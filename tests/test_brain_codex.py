@@ -383,8 +383,12 @@ def test_make_session_render_failure_propagates(tmp_path, monkeypatch):
 
 
 def test_make_session_clears_stale_managed_block(tmp_path, monkeypatch):
-    """A codex team that dropped its MCP deps clears a previously-rendered block
-    (no options.mcp_servers, but a bobi-managed block on disk)."""
+    """A codex team that dropped its MCP deps clears a previously-rendered block.
+
+    The team declaring none is an EXPLICIT empty set, not an absent key — see
+    test_make_session_without_mcp_leaves_a_live_block_alone for why the two
+    cannot be the same signal (D009).
+    """
     import tomllib
     from bobi.brain import codex_config
 
@@ -393,6 +397,74 @@ def test_make_session_clears_stale_managed_block(tmp_path, monkeypatch):
     codex_config.write_codex_config({"old": {"command": "/old"}}, home=tmp_path)
     assert codex_config.MANAGED_BEGIN in (tmp_path / "config.toml").read_text()
 
-    CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"}, options={})
+    CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"},
+                              options={"mcp_servers": {}})
     data = tomllib.loads((tmp_path / "config.toml").read_text())
     assert "mcp_servers" not in data
+
+
+def test_make_session_without_mcp_leaves_a_live_block_alone(tmp_path, monkeypatch):
+    """D009 — an absent `mcp_servers` key means "this call site has no opinion".
+
+    Codex reads MCP servers from config.toml at the start of every `codex exec`,
+    and that file is shared by every session on the host. Monitor checks, gates
+    and workflow steps build their options without `mcp_servers`; reading that
+    as "the team has none" made each one wipe the managed block, so the manager
+    and every other live session lost their MCP tools mid-flight, silently,
+    until some session that did pass the set re-rendered it — config flapping
+    on every monitor interval.
+    """
+    import tomllib
+    from bobi.brain import codex_config
+
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    codex_config.write_codex_config({"weather": {"command": "/opt/weather"}},
+                                    home=tmp_path)
+    before = (tmp_path / "config.toml").read_text()
+
+    # Exactly what subagent._run_agent_supervised and the workflow
+    # orchestrator pass: no mcp_servers key at all.
+    CodexBrain().make_session(
+        cwd="/w", system_prompt={"append": "S"},
+        options={"max_turns": 200, "skills": "all"})
+
+    assert (tmp_path / "config.toml").read_text() == before
+    data = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert data["mcp_servers"]["weather"]["command"] == "/opt/weather"
+
+
+def test_spawn_adhoc_passes_an_empty_set_explicitly(bobi_install, monkeypatch):
+    """The clearing path still has a real trigger.
+
+    With an absent key now meaning "no opinion", something has to say "this
+    team genuinely declares none" — that is the spawn path, which resolves the
+    set from the team config rather than inheriting a caller's silence.
+    """
+    from bobi import subagent
+
+    captured = {}
+
+    class _Session:
+        def __init__(self, *a, **kw):
+            captured.update(kw.get("extra_options") or {})
+
+        def start(self, **kw):
+            return False
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr("bobi.session.Session", _Session)
+    monkeypatch.setattr(subagent, "_load_team_config",
+                        lambda: type("C", (), {
+                            "mcp_servers": {}, "roles": {}, "brain": {},
+                        })())
+    monkeypatch.setattr(subagent, "_load_long_term_memory_prompt", lambda: "")
+
+    subagent.spawn_adhoc(cwd=".", task="t", name="n")
+
+    assert "mcp_servers" in captured, (
+        "an empty set must be passed explicitly, or a team that dropped its "
+        "MCP deps never clears the stale block"
+    )
+    assert captured["mcp_servers"] == {}

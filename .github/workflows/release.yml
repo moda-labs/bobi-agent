@@ -119,6 +119,8 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
 
+      # CI proves any Node 20+ host ships the same bundle (#857). This pin keeps
+      # release provenance stable; it is not an exact-major support requirement.
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
@@ -164,11 +166,37 @@ jobs:
         run: |
           set -euo pipefail
           whl="$(basename dist/*.whl)"
-          echo "version=$(echo "$whl" | cut -d- -f2)" >> "$GITHUB_OUTPUT"
-          echo "source-sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          version="$(echo "$whl" | cut -d- -f2)"
+          source_sha="$(git rev-parse HEAD)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source-sha=$source_sha" >> "$GITHUB_OUTPUT"
           curl -fsSL https://claude.ai/install.sh | bash -s -- stable
-          echo "claude-version=$("$HOME/.local/bin/claude" --version | awk '{print $1}')" \
-            >> "$GITHUB_OUTPUT"
+          claude_version="$("$HOME/.local/bin/claude" --version | awk '{print $1}')"
+          echo "claude-version=$claude_version" >> "$GITHUB_OUTPUT"
+
+          # PUBLISH these to the run summary, not just to $GITHUB_OUTPUT.
+          # `release-image.yml` takes claude-version as a REQUIRED dispatch
+          # input, and since the repo reorg moved its caller out of this
+          # workflow, nothing here consumes the output any more - it was
+          # resolved into a variable no human could read, so dispatching the
+          # image meant re-deriving the `stable` channel by hand and hoping it
+          # had not moved in between. The whole point of the pin is that every
+          # arch bakes the SAME claude the release resolved, so guessing it
+          # defeats the mechanism. Echoed to the log as well as the summary:
+          # the summary is easier to read, the log survives in `gh run view`.
+          echo "::notice title=Release pins::version=$version claude-version=$claude_version source-sha=$source_sha"
+          {
+            echo "## Release pins"
+            echo
+            echo "Dispatch \`release-image.yml\` with these EXACT values:"
+            echo
+            echo '```'
+            echo "gh workflow run release-image.yml --ref main \\"
+            echo "  -f version=$version \\"
+            echo "  -f claude-version=$claude_version \\"
+            echo "  -f source-sha=$source_sha"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # --------------------------------------------------------------------------
   # Publish the SAME wheel the smokes proved. Trusted publishing (OIDC): this

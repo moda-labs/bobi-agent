@@ -52,33 +52,6 @@ def inbound_event_sources(project_path: Path) -> list[str]:
     return [svc.name for svc in cfg.event_services if svc.name]
 
 
-def explicit_subscriptions(project_path: Path) -> list[str]:
-    """Return explicit manager subscriptions from agent.yaml."""
-    import yaml
-
-    from bobi import paths
-    from bobi.config import _interpolate_env, project_env
-
-    agent_yaml = paths.agent_yaml_path(project_path)
-    if not agent_yaml.exists():
-        return []
-    raw = yaml.safe_load(agent_yaml.read_text()) or {}
-    if not isinstance(raw, dict):
-        return []
-    value = _interpolate_env(raw.get("subscribe", []), project_env(project_path))
-    if isinstance(value, str):
-        candidates = [value]
-    elif isinstance(value, list):
-        candidates = value
-    else:
-        return []
-    return [
-        item.strip()
-        for item in candidates
-        if isinstance(item, str) and item.strip()
-    ]
-
-
 def _uses_outbound_transport(source: str, *, slack_socket: bool) -> bool:
     """Whether an event source reaches Bobi over an outbound connection."""
     return (
@@ -102,6 +75,7 @@ def check_ingress_reachability(
     services such as Slack need a URL they can reach from the public internet.
     """
     from bobi.config import Config
+    from bobi.events.subscriptions import explicit_subscriptions
 
     cfg = Config.load(project_path)
     app_token = str(cfg.credential("slack", "app_token") or "").strip()
@@ -140,8 +114,11 @@ def check_ingress_reachability(
             f"is {url}, which is not public HTTPS ingress external webhooks can use"
         ),
         hint=(
-            "Set event_server_url to the bobi cloud event server, a deployed "
-            "Worker, or a public tunnel in front of localhost:8080."
+            # `event_server:` is the spelling every pack, doc and `bobi setup`
+            # writes; the hint used to name `event_server_url:`, which parses
+            # but appears in no authored config anywhere (Q109).
+            "Set event_server in agent.yaml to the bobi cloud event server, a "
+            "deployed Worker, or a public tunnel in front of localhost:8080."
             f"{slack_hint}"
         ),
     )

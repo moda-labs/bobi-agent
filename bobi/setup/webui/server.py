@@ -23,11 +23,9 @@ import json
 import os
 from pathlib import Path
 from typing import AsyncIterator
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request as UrlRequest
-from urllib.request import urlopen
 
+import httpx
 import yaml
 
 # Imported at module level (not inside build_app) so that, under
@@ -36,8 +34,8 @@ import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from bobi import paths
-from bobi.setup.state import STAGE_ORDER, SetupState, Stage
+from bobi import http, paths
+from bobi.setup.state import SPEC_SLOTS, STAGE_ORDER, SetupState, Stage
 from bobi.webui_common.launcher import serve_local
 from bobi.webui_common.security import (
     WEBUI_TOKEN_HEADER,
@@ -81,8 +79,7 @@ def serialize_state(state: SetupState) -> dict:
             # User-added MCP connections — names/command/args/url only (never
             # secret VALUES), so the UI can repopulate the edit form.
             "mcp_servers": spec.mcp_servers,
-            "readiness": {s: spec.readiness_for(s).value
-                          for s in ("goal", "roles", "autonomous", "services")},
+            "readiness": {s: spec.readiness_for(s).value for s in SPEC_SLOTS},
         },
         "summary": state.summary,
         "messages": state.messages,
@@ -106,29 +103,38 @@ def _validate_public_event_server_url(url: str) -> str | None:
 
 
 def _probe_event_server(url: str) -> tuple[bool, str]:
+    # Not events.server.health(): this wants the extra `auth == "hmac"` check
+    # and a per-failure error string to show in the wizard. Only the transport
+    # is shared — bobi.http is the house outbound client (see its docstring).
     health_url = url.rstrip("/") + "/health"
-    req = UrlRequest(health_url, headers={"accept": "application/json"})
     try:
-        with urlopen(req, timeout=8) as resp:
-            if not (200 <= resp.status < 300):
-                return False, f"/health returned HTTP {resp.status}"
-            try:
-                payload = json.loads(resp.read(4096).decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return False, "/health did not return Bobi JSON"
-            if (isinstance(payload, dict)
-                    and payload.get("status") == "ok"
-                    and payload.get("auth") == "hmac"):
-                return True, ""
-            return False, "/health did not look like a Bobi event server"
-    except HTTPError as e:
-        return False, f"/health returned HTTP {e.code}"
-    except URLError as e:
-        return False, f"could not reach /health: {e.reason}"
-    except TimeoutError:
+        resp = http.get(health_url, headers={"accept": "application/json"},
+                        timeout=8)
+    except httpx.TimeoutException:
         return False, "timed out reaching /health"
-    except OSError as e:
+    except (httpx.HTTPError, httpx.InvalidURL) as e:
+        # InvalidURL is NOT an HTTPError — it inherits straight from Exception.
+        # `_validate_public_event_server_url` only checks scheme + netloc, so a
+        # host that parses but cannot be a host ("https://256.256.256.256")
+        # reaches here; urlopen used to fold that into its gaierror path, and
+        # letting it escape would 500 the verify endpoint on a typo.
         return False, f"could not reach /health: {e}"
+    if not (200 <= resp.status_code < 300):
+        return False, f"/health returned HTTP {resp.status_code}"
+    try:
+        # Sliced to match the urlopen read(4096) this replaced, so an oversized
+        # body still fails as "not Bobi JSON" rather than parsing. It does NOT
+        # bound what we buffer — httpx has already read the whole response by
+        # the time we get here; only a streaming request could cap that, and a
+        # health payload is tiny enough not to warrant one.
+        payload = json.loads(resp.content[:4096].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False, "/health did not return Bobi JSON"
+    if (isinstance(payload, dict)
+            and payload.get("status") == "ok"
+            and payload.get("auth") == "hmac"):
+        return True, ""
+    return False, "/health did not look like a Bobi event server"
 
 
 def _persist_ingress_env(project: Path, state: SetupState) -> None:
@@ -141,6 +147,13 @@ def _persist_ingress_env(project: Path, state: SetupState) -> None:
         env["BOBI_EVENT_SERVER"] = state.ingress.url
         os.environ["BOBI_EVENT_SERVER"] = state.ingress.url
     actions.write_env(project, env)
+
+
+def _dedupe_roots(roots: list[Path]) -> list[Path]:
+    """Drop any root already contained in another — the usual case, where
+    BOBI_HOME is ~/.bobi and so lives under the home directory."""
+    return [r for r in roots
+            if not any(o != r and (o == r or o in r.parents) for o in roots)]
 
 
 # --- app -----------------------------------------------------------------
@@ -166,20 +179,30 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     # <home>/agents/<name>/src; setup scans this root.
     home = (home_root or paths.home_dir()).resolve()
     library = home / "agents"
+    # The folder-picker / scan boundary: the user's home directory, which is
+    # what the picker comment and every rejection message say. It used to be
+    # BOBI_HOME alone — so pointing detect or the picker at a real project
+    # folder (~/dev/acme-mcp, the only place an MCP server ever lives) was
+    # rejected by a message the path already satisfied, and detect could never
+    # succeed. BOBI_HOME joins it as a second root for the installs that put it
+    # outside home; `home_root` (tests, e2e) still stands in for both, keeping
+    # the picker off the real filesystem.
+    picker_roots = [home] if home_root else _dedupe_roots(
+        [Path.home().resolve(), home])
 
     def _within_home(raw: str, default: Path) -> tuple[Path, bool]:
-        """Resolve a user-supplied path and confine it to the home tree — the
+        """Resolve a user-supplied path and confine it to the picker roots — the
         single source of truth for the folder-picker / scan security boundary.
         Relative paths re-base under home (consistent across endpoints). Returns
-        (path, ok); ok is False when the resolved path escaped home, so each
-        caller picks its own policy (reject vs. fall back)."""
+        (path, ok); ok is False when the resolved path escaped every root, so
+        each caller picks its own policy (reject vs. fall back)."""
         if not raw:
             return default, True
         p = Path(raw).expanduser()
         if not p.is_absolute():
             p = home / p
         p = p.resolve()
-        return p, (p == home or home in p.parents)
+        return p, any(p == r or r in p.parents for r in picker_roots)
 
     def _load_machine_config() -> dict:
         cfg_path = paths.ensure_global_config()
@@ -316,17 +339,12 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         return JSONResponse({"dir": str(target),
                              "teams": open_mode.list_teams_in(target)})
 
-    # Internal/test packs that shouldn't surface as user-facing templates.
-    _HIDDEN_TEMPLATES = {"dogfood-content-review"}
-
     @app.get("/api/registry")
     def registry_teams() -> dict:
         # Network-backed and lazy — only fetched to populate the intro's
         # template list, so the intro screen never blocks on it.
         from bobi.setup import open_mode
-        teams = [t for t in open_mode.list_registry_teams(project)
-                 if t.get("name") not in _HIDDEN_TEMPLATES]
-        return {"teams": teams}
+        return {"teams": open_mode.list_registry_teams(project)}
 
     @app.get("/api/browse")
     def browse(request: Request) -> JSONResponse:
@@ -343,10 +361,10 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             library.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
-        default = library if library.is_dir() else home
+        default = library if library.is_dir() else picker_roots[0]
         here, ok = _within_home(request.query_params.get("path") or "", default)
         if not ok:
-            here = home
+            here = picker_roots[0]
         if not here.is_dir():
             return JSONResponse({"error": "not a directory"}, status_code=404)
         try:
@@ -354,7 +372,9 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                           if d.is_dir() and not d.name.startswith("."))
         except OSError:
             dirs = []
-        parent = str(here.parent) if here != home else None
+        # "Up" stops at whichever picker root contains this directory, so the
+        # walk can never be climbed out of the boundary.
+        parent = None if here in picker_roots else str(here.parent)
         return JSONResponse({"path": str(here), "parent": parent, "dirs": dirs})
 
     @app.post("/api/rename")
@@ -556,123 +576,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         body = await request.json()
         text = (body.get("text") or "").strip()
 
-        def _record(user_text, reply):
-            state.messages.append({"role": "user", "content": user_text})
-            state.messages.append({"role": "assistant", "content": reply})
-            state.save(project)
-
-        async def _propose_test(user_text: str, hit: dict):
-            """First turn: launch the server, list its tools, and PROPOSE a safe
-            read-only tool to call — the user confirms before anything runs."""
-            from bobi.setup import mcp_probe
-            if hit.get("none"):
-                reply = ("There are no MCP connections set up yet to test. Add "
-                         "one with “add a connection,” then ask me to test it.")
-                yield reply
-                _record(user_text, reply)
-                return
-            if hit.get("ambiguous"):
-                reply = ("Which connection should I test? You have: "
-                         + ", ".join(hit.get("candidates") or []) + ".")
-                yield reply
-                _record(user_text, reply)
-                return
-            key = hit["key"]
-            entry = (state.spec.mcp_servers or {}).get(key) or {}
-            label = entry.get("label") or key
-            yield (f"Starting {label} and listing its tools (first run can take "
-                   "a moment)…\n\n")
-            result = await mcp_probe.probe(entry, project)   # list only, no call
-            if not result.get("ok"):
-                reply = f"✗ Couldn’t start {label}: {result.get('error')}"
-                if result.get("stderr"):
-                    reply += f"\n\nServer output:\n{result['stderr'][:600]}"
-                state.pending_test = {}
-                yield reply
-                _record(user_text, reply)
-                return
-            tools = result.get("tools") or []
-            proposed = result.get("suggested")
-            state.pending_test = {"key": key, "proposed": proposed, "tools": tools}
-            state.save(project)
-            shown = ", ".join(tools[:10]) + (" …" if len(tools) > 10 else "")
-            if proposed:
-                reply = (f"{label} is up — {len(tools)} tools available.\n\n"
-                         f"To verify the connection end-to-end I'll call "
-                         f"{proposed} (read-only, no arguments). Reply “yes” "
-                         f"to run it, name another tool, or say no.\n\n"
-                         f"Tools: {shown}")
-            else:
-                reply = (f"{label} is up — {len(tools)} tools available, but I "
-                         f"couldn’t spot a clearly safe read-only one to call. "
-                         f"Name a tool to try (no arguments will be sent): {shown}")
-            yield reply
-            _record(user_text, reply)
-
-        async def _resolve_pending(user_text: str, decision: dict):
-            """Second turn: the user confirmed (or named a tool / declined).
-            Run the chosen tool and report — this is the real connection test."""
-            from bobi.setup import mcp_probe
-            pending = state.pending_test or {}
-            if decision["action"] == "cancel":
-                state.pending_test = {}
-                reply = "Okay — skipped the test. Ask again whenever you’re ready."
-                yield reply
-                _record(user_text, reply)
-                return
-            if decision["action"] == "refuse_write":
-                # User named a tool that looks like it writes/changes data — never
-                # run it as a connection test. Keep the proposal open.
-                reply = (f"{decision.get('tool')} looks like it writes or changes "
-                         f"data, so I won’t call it as a test. Pick a read-only "
-                         f"tool, or reply “yes” to run the proposed one.")
-                yield reply
-                _record(user_text, reply)
-                return
-            tool = decision.get("tool")
-            if not tool:
-                reply = ("Name a tool to call (no arguments will be sent): "
-                         + ", ".join(pending.get("tools") or []))
-                yield reply
-                _record(user_text, reply)
-                return
-            key = pending.get("key")
-            entry = (state.spec.mcp_servers or {}).get(key)
-            state.pending_test = {}
-            # The connection may have been edited or removed between the proposal
-            # and now — don't test a stale/empty key.
-            if not isinstance(entry, dict) or not entry:
-                reply = ("That connection isn’t there anymore — it may have been "
-                         "removed or changed. Ask me to test it again.")
-                yield reply
-                _record(user_text, reply)
-                return
-            label = entry.get("label") or key
-            yield f"Calling {tool} on {label}…\n\n"
-            result = await mcp_probe.probe(entry, project, call_name=tool)
-            # Persist ONLY coarse status — never raw error/stderr text, which can
-            # carry secrets and is served to the browser via /api/state.
-            entry["last_test"] = {"ok": bool(result.get("ok")),
-                                  "live_ok": result.get("live_ok"),
-                                  "called": tool}
-            state.spec.mcp_servers[key] = entry
-            if not result.get("ok"):
-                reply = f"✗ Couldn’t start {label}: {result.get('error')}"
-                if result.get("stderr"):
-                    reply += f"\n\nServer output:\n{result['stderr'][:600]}"
-            elif result.get("live_ok"):
-                out = (result.get("output") or "").strip()
-                snippet = f"\n\nResponse: {out}" if out else ""
-                reply = (f"✓ Called {tool} on {label} — it worked. The "
-                         f"connection is live.{snippet}")
-            else:
-                reply = (f"⚠ {label} starts, but calling {tool} failed: "
-                         f"{result.get('live_error')}\n\nThat usually means "
-                         f"credentials aren’t set or aren’t valid yet — add them "
-                         f"with “edit” on the connection, then re-test.")
-            yield reply
-            _record(user_text, reply)
-
         async def gen() -> AsyncIterator[str]:
             if not text:
                 yield _sse("error", {"message": "empty message"})
@@ -709,7 +612,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                 decision = mcp_probe.match_test_confirmation(
                     clean, state.pending_test)
                 if decision["action"] != "none":
-                    async for chunk in _resolve_pending(clean, decision):
+                    async for chunk in mcp_probe.resolve_pending(
+                            state, project, clean, decision):
                         yield _sse("delta", {"text": chunk})
                     yield _sse("state", serialize_state(state))
                     return
@@ -719,7 +623,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             # can't reach the team's servers, so we handle it here).
             hit = mcp_probe.match_connection_test(clean, state.spec.mcp_servers)
             if hit.get("intent"):
-                async for chunk in _propose_test(clean, hit):
+                async for chunk in mcp_probe.propose_test(
+                        state, project, clean, hit):
                     yield _sse("delta", {"text": chunk})
                 yield _sse("state", serialize_state(state))
                 return
@@ -1045,8 +950,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     if var not in env_vars:
                         env_vars.append(var)
                     if val:
-                        actions.save_credential(state, project, var, name, "",
-                                                prompt_fn=lambda *_: val)
+                        actions.save_credential(state, project, var, val)
             except actions.ActionError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             entry: dict = {"type": "stdio", "command": command, "args": args,
@@ -1069,8 +973,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     entry["secret_var"] = var
                     api_key = payload.get("api_key", "")
                     if api_key:
-                        actions.save_credential(state, project, var, name, "",
-                                                prompt_fn=lambda *_: api_key)
+                        actions.save_credential(state, project, var, api_key)
             except actions.ActionError as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
 
@@ -1146,8 +1049,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         except VennError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         try:
-            actions.save_credential(state, project, "VENN_API_KEY", "venn", "",
-                                    prompt_fn=lambda *_: key)
+            actions.save_credential(state, project, "VENN_API_KEY", key)
         except actions.ActionError as e:
             return JSONResponse({"ok": False, "error": str(e)})
         data["state"] = serialize_state(state)
@@ -1209,11 +1111,8 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
 
     # --- slack finalization (the post-install next-steps screen) --------
     def _env_value(var: str) -> str:
-        # Same precedence as runtime resolution (config.load_dotenv and
-        # venn_key): an exported environment variable wins over .env.
-        import os
         from bobi.setup import actions
-        return os.environ.get(var) or actions.read_env(project).get(var, "")
+        return actions.env_value(project, var)
 
     @app.post("/api/slack/channel")
     def slack_channel(payload: dict) -> JSONResponse:
@@ -1251,8 +1150,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                     status_code=400)
             value = raw
         try:
-            actions.save_credential(state, project, "SLACK_CHANNELS", "slack",
-                                    "", prompt_fn=lambda *_: value)
+            actions.save_credential(state, project, "SLACK_CHANNELS", value)
         except actions.ActionError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return JSONResponse({"ok": True, "channel": value,
@@ -1271,9 +1169,10 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         if not channel:
             return JSONResponse({"error": "save a channel first"},
                                 status_code=400)
-        from bobi.slack import post_slack_message
+        from bobi.slack import post_slack_message, require_app_identity
         team = state.team_name or "your bobi team"
         try:
+            require_app_identity(token)
             post_slack_message(
                 token, channel,
                 f"Test message from bobi setup — {team} can post here. "
@@ -1299,10 +1198,17 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # Copy-to-clipboard support: returns a saved credential value to the
         # local page so it can be copied without being shown. Loopback + nonce
         # only; the value already lives in plaintext in .env on this machine.
-        import os
+        #
+        # run/.env is the whole surface, deliberately. This used to fall back to
+        # os.environ for any requested name, which served every secret exported
+        # in the shell that launched setup (AWS_SECRET_ACCESS_KEY,
+        # ANTHROPIC_API_KEY, …) — none of them saved through setup, and outside
+        # the justification above. mcp_probe.py withholds ambient environment
+        # from child processes for the same reason. An ambient-only credential
+        # is simply not copyable; the page shows "nothing to copy".
         from bobi.setup import actions
         var = request.query_params.get("var", "")
-        val = actions.read_env(project).get(var) or os.environ.get(var, "")
+        val = actions.read_env(project).get(var, "")
         if not val:
             return JSONResponse({"error": "not set"}, status_code=404)
         return JSONResponse({"value": val})
@@ -1313,9 +1219,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         value = payload.get("value", "")
         try:
             result = actions.save_credential(
-                state, project, payload.get("var_name", ""),
-                payload.get("service", ""), payload.get("instructions", ""),
-                prompt_fn=lambda *_: value)
+                state, project, payload.get("var_name", ""), value)
         except actions.ActionError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return JSONResponse(result)
@@ -1391,7 +1295,16 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         target = _safe_target(path)
         if target is None or not target.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse({"path": path, "content": target.read_text()})
+        try:
+            content = target.read_text()
+        except (UnicodeDecodeError, OSError):
+            # /api/files lists every file under the pack with no suffix filter,
+            # so a logo.png or a latin-1 doc copied into the source tree is one
+            # click away in the review viewer. An unhandled decode error there
+            # was a 500; say what it is instead and let the UI render a stub.
+            return JSONResponse({"path": path, "binary": True,
+                                 "error": "not a text file — nothing to show"})
+        return JSONResponse({"path": path, "content": content})
 
     @app.post("/api/file")
     def write_file(payload: dict) -> JSONResponse:
@@ -1486,8 +1399,6 @@ def serve(project: Path, *, model: str | None = None,
         lambda nonce: build_app(state, project, nonce=nonce, model=model),
         open_browser=open_browser,
         label="bobi setup",
-        announce=lambda url:
-            f"\n  bobi setup is running at {url}\n  (Ctrl-C to stop)\n",
     )
 
     if state.finished:

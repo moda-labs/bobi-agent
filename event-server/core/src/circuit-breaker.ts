@@ -13,9 +13,22 @@
  * represent external conversation depth.
  *
  * Trip condition: ≥ THRESHOLD non-human-authored deliveries in one key within
- * WINDOW_MS with zero human events → pause delivery for that key (buffered,
- * not dropped). Emit `system.loop_detected`. Auto-resume after COOLDOWN_MS or
- * on the next human-authored event in the same key.
+ * WINDOW_MS with zero human events → pause delivery for that key. Emit
+ * `system.loop_detected`. Auto-resume after COOLDOWN_MS or on the next
+ * human-authored event in the same key.
+ *
+ * BUFFER BOUNDS (D047): the pause buffer holds at most BREAKER_MAX_PAUSED
+ * events per key, newest wins — a hot loop would otherwise grow it without
+ * limit for the whole cooldown, in a server process that runs for weeks.
+ * Events dropped past the cap are counted, not silent (`breakerStats()`).
+ *
+ * RESUME IS LAZY, so it needs a sweep: `recordDelivery` and `drainPaused` are
+ * only reached when a NEW event arrives on the same key, so a key that trips
+ * and then goes quiet would hold its state and its buffer forever. Callers
+ * running a long-lived process must call `sweepBreakers()` periodically to
+ * release cooled-down and idle keys (the local server hangs it on its existing
+ * eviction timer). Nothing here schedules its own timer — this module also
+ * runs inside a Workers isolate, which has no place to put one.
  */
 
 import type { NormalizedEvent } from "./core.js";
@@ -27,6 +40,12 @@ import type { NormalizedEvent } from "./core.js";
 export const BREAKER_THRESHOLD = 5;
 export const BREAKER_WINDOW_MS = 60_000; // 60s
 export const BREAKER_COOLDOWN_MS = 300_000; // 5min
+/**
+ * Max events held in one key's pause buffer (D047). A tripped key is by
+ * definition in a loop, so the buffer's value is the tail — enough context for
+ * the agent to see what it was looping on, not the whole flood.
+ */
+export const BREAKER_MAX_PAUSED = 50;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,8 +58,10 @@ export interface BreakerState {
 	tripped: boolean;
 	/** When the breaker was tripped (epoch ms), undefined if not tripped */
 	trippedAt?: number;
-	/** Events paused while tripped — delivered on resume */
+	/** Events paused while tripped — delivered on resume, capped at BREAKER_MAX_PAUSED */
 	paused: NormalizedEvent[];
+	/** Last time this key saw any activity (epoch ms), for the idle sweep */
+	lastSeen: number;
 }
 
 export interface BreakerVerdict {
@@ -179,13 +200,28 @@ export function isBotAuthored(event: NormalizedEvent): boolean {
 /** Map of `deploymentId:conversationKey` → BreakerState */
 const states = new Map<string, BreakerState>();
 
-function getState(compositeKey: string): BreakerState {
+/** Events discarded because a pause buffer was already at BREAKER_MAX_PAUSED. */
+let droppedPaused = 0;
+
+function getState(compositeKey: string, now: number): BreakerState {
 	let s = states.get(compositeKey);
 	if (!s) {
-		s = { timestamps: [], tripped: false, paused: [] };
+		s = { timestamps: [], tripped: false, paused: [], lastSeen: now };
 		states.set(compositeKey, s);
 	}
+	s.lastSeen = now;
 	return s;
+}
+
+/**
+ * Buffer an event for a paused key, newest-wins past the cap (D047).
+ */
+function pushPaused(state: BreakerState, event: NormalizedEvent): void {
+	state.paused.push(event);
+	if (state.paused.length > BREAKER_MAX_PAUSED) {
+		droppedPaused += state.paused.length - BREAKER_MAX_PAUSED;
+		state.paused.splice(0, state.paused.length - BREAKER_MAX_PAUSED);
+	}
 }
 
 /**
@@ -217,9 +253,9 @@ export function recordDelivery(
 	const convKey = conversationKey(event);
 	if (!convKey) return { allow: true, justTripped: false };
 
-	const compositeKey = `${deploymentId}:${convKey}`;
-	const state = getState(compositeKey);
 	const now = Date.now();
+	const compositeKey = `${deploymentId}:${convKey}`;
+	const state = getState(compositeKey, now);
 
 	// Auto-resume on cooldown expiry
 	if (state.tripped && checkCooldown(state, now)) {
@@ -234,7 +270,7 @@ export function recordDelivery(
 
 	// If already tripped, buffer the event
 	if (state.tripped) {
-		state.paused.push(event);
+		pushPaused(state, event);
 		return { allow: false, justTripped: false };
 	}
 
@@ -246,7 +282,7 @@ export function recordDelivery(
 	if (state.timestamps.length >= BREAKER_THRESHOLD) {
 		state.tripped = true;
 		state.trippedAt = now;
-		state.paused.push(event);
+		pushPaused(state, event);
 		return { allow: false, justTripped: true };
 	}
 
@@ -329,9 +365,64 @@ export function buildLoopDetectedEvent(
 }
 
 // ---------------------------------------------------------------------------
+// Sweep (D047)
+// ---------------------------------------------------------------------------
+
+/**
+ * Release breaker keys that no further event will ever revisit.
+ *
+ * Resume is lazy — it only runs when a new event arrives on the same key — so
+ * a key that trips and then goes quiet keeps its state and its pause buffer
+ * for the life of the process. This drops:
+ *   - tripped keys whose cooldown has expired, and
+ *   - untripped keys idle for longer than the counting window (their
+ *     timestamps have all aged out, so the state is already a no-op).
+ *
+ * A cooled-down key's buffered events are discarded here rather than
+ * delivered: nothing is asking for them, and by construction they are the
+ * loop traffic that tripped the breaker in the first place. The count is
+ * logged so an operator can see it happen.
+ *
+ * @param now - epoch ms, injectable for tests
+ * @returns how many keys were released
+ */
+export function sweepBreakers(now: number = Date.now()): number {
+	let released = 0;
+	let discarded = 0;
+	for (const [key, state] of states) {
+		const expired = state.tripped
+			? checkCooldown(state, now)
+			: now - state.lastSeen > BREAKER_WINDOW_MS;
+		if (!expired) continue;
+		discarded += state.paused.length;
+		states.delete(key);
+		released++;
+	}
+	if (discarded > 0) {
+		console.warn(
+			`circuit breaker: discarded ${discarded} buffered event(s) from ` +
+			`${released} cooled-down conversation(s) that went quiet`,
+		);
+	}
+	return released;
+}
+
+/** Observability for the bounds above — key count, buffered depth, drops. */
+export function breakerStats(): {
+	keys: number;
+	pausedEvents: number;
+	droppedPaused: number;
+} {
+	let pausedEvents = 0;
+	for (const state of states.values()) pausedEvents += state.paused.length;
+	return { keys: states.size, pausedEvents, droppedPaused };
+}
+
+// ---------------------------------------------------------------------------
 // Reset (for testing)
 // ---------------------------------------------------------------------------
 
 export function resetAllBreakers(): void {
 	states.clear();
+	droppedPaused = 0;
 }

@@ -33,7 +33,6 @@ from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     AssistantText,
-    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,
@@ -367,13 +366,23 @@ class CodexBrain(GatewayAwareEngine):
         # unchanged) but errors PROPAGATE: a codex team that declares MCP and
         # can't render config would silently run MCP-less, so surface it rather
         # than pass preflight and fail at runtime.
+        #
+        # An ABSENT key is not an empty set (D009). config.toml is shared by
+        # every session on the host and re-read at the start of every `codex
+        # exec`, so treating "this call site said nothing" as "the team has
+        # none" made monitor checks, gates and workflow steps wipe the managed
+        # block out from under the manager and every other live session —
+        # silently, on every monitor interval. Only a caller that resolved the
+        # set from the team config gets to write; everyone else inherits.
         from bobi.brain.codex_config import (
             codex_home, config_has_managed_block, write_codex_config,
         )
-        mcp_servers = opts.get("mcp_servers") or {}
-        home = codex_home()
-        if mcp_servers or config_has_managed_block(home):
-            write_codex_config(mcp_servers, home)
+        declared = opts.get("mcp_servers")
+        mcp_servers = declared or {}
+        if declared is not None:
+            home = codex_home()
+            if mcp_servers or config_has_managed_block(home):
+                write_codex_config(mcp_servers, home)
         config_overrides: list[str] = []
         if gateway_base_url():
             from bobi.brain.gateway_openai import gateway_openai_overrides
@@ -392,3 +401,31 @@ class CodexBrain(GatewayAwareEngine):
             config_overrides=config_overrides,
             provider=self.provider,
         )
+
+    async def stream_once(
+        self,
+        *,
+        system_prompt: Any = None,
+        user_prompt: str = "",
+        model: str | None = None,
+        cwd: str | None = None,
+        options: dict | None = None,
+    ) -> AsyncIterator[BrainMessage]:
+        """Not served by the codex engine — the gap, named.
+
+        The one caller is the setup/digestion pour (``bobi.setup.llm``), which
+        wants a partial-token stream and no tools. ``codex exec`` can run the
+        one-shot turn, but it emits no token-level partials, so a naive
+        implementation would silently degrade the pour to a single block of
+        text at the end. Rather than fake the capability, say so: a process on
+        ``BOBI_BRAIN=codex`` reaching this path used to die with
+        ``AttributeError: 'CodexBrain' object has no attribute 'stream_once'``,
+        laundered into ``LLMError`` — the same failure, with nothing pointing
+        at the brain. Wiring a real implementation is its own change, gated on
+        deciding what the pour should look like without partials.
+        """
+        raise NotImplementedError(
+            "the codex brain has no one-shot streaming path — "
+            "`bobi setup` and the digestion pour require BOBI_BRAIN=claude"
+        )
+        yield  # pragma: no cover - unreachable, marks this an async generator

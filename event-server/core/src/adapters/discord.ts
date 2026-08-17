@@ -14,6 +14,7 @@
  */
 import type { NormalizedEvent } from "../core.js";
 import { buildConversation } from "../conversation.js";
+import { DISCORD_ATTACHMENT_KEYS, normalizeAttachments } from "./payload.js";
 
 /**
  * Shown when Discord withholds a guild message's content (the privileged
@@ -85,19 +86,7 @@ export function normalizeDiscordMessage(
 		|| (typeof author?.username === "string" ? author.username : "")
 		|| authorId;
 
-	const rawAttachments = Array.isArray(d.attachments)
-		? (d.attachments as Array<Record<string, unknown>>)
-		: [];
-	const files: Array<Record<string, string>> = [];
-	for (const a of rawAttachments) {
-		const entry: Record<string, string> = {};
-		if (a.id) entry.id = String(a.id);
-		if (a.filename) entry.name = String(a.filename);
-		if (a.content_type) entry.mimetype = String(a.content_type);
-		if (a.url) entry.url = String(a.url);
-		if (a.size) entry.size = String(a.size);
-		files.push(entry);
-	}
+	const files = normalizeAttachments(d.attachments, DISCORD_ATTACHMENT_KEYS);
 
 	// Empty content is only "withheld" when nothing else came through: an
 	// attachment-only message (a DM'd screenshot, say) legitimately has no

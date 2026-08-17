@@ -166,20 +166,10 @@ def format_long_term_memory_prompt(content: str) -> str:
     )
 
 
-def reference_memory_path(root: Path | None = None) -> Path:
-    """Return the cold, human-readable reference memory path."""
-    from bobi import paths
-    return paths.workspace_dir(root) / "memory" / "reference.md"
-
-
 def cold_memory_kb_path(root: Path | None = None) -> Path:
     """Return the team-scoped cold-memory KB database path."""
     from bobi import paths
     return paths.state_path(root) / "kb" / f"{COLD_MEMORY_KB_NAME}.db"
-
-
-def cold_memory_kb_name() -> str:
-    return COLD_MEMORY_KB_NAME
 
 
 def _reference_category(text: str) -> str:
@@ -212,24 +202,11 @@ def cold_memory_kb_needs_sync(root: Path | None, reference_path: Path) -> bool:
     try:
         content = reference_path.read_text()
         current_hash = hashlib.sha256(content.encode()).hexdigest()
-        from bobi.kb.store import KBStore, _chunk_text, _fetchone
+        from bobi.kb.store import KBStore
 
         with KBStore(COLD_MEMORY_KB_NAME, db_path=db_path) as store:
-            conn = store._connect()
-            existing = _fetchone(
-                conn,
-                """SELECT COUNT(*) AS entry_count,
-                          COUNT(v.entry_id) AS vector_count
-                   FROM entries
-                   LEFT JOIN entries_vec v ON v.entry_id = entries.id
-                   WHERE source = ? AND source_hash = ?""",
-                (COLD_MEMORY_REFERENCE_SOURCE, current_hash),
-            )
-        expected = len(_chunk_text(content))
-        return (
-            int((existing or {}).get("entry_count", 0) or 0) != expected
-            or int((existing or {}).get("vector_count", 0) or 0) != expected
-        )
+            return not store.source_index_complete(
+                COLD_MEMORY_REFERENCE_SOURCE, current_hash, content)
     except Exception:
         return True
 
@@ -259,24 +236,9 @@ def sync_reference_to_cold_memory_kb(
     }
 
     with _cold_memory_store(root) as store:
-        conn = store._connect()
-        from bobi.kb.store import _chunk_text, _fetchone
-
-        existing = _fetchone(
-            conn,
-            """SELECT COUNT(*) AS entry_count,
-                      COUNT(v.entry_id) AS vector_count
-               FROM entries
-               LEFT JOIN entries_vec v ON v.entry_id = entries.id
-               WHERE source = ? AND source_hash = ?""",
-            (COLD_MEMORY_REFERENCE_SOURCE, current_hash),
-        )
-        expected_chunks = len(_chunk_text(content))
         indexed = 0
-        if (
-            int((existing or {}).get("entry_count", 0) or 0) != expected_chunks
-            or int((existing or {}).get("vector_count", 0) or 0) != expected_chunks
-        ):
+        if not store.source_index_complete(
+                COLD_MEMORY_REFERENCE_SOURCE, current_hash, content):
             store.remove_source(COLD_MEMORY_REFERENCE_SOURCE)
             indexed = len(store.add_text(
                 content,
@@ -377,13 +339,3 @@ def collect_legacy_journals(state_dir: Path, budget: int) -> str:
     return "\n\n".join(parts)
 
 
-# Deprecated aliases kept for one release while installed packages catch up.
-MAX_POLICY_CHARS = MAX_MEMORY_CHARS
-
-
-def load_policy(state_dir: Path) -> str:
-    return load_long_term_memory(state_dir)
-
-
-def format_policy_prompt(content: str) -> str:
-    return format_long_term_memory_prompt(content)

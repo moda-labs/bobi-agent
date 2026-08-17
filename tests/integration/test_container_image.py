@@ -11,13 +11,20 @@ ANTHROPIC_API_KEY is present).
 
 Gated on a working Docker daemon, so they no-op in environments without one.
 Set BOBI_TEST_IMAGE=<tag> to reuse an already-built image and skip the build.
+
+Building the image here needs Node.js major 20 EXACTLY on PATH, because
+staging the wheel runs hatch_build.py's embedded-event-server build. Node 22
+and 24 are both rejected outright. Reusing a prebuilt image via
+BOBI_TEST_IMAGE needs no Node at all.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -55,16 +62,52 @@ def _run(*args: str, **kw) -> subprocess.CompletedProcess:
     )
 
 
+def _stage_wheel() -> None:
+    """Build the wheel into `dist/`, the way the release pipeline stages it.
+
+    Wheel mode installs `dist/*.whl` and the Dockerfile expects EXACTLY one, so
+    clear the directory first: a stale wheel from an earlier version would make
+    `pip install /dist/*.whl` install two, and which one wins is arbitrary.
+    """
+    dist = REPO_ROOT / "dist"
+    for stale in dist.glob("*.whl"):
+        stale.unlink()
+    proc = _run(
+        sys.executable, "-m", "build", "--wheel", "--outdir", str(dist),
+        cwd=str(REPO_ROOT), timeout=900,
+    )
+    if proc.returncode != 0:
+        pytest.fail(
+            "could not build the wheel to stage into the image build context.\n"
+            "This build runs hatch_build.py, which needs Node.js major 20 "
+            "EXACTLY on PATH (not 22, not 24) to build the embedded event "
+            f"server.\n\nstdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}"
+        )
+
+
 @pytest.fixture(scope="session")
 def image() -> str:
-    """Build (or reuse) the instance image; return its tag."""
+    """Build (or reuse) the instance image; return its tag.
+
+    Builds in WHEEL mode - the mode the release pipeline and this repo's own
+    CI use - not the Dockerfile's nominal `source` default.
+
+    Source mode cannot build in ANY repo: `.dockerignore` drops both `.git`
+    and `event-server/dist`, so hatch_build.py's `initialize` finds neither a
+    VCS checkout nor a prebuilt artifact, takes the rebuild path, and needs
+    Node inside `python:3.11-slim` - where there is none, by design (the image
+    is deliberately Node-free). Defaulting to it made this entire module look
+    environment-blocked when it was really asking for an impossible build.
+    """
     prebuilt = os.environ.get("BOBI_TEST_IMAGE")
     if prebuilt:
         return prebuilt
 
+    _stage_wheel()
     tag = "bobi:pytest"
     proc = _run(
-        "docker", "build", "-t", tag, str(REPO_ROOT),
+        "docker", "build", "--build-arg", "BOBI_BUILD=wheel",
+        "-t", tag, str(REPO_ROOT),
         timeout=1800,
     )
     if proc.returncode != 0:
@@ -247,6 +290,64 @@ def test_gateway_auth_token_passes_post_install_auth_gate(
 
 @requires_docker
 @pytest.mark.timeout(120)
+def test_subscription_claude_gateway_passes_post_install_auth_gate(
+    image: str,
+    tmp_path: Path,
+):
+    """A Claude gateway may use durable subscription OAuth credentials."""
+    import time
+
+    team = tmp_path / "team"
+    shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "claude-smoke", team)
+    agent_yaml = team / "agent.yaml"
+    agent_yaml.write_text(
+        agent_yaml.read_text()
+        + "\nbrain:\n"
+        + "  kind: claude\n"
+        + "  base_url: http://127.0.0.1:9\n"
+    )
+
+    vol = tmp_path / "data"
+    creds = vol / "claude" / ".credentials.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {"refreshToken": "refresh"},
+    }))
+
+    name = "bobi-gateway-subscription"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "BOBI_AUTH=subscription",
+            "-e", "BOBI_AGENT=claude-smoke",
+            "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-v", f"{vol}:/data",
+            "-v", f"{team}:/mnt/team:ro",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        deadline = time.time() + 30
+        text = ""
+        while time.time() < deadline:
+            logs = _run("docker", "logs", name)
+            text = logs.stdout + logs.stderr
+            if "Starting manager under the supervisor sidecar" in text:
+                break
+            if "FATAL:" in text:
+                break
+            time.sleep(1)
+
+        assert "refresh token is present" in text, text
+        assert "Starting manager under the supervisor sidecar" in text, text
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(120)
 def test_credentialless_claude_gateway_passes_post_install_auth_gate(
     image: str,
     tmp_path: Path,
@@ -312,6 +413,129 @@ def test_subscription_mode_rejects_api_key(image: str):
     )
     assert proc.returncode != 0
     assert "overrides subscription auth" in (proc.stdout + proc.stderr)
+
+
+def _subscription_bootstrap_logs(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+) -> str:
+    """Boot through the real entrypoint and return its auth-decision logs."""
+    import time
+
+    team = REPO_ROOT / "tests" / "fixtures" / f"{brain}-smoke"
+    data = tmp_path / f"data-{brain}"
+    cred_dir = data / brain
+    cred_dir.mkdir(parents=True)
+    cred_file = ".credentials.json" if brain == "claude" else "auth.json"
+    (cred_dir / cred_file).write_text(json.dumps(credential))
+
+    name = f"bobi-subscription-credentials-{brain}"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "BOBI_AUTH=subscription",
+            "-e", f"BOBI_AGENT={brain}-smoke",
+            "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-v", f"{data}:/data",
+            "-v", f"{team}:/mnt/team:ro",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        deadline = time.time() + 45
+        text = ""
+        while time.time() < deadline:
+            logs = _run("docker", "logs", name)
+            text = logs.stdout + logs.stderr
+            if ("running login bootstrap" in text
+                    or "skipping login bootstrap" in text
+                    or "FATAL:" in text):
+                break
+            time.sleep(0.5)
+        return text
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+@pytest.mark.parametrize(
+    ("brain", "credential", "reason"),
+    [
+        (
+            "claude",
+            {"claudeAiOauth": {"accessToken": "", "refreshToken": ""}},
+            "refresh token is missing or blank",
+        ),
+        (
+            "codex",
+            {"OPENAI_API_KEY": None, "tokens": {"refresh_token": ""}},
+            "refresh token is missing or blank",
+        ),
+    ],
+)
+def test_subscription_bootstrap_runs_for_invalid_credentials(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+    reason: str,
+):
+    text = _subscription_bootstrap_logs(
+        image, tmp_path, brain, credential,
+    )
+
+    assert f"credentials invalid: {reason}" in text, text
+    assert "running login bootstrap" in text, text
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+@pytest.mark.parametrize(
+    ("brain", "credential", "reason"),
+    [
+        (
+            "claude",
+            {
+                "claudeAiOauth": {
+                    "accessToken": "access",
+                    "refreshToken": "refresh",
+                    "refreshTokenExpiresAt": 4_102_444_800_000,
+                },
+            },
+            "refresh token is present and unexpired",
+        ),
+        (
+            "codex",
+            {
+                "OPENAI_API_KEY": None,
+                "tokens": {
+                    "id_token": "id",
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                },
+            },
+            "refresh token is present",
+        ),
+    ],
+)
+def test_subscription_bootstrap_skips_valid_credentials(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+    reason: str,
+):
+    text = _subscription_bootstrap_logs(
+        image, tmp_path, brain, credential,
+    )
+
+    assert f"credentials valid: {reason}" in text, text
+    assert "skipping login bootstrap" in text, text
 
 
 @requires_docker

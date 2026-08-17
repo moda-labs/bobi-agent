@@ -13,8 +13,9 @@ floors are structural — goal must be non-empty to author anything at
 Build, a fresh validation to Install, an install to finish.
 
 State is checkpointed under the selected Bobi Agent's run/state directory
-after every change so an interrupted setup resumes with
-`bobi setup --resume`.
+after every change, so reopening setup for the same team resumes an
+interrupted session (the web UI loads any unfinished checkpoint on open —
+there is no flag to pass).
 
 v1 is the **create** spine. Open mode (editing an existing pack) reuses
 these same stages and is deferred to M2 — `mode` carries the seam.
@@ -30,6 +31,7 @@ from enum import Enum
 from pathlib import Path
 
 from bobi import paths
+from bobi.fsutil import atomic_write_json, file_lock, is_atomic_temp
 
 STATE_FILENAME = "setup.json"
 
@@ -226,10 +228,22 @@ class SetupState:
     # --- persistence ----------------------------------------------------
 
     def save(self, project_path: Path) -> None:
+        """Checkpoint the wizard so an interrupted setup can resume.
+
+        Atomic and locked, because both halves matter here and for
+        different reasons. Atomic: a bare rewrite killed midway (Ctrl-C on
+        the foreground server, a deploy roll) left setup.json truncated,
+        and ``load`` maps a JSONDecodeError to None — so the whole
+        in-progress setup was silently discarded rather than resumed.
+        Locked: ``bobi setup`` and ``bobi app`` each build their own
+        SetupState over the same file, and every sync webui handler runs in
+        FastAPI's threadpool, so concurrent publishers are the norm.
+        """
         data = asdict(self)            # recurses into Spec → dict
         data["stage"] = self.stage.value
         path = paths.state_dir(project_path) / STATE_FILENAME
-        path.write_text(json.dumps(data, indent=1))
+        with file_lock(path):
+            atomic_write_json(path, data, indent=1)
 
     @classmethod
     def load(cls, project_path: Path) -> "SetupState | None":
@@ -269,6 +283,11 @@ def source_tree_hash(pack_dir: Path, exclude: Iterable[Path] = ()) -> str:
     frozen value is stale the instant it is written and install can never
     match it. Hashing after the save does not help — the digest would then
     have to cover the file that stores it, which has no fixed point.
+
+    Atomic-write temp siblings are skipped by shape rather than by name:
+    a save killed mid-write leaves one behind under a process-unique name
+    no ``exclude`` list can enumerate ahead of time, and counting it would
+    fail the next install with "the team source changed".
     """
     h = hashlib.sha256()
     if not pack_dir.is_dir():
@@ -276,6 +295,7 @@ def source_tree_hash(pack_dir: Path, exclude: Iterable[Path] = ()) -> str:
     skip = {p.resolve() for p in exclude}
     for f in sorted(pack_dir.rglob("*")):
         if (f.is_file() and "__pycache__" not in f.parts
+                and not is_atomic_temp(f)
                 and f.resolve() not in skip):
             h.update(f.relative_to(pack_dir).as_posix().encode())
             h.update(f.read_bytes())
@@ -286,3 +306,16 @@ def setup_state_file(project_path: Path) -> Path:
     """The setup checkpoint written by ``SetupState.save`` — never part of a
     team source tree, even when it happens to sit inside one."""
     return paths.state_path(project_path) / STATE_FILENAME
+
+
+def setup_state_artifacts(project_path: Path) -> list[Path]:
+    """Every file ``SetupState.save`` owns, for source-tree hash exclusion.
+
+    The checkpoint plus its lock sidecar. Both are runtime bookkeeping, not
+    team source, and a run/ directory that sits inside the source tree puts
+    them under the hash — where any file the save path touches invalidates
+    the validation it just froze. One list, so a future sidecar cannot be
+    added to the save path and silently forgotten by the two hash callers.
+    """
+    state_file = setup_state_file(project_path)
+    return [state_file, state_file.with_name(f"{state_file.name}.lock")]

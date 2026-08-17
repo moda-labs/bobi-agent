@@ -20,6 +20,7 @@ from pathlib import Path
 import httpx
 
 from bobi.events import artifact as event_server_artifact
+from bobi.fsutil import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -388,6 +389,74 @@ def _is_local_url(url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1")
 
 
+def local_port_from_url(url: str) -> int | None:
+    """The local event-server port named by *url*, or None when it is remote."""
+    if not url:
+        return None
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+        return None
+    return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def local_port_file(project_path: Path | None) -> Path:
+    """Where the local event server remembers the port it came up on.
+
+    Resolves the path only — it does not create the state directory, so a
+    reader cannot bring state into being just by asking where it lives.
+    Writers go through ``atomic_write_text``, which creates the parent.
+    """
+    from bobi import paths
+
+    return paths.state_path(project_path) / "event-server.port"
+
+
+def resolve_local_port(project_path: Path) -> int:
+    """Port this runtime's LOCAL event server uses.
+
+    A live runtime's remembered start port wins, then the configured local
+    ``event_server_url``, then a remembered port with no live pid, then the
+    8080 default. The single definition, so `event-server status` and doctor
+    can never disagree about which port to probe (D019).
+    """
+    from bobi import paths
+
+    state = paths.state_path(project_path)
+    pid_file = state / "event-server.pid"
+    port_file = local_port_file(project_path)
+
+    def _remembered() -> int | None:
+        try:
+            return int(port_file.read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    if pid_file.exists() and port_file.exists():
+        port = _remembered()
+        if port is not None:
+            return port
+
+    try:
+        from bobi.config import Config
+        configured = Config.load(project_path).event_server_url
+    except Exception:
+        configured = ""
+    if configured:
+        port = local_port_from_url(configured)
+        if port is not None:
+            return port
+
+    if port_file.exists():
+        port = _remembered()
+        if port is not None:
+            return port
+    return 8080
+
+
 def _run_npm(
     args: list[str],
     es_dir: Path,
@@ -467,8 +536,7 @@ def ensure_running(port: int, webhook_secret: str | None = None,
 
     if health(f"http://localhost:{port}"):
         if project_path is not None:
-            from bobi import paths
-            (paths.state_dir(project_path) / "event-server.port").write_text(str(port))
+            atomic_write_text(local_port_file(project_path), str(port))
         log.info(f"Event server already running on port {port}")
         return "connected"
 
@@ -503,22 +571,20 @@ def ensure_running(port: int, webhook_secret: str | None = None,
         env["BOBI_ES_SLACK_SIGNING_SECRET"] = resolved_slack_signing_secret
     if resolved_linear_webhook_secret:
         env["BOBI_ES_LINEAR_WEBHOOK_SECRET"] = resolved_linear_webhook_secret
-    # WhatsApp inbound verification (#656): the runtime .env carries the
-    # unprefixed vars (the connector card captures them); the local server
-    # reads only BOBI_ES_*.
-    if env.get("WHATSAPP_APP_SECRET"):
-        env["BOBI_ES_WHATSAPP_APP_SECRET"] = env["WHATSAPP_APP_SECRET"]
-    if env.get("WHATSAPP_VERIFY_TOKEN"):
-        env["BOBI_ES_WHATSAPP_VERIFY_TOKEN"] = env["WHATSAPP_VERIFY_TOKEN"]
-    # Discord Gateway (#2): the local server holds the persistent inbound
-    # WebSocket, so it needs the bot credential at boot. Same unprefixed ->
-    # BOBI_ES_* re-map as WhatsApp.
-    if env.get("DISCORD_BOT_TOKEN"):
-        env["BOBI_ES_DISCORD_BOT_TOKEN"] = env["DISCORD_BOT_TOKEN"]
-    if env.get("DISCORD_APPLICATION_ID"):
-        env["BOBI_ES_DISCORD_APPLICATION_ID"] = env["DISCORD_APPLICATION_ID"]
-    if env.get("DISCORD_MESSAGE_CONTENT"):
-        env["BOBI_ES_DISCORD_MESSAGE_CONTENT"] = env["DISCORD_MESSAGE_CONTENT"]
+    # The runtime .env carries these unprefixed (the connector cards capture
+    # them); the local server reads only BOBI_ES_*. WhatsApp (#656) needs them
+    # for inbound webhook verification; Discord (#2) because the local server
+    # holds the persistent inbound Gateway WebSocket and needs the bot
+    # credential at boot. Adding the next channel's vars is one line here.
+    for var in (
+        "WHATSAPP_APP_SECRET",
+        "WHATSAPP_VERIFY_TOKEN",
+        "DISCORD_BOT_TOKEN",
+        "DISCORD_APPLICATION_ID",
+        "DISCORD_MESSAGE_CONTENT",
+    ):
+        if env.get(var):
+            env[f"BOBI_ES_{var}"] = env[var]
     if bind:
         env["BOBI_ES_BIND"] = bind
     if extra_env:
@@ -540,7 +606,7 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     for _ in range(30):
         time.sleep(0.5)
         if health(f"http://localhost:{port}"):
-            (state / "event-server.port").write_text(str(port))
+            atomic_write_text(local_port_file(project_path), str(port))
             log.info(f"Event server started on port {port} (pid {proc.pid})")
             return "started"
     log.error("Event server failed to start within 15 seconds")
@@ -652,6 +718,20 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
 
     kept: list[str] = []
     unbacked: list[str] = []
+
+    def mark_unbacked(sub: str) -> None:
+        """Record a topic with no resource grant.
+
+        The four ways a topic ends up here (credential missing, registration
+        did not back it, transport error, server denied) share one rule, and
+        it lives here so a fifth cannot get it wrong: an unbacked topic is
+        always reported, and is kept in the subscription set only when this
+        call is not filtering.
+        """
+        unbacked.append(sub)
+        if not filter_unauthorized:
+            kept.append(sub)
+
     for sub in subscribe:
         service = sub.split(":", 1)[0] if ":" in sub else ""
         if service in ("github", "linear", "slack", "whatsapp", "discord") and ":" in sub:
@@ -671,9 +751,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                     "subscriptions (a resource grant is required, #488)",
                     service, sub, action,
                 )
-                unbacked.append(sub)
-                if not filter_unauthorized:
-                    kept.append(sub)
+                mark_unbacked(sub)
                 continue
         if service not in _RESOURCE_CRED_KEYS:
             # Non-global, or slack/whatsapp/discord (granted via their
@@ -693,9 +771,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "session's subscriptions (a resource grant is required, #488)",
                 service, sub, action,
             )
-            unbacked.append(sub)
-            if not filter_unauthorized:
-                kept.append(sub)
+            mark_unbacked(sub)
             continue
         try:
             granted = _authorize_one_resource(
@@ -707,9 +783,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "Resource authorize failed for %r: %s — %s",
                 sub, type(e).__name__, action,
             )
-            unbacked.append(sub)
-            if not filter_unauthorized:
-                kept.append(sub)
+            mark_unbacked(sub)
             continue
         if granted:
             kept.append(sub)
@@ -720,9 +794,7 @@ def authorize_resources(base_url: str, cfg, subscribe: list[str],
                 "%s credential cannot read it; %s subscriptions (#488)",
                 sub, service, action,
             )
-            unbacked.append(sub)
-            if not filter_unauthorized:
-                kept.append(sub)
+            mark_unbacked(sub)
     if unbacked:
         action = "dropped" if filter_unauthorized else "kept"
         log.warning(
@@ -878,55 +950,6 @@ def deregister(base_url: str, deployment_id: str, api_key: str) -> bool:
         return False
 
 
-def _slack_auth_info(token: str) -> tuple[str, str, str]:
-    """Resolve (team_id, bot_id, bot_user_id) from a bot token via auth.test."""
-    from bobi import http as pooled
-
-    try:
-        resp = pooled.get(
-            "https://slack.com/api/auth.test",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=5.0,
-        )
-        data = resp.json()
-        if data.get("ok"):
-            return (
-                data.get("team_id", "") or "",
-                data.get("bot_id", "") or "",
-                data.get("user_id", "") or "",
-            )
-    except Exception as e:  # best-effort — never block startup
-        log.debug("Slack auth.test failed during workspace registration: %s", e)
-    return "", "", ""
-
-
-def _slack_app_id(token: str, bot_id: str) -> str:
-    """Resolve api_app_id from a bot id via bots.info.
-
-    ``auth.test`` does not return the app id, but the event server keys each
-    bot's record by ``api_app_id`` (the only id unique per app AND present on
-    every inbound event) so two bots can share one workspace. Best-effort.
-    """
-    if not bot_id:
-        return ""
-    from urllib.parse import quote
-
-    from bobi import http as pooled
-
-    try:
-        resp = pooled.get(
-            f"https://slack.com/api/bots.info?bot={quote(bot_id)}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=5.0,
-        )
-        data = resp.json()
-        if data.get("ok"):
-            return (data.get("bot", {}) or {}).get("app_id", "") or ""
-    except Exception as e:  # best-effort — server can fall back to bot_id keying
-        log.debug("Slack bots.info failed during workspace registration: %s", e)
-    return ""
-
-
 def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
                               bubble_key: str = "") -> list[str]:
     """Register the agent's Slack workspace(s) with the event server.
@@ -960,10 +983,13 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         app_token = str(cfg.credential("slack", "app_token") or "").strip()
     except Exception:
         app_token = ""
-    team_id, bot_id, bot_user_id = _slack_auth_info(token)
-    if not team_id:
+    from bobi.slack import SlackAppIdentityError, require_app_identity
+
+    try:
+        team_id, bot_id, bot_user_id, app_id = require_app_identity(token)
+    except SlackAppIdentityError as e:
+        log.warning("Slack workspace registration skipped: %s", e)
         return []
-    app_id = _slack_app_id(token, bot_id)
     try:
         # Send bot_id explicitly when known: the server's own auth.test
         # fallback is best-effort, and a registration without bot_id
@@ -992,10 +1018,24 @@ def register_slack_workspaces(base_url: str, cfg, bubble_id: str = "",
         # bubble-scoped record outbound channel sends require. Unsigned
         # otherwise (still writes the global self-reply record).
         from bobi.events.signing import signed_request
-        signed_request(
+        resp = signed_request(
             base_url, "POST", "/slack/workspaces", record,
             bubble_id, bubble_key, timeout=10.0,
         )
+        # signed_request does not raise on status, so an unchecked call logged
+        # success for a registration the server rejected (D031): the
+        # bubble-scoped outbound record (#487) and the slack resource grant
+        # were never written, leaving self-reply loop prevention and outbound
+        # sends silently broken. The whatsapp and discord siblings below check
+        # this the same way.
+        if resp.status_code != 200:
+            log.warning(
+                "Slack workspace registration rejected for %s (app %s): "
+                "HTTP %d — self-reply loop prevention and outbound sends are "
+                "NOT active for this workspace",
+                team_id, app_id or "?", resp.status_code,
+            )
+            return []
         log.info(
             "Registered Slack workspace %s (app %s) with event server "
             "(self-reply loop prevention)", team_id, app_id or "?",

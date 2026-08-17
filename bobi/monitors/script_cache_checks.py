@@ -44,6 +44,7 @@ in agent.yaml):
     http_hosts         host allowlist when allow_http is on
     max_age            refresh a pinned script older than this (default: unset)
     on_persistent_failure  "degrade" (default) | "pause"
+    notify_channel     Slack channel for the best-effort direct message
 """
 
 from __future__ import annotations
@@ -63,12 +64,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from bobi.fsutil import atomic_write_json, atomic_write_text
+from bobi.monitors.run_records import _parse_iso
 from bobi.monitors.schema import Condition
 # Reuse the parse helpers verbatim — no behavior change to tool_poll.
 from bobi.monitors.tool_checks import (
     TOOL_TIMEOUT,
     _items_to_conditions,
     _parse_items,
+    _safe_name,
+    _scripts_dir,
 )
 
 log = logging.getLogger(__name__)
@@ -561,17 +566,6 @@ def run_sandboxed(script_content: str, env: dict, timeout: int, *, name: str = "
 # Script + trusted-state paths
 # ---------------------------------------------------------------------------
 
-def _scripts_dir() -> Path:
-    from bobi import paths
-    d = paths.state_dir() / "scripts"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _safe_name(monitor_name: str) -> str:
-    return monitor_name.replace("/", "_").replace("..", "_")
-
-
 def _active_path(name: str) -> Path:
     return _scripts_dir() / f"{_safe_name(name)}.sc.sh"
 
@@ -598,15 +592,12 @@ def _load_trusted_state(name: str) -> dict:
 
 
 def _save_trusted_state(name: str, state: dict) -> None:
-    """Persist the trusted-state sidecar atomically (tmp write + os.replace), so a
-    crash or fleet-churn kill mid-write can't truncate it into corrupt JSON that
+    """Persist the trusted-state sidecar atomically, so a crash or
+    fleet-churn kill mid-write can't truncate it into corrupt JSON that
     _load_trusted_state would discard (dropping the pinned sha256 + envelope =
     losing the security baseline)."""
     try:
-        p = _state_path(name)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(state, indent=2))
-        os.replace(tmp, p)
+        atomic_write_json(_state_path(name), state)
     except OSError as e:
         log.warning("script_cache %s: couldn't persist trusted state: %s", name, e)
 
@@ -626,16 +617,6 @@ def _fingerprint(prompt: str, id_field: str, extra: dict) -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _parse_iso(value: str | None):
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +647,7 @@ def _policy(monitor) -> dict:
         "http_hosts": [],
         "max_age": None,
         "on_persistent_failure": "degrade",
+        "notify_channel": None,
     }
     base.update(_install_policy())
     extra = monitor.extra or {}
@@ -764,7 +746,8 @@ def publish(event: str, data: dict) -> bool:
         return False
 
 
-def _notify(event: str, monitor, payload: dict, state: dict) -> None:
+def _notify(event: str, monitor, payload: dict, state: dict,
+            policy: dict) -> None:
     """Emit a real post-hoc notification AND append an observable record.
 
     Two channels, both real: (1) publish the event on the wire (→ manager →
@@ -782,16 +765,20 @@ def _notify(event: str, monitor, payload: dict, state: dict) -> None:
     level("script_cache %s: %s %s (published=%s)",
           monitor.name, event, payload.get("mode", payload.get("reason", "")), ok)
     # Best-effort direct Slack on top of the wire path, when configured.
-    _slack_notify(monitor, event, payload)
+    _slack_notify(monitor, event, payload, policy)
 
 
-def _slack_notify(monitor, event: str, payload: dict) -> None:
+def _slack_notify(monitor, event: str, payload: dict, policy: dict) -> None:
     """Best-effort direct Slack message when a bot token + notify channel are
     configured (script_cache.notify_channel). Additive to the event publish —
-    never raises."""
+    never raises.
+
+    The channel arrives already resolved in *policy*: this module resolves
+    install-level config overlaid by per-monitor ``extra`` exactly once, in
+    :func:`_policy`, and every other consumer reads it from there."""
     try:
         token = os.environ.get("SLACK_BOT_TOKEN", "")
-        channel = (monitor.extra or {}).get("notify_channel") or _install_policy().get("notify_channel")
+        channel = policy.get("notify_channel")
         if not token or not channel:
             return
         from bobi.slack import post_slack_message
@@ -834,11 +821,7 @@ def _pin(name: str, content: str, monitor, fp: str, envelope: CapabilityEnvelope
          state: dict) -> None:
     """Atomically activate a validated+smoked script and record trusted state."""
     headed = _write_header(content, monitor, fp)
-    tmp = _scripts_dir() / f".tmp-{_safe_name(name)}.sh"
-    tmp.write_text(headed)
-    tmp.chmod(tmp.stat().st_mode | stat.S_IEXEC)
-    active = _active_path(name)
-    os.replace(tmp, active)
+    atomic_write_text(_active_path(name), headed, executable=True)
     state["fingerprint"] = fp
     state["sha256"] = _sha256(headed)
     state["envelope"] = envelope.to_json()
@@ -902,7 +885,7 @@ def _backoff_active(state: dict) -> bool:
     return until is not None and _now() < until
 
 
-def _bump_failure(name: str, monitor, state: dict, on_persistent_failure: str) -> None:
+def _bump_failure(monitor, state: dict, policy: dict) -> None:
     """Increment the consecutive-regen-fail counter; at SCRIPT_REGEN_MAX fire
     ``script.failing`` and either pause (policy) or degrade with exponential
     backoff so we don't hammer the agent every tick."""
@@ -910,16 +893,16 @@ def _bump_failure(name: str, monitor, state: dict, on_persistent_failure: str) -
     state["script_regen_fails"] = fails
     if fails >= SCRIPT_REGEN_MAX:
         backoff = min(_BACKOFF_CAP, TOOL_TIMEOUT * (2 ** (fails - SCRIPT_REGEN_MAX + 1)))
-        if on_persistent_failure == "pause":
+        if policy["on_persistent_failure"] == "pause":
             state["paused"] = True
             _notify("monitor/script.failing", monitor,
                     {"reason": "persistent regen failure — paused",
-                     "fails": fails}, state)
+                     "fails": fails}, state, policy)
         else:
             state["backoff_until"] = (_now() + timedelta(seconds=backoff)).isoformat()
             _notify("monitor/script.failing", monitor,
                     {"reason": "persistent regen failure — degraded with backoff",
-                     "fails": fails, "backoff_s": backoff}, state)
+                     "fails": fails, "backoff_s": backoff}, state, policy)
 
 
 # ---------------------------------------------------------------------------
@@ -977,7 +960,7 @@ def _self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
     approval mode; never waste the tick (return the agent's items either way)."""
     gen = generate_candidate(monitor, cwd, policy)
     if not gen.success or gen.items is None:
-        _bump_failure(monitor.name, monitor, state, policy["on_persistent_failure"])
+        _bump_failure(monitor, state, policy)
         _record_tick(state, "fallback_regen", gen.cost_usd, returncode=1)
         log.warning("script_cache %s: generation failed (%s)", monitor.name, gen.error)
         return None  # indeterminate — leave state untouched downstream
@@ -1003,13 +986,13 @@ def _self_heal(monitor, state: dict, policy: dict, fp: str, env: dict,
                     "summary": f"auto-pinned generated script for {monitor.name}",
                     "envelope": vr.envelope.to_json(),
                     "sha256": state["sha256"],
-                }, state)
+                }, state, policy)
             else:
-                _queue_review(monitor, candidate, vr, state)
+                _queue_review(monitor, candidate, vr, state, policy)
         else:
             reason = vr.reason if not vr.ok else "smoke run failed"
             log.warning("script_cache %s: candidate rejected (%s)", monitor.name, reason)
-            _bump_failure(monitor.name, monitor, state, policy["on_persistent_failure"])
+            _bump_failure(monitor, state, policy)
     _record_tick(state, mode, gen.cost_usd, returncode=0,
                  conditions_count=len(conditions))
     return conditions
@@ -1028,7 +1011,8 @@ def _should_pin(state: dict, envelope: CapabilityEnvelope, approval: str) -> boo
     return CapabilityEnvelope.from_json(prior).covers(envelope)
 
 
-def _queue_review(monitor, candidate: str, vr: ValidationResult, state: dict) -> None:
+def _queue_review(monitor, candidate: str, vr: ValidationResult, state: dict,
+                  policy: dict) -> None:
     """Write the candidate to pending/ and fire a review request; keep using the
     agent runtime until a human promotes it (review mode / out-of-envelope)."""
     try:
@@ -1040,10 +1024,10 @@ def _queue_review(monitor, candidate: str, vr: ValidationResult, state: dict) ->
         "summary": f"generated script for {monitor.name} awaits approval",
         "reason": "review mode (or capability change on self-heal)",
         "envelope": vr.envelope.to_json(),
-    }, state)
+    }, state, policy)
 
 
-def approve_pending(monitor, scripts_dir: Path | None = None) -> bool:
+def approve_pending(monitor) -> bool:
     """Promote a queued ``pending/<name>.sh`` to active (CLI approve-script).
 
     Re-validates the pending script, smoke-runs it, then atomically pins it and
@@ -1133,6 +1117,14 @@ def script_cache(monitor, projects: list[Path]) -> list[Condition] | None:
     finally:
         _save_trusted_state(monitor.name, state)
 
+
+# Self-heal calls the agent runtime through `run_check_blocking`, which blocks
+# for up to ~20 minutes (attempts=2 x CHECK_TIMEOUT=600s). The scheduler runs
+# every check on its single thread, so running this one there stalled every
+# other monitor for the duration (D004). This flag moves detection to its own
+# thread; the runner itself is unchanged, so a regeneration tick still returns
+# the agent's items rather than wasting the tick.
+script_cache.out_of_band = True
 
 # Native check runners, keyed by the monitor's `check` field. Auto-loaded by the
 # scheduler's *_checks.py glob — no scheduler change to register.

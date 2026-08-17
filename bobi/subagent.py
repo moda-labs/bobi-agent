@@ -8,6 +8,7 @@ from the dashboard, or cancelled.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -445,93 +446,101 @@ async def _run_agent_supervised(
     )
 
     try:
-        try:
-            connect_prompt = prompt if not saved_id else None
-            await client.connect(connect_prompt)
-            if saved_id:
-                await client.query(prompt)
-        except Exception as e:
-            if not saved_id:
-                raise
-            # Stale/unresumable saved session: clear it and retry fresh once,
-            # matching Session._run and the workflow orchestrator. Without
-            # this, a bad token fails every subsequent monitor interval.
-            log.warning(
-                "Resume failed for '%s' (stale session?), retrying fresh: %s",
-                name, e,
-            )
-            save_session_id(name, "")
-            saved_id = ""
+        # D067: enforce `timeout` HERE, not only in the caller. The sole caller
+        # wraps this coroutine in asyncio.wait_for, whose expiry cancels the task
+        # from outside — and CancelledError is a BaseException, so it skips both
+        # handlers below and the TERMINAL_FAILED persist never runs. The entry's
+        # state.json then records no terminal status and no reason, leaving the
+        # reconciler nothing to re-emit. Raised from inside, the timeout lands in
+        # `except asyncio.TimeoutError` (until now unreachable) and is recorded.
+        async with asyncio.timeout(timeout if timeout and timeout > 0 else None):
             try:
-                await client.disconnect()
-            except Exception:
-                pass
-            client = _build_client("")
-            await client.connect(prompt)
+                connect_prompt = prompt if not saved_id else None
+                await client.connect(connect_prompt)
+                if saved_id:
+                    await client.query(prompt)
+            except Exception as e:
+                if not saved_id:
+                    raise
+                # Stale/unresumable saved session: clear it and retry fresh once,
+                # matching Session._run and the workflow orchestrator. Without
+                # this, a bad token fails every subsequent monitor interval.
+                log.warning(
+                    "Resume failed for '%s' (stale session?), retrying fresh: %s",
+                    name, e,
+                )
+                save_session_id(name, "")
+                saved_id = ""
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                client = _build_client("")
+                await client.connect(prompt)
 
-        while True:
-            result_msg = None
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantText):
-                    if msg.text:
-                        result.final_text = msg.text
-                        log_activity("response", {
-                            "text": msg.text[:500],
-                        }, session=name)
-                elif isinstance(msg, TurnResult):
-                    result_msg = msg
+            while True:
+                result_msg = None
+                async for msg in client.receive_response():
+                    if isinstance(msg, AssistantText):
+                        if msg.text:
+                            result.final_text = msg.text
+                            log_activity("response", {
+                                "text": msg.text[:500],
+                            }, session=name)
+                    elif isinstance(msg, TurnResult):
+                        result_msg = msg
 
-            if result_msg is None:
-                result.error = _network_drop_error("no ResultMessage")
-                _persist_terminal(registry, name, TERMINAL_FAILED,
-                                  error=result.error, phase=phase)
+                if result_msg is None:
+                    result.error = _network_drop_error("no ResultMessage")
+                    _persist_terminal(registry, name, TERMINAL_FAILED,
+                                      error=result.error, phase=phase)
+                    return result
+
+                save_session_id(name, result_msg.session_id, model=model)
+                result.session_id = result_msg.session_id
+                result.duration_ms += result_msg.duration_ms
+                result.total_cost_usd += result_msg.total_cost_usd or 0.0
+                result.num_turns += result_msg.num_turns
+                for _c in result_msg.costs:
+                    if _c.model:
+                        result.model = _c.model
+
+                if result_msg.deferred_tool and on_input_needed:
+                    deferred = result_msg.deferred_tool
+                    log.info(f"Agent {run_key}/{phase} deferred {deferred.name}")
+                    loop = asyncio.get_running_loop()
+                    answer = await loop.run_in_executor(
+                        None, on_input_needed, deferred.name, deferred.input,
+                    )
+                    await client.query(answer)
+                    continue
+
+                result.success = not (result_msg.is_error or result_msg.error_kind)
+                if not result.success:
+                    result.error_kind = result_msg.error_kind
+                    # The shared composition (#845): never "unknown error" - the
+                    # last resort still names the kind and API status, which is
+                    # what a monitor's retry log had been reduced to for hours.
+                    result.error = result_msg.error_text()
+                    # Single-sourced transient classification (§4.3): a 529/rate-limit
+                    # /5xx is tagged transient so the launcher can re-dispatch. We do
+                    # NOT retry here — survival/retry is owned by #444.
+                    result.transient = is_transient_api_error(
+                        result_msg.api_error_status,
+                        result.error,
+                    )
+                # RC#2: honest terminal status — never record `done` on an error
+                # result. A transient 529 surfaces as an error ResultMessage (not an
+                # exception), so the old unconditional `done` wrote a success over a
+                # real failure. We record it honestly as `failed` and let it be
+                # delivered (RC#1); transient survival/retry is owned by the
+                # persistent session (#444), so the spawn path adds no retry (§4.3).
+                terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
+                _persist_terminal(registry, name, terminal, error=result.error,
+                                  session_id=result_msg.session_id, phase=phase)
+                log_activity("stop", {"session_id": result_msg.session_id,
+                                      "status": terminal}, session=name)
                 return result
-
-            save_session_id(name, result_msg.session_id, model=model)
-            result.session_id = result_msg.session_id
-            result.duration_ms += result_msg.duration_ms
-            result.total_cost_usd += result_msg.total_cost_usd or 0.0
-            result.num_turns += result_msg.num_turns
-            for _c in result_msg.costs:
-                if _c.model:
-                    result.model = _c.model
-
-            if result_msg.deferred_tool and on_input_needed:
-                deferred = result_msg.deferred_tool
-                log.info(f"Agent {run_key}/{phase} deferred {deferred.name}")
-                loop = asyncio.get_running_loop()
-                answer = await loop.run_in_executor(
-                    None, on_input_needed, deferred.name, deferred.input,
-                )
-                await client.query(answer)
-                continue
-
-            result.success = not (result_msg.is_error or result_msg.error_kind)
-            if not result.success:
-                result.error_kind = result_msg.error_kind
-                # The shared composition (#845): never "unknown error" - the
-                # last resort still names the kind and API status, which is
-                # what a monitor's retry log had been reduced to for hours.
-                result.error = result_msg.error_text()
-                # Single-sourced transient classification (§4.3): a 529/rate-limit
-                # /5xx is tagged transient so the launcher can re-dispatch. We do
-                # NOT retry here — survival/retry is owned by #444.
-                result.transient = is_transient_api_error(
-                    result_msg.api_error_status,
-                    result.error,
-                )
-            # RC#2: honest terminal status — never record `done` on an error
-            # result. A transient 529 surfaces as an error ResultMessage (not an
-            # exception), so the old unconditional `done` wrote a success over a
-            # real failure. We record it honestly as `failed` and let it be
-            # delivered (RC#1); transient survival/retry is owned by the
-            # persistent session (#444), so the spawn path adds no retry (§4.3).
-            terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
-            _persist_terminal(registry, name, terminal, error=result.error,
-                              session_id=result_msg.session_id, phase=phase)
-            log_activity("stop", {"session_id": result_msg.session_id,
-                                  "status": terminal}, session=name)
-            return result
 
     except asyncio.TimeoutError:
         result.error = _timeout_error(timeout)
@@ -683,11 +692,6 @@ def _load_long_term_memory_prompt() -> str:
         return ""
 
 
-def _load_policy_prompt() -> str:
-    """Deprecated alias for one release."""
-    return _load_long_term_memory_prompt()
-
-
 def adhoc_session_name(task: str, name: str | None = None) -> str:
     """The session name :func:`spawn_adhoc` will use for this task.
 
@@ -697,8 +701,6 @@ def adhoc_session_name(task: str, name: str | None = None) -> str:
     recomputed name that drifts would stamp a link naming a session that never
     exists, which is the lineage invariant (see ``bobi/launch_lineage.py``).
     """
-    import hashlib
-
     if name:
         return name
     return f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
@@ -779,8 +781,14 @@ def spawn_adhoc(
     # Resolve MCP servers: caller-supplied override, else config-declared.
     # Done here so all spawn paths (CLI, workflow, subagent) go through one
     # call site.
+    # An empty set is passed through EXPLICITLY, not dropped: this is the path
+    # that resolved the set from the team config, so it is the one entitled to
+    # say "this team declares none" and clear a stale rendered block. A call
+    # site that simply omitted the key means "no opinion" and must leave the
+    # shared config alone (D009).
     _cfg = _load_team_config()
-    merged_mcp = mcp_servers or (_cfg.mcp_servers if _cfg else None)
+    merged_mcp = mcp_servers if mcp_servers is not None else (
+        _cfg.mcp_servers if _cfg else None)
     model = _resolve_launch_model(role, explicit=model, cfg=_cfg)
     effort = _resolve_launch_effort(role, explicit=effort, cfg=_cfg)
 
@@ -795,7 +803,7 @@ def spawn_adhoc(
         extra_options={
             "skills": "all",
             "max_turns": _resolve_launch_max_turns(role, cfg=_cfg),
-            **({"mcp_servers": merged_mcp} if merged_mcp else {}),
+            **({"mcp_servers": merged_mcp} if merged_mcp is not None else {}),
             **({"model": model} if model else {}),
             **({"effort": effort} if effort else {}),
         },
@@ -1263,7 +1271,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from bobi.events.server import (
         ensure_running, ensure_bubble, register, register_slack_workspaces,
         register_whatsapp_numbers, register_discord_apps, authorize_resources,
-        BubbleRejected,
+        local_port_from_url, BubbleRejected,
     )
 
     cfg = Config.load(project_path)
@@ -1366,16 +1374,57 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             f"after {attempts} attempts: {last_err}"
         ) from last_err
 
-    def _local_port(url: str) -> int | None:
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return None
-        if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
-            return None
-        return parsed.port or (443 if parsed.scheme == "https" else 80)
+    def _sync_or_reregister(dep: str, key: str) -> tuple[str, str]:
+        """Sync this session's current subscribe list onto its saved deployment.
+
+        Authorize resource grants first (#488) so a global topic added since the
+        last start is not hard-rejected. A topic we cannot authorize is kept
+        anyway (``filter_unauthorized=False``): the server may already hold a
+        no-expiry grant from an earlier start, and dropping the topic would
+        silently unsubscribe a valid deployment. The server stays authoritative
+        and rejects the update if the grant is truly absent — at which point
+        re-registering is the recovery.
+        """
+        nonlocal active_subscriptions
+        try:
+            bubble = ensure_bubble(es_url, project_path)
+            registered = (
+                _register_channel_credentials(es_url, bubble)
+                if has_external else {}
+            )
+            authorized = authorize_resources(
+                es_url, cfg, subscribe,
+                bubble["bubble_id"], bubble["bubble_key"],
+                filter_unauthorized=False,
+                whatsapp_registered=registered.get("whatsapp"),
+                discord_registered=registered.get("discord"),
+            )
+        except Exception as e:
+            log.info("Pre-PUT resource authorization unavailable (%s)", e)
+            authorized = subscribe
+        from bobi import http as pooled
+        try:
+            resp = pooled.put(
+                f"{es_url}/deployments/{dep}/subscriptions",
+                json={"replace": authorized},
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            active_subscriptions = list(authorized)
+            return dep, key
+        except Exception as e:
+            log.info("Subscription update failed (%s) — re-registering", e)
+            return _register_with_retry(es_url)
 
     if not es_url:
+        # Nothing configured: default to a local server on 8080 and always
+        # register fresh against it. Saved deployment state is deliberately
+        # NOT reused here — an unconfigured local server is ephemeral, so the
+        # deployment it once issued is not something to sync onto.
         es_port = 8080
         es_url = f"http://localhost:{es_port}"
         result = ensure_running(es_port, project_path=project_path)
@@ -1384,98 +1433,34 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
         es_deployment, es_key = _register_with_retry(es_url)
-    elif (es_port := _local_port(es_url)) is not None:
-        result = ensure_running(es_port, project_path=project_path)
-        if result == "started":
-            log.info("Configured local event server started on port %d", es_port)
-        elif result == "connected":
-            log.info("Connected to configured local event server on port %d", es_port)
+    else:
+        # A configured local URL additionally starts/attaches the server; from
+        # there the decision is identical for local and remote, so it is made
+        # once rather than mirrored per transport.
+        if (es_port := local_port_from_url(es_url)) is not None:
+            result = ensure_running(es_port, project_path=project_path)
+            if result == "started":
+                log.info("Configured local event server started on port %d", es_port)
+            elif result == "connected":
+                log.info("Connected to configured local event server on port %d", es_port)
+
         if not (es_deployment and es_key):
+            # No saved deployment for this session — register fresh rather
+            # than PUT to a guaranteed-400 empty deployment URL.
             es_deployment, es_key = _register_with_retry(es_url)
         elif not bubble_state_path(project_path).exists():
+            # Pre-bubble upgrade: saved deployment_state from a version that
+            # predates auth bubbles. The old api_key can't sign publishes
+            # against a v0.21+ server → 403. Drop the stale state and
+            # re-register through ensure_bubble to mint/join a bubble.
             log.info("Saved deployment but no bubble.json — pre-bubble upgrade, re-registering")
             cursor_path.unlink(missing_ok=True)
             es_deployment, es_key = _register_with_retry(es_url)
         else:
-            try:
-                _bubble = ensure_bubble(es_url, project_path)
-                _registered = (
-                    _register_channel_credentials(es_url, _bubble)
-                    if has_external else {}
-                )
-                authorized = authorize_resources(
-                    es_url, cfg, subscribe,
-                    _bubble["bubble_id"], _bubble["bubble_key"],
-                    filter_unauthorized=False,
-                    whatsapp_registered=_registered.get("whatsapp"),
-                    discord_registered=_registered.get("discord"),
-                )
-                from bobi import http as pooled
-                resp = pooled.put(
-                    f"{es_url}/deployments/{es_deployment}/subscriptions",
-                    json={"replace": authorized},
-                    headers={
-                        "Authorization": f"Bearer {es_key}",
-                        "Content-Type": "application/json",
-                    },
-                    timeout=10.0,
-                )
-                resp.raise_for_status()
-                active_subscriptions = list(authorized)
-            except Exception as e:
-                log.warning("Subscription sync failed, re-registering: %s", e)
-                cursor_path.unlink(missing_ok=True)
-                es_deployment, es_key = _register_with_retry(es_url)
-    elif not (es_deployment and es_key):
-        # No saved deployment for this session — register fresh rather
-        # than PUT to a guaranteed-400 empty deployment URL.
-        es_deployment, es_key = _register_with_retry(es_url)
-    elif not bubble_state_path(project_path).exists():
-        # Pre-bubble upgrade: saved deployment_state from a version that
-        # predates auth bubbles. The old api_key can't sign publishes
-        # against a v0.21+ server → 403. Drop the stale state and
-        # re-register through ensure_bubble to mint/join a bubble.
-        log.info("Saved deployment but no bubble.json — pre-bubble upgrade, re-registering")
-        cursor_path.unlink(missing_ok=True)
-        es_deployment, es_key = _register_with_retry(es_url)
-    else:
-        # This session restarting with its own saved deployment — sync any
-        # new subscription keys onto it. Never PUT to another session's
-        # deployment; state is per-session by construction. Authorize resource
-        # grants first (#488) so a global topic added here is not hard-rejected;
-        # a github/linear topic we can't authorize is dropped from the PUT.
-        try:
-            _bubble = ensure_bubble(es_url, project_path)
-            _registered = (
-                _register_channel_credentials(es_url, _bubble)
-                if has_external else {}
-            )
-            authorized = authorize_resources(
-                es_url, cfg, subscribe,
-                _bubble["bubble_id"], _bubble["bubble_key"],
-                filter_unauthorized=False,
-                whatsapp_registered=_registered.get("whatsapp"),
-                discord_registered=_registered.get("discord"),
-            )
-        except Exception as e:
-            log.info("Pre-PUT resource authorization unavailable (%s)", e)
-            authorized = subscribe
-        from bobi import http as pooled
-        try:
-            resp = pooled.put(
-                f"{es_url}/deployments/{es_deployment}/subscriptions",
-                json={"replace": authorized},
-                headers={
-                    "Authorization": f"Bearer {es_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-            active_subscriptions = list(authorized)
-        except Exception as e:
-            log.info("Subscription update failed (%s) — re-registering", e)
-            es_deployment, es_key = _register_with_retry(es_url)
+            # This session restarting with its own saved deployment — sync any
+            # new subscription keys onto it. Never PUT to another session's
+            # deployment; state is per-session by construction.
+            es_deployment, es_key = _sync_or_reregister(es_deployment, es_key)
 
     # Note: Slack-bot registration (signed, also writing the #487 outbound record
     # and the #488 slack grant) now happens in `_authorize_subscriptions` BEFORE
@@ -1650,6 +1635,19 @@ def _run_agent_entry(args: dict) -> None:
 # Non-interactive check execution (background monitor path)
 # ---------------------------------------------------------------------------
 
+def _supervised_backstop(timeout: float) -> float:
+    """Deadline for the caller-side ``wait_for`` around the supervised loop.
+
+    The loop enforces ``timeout`` itself and records an honest terminal status
+    on the way out (D067); this backstop exists only for a coroutine stuck
+    somewhere its own deadline cannot reach. It therefore needs *some* grace —
+    an equal deadline would race the inner one and cancel the run before it
+    could persist anything — but the grace has to scale: a flat 30s turns a 1s
+    check into a 31s one, while 10% of a 600s check is plenty.
+    """
+    return timeout + max(1.0, min(30.0, timeout * 0.1))
+
+
 CHECK_TIMEOUT = 600  # monitor checks are short-lived
 CHECK_MAX_TURNS = 8  # cap poll cost — a single check can't balloon into 200 turns
 
@@ -1671,6 +1669,9 @@ class CheckResult:
     error: str = ""
     duration_ms: int = 0
     total_cost_usd: float = 0.0
+    # Registry entry name of the session this check ran under, so a caller
+    # holding only the verdict can still find the transcript.
+    session: str = ""
 
 
 def _build_check_prompt(description: str, extra: dict[str, Any] | None = None) -> str:
@@ -1774,22 +1775,25 @@ def _parse_check_verdict(text: str) -> dict | None:
     return _last_verdict_object(text, lambda p: "finding" in p)
 
 
-def _parse_check_output(text: str) -> tuple[bool, str, dict]:
-    """Extract the trailing JSON verdict as (finding, summary, details).
+def _register_verdict_session(
+    seed: str, name: str | None, *,
+    role: str, phase: str, title: str, cwd: str,
+) -> tuple[str, str]:
+    """Derive a one-shot verdict agent's run key + session name, and register it.
 
-    Back-compat shim over _parse_check_verdict: defaults to (False, "", {})
-    when no verdict is present. Callers that must distinguish a missing verdict
-    from an explicit finding=false should use _parse_check_verdict directly.
+    The three blocking verdict runners (check, gate, curator) differ only in
+    role, phase, the string they hash for a default slug, and the registry
+    title. The slug's prefix IS the phase in all three, so it is derived rather
+    than passed. Returns ``(slug, session)``.
     """
-    verdict = _parse_check_verdict(text)
-    if verdict is None:
-        return False, "", {}
-    finding = bool(verdict.get("finding"))
-    summary = str(verdict.get("summary", "")) if finding else ""
-    details = verdict.get("details") or {}
-    if not isinstance(details, dict):
-        details = {}
-    return finding, summary, details
+    slug = name or f"{phase}-{hashlib.sha256(seed.encode()).hexdigest()[:8]}"
+    session = _session_name(slug, role=role, phase=phase)
+    get_registry().register(SessionEntry(
+        name=session, session_id="", role=role,
+        run_key=slug, title=title, phase=phase,
+        cwd=cwd, status="starting",
+    ))
+    return slug, session
 
 
 def run_check_blocking(
@@ -1816,21 +1820,13 @@ def run_check_blocking(
     ``success=False`` so the scheduler treats it as a failed check, not a
     healthy one.
     """
-    import hashlib
-
-    short_hash = hashlib.sha256(description.encode()).hexdigest()[:8]
-    slug = name or f"check-{short_hash}"
     phase = "check"
-    session = _session_name(slug, role="monitor", phase=phase)
+    slug, session = _register_verdict_session(
+        description, name,
+        role="monitor", phase=phase, title=description[:80], cwd=cwd,
+    )
 
     prompt = _build_check_prompt(description, extra)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="monitor",
-        run_key=slug, title=description[:80], phase=phase,
-        cwd=cwd, status="starting",
-    ))
 
     verdict, result, error = _run_verdict_agent_blocking(
         prompt, cwd, slug, phase, session, _parse_check_verdict,
@@ -1844,6 +1840,7 @@ def run_check_blocking(
             raw_output=result.final_text if result else "",
             duration_ms=result.duration_ms if result else 0,
             total_cost_usd=result.total_cost_usd if result else 0.0,
+            session=session,
         )
 
     finding = bool(verdict.get("finding"))
@@ -1854,7 +1851,7 @@ def run_check_blocking(
     return CheckResult(
         success=True, finding=finding, summary=summary, details=details,
         raw_output=result.final_text, duration_ms=result.duration_ms,
-        total_cost_usd=result.total_cost_usd,
+        total_cost_usd=result.total_cost_usd, session=session,
     )
 
 
@@ -1895,7 +1892,9 @@ def _run_verdict_agent_blocking(
                     _run_agent_supervised(prompt, cwd, run_key, phase, timeout,
                                           role=role, max_turns=max_turns,
                                           fresh=fresh),
-                    timeout=timeout,
+                    # Backstop only (D067) — the supervised loop owns the real
+                    # deadline now and records why it fired.
+                    timeout=_supervised_backstop(timeout),
                 )
             )
         except asyncio.TimeoutError:
@@ -2032,23 +2031,14 @@ def run_gate_blocking(
     the context (and cost) every interval and let stale items pollute the
     verdict.
     """
-    import hashlib
-
     presented = {str(i.get("key", "")) for i in items}
-    short_hash = hashlib.sha256(
-        (criterion + "".join(sorted(presented))).encode()).hexdigest()[:8]
-    slug = name or f"gate-{short_hash}"
     phase = "gate"
-    session = _session_name(slug, role="monitor", phase=phase)
+    slug, session = _register_verdict_session(
+        criterion + "".join(sorted(presented)), name,
+        role="monitor", phase=phase, title=criterion[:80], cwd=cwd,
+    )
 
     prompt = _build_gate_prompt(criterion, items)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="monitor",
-        run_key=slug, title=criterion[:80], phase=phase,
-        cwd=cwd, status="starting",
-    ))
 
     relevant, result, error = _run_verdict_agent_blocking(
         prompt, cwd, slug, phase, session,
@@ -2106,21 +2096,13 @@ def run_curator_blocking(
     or ``(None, error)`` after exhausting attempts - indeterminate, never
     "all clear", so the caller must not advance the cursor.
     """
-    import hashlib
-
     from bobi.monitors import curator as curator_mod
 
-    short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
-    slug = name or f"curator-{short_hash}"
     phase = "curator"
-    session = _session_name(slug, role="curator", phase=phase)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="curator",
-        run_key=slug, title="policy curator", phase=phase,
-        cwd=cwd, status="starting",
-    ))
+    slug, session = _register_verdict_session(
+        task, name,
+        role="curator", phase=phase, title="policy curator", cwd=cwd,
+    )
 
     summary, _result, error = _run_verdict_agent_blocking(
         task, cwd, slug, phase, session, curator_mod.parse_result,

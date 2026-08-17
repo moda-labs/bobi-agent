@@ -86,13 +86,27 @@ PATH="$HOME/.nvm/versions/node/v24.4.1/bin:$PATH" \
 cd ..
 ```
 
-Commit and push the release bump:
+Commit the release bump and land it **via a PR** — `main` is protected, so
+pushing to it directly is rejected. Work in a worktree, open the PR, and merge
+it once checks are green (0.53.0, 0.54.0 and 0.55.0 all went this way):
 
 ```bash
+git worktree add -b release/<version> .claude/worktrees/release-<version> origin/main
+cd .claude/worktrees/release-<version>
+# ...edit VERSION, pyproject.toml, CHANGELOG.md...
 git add VERSION pyproject.toml CHANGELOG.md
 git commit -m "chore(release): cut <version>"
-git push origin main
+git push -u origin release/<version>
+gh pr create --base main --title "chore(release): cut <version>" --body "..."
 ```
+
+The releaser authors the PR, so the 1-review ruleset is unsatisfiable by them;
+`gh pr merge --squash --admin` is the authorized equivalent of the maintainer's
+own UI click. Note that `--delete-branch` errors with `fatal: 'main' is already
+used by worktree` when main is checked out elsewhere — **the merge still
+succeeds**; verify with `gh pr view` rather than reacting to the message.
+
+Then tag from `main` at the merge commit.
 
 Publish the GitHub Release. This tag/release event builds the wheel, publishes
 to PyPI, and bumps Homebrew. It does NOT run a canary, deploy the event server,
@@ -118,10 +132,31 @@ The public release workflow must go green:
 - PyPI publish
 - Homebrew formula bump + bottle-URL smoke
 
-Then publish the reference image from THIS repo (`release-image.yml`, dispatched
-with the version): multi-arch build + the `:latest` move when this is the newest
-non-prerelease release. It installs `bobi==<version>` from PyPI, so it must run
-after the publish above.
+Then publish the reference image from THIS repo (`release-image.yml`): multi-arch
+build + the `:latest` move when this is the newest non-prerelease release. It
+installs `bobi==<version>` from PyPI, so it must run after the publish above.
+
+It needs `claude-version` as well as the version — the exact claude CLI the
+release resolved from the floating `stable` channel, so every arch bakes the
+same one. **Do not re-derive it.** `build-wheel` prints the ready-made dispatch
+command to its run summary (and as a `::notice::`); copy it from there.
+
+A `::notice::` is an **annotation, not log output** — `gh run view --log | grep`
+will never find it. Read it directly:
+
+```bash
+JOB=$(gh run view <release-run-id> --repo moda-labs/bobi-agent \
+  --json jobs --jq '.jobs[] | select(.name=="Build the release wheel") | .databaseId')
+gh api repos/moda-labs/bobi-agent/check-runs/$JOB/annotations --jq '.[].message'
+# -> version=<version> claude-version=<x.y.z> source-sha=<sha>
+```
+
+If you are recovering an OLD release whose summary has expired, resolve the
+channel with `curl -fsSL https://downloads.claude.ai/claude-code-releases/stable`
+and corroborate it against the previous release's published image
+(`docker run --rm --entrypoint claude ghcr.io/moda-labs/bobi:<prev> --version`):
+agreement means the channel has not moved and the value is what that run
+resolved. That is a recovery path, not the normal one.
 
 Then run the fleet train in `moda-labs/moda-agents` (its own workflows):
 dispatch `release.yml` there with the version. It verifies the wheel and the
@@ -194,10 +229,16 @@ git pull --ff-only
 git status --short
 ```
 
-Update both pins:
+**There is one pin, and you do not normally edit it by hand.** moda-agents#92
+consolidated the former four-site fan-out into a single
+`.github/fleet-version` holding `BOBI_VERSION=<version>` — deliberately
+*outside* `.github/workflows/`, because `GITHUB_TOKEN` cannot push a change to
+any file under that directory and `version-gate.yml` has to be able to deliver
+its own result. `deploy-agent-teams.yml` and `lint.yml` no longer carry copies;
+ignore any instruction to hand-write three files.
 
-- `.github/workflows/deploy-agent-teams.yml`: `BOBI_VERSION`
-- `.github/workflows/lint.yml`: pinned `pip install "bobi==..."`
+The bump arrives as a PR from `version-gate.yml` (below). Editing
+`.github/fleet-version` by hand is a recovery path, not the normal one.
 
 Worker identity check: if the event-server Worker name or URL changes, move all
 external entry points together before validating the release:
@@ -222,12 +263,12 @@ rm -rf "$tmpdir"
 
 If pip cannot find the just-published version, wait 30-60 seconds and retry.
 
-Commit, push, and dispatch the fleet rebuild:
+Merge the pin PR that `version-gate.yml` opened, then dispatch the fleet
+rebuild. **The roll is a separate decision, not part of the release** — merging
+the pin alone changes nothing on a running box:
 
 ```bash
-git add .github/workflows/deploy-agent-teams.yml .github/workflows/lint.yml
-git commit -m "ops: bump bobi deploy pin to <version>"
-git push origin main
+gh pr merge <pin-pr> --repo moda-labs/moda-agents --squash --admin
 
 gh workflow run "Deploy agent teams" --ref main -f rebuild=true
 gh run list --repo moda-labs/moda-agents --workflow "Deploy agent teams" \
@@ -236,14 +277,19 @@ gh run watch <run-id> --repo moda-labs/moda-agents --interval 20
 ```
 
 The deploy run should show a green job for every team the `plan` job lists as
-"Deployments to reconcile" — read that line rather than trusting this list,
-which goes stale as the fleet grows. As of 2026-07-31 it is five:
+"Deployments to reconcile". **That line is the only trustworthy roster** — the
+fleet gains and loses teams between releases, so read it per run:
 
-- `baohua`
-- `basketbot`
-- `eng-team`
-- `roadmap-pm`
-- `zachs-personal-assistant`
+```bash
+gh run view <run-id> --repo moda-labs/moda-agents --log \
+  | grep -m1 "Deployments to reconcile"
+```
+
+This file used to carry a copy of the roster, hedged with "read the plan job
+rather than trusting this list". It was wrong within days — it still named
+`basketbot` two releases after moda-agents#90 decommissioned it. A list nobody
+is supposed to trust is worse than no list, so it is gone rather than
+re-frozen at today's count.
 
 A team can fail here while the release artifacts are perfectly good. Note that
 `bobi deploy` **pauses the old runtime before it validates the new one**, so a

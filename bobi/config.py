@@ -13,7 +13,23 @@ from pathlib import Path
 
 import yaml
 
+from bobi.fsutil import atomic_write_json
+
 log = logging.getLogger(__name__)
+
+
+def _launch_admission_defaults() -> dict:
+    """The one authority for the launch-admission tunables (D088/Q124).
+
+    Imported lazily ON PURPOSE. `bobi.launch_admission` reaches `bobi.sdk` and
+    `bobi.concurrency_semaphore`; this module is imported almost everywhere and
+    deliberately keeps `fsutil` as its only module-level `bobi` dependency, so a
+    top-level import here would quadruple what `import bobi.config` costs. Both
+    readers below run at call time, so the lazy import is free.
+    """
+    from bobi.launch_admission import LAUNCH_ADMISSION_DEFAULTS
+    return dict(LAUNCH_ADMISSION_DEFAULTS)
+
 
 # `${{...}}` is workflow template syntax, not an env reference. Excluding
 # `${{` keeps templates intact during both scanning and interpolation.
@@ -402,11 +418,8 @@ class Config:
     services: list[ServiceConfig] = field(default_factory=list)
 
     event_server_url: str = ""
-    registries: list[str] = field(default_factory=list)
 
     venn_api_key: str = ""
-
-    default_role: str = ""
 
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     monitors: list[dict] = field(default_factory=list)
@@ -422,15 +435,7 @@ class Config:
     spend_cap: int = 0  # max agent invocations per rolling hour; 0 = use default
     max_concurrent_agents: int = 0  # max simultaneous subagents; 0 = use default (2)
     max_launch_depth: int = 0  # max launch-chain depth; 0 = use default (8)
-    launch_admission: dict = field(default_factory=lambda: {
-        "enabled": False,
-        "max_starting_agents": 1,
-        "load_per_cpu_soft_limit": 1.5,
-        "load_per_cpu_hard_limit": 2.0,
-        "min_memory_available_mb": 512,
-        "init_failure_window_seconds": 600,
-        "init_failure_backoff_threshold": 2,
-    })
+    launch_admission: dict = field(default_factory=_launch_admission_defaults)
     # Which agent "brain" (ENGINE) drives this team's agents (#485). `{kind:
     # claude|codex, model: <optional override>, effort: <optional reasoning
     # effort>, max_turns: <optional per-session turn cap>}`. Setting
@@ -560,7 +565,7 @@ class Config:
         # verbatim — they may contain ${VAR} or ~ intended for shell
         # expansion, not config interpolation.
         monitors_raw = raw_uninterpolated.get("monitors", [])
-        requires_raw = raw_uninterpolated.get("requires", [])
+        requires_raw = raw_uninterpolated.get("requires") or []
         # host: entries carry a sysctl `key=value` verbatim — no config
         # interpolation (mirrors requires/build).
         host_raw = raw_uninterpolated.get("host", [])
@@ -571,7 +576,7 @@ class Config:
         raw["monitors"] = monitors_raw
 
         services = []
-        for s in raw.get("services", []):
+        for s in raw.get("services") or []:
             if isinstance(s, str):
                 services.append(ServiceConfig(name=s))
             elif isinstance(s, dict):
@@ -602,7 +607,7 @@ class Config:
 
         build = cls._parse_build(build_raw, path)
 
-        event_server = raw.get("event_server", {})
+        event_server = raw.get("event_server") or {}
         if isinstance(event_server, str):
             event_server_url = event_server
         else:
@@ -615,51 +620,46 @@ class Config:
             chat=raw.get("chat", ""),
             services=services,
             event_server_url=raw.get("event_server_url", event_server_url),
-            registries=raw.get("registries", []),
-            default_role=raw.get("defaults", {}).get("role", "") if isinstance(raw.get("defaults"), dict) else "",
             venn_api_key=raw.get("venn_api_key", ""),
-            mcp_servers=raw.get("mcp_servers", {}),
-            monitors=raw.get("monitors", []),
-            auto_dispatch=raw.get("auto_dispatch", []),
+            mcp_servers=raw.get("mcp_servers") or {},
+            monitors=raw.get("monitors") or [],
+            auto_dispatch=raw.get("auto_dispatch") or [],
             requires=requires,
             host=host_raw if isinstance(host_raw, list) else [],
             build=build,
-            spend_cap=int(raw.get("spend_cap", 0)),
-            max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
-            # `max_launch_depth:` with an empty value parses as None, and a
-            # bare int(None) would raise out of Config.load entirely - so a
-            # half-finished edit to this one key would stop the whole team
-            # booting with an error naming neither the key nor the file.
+            # `key:` with an empty value is YAML null, so `raw.get(key, default)`
+            # returns None and the default never applies. Every container and
+            # numeric field therefore reads `or <default>`, not a get-default:
+            # one commented-out value in agent.yaml used to raise out of
+            # Config.load and take down start/status/dispatch with a traceback
+            # naming neither the key nor the file.
+            spend_cap=int(raw.get("spend_cap") or 0),
+            max_concurrent_agents=int(raw.get("max_concurrent_agents") or 0),
             max_launch_depth=int(raw.get("max_launch_depth") or 0),
-            launch_admission=cls._parse_launch_admission(raw.get("launch_admission", {})),
+            launch_admission=cls._parse_launch_admission(raw.get("launch_admission") or {}),
             brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
             roles=raw.get("roles", {}) if isinstance(raw.get("roles"), dict) else {},
         )
 
     @staticmethod
     def _parse_launch_admission(raw: object) -> dict:
-        defaults = {
-            "enabled": False,
-            "max_starting_agents": 1,
-            "load_per_cpu_soft_limit": 1.5,
-            "load_per_cpu_hard_limit": 2.0,
-            "min_memory_available_mb": 512,
-            "init_failure_window_seconds": 600,
-            "init_failure_backoff_threshold": 2,
-        }
+        defaults = _launch_admission_defaults()
         if not isinstance(raw, dict):
             return defaults
+        # Every key is present after the merge, so the per-key `.get` fallbacks
+        # this replaced were unreachable — a second copy of the defaults that
+        # could only ever drift from the first (Q124).
         cfg = {**defaults, **raw}
-        soft = max(0.1, float(cfg.get("load_per_cpu_soft_limit", 1.5)))
-        hard = max(soft, float(cfg.get("load_per_cpu_hard_limit", 2.0)))
+        soft = max(0.1, float(cfg["load_per_cpu_soft_limit"]))
+        hard = max(soft, float(cfg["load_per_cpu_hard_limit"]))
         return {
-            "enabled": _as_bool(cfg.get("enabled", False)),
-            "max_starting_agents": max(1, int(cfg.get("max_starting_agents", 1))),
+            "enabled": _as_bool(cfg["enabled"]),
+            "max_starting_agents": max(1, int(cfg["max_starting_agents"])),
             "load_per_cpu_soft_limit": soft,
             "load_per_cpu_hard_limit": hard,
-            "min_memory_available_mb": max(0, int(cfg.get("min_memory_available_mb", 512))),
-            "init_failure_window_seconds": max(1, int(cfg.get("init_failure_window_seconds", 600))),
-            "init_failure_backoff_threshold": max(1, int(cfg.get("init_failure_backoff_threshold", 2))),
+            "min_memory_available_mb": max(0, int(cfg["min_memory_available_mb"])),
+            "init_failure_window_seconds": max(1, int(cfg["init_failure_window_seconds"])),
+            "init_failure_backoff_threshold": max(1, int(cfg["init_failure_backoff_threshold"])),
         }
 
     @staticmethod
@@ -755,13 +755,13 @@ def load_deployment_state(project_path: Path, session: str) -> dict:
 def save_deployment_state(project_path: Path, session: str,
                           deployment_id: str, api_key: str) -> None:
     """Save a session's event server deployment_id + api_key."""
-    import json
     state_file = deployment_state_path(project_path, session)
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps({
+    # Atomic: a torn write here reads back as {} and the session loses the
+    # credentials it needs to reach its event server.
+    atomic_write_json(state_file, {
         "deployment_id": deployment_id,
         "api_key": api_key,
-    }))
+    }, indent=None)
 
 
 # --- bubble (trust-domain) state -------------------------------------------

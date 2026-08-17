@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bobi import paths
+from bobi.fsutil import atomic_write_text
 
 # Bump this when the on-disk state layout changes in a way that older
 # code cannot safely ignore.
@@ -76,5 +77,4 @@ def ensure_state_version(root: Path | None = None) -> None:
         # Today there is only version 1, so no migrations exist yet.
 
     # Write (or overwrite after migration).
-    fv.parent.mkdir(parents=True, exist_ok=True)
-    fv.write_text(f"{CURRENT_FORMAT_VERSION}\n")
+    atomic_write_text(fv, f"{CURRENT_FORMAT_VERSION}\n")

@@ -12,13 +12,3 @@ installed runtime lives at <BOBI_HOME>/agents/<name>/run.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
-
-
-def run_setup(project_path: Path, model: str | None = None,
-              resume: bool = False) -> int:
-    """Launch the local web UI for setup. Returns a process exit code."""
-    from bobi.setup.webui.server import serve
-
-    return serve(project_path, model=model, resume=resume)

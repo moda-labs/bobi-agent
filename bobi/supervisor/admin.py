@@ -54,7 +54,11 @@ log = logging.getLogger(__name__)
 COMMAND_RESULT_TOPIC = "fleet/command_result"
 ADMIN_COMMANDS = frozenset({"restart", "stop", "start", "status",
                             "chat", "transcript", "roster", "spend",
-                            "session_log"})
+                            "session_log",
+                            # The single-agent view's read model + the three
+                            # operator writes it offers on a waiting run.
+                            "runs", "overview", "run_details",
+                            "resume_run", "remind_run", "close_run"})
 
 # The session log rides one bus message + one KV command record, so cap the
 # row list (newest first - the cap keeps the recent end). counts is computed
@@ -65,9 +69,60 @@ MAX_SESSION_LOG_ROWS = 100
 # Sentinel that unblocks the worker loop on shutdown.
 _STOP = object()
 
+# The three run-scoped writes, dispatched through one delegate: they differ
+# only in which shared action they call.
+_RUN_ACTIONS = frozenset({"resume_run", "remind_run", "close_run"})
+
+
+class AdminCommandError(Exception):
+    """A refusal the caller caused, carrying a machine-readable ``code``.
+
+    Distinct from an unexpected failure: an unknown ``run_id`` or a run that
+    is no longer at a gate are ORDINARY outcomes of an operator acting on a
+    page that has gone slightly stale, and a consumer needs to tell them apart
+    without parsing prose. Codes are part of the protocol - see
+    ``docs/ADMIN_PROTOCOL.md``.
+    """
+
+    def __init__(self, message: str, code: str, **detail) -> None:
+        self.code = code
+        # Extra fields ride the error result beside the code - `run_id` above
+        # all, so a consumer can rebuild its own typed error for the run the
+        # operator actually asked about rather than inferring it.
+        self.detail = {k: v for k, v in detail.items() if v is not None}
+        super().__init__(message)
+
 
 def admin_topic(fleet: str, instance: str) -> str:
     return f"fleet/admin/{fleet}/{instance}"
+
+
+def _int_arg(value) -> int | None:
+    """An optional integer arg, or None when absent or unparseable.
+
+    The server does not validate arg shape, so a pagination arg arriving as a
+    string, a float, or a dict must degrade to the default rather than raise -
+    a malformed page request should return page one, not fail the command.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _require_run_id(value) -> str:
+    """A run id arg, or a refusal naming the omission.
+
+    Run-scoped commands are the protocol's first with a REQUIRED arg. A
+    missing one is the caller's error and is reported as such, rather than
+    reaching the store as an empty id and coming back as "unknown run ''".
+    """
+    target = str(value or "").strip()
+    if not target:
+        raise AdminCommandError("run_id is required", "bad_request")
+    return target
 
 
 class AdminListener:
@@ -197,7 +252,9 @@ class AdminListener:
             return
         status, result, error = "done", None, None
         try:
-            if command == "restart":
+            if command in _RUN_ACTIONS:
+                result = self._run_action(command, args.get("run_id"))
+            elif command == "restart":
                 self.supervisor.request_manager_restart()
                 result = {"accepted": True, "action": "restart"}
             elif command == "stop":
@@ -209,13 +266,37 @@ class AdminListener:
             elif command == "status":
                 result = self.telemetry.last_snapshot or {"status": "starting"}
             elif command == "transcript":
-                result = {"messages": self._read_transcript(args.get("session"))}
+                # Built whole before assignment: a failure in the detail half
+                # must not leave `result` holding the messages half beside an
+                # error status, which would publish a partial reply that reads
+                # like a successful one.
+                payload = {"messages": self._read_transcript(
+                    args.get("session"))}
+                if args.get("detail"):
+                    payload.update(self._read_transcript_detail(
+                        args.get("session")))
+                result = payload
             elif command == "roster":
                 result = {"subagents": self._read_roster()}
             elif command == "spend":
                 result = {"spend": self._read_spend()}
             elif command == "session_log":
                 result = self._read_session_log()
+            elif command == "runs":
+                result = self._read_runs(args)
+            elif command == "overview":
+                result = {"overview": self._read_overview()}
+            elif command == "run_details":
+                result = {"details": self._read_run_details(args.get("run_id"))}
+        except AdminCommandError as e:
+            # A refusal the CALLER caused (unknown run, run not at a gate).
+            # The machine-readable code rides on `result` - the envelope's
+            # `error` is prose, and a consumer must not have to string-match
+            # it to tell "gone" from "not right now". Additive: the protocol
+            # already carries an optional `result`, and the server folds it on
+            # an error status exactly as it does on a done one.
+            status, error, result = "error", str(e), {"code": e.code, **e.detail}
+            log.info("supervisor: admin command %s refused (%s)", command, e.code)
         except Exception as e:  # a request setter/read should never raise, but be safe
             status, error = "error", str(e)
             log.exception("supervisor: admin command %s failed", command)
@@ -247,6 +328,33 @@ class AdminListener:
             messages = read_chat(self.project_root, target)
         return messages
 
+    def _read_transcript_detail(self, session) -> dict:
+        """The DEBUGGING view of the same transcript ``_read_transcript``
+        reads: timestamped lines with tool calls, plus the slab header.
+
+        A widening of the existing ``transcript`` command rather than a new
+        one, because it reads the same file for the same session - and it has
+        to be a widening rather than a reshape of ``messages``, which is the
+        chat view: prose only, both roles, tool calls DISCARDED. Nothing
+        downstream can recover a tool call from that list, so a hosted
+        transcript built by reshaping it would silently omit everything the
+        agent DID between speaking, which is most of what debugging a run
+        means. Additive on both halves of the wire: the arg is optional and
+        the keys only appear when it is set, so an older consumer sees the
+        reply it already expects.
+        """
+        from bobi.sdk import load_session_brain, load_session_id
+        from bobi.webapp.runtime import session_usage
+
+        target = (session or "").strip() or self._manager_session()
+        from bobi.chat_history import read_transcript_detail
+        entries = read_transcript_detail(
+            load_session_id(target, root=self.project_root),
+            brain=load_session_brain(target, root=self.project_root),
+        )
+        return {"session": target, "entries": entries,
+                "usage": session_usage(self.project_root, target)}
+
     def _read_roster(self) -> list:
         """The team's session roster, manager first - the same serialization
         the local UI renders (`serialize_subagent`), so one card shape."""
@@ -262,11 +370,21 @@ class AdminListener:
         """This team's cumulative spend, folded from the local session state
         files - the same read ``LocalRuntime.spend_summary`` does. A cheap file
         fold, so it runs synchronously on the dispatch worker (unlike chat).
-        ``sessions_path`` (not ``sessions_dir``) so a read never mkdirs."""
+        ``sessions_path`` (not ``sessions_dir``) so a read never mkdirs.
+
+        ``script_cache`` rides along for the same reason it does locally (see
+        ``docs/AGENT_OVERVIEW.md``): the savings block is part of the spend
+        payload the agent page renders, so a hosted box that omitted it
+        answered 200 with the block silently empty. Counterfactual dollars,
+        kept in their own key so nothing can add them to a bill.
+        """
         from bobi import paths
         from bobi.costs import rollup_costs
+        from bobi.webapp.savings import script_cache_savings
 
-        return rollup_costs(paths.sessions_path(self.project_root)).to_dict()
+        payload = rollup_costs(paths.sessions_path(self.project_root)).to_dict()
+        payload["script_cache"] = script_cache_savings(self.project_root)
+        return payload
 
     def _read_session_log(self) -> dict:
         """The team's whole session history with honest terminal outcomes -
@@ -300,6 +418,78 @@ class AdminListener:
             "counts": session_outcome_counts(entries),
             "truncated": len(entries) > MAX_SESSION_LOG_ROWS,
         }
+
+    # --- the single-agent view (runs / overview / details + writes) -------
+    #
+    # Same discipline as the tier-3 reads above, and for the same reason: the
+    # read builders are already pure functions of a filesystem root, and the
+    # supervisor runs ON the box where that root is. So these delegate to the
+    # SAME `bobi.webapp` functions `LocalRuntime` calls. No read logic is
+    # re-implemented here, which is what keeps the two runtimes from drifting
+    # - there is only one implementation to drift from.
+
+    def _read_runs(self, args: dict) -> dict:
+        """The unified runs read model for this box's team.
+
+        ``limit``/``offset`` are coerced the way ``LocalRuntime.runs`` coerces
+        them (a non-positive or malformed limit falls back to the builder's
+        default) so a hand-issued command cannot produce a page shape the
+        local UI could never produce.
+        """
+        from bobi import service
+        from bobi.webapp.runs import DEFAULT_LIMIT, build_runs
+
+        limit = _int_arg(args.get("limit"))
+        offset = _int_arg(args.get("offset"))
+        return build_runs(
+            self.project_root,
+            manager_name=service.manager_session_name(self.project_root),
+            status=str(args.get("status") or ""),
+            query=str(args.get("query") or ""),
+            offset=max(0, offset or 0),
+            limit=limit if limit and limit > 0 else DEFAULT_LIMIT,
+        )
+
+    def _read_overview(self) -> dict:
+        """What this team IS, from the installed package image."""
+        from bobi.webapp.overview import build_overview
+
+        return build_overview(self.project_root)
+
+    def _read_run_details(self, run_id) -> dict:
+        """The Details slab for a run with no transcript to open."""
+        from bobi.webapp.details import UnknownRun, build_details
+
+        target = _require_run_id(run_id)
+        try:
+            return build_details(self.project_root, target)
+        except UnknownRun:
+            raise AdminCommandError(f"unknown run '{target}'",
+                                    "unknown_run", run_id=target) from None
+
+    def _run_action(self, command: str, run_id) -> dict:
+        """One of the three operator writes on a waiting workflow run.
+
+        Delegates to ``bobi.webapp.run_actions``, the same module
+        ``LocalRuntime`` delegates to - including the spawn-not-thread resume,
+        whose reasoning applies here verbatim: resuming inside this process
+        would stamp the SUPERVISOR's pid on the run's registry entry, and a
+        later reconciler timeout would then signal the supervisor.
+        """
+        from bobi.webapp import run_actions
+
+        target = _require_run_id(run_id)
+        try:
+            return getattr(run_actions, command)(self.project_root, target)
+        except run_actions.UnknownRun as e:
+            raise AdminCommandError(str(e), "unknown_run",
+                                    run_id=target) from None
+        except run_actions.RunNotWaiting as e:
+            raise AdminCommandError(str(e), "not_waiting", run_id=target,
+                                    status=e.status) from None
+        except run_actions.ActionFailed as e:
+            raise AdminCommandError(str(e), "action_failed",
+                                    run_id=target) from None
 
     def _dispatch_chat_async(self, command_id: str, args: dict) -> None:
         """Run ``service.ask`` on a detached thread; that thread publishes the

@@ -695,9 +695,11 @@ class TestValidateConfig:
         assert "LiteLLM" in warning.hint
 
     def test_pack_with_required_venn_service_blocks(self, tmp_path):
-        # Mirrors the dogfood-content-review decision (#329 / PR #405): a venn
-        # service marked required: true (dogfood's email) hard-blocks startup
-        # when its credential is missing — it does NOT degrade.
+        # Pins the #329 / PR #405 decision: a venn service marked
+        # required: true hard-blocks startup when its credential is missing -
+        # it does NOT degrade. The pack that originally motivated this
+        # (dogfood-content-review, whose email service carried the flag) has
+        # since been deleted; the rule it settled is the engine's.
         config_dir = tmp_path / "package"
         config_dir.mkdir()
         (config_dir / "agent.yaml").write_text(dedent("""\

@@ -20,8 +20,6 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-import yaml
-
 
 class BuildError(RuntimeError):
     """A team build step failed - resolution here, or the image engine
@@ -67,11 +65,9 @@ def _flatten_if_chained(project_path: Path, team_dir: Path) -> Path:
     # the chain's merged workspace (leaf-wins) so an overlay's per-principal
     # assistant-context.md actually ships.
     compose.merge_workspace(chain, staged)
+    # `agent:` needs no defaulting here — _compose_agent_yaml already setdefaults
+    # it to the leaf layer's directory name, and this team_dir IS that leaf.
     # Preserve the leaf's directory name so the app/tarball naming is unchanged.
-    cfg = compose._read_agent_yaml(staged)
-    cfg.setdefault("agent", team_dir.name)
-    (staged / "agent.yaml").write_text(
-        yaml.dump(cfg, default_flow_style=False, sort_keys=False))
     final = staged.parent / team_dir.name
     if final.exists():
         shutil.rmtree(final)

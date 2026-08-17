@@ -35,6 +35,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from bobi.fsutil import atomic_write_text
+
 # Sentinels bracketing the bobi-owned region of config.toml. Everything outside
 # them is foreign content preserved untouched; everything between them is
 # regenerated on each render (idempotent).
@@ -208,8 +210,11 @@ def write_codex_config(mcp_servers: dict, home: Path | None = None) -> Path:
     existing = path.read_text() if path.is_file() else ""
     rendered = render_config(existing, mcp_servers or {})
     # Only touch disk when the content actually changes (avoids churning the
-    # durable volume + mtime on every session spawn).
+    # durable volume + mtime on every session spawn). The write is atomic:
+    # config.toml also carries foreign keys (model settings, profiles,
+    # anything `codex mcp add` or the operator wrote), and a rewrite killed
+    # midway would truncate them away for good — the same reason the sibling
+    # managed-block renderer in brain/instructions.py writes atomically.
     if rendered != existing:
-        home.mkdir(parents=True, exist_ok=True)
-        path.write_text(rendered)
+        atomic_write_text(path, rendered)
     return path

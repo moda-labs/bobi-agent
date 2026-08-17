@@ -70,6 +70,38 @@ def test_fresh_state_registers_without_put(mock_register,
 @patch("bobi.events.drain.drain_loop")
 @patch("bobi.events.client.EventServerClient")
 @patch("bobi.events.server.register")
+def test_fresh_state_registers_even_when_a_bubble_already_exists(
+        mock_register, mock_client, _drain, project):
+    """No saved deployment still means register, bubble.json or not.
+
+    The sibling above has no bubble, so it cannot tell the no-deployment
+    branch from the pre-bubble branch — both register. With a bubble present
+    only the no-deployment branch stands between the caller and a PUT to
+    `/deployments//subscriptions`, the guaranteed-400 empty-id URL.
+    """
+    mock_register.return_value = ("dep-1", "key-1")
+    _create_bubble(project)
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    with patch.object(pooled, '_client', httpx.Client(transport=httpx.MockTransport(handler))):
+        _start_event_subscription("sess", ["github:o/r"], project)
+
+    # Asserted on the captured list, NOT raised from the handler: the caller
+    # wraps its PUT in `except Exception`, so a raise here would be swallowed
+    # and silently answered by the very re-register fallback under test.
+    assert [r for r in captured if r.method == "PUT"] == []
+    mock_register.assert_called_once()
+    assert mock_client.call_args.kwargs["deployment_id"] == "dep-1"
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
 def test_deaf_reconnect_uses_filtered_registered_subscriptions(
         mock_register, mock_client, _drain, project):
     """If fresh registration drops an unbacked global topic, the deaf reconnect
@@ -211,6 +243,229 @@ def test_saved_state_keeps_unbacked_global_topics_and_resubscribes_same(
     assert len(put_reqs) == 2
     assert json.loads(put_reqs[0].content) == {"replace": ["github:o/r", "inbox/self"]}
     assert json.loads(put_reqs[1].content) == {"replace": ["github:o/r", "inbox/self"]}
+
+
+# --- the CONFIGURED-LOCAL arm -------------------------------------------------
+#
+# Every test above configures a REMOTE url. A configured *local* url takes the
+# same decisions but additionally starts/attaches the server first, and that arm
+# used to carry its own hand-copied sync block (added by #538, copied from the
+# remote one after #488 had already given it a pre-PUT authorization fallback,
+# and copied without it). These pin that the one shared path now serves both.
+
+LOCAL_URL = "http://localhost:8099"
+
+
+@pytest.fixture
+def local_project(tmp_path):
+    """Project dir with a LOCAL event server configured."""
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text(
+        f"agent: test\nentry_point: manager\nevent_server: {LOCAL_URL}\n"
+    )
+    return tmp_path
+
+
+@pytest.fixture
+def _stub_ensure_running():
+    """No real server process — just record that the local arm attached."""
+    with patch("bobi.events.server.ensure_running",
+               return_value="connected") as m:
+        yield m
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_configured_local_saved_state_syncs_after_starting_the_server(
+        mock_register, mock_client, _drain, local_project, _stub_ensure_running):
+    """The local arm starts/attaches the server, then takes the same PUT-not-
+    register decision the remote arm takes."""
+    state = _state_file(local_project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-L", "api_key": "key-L"}))
+    _create_bubble(local_project)
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    with patch.object(pooled, '_client', httpx.Client(transport=httpx.MockTransport(handler))):
+        _start_event_subscription("sess", ["github:o/r"], local_project)
+
+    _stub_ensure_running.assert_called_once()
+    assert _stub_ensure_running.call_args[0][0] == 8099
+    mock_register.assert_not_called()
+    put_reqs = [r for r in captured if r.method == "PUT"]
+    assert len(put_reqs) == 1
+    assert str(put_reqs[0].url) == f"{LOCAL_URL}/deployments/dep-L/subscriptions"
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_configured_local_keeps_unbacked_topics_when_the_grant_is_denied(
+        mock_register, mock_client, _drain, local_project, _stub_ensure_running):
+    """A DENIED grant keeps the topic and still PUTs, on the local arm too.
+
+    `authorize_resources` absorbs the 403 itself (`mark_unbacked` keeps the
+    topic whenever `filter_unauthorized` is false), so this covers the ordinary
+    denial path, not the exception path — that one is
+    `test_..._authorization_raising_still_puts_the_raw_list` below.
+    """
+    paths.agent_yaml_path(local_project).write_text(
+        f"agent: test\nentry_point: manager\nevent_server: {LOCAL_URL}\n"
+        "services:\n  - name: github\n    credentials:\n      token: ghp_secret\n"
+    )
+    state = _state_file(local_project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-L", "api_key": "key-L"}))
+    _create_bubble(local_project)
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.method == "POST" and str(request.url).endswith("/resources/authorize"):
+            return httpx.Response(403, json={"error": "forbidden"})
+        return httpx.Response(200, json={"ok": True})
+
+    with patch.object(pooled, '_client', httpx.Client(transport=httpx.MockTransport(handler))):
+        _start_event_subscription(
+            "sess", ["github:o/r", "inbox/self"], local_project)
+
+    mock_register.assert_not_called()
+    put_reqs = [r for r in captured if r.method == "PUT"]
+    assert len(put_reqs) == 1
+    assert json.loads(put_reqs[0].content) == {
+        "replace": ["github:o/r", "inbox/self"]}
+    # The saved deployment survives — nothing was re-minted.
+    assert json.loads(state.read_text()) == {
+        "deployment_id": "dep-L", "api_key": "key-L"}
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_authorization_raising_still_puts_the_raw_list(
+        mock_register, mock_client, _drain, local_project, _stub_ensure_running):
+    """When pre-PUT authorization RAISES, send the raw subscribe list anyway.
+
+    This is precisely the behaviour the #538 copy of this block dropped: it
+    wrapped bubble+authorize+PUT in one try, so a bubble hiccup threw the saved
+    deployment away and minted a new one. The server holds no-expiry grants
+    from earlier starts and stays authoritative over the PUT, so the right
+    recovery is to let it judge the raw list.
+
+    `authorize_resources` absorbs denials and transport errors internally, so
+    the only way into this branch is `ensure_bubble` failing — which is what
+    the autouse bubble stub is overridden to do here.
+    """
+    state = _state_file(local_project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-L", "api_key": "key-L"}))
+    _create_bubble(local_project)
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    with patch("bobi.events.server.ensure_bubble",
+               side_effect=httpx.ConnectError("bubble mint unreachable")), \
+         patch.object(pooled, '_client', httpx.Client(transport=httpx.MockTransport(handler))):
+        _start_event_subscription("sess", ["github:o/r"], local_project)
+
+    mock_register.assert_not_called()
+    put_reqs = [r for r in captured if r.method == "PUT"]
+    assert len(put_reqs) == 1
+    assert str(put_reqs[0].url) == f"{LOCAL_URL}/deployments/dep-L/subscriptions"
+    assert json.loads(put_reqs[0].content) == {"replace": ["github:o/r"]}
+    assert json.loads(state.read_text()) == {
+        "deployment_id": "dep-L", "api_key": "key-L"}
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_configured_local_failed_put_still_falls_back_to_register(
+        mock_register, mock_client, _drain, local_project, _stub_ensure_running):
+    """The PUT itself failing is the case that DOES re-register, on both arms."""
+    mock_register.return_value = ("dep-new", "key-new")
+    state = _state_file(local_project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-L", "api_key": "key-L"}))
+    _create_bubble(local_project)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            return httpx.Response(404, json={"error": "no such deployment"})
+        return httpx.Response(200, json={"ok": True})
+
+    with patch.object(pooled, '_client', httpx.Client(transport=httpx.MockTransport(handler))):
+        _start_event_subscription("sess", ["github:o/r"], local_project)
+
+    mock_register.assert_called_once()
+    assert mock_client.call_args.kwargs["deployment_id"] == "dep-new"
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_configured_local_pre_bubble_upgrade_reregisters(
+        mock_register, mock_client, _drain, local_project, _stub_ensure_running):
+    """No bubble.json beside a saved deployment re-registers on the local arm
+    too — the shared tree, not a per-transport copy of it."""
+    mock_register.return_value = ("dep-new", "key-new")
+    state = _state_file(local_project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-L", "api_key": "key-L"}))
+    # deliberately no _create_bubble()
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    with patch.object(pooled, '_client', httpx.Client(transport=httpx.MockTransport(handler))):
+        _start_event_subscription("sess", ["github:o/r"], local_project)
+
+    assert [r for r in captured if r.method == "PUT"] == []
+    mock_register.assert_called_once()
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_unconfigured_local_always_registers_fresh(
+        mock_register, mock_client, _drain, tmp_path, _stub_ensure_running):
+    """With NO event_server configured, saved deployment state is deliberately
+    not synced onto: the default 8080 server is ephemeral, so its old
+    deployment is not something to PUT to."""
+    mock_register.return_value = ("dep-fresh", "key-fresh")
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text("agent: test\nentry_point: manager\n")
+    state = _state_file(tmp_path)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-old", "api_key": "key-old"}))
+    _create_bubble(tmp_path)
+
+    captured = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    with patch.object(pooled, '_client', httpx.Client(transport=httpx.MockTransport(handler))):
+        _start_event_subscription("sess", ["github:o/r"], tmp_path)
+
+    assert [r for r in captured if r.method == "PUT"] == []
+    mock_register.assert_called_once()
+    assert _stub_ensure_running.call_args[0][0] == 8080
 
 
 @patch("bobi.events.drain.drain_loop")
@@ -476,6 +731,45 @@ def test_register_slack_workspaces_posts_bot_token():
                                    "signing_secret": "shhh"}
 
 
+@pytest.mark.parametrize("status", [403, 500])
+def test_register_slack_workspaces_reports_a_rejected_registration(status):
+    """D031 — a rejected registration was logged and returned as success.
+
+    ``signed_request`` never raises on status, so a server that forgot the
+    bubble (403) or failed (500) still fell through to
+    "Registered Slack workspace ..." and returned [team_id]. The
+    bubble-scoped outbound record (#487) and the slack resource grant are
+    never written, so self-reply loop prevention and outbound sends are both
+    silently broken — and because nothing raised, the subagent's unsigned
+    retry path never triggered either. The whatsapp and discord siblings
+    check the status; this one did not.
+    """
+    from bobi.config import Config, ServiceConfig
+    from bobi.events.server import register_slack_workspaces
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "auth.test" in url:
+            return httpx.Response(200, json={
+                "ok": True, "team_id": "T0952",
+                "bot_id": "BSELF", "user_id": "USELF",
+            })
+        if "bots.info" in url:
+            return httpx.Response(200, json={"ok": True, "bot": {"app_id": "A0952"}})
+        if url.endswith("/slack/workspaces"):
+            return httpx.Response(status, json={"error": "no such bubble"})
+        raise AssertionError(f"unexpected url {url}")
+
+    mock_http = httpx.Client(transport=httpx.MockTransport(handler))
+    with patch.object(pooled, '_client', mock_http):
+        cfg = Config(services=[
+            ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+        ])
+        result = register_slack_workspaces("http://localhost:8080", cfg)
+
+    assert result == []
+
+
 def test_register_slack_workspaces_noop_without_token():
     from bobi.events.server import register_slack_workspaces
     from bobi.config import Config
@@ -486,3 +780,26 @@ def test_register_slack_workspaces_noop_without_token():
 
     with patch.object(pooled, '_client', mock_http):
         assert register_slack_workspaces("http://localhost:8080", Config()) == []
+
+
+def test_register_slack_workspaces_skips_missing_app_identity(monkeypatch, caplog):
+    from bobi.config import Config, ServiceConfig
+    from bobi.events.server import register_slack_workspaces
+    import bobi.events.signing as signing_mod
+    import bobi.slack as slack_mod
+
+    monkeypatch.setattr(
+        signing_mod,
+        "signed_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("an unresolved Slack app must not be registered")
+        ),
+    )
+    monkeypatch.setattr(slack_mod, "resolve_auth_info",
+                        lambda token: ("T0952", "BSELF", "USELF"))
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "")
+    cfg = Config(services=[
+        ServiceConfig(name="slack", credentials={"bot_token": "xoxb-test"}),
+    ])
+    assert register_slack_workspaces("http://localhost:8080", cfg) == []
+    assert "users:read" in caplog.text

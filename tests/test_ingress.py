@@ -1,5 +1,7 @@
 """Ingress reachability diagnostics."""
 
+import pytest
+
 from bobi import paths
 
 
@@ -240,3 +242,83 @@ def test_local_ingress_is_ok_without_external_events(bobi_install):
     from bobi.ingress import check_ingress_reachability
 
     assert check_ingress_reachability(bobi_install.repo_path) is None
+
+
+# --- one parser for `subscribe:` (D078) --------------------------------------
+
+
+@pytest.mark.parametrize("subscribe_yaml,expected", [
+    ("subscribe:\n  - github/issues\n  - linear/MOD\n",
+     ["github/issues", "linear/MOD"]),
+    ("subscribe: github/issues\n", ["github/issues"]),           # scalar form
+    ("subscribe:\n  - '  github/issues  '\n", ["github/issues"]),  # stripped
+    ("subscribe:\n  - github/issues\n  - ''\n  - 7\n",
+     ["github/issues"]),                                          # empty + non-str
+    ("subscribe: {}\n", []),                                      # unsupported shape
+    ("", []),                                                     # absent
+])
+def test_ingress_and_discovery_read_subscribe_identically(
+        bobi_install, subscribe_yaml, expected):
+    """The ingress warning and the session's real subscriptions share a parser.
+
+    Two copies meant a schema change could make the reachability warning name a
+    different set of topics than the session actually subscribed to. Reading
+    both through one function is what stops that; this pins them together.
+    """
+    from bobi.events.subscriptions import discover_subscriptions, explicit_subscriptions
+
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\nentry_point: director\n" + subscribe_yaml
+    )
+    assert explicit_subscriptions(bobi_install.repo_path) == expected
+    if expected:
+        # An explicit subscribe is discovery's highest-precedence source.
+        assert discover_subscriptions(bobi_install.repo_path) == expected
+
+
+def test_explicit_subscriptions_interpolates_env(bobi_install, monkeypatch):
+    from bobi.events.subscriptions import explicit_subscriptions
+
+    monkeypatch.setenv("INGRESS_TOPIC", "github/moda-labs")
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\nentry_point: director\n"
+        "subscribe:\n  - ${INGRESS_TOPIC}\n"
+    )
+    assert explicit_subscriptions(bobi_install.repo_path) == ["github/moda-labs"]
+
+
+def test_the_shared_parser_does_not_swallow_a_malformed_agent_yaml(bobi_install):
+    """The shared parser stays non-swallowing.
+
+    Ingress has never hidden a broken agent.yaml behind an empty subscription
+    list, so folding discovery's `except Exception` INTO the parser would have
+    silently changed ingress from "raise" to "no topics configured".
+    """
+    import yaml
+
+    from bobi.events.subscriptions import explicit_subscriptions
+
+    paths.agent_yaml_path(bobi_install.repo_path).write_text("subscribe: [a\n")
+    with pytest.raises(yaml.YAMLError):
+        explicit_subscriptions(bobi_install.repo_path)
+
+
+def test_discovery_keeps_its_own_fall_through_on_a_parser_error(
+        bobi_install, monkeypatch):
+    """...and discovery's `except Exception` still sits at the CALL site.
+
+    Deleting that try/except would turn a parse failure into a hard error for
+    the session instead of a fall-through to auto-detection.
+    """
+    from bobi.events import subscriptions
+
+    paths.agent_yaml_path(bobi_install.repo_path).write_text(
+        "agent: test-agent\nentry_point: director\n"
+    )
+
+    def _boom(_project_path):
+        raise ValueError("parser blew up")
+
+    monkeypatch.setattr(subscriptions, "explicit_subscriptions", _boom)
+    assert subscriptions.discover_subscriptions(bobi_install.repo_path) == [
+        bobi_install.repo_path.name]

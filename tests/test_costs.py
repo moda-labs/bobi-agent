@@ -95,6 +95,36 @@ class TestCostRollup:
         assert "anthropic:claude-sonnet-4-20250514" in summary.by_model
         assert summary.by_role["engineer"] == 0.25
 
+    def test_rollup_fills_every_breakdown_regardless_of_grouping(self, tmp_path):
+        """One rollup populates all four by_* maps.
+
+        This is why `rollup_costs` takes no `group_by`: the fold is
+        grouping-independent and `format_costs` picks a map from the finished
+        summary. If the rollup ever became shaped by a requested dimension,
+        this test is where that shows up.
+        """
+        sessions_dir = self._make_sessions(tmp_path, {
+            "eng-1": {
+                "name": "eng-1",
+                "role": "engineer",
+                "total_cost_usd": 0.25,
+                "model": "claude-sonnet-4-20250514",
+                "provider": "anthropic",
+                "model_usage": {
+                    "anthropic:claude-sonnet-4-20250514": {
+                        "cost_usd": 0.25,
+                        "input_tokens": 50000,
+                        "output_tokens": 10000,
+                    }
+                },
+            }
+        })
+        summary = rollup_costs(sessions_dir)
+        assert summary.by_provider == {"anthropic": 0.25}
+        assert summary.by_model == {"anthropic:claude-sonnet-4-20250514": 0.25}
+        assert summary.by_session == {"eng-1": 0.25}
+        assert summary.by_role == {"engineer": 0.25}
+
     def test_multi_provider(self, tmp_path):
         sessions_dir = self._make_sessions(tmp_path, {
             "eng-1": {
@@ -193,6 +223,43 @@ class TestCostRollup:
         })
         summary = rollup_costs(sessions_dir)
         assert summary.sessions_counted == 0
+
+    # D086 — the fold backs a web endpoint that must not 500 on one malformed
+    # session (its own comment says so, and _tok exists for exactly that on the
+    # token fields). The cost fields had no such guard: a string is truthy, so
+    # `or 0.0` passed it straight into `+=`.
+
+    @pytest.mark.parametrize("bad", ["0.5", None, [], {}, "abc"])
+    def test_a_non_numeric_cost_does_not_crash_the_whole_fold(self, tmp_path,
+                                                              bad):
+        sessions_dir = self._make_sessions(tmp_path, {
+            "good": {"name": "good", "role": "engineer",
+                     "total_cost_usd": 0.25,
+                     "model": "claude-sonnet-4-20250514"},
+            "corrupt": {"name": "corrupt", "role": "engineer",
+                        "total_cost_usd": bad,
+                        "model": "claude-sonnet-4-20250514"},
+        })
+
+        summary = rollup_costs(sessions_dir)
+
+        # The good session still folds; the bad one contributes nothing.
+        assert summary.total_cost_usd == 0.25
+        assert isinstance(summary.total_cost_usd, float)
+
+    def test_a_non_numeric_usage_cost_does_not_crash_the_fold(self, tmp_path):
+        sessions_dir = self._make_sessions(tmp_path, {
+            "corrupt": {
+                "name": "corrupt", "role": "engineer",
+                "model_usage": {"claude-sonnet-4-20250514": {
+                    "cost_usd": "1.5", "input_tokens": 10,
+                    "output_tokens": 5}},
+            },
+        })
+
+        summary = rollup_costs(sessions_dir)
+
+        assert isinstance(summary.total_cost_usd, float)
 
 
 class TestEstimatedRollup:

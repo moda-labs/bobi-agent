@@ -145,6 +145,14 @@ conversation, launch it, and chat with its agents, all in the browser:
 bobi app start        # runs in the background; stop/restart/status manage it
 ```
 
+Open an agent from the dashboard for its own page: a status strip
+(running / stopped / not responding, with start/stop/restart), spend and
+health at a glance, and one runs table folding sessions, workflow runs,
+and monitor firings behind ALL / RUNNING / FAILED tabs. Click a row for a
+transcript or run details; a stalled workflow run can be resumed from
+there too. Composition (the agent's `agent.yaml`, roles, and prompts)
+stays read-only on this page - edit it through `bobi setup`.
+
 Prefer to design your own agent from scratch in a standalone wizard? Run:
 
 ```bash
@@ -187,8 +195,11 @@ brain:
   model: qwen3:14b               # gateway-native model id
 ```
 
-If the gateway needs auth, put `ANTHROPIC_AUTH_TOKEN` in the team's runtime
-`.env`. See `skills/create-agent.md` for the details.
+If the gateway needs its own auth, put `ANTHROPIC_AUTH_TOKEN` in the team's
+runtime `.env`. A proxy that accepts Claude subscription OAuth can instead use
+`BOBI_AUTH=subscription` with no `ANTHROPIC_AUTH_TOKEN`; `login-bootstrap`
+creates the subscription credentials while preserving the gateway endpoint.
+See `skills/create-agent.md` for the details.
 
 For an **OpenAI-compatible** gateway, use the codex engine instead:
 
@@ -304,7 +315,7 @@ Full walkthrough: **[Slack setup](skills/slack-setup.md)**.
 ```bash
 # Launch and operate agents
 bobi agent <name> start
-bobi agent <name> subagents launch --role <role> --task "context"
+bobi agent <name> subagents launch -w <workflow> --role <role> --task "context"
 
 # Talk to running agents
 bobi agent <name> ask "question"          # blocks until response

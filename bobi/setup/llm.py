@@ -18,10 +18,6 @@ from __future__ import annotations
 import asyncio
 from typing import AsyncIterator, Callable, Optional
 
-# The Anthropic partial-stream parser lives in the brain adapter now; re-exported
-# here for back-compat (tested as ``llm._delta_text``) — #485.
-from bobi.brain.claude import _delta_text  # noqa: F401
-
 
 class LLMError(Exception):
     """A streaming call failed before producing usable output."""

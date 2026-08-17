@@ -238,9 +238,16 @@ def check_runtime_write_policy(runtime_root: Path | None) -> PolicyCheck:
 @contextlib.contextmanager
 def with_mutable_runtime_package(runtime_root: Path) -> Iterator[None]:
     package = paths.package_dir(runtime_root)
-    if package.exists():
-        _chmod_tree(package, _mutable_mode, strict=True)
+    # The unlock is INSIDE the try: the strict sweep raises partway through on
+    # a file this uid cannot chmod (EPERM on another user's file, EROFS on a
+    # read-only mount), and running it before the try meant every file already
+    # opened stayed writable with no rollback (D044) — a half-unlocked
+    # protected tree that fails doctor's write-policy check until some later
+    # spawn re-runs prepare_brain_runtime. The error still propagates; the
+    # tree is re-locked first.
     try:
+        if package.exists():
+            _chmod_tree(package, _mutable_mode, strict=True)
         yield
     finally:
         if package.exists():

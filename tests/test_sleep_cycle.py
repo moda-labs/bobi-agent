@@ -260,7 +260,7 @@ class _CuratorHarness:
 
         self.sched = MonitorScheduler(
             publish=fake_publish, state_path=tmp_path / "monitor_state.json",
-            project_path=tmp_path, spawn_curator=fake_spawn)
+            project_path=tmp_path, spawn_sleep_cycle=fake_spawn)
 
     def messages_since(self, cursor, limit=None):
         self.cursor_seen.append(cursor)
@@ -284,7 +284,7 @@ class TestCuratorDispatch:
         h = _CuratorHarness(tmp_path, [_row(10, "a"), _row(11, "b")])
         # Pre-seed the curator cursor; the curator must read THIS, not last_run.
         from bobi import paths
-        curator_mod.write_cursor(paths.policy_cursor_path(tmp_path), 9)
+        curator_mod.write_cursor(paths.long_term_memory_cursor_path(tmp_path), 9)
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
         assert h.cursor_seen == [9]
@@ -295,7 +295,7 @@ class TestCuratorDispatch:
         h = _CuratorHarness(tmp_path, [_row(10, "a"), _row(11, "b"), _row(12, "c")])
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
-        cursor_path = paths.policy_cursor_path(tmp_path)
+        cursor_path = paths.long_term_memory_cursor_path(tmp_path)
         # Not advanced before the result lands.
         assert curator_mod.read_cursor(cursor_path) == 0
         h.captured["on_result"]({"success": True, "updated": False})
@@ -307,7 +307,7 @@ class TestCuratorDispatch:
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])
         h.captured["on_result"]({"success": False})
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
 
     def test_publishes_policy_updated_on_success_updated(self, tmp_path, monitor):
         from bobi import paths
@@ -391,7 +391,7 @@ class TestCuratorDispatch:
         h.captured["on_result"]({"success": True, "updated": True,
                                  "summary": "compacted", "bytes": 100,
                                  "urgent": False})
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
 
     def test_dispatches_compaction_only_when_memory_over_working_budget(
         self, tmp_path, monitor
@@ -415,7 +415,7 @@ class TestCuratorDispatch:
         h.captured["on_result"]({"success": True, "updated": False,
                                  "summary": "no durable changes",
                                  "urgent": False})
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert h.published == [(
             "system/monitor.error",
             {
@@ -467,7 +467,7 @@ class TestCuratorDispatch:
         h.captured["on_result"]({"success": True, "updated": False,
                                  "summary": "no durable changes"})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         actual_chars = MAX_MEMORY_CHARS + len("## Facts\n\n") + 1
         assert h.published == [(
             "system/monitor.error",
@@ -500,7 +500,7 @@ class TestCuratorDispatch:
                                  "summary": "added signal", "bytes": 42,
                                  "urgent": False})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert "memory-cap-exceeded" == h.published[0][1]["reason"]
         assert "updated=True" in h.published[0][1]["detail"]
@@ -521,7 +521,7 @@ class TestCuratorDispatch:
         h.captured["on_result"]({"success": True, "updated": False,
                                  "summary": "no durable changes"})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert "memory-cap-exceeded" == h.published[0][1]["reason"]
         assert "updated=False" in h.published[0][1]["detail"]
@@ -536,7 +536,7 @@ class TestCuratorDispatch:
                                  "summary": "claimed write", "bytes": 0,
                                  "urgent": False})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert "memory-artifact-unreadable" == h.published[0][1]["reason"]
 
@@ -553,7 +553,7 @@ class TestCuratorDispatch:
                                  "summary": "added signal", "bytes": 999999,
                                  "urgent": False})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 10
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 10
         assert [event for event, _ in h.published] == [
             "system/policy.updated",
             "system/memory.updated",
@@ -574,7 +574,7 @@ class TestCuratorDispatch:
                                  "summary": "added signal", "bytes": 999999,
                                  "urgent": False})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert h.published[0][1]["reason"] == "memory-working-budget-exceeded"
         assert "updated=True" in h.published[0][1]["detail"]
@@ -591,7 +591,7 @@ class TestCuratorDispatch:
                                  "summary": "demoted cold details", "bytes": 42,
                                  "urgent": False, "demoted": 2})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert h.published[0][1]["reason"] == "reference-artifact-unreadable"
 
@@ -621,7 +621,7 @@ class TestCuratorDispatch:
                                  "summary": "demoted cold details", "bytes": 42,
                                  "urgent": False, "demoted": 2})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 10
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 10
         assert [event for event, _ in h.published] == [
             "system/policy.updated",
             "system/memory.updated",
@@ -655,7 +655,7 @@ class TestCuratorDispatch:
                                  "summary": "demoted cold details", "bytes": 42,
                                  "urgent": False, "demoted": 2})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 10
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 10
         assert calls == [
             (tmp_path, reference, "policy-curator", None),
         ]
@@ -685,7 +685,7 @@ class TestCuratorDispatch:
                                  "summary": "demoted cold details", "bytes": 42,
                                  "urgent": False, "demoted": 2})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert h.published[0][1]["reason"] == "reference-kb-index-failed"
         assert "embed sidecar unavailable" in h.published[0][1]["detail"]
@@ -708,7 +708,7 @@ class TestCuratorDispatch:
                                  "summary": "demoted cold details", "bytes": 42,
                                  "urgent": False, "demoted": 2})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert h.published[0][1]["reason"] == "reference-artifact-unchanged"
 
@@ -727,7 +727,7 @@ class TestCuratorDispatch:
                                  "summary": "demoted cold details", "bytes": 42,
                                  "urgent": False, "demoted": 2})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert h.published[0][1]["reason"] == "reference-pointer-missing"
 
@@ -749,7 +749,7 @@ class TestCuratorDispatch:
                                  "summary": "demoted cold details", "bytes": 42,
                                  "urgent": False, "demoted": 2})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert h.published[0][1]["reason"] == "reference-pointer-missing"
 
@@ -769,7 +769,7 @@ class TestCuratorDispatch:
                                  "summary": "updated cold reference", "bytes": 42,
                                  "urgent": False, "demoted": 0})
 
-        assert curator_mod.read_cursor(paths.policy_cursor_path(tmp_path)) == 0
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
         assert [event for event, _ in h.published] == ["system/monitor.error"]
         assert h.published[0][1]["reason"] == "reference-artifact-unreadable"
 
@@ -791,11 +791,11 @@ class TestCuratorDispatch:
 
 def _spawn_curator_and_wait(monkeypatch, monitor, task: str = "task body",
                             on_spawn=None):
-    """Run _default_spawn_curator with a stubbed Popen and wait for the waiter
+    """Run _default_spawn_sleep_cycle with a stubbed Popen and wait for the waiter
     thread's result. Returns (captured argv list, results list). ``on_spawn``
     (if given) is called with the argv at spawn time, before the fake process
     "exits" - the window where the task file must still exist on disk."""
-    from bobi.monitors.scheduler import _default_spawn_curator
+    from bobi.monitors.scheduler import _default_spawn_sleep_cycle
 
     captured = []
     results = []
@@ -811,7 +811,7 @@ def _spawn_curator_and_wait(monkeypatch, monitor, task: str = "task body",
         return FakeProc()
 
     monkeypatch.setattr("subprocess.Popen", fake_popen)
-    _default_spawn_curator(monitor, None, task, results.append)
+    _default_spawn_sleep_cycle(monitor, None, task, results.append)
     for _ in range(100):
         if results:
             break
@@ -967,7 +967,7 @@ class TestCuratorSeed:
         from bobi import paths
         self._seed_journal(tmp_path, "old-director", "some legacy decision")
         paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
-        paths.policy_path(tmp_path).write_text("## Facts\n\n## Decisions\n")
+        paths.long_term_memory_path(tmp_path).write_text("## Facts\n\n## Decisions\n")
         h = _CuratorHarness(tmp_path, [])  # policy.md exists + no rows → no dispatch
         with _patch_history(h):
             h.sched._spawn_curator(monitor, [tmp_path])

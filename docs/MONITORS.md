@@ -64,8 +64,28 @@ Configuration merges in tiers, later wins by `name`:
 2. **Team package** - `run/package/monitors.yaml` in the installed image.
 3. **User overrides** - the `monitors:` key in `run/package/agent.yaml`.
 
-Set `enabled: false` on a name to switch off a default. The registry reloads
-every tick, so monitors added at runtime take effect without a restart.
+`enabled: false` only switches a monitor off at the tier that **defines** it.
+Setting it in tier 2 or 3 against a name that came from tier 1 - including
+`bobi agent <name> monitors pause`, which writes exactly that record - does
+**not** stop the monitor. The runtime tiers record an *opt-out*, which narrows
+only which projects a monitor's check runs against; the tier-1 record stays in
+the scheduler's effective set and keeps firing on its interval. Notify, command,
+and sleep-cycle monitors never consult the opt-out at all, and the sleep cycle
+falls back to the scheduler's own bound root, so it keeps running - and keeps
+paying for LLM calls - after a `pause` that reported success. This gap is
+tracked as D014 in `plans/2026-07-22-review-remediation.md`.
+
+To actually remove a framework default, prune it at compose time from the team
+package's `agent.yaml`, which drops the record from the composed image's
+`monitors/defaults.yaml`:
+
+```yaml
+prune:
+  monitors: [sleep-cycle]
+```
+
+The registry reloads every tick, so monitors added at runtime take effect
+without a restart.
 
 ## Flavors
 
@@ -77,6 +97,13 @@ every tick, so monitors added at runtime take effect without a restart.
   right call interactively with `venn tools search/describe/execute` first.
 - **Native check** (`check:`) - names a deterministic Python runner shipped with
   the framework or the pack's `monitors/*_checks.py`. `script_cache` is one.
+  A runner normally detects inline, on the scheduler thread, which is fine for
+  anything subprocess-bounded (`tool_poll` caps at 60 s). A runner that may
+  call the agent runtime sets `out_of_band = True` on itself; the scheduler
+  then detects on a worker thread and reconciles from there, so a slow
+  regeneration cannot stall the other monitors. `script_cache` sets it. While
+  one is in flight the monitor's later ticks are skipped rather than stacked,
+  and they open no run record - a 20-minute generation is one row, not forty.
 - **Description-only** (`description:`, no command) - when output needs
   interpretation, the scheduler spawns a short-lived check agent that observes
   and returns a verdict. Costs an LLM call per interval; use when diffable JSON
@@ -180,9 +207,9 @@ reconcile path (`scheduler.py`):
 - Conditions are deduped by `id_field` (a SHA-256 of the payload if absent).
   Only keys not already active publish - so a condition fires once, not every
   tick it stays true.
-- A condition is recorded active **only after its event actually publishes**, so
-  a failed publish (event server briefly down) retries next interval instead of
-  being lost.
+- A condition is recorded active **only after its event actually publishes**. A
+  failed publish (event server briefly down) is **parked** with its payload in
+  `pending_publish` and retried by the drain below, instead of being lost.
 - Out-of-band agent failures publish `system/monitor.error` with the monitor
   name, flavor, reason (`spawn-failed`, `timeout`, or
   `indeterminate-result`), and detail. The drain loop actively delivers the
@@ -193,8 +220,149 @@ reconcile path (`scheduler.py`):
   read the date before concluding anything about how often one ran; the
   authoritative last-run time is `run/state/monitor_state.json`.
 
-Scheduler-owned state (last-run times, active condition keys) lives in
-`run/state/monitor_state.json`, rewritten wholesale each tick.
+Scheduler-owned state (last-run times, active condition keys, parked payloads)
+lives in `run/state/monitor_state.json`, rewritten wholesale each tick.
+
+### The retry park
+
+A publish that fails is the one failure a monitor can recover from by itself:
+the payload is still in hand, and re-sending it needs no detector, no model and
+no schedule. So it is parked in `pending_publish` and retried **every tick**,
+whether or not its monitor is due.
+
+Every publisher parks: the detection path through `_reconcile`, the relevance
+gate's judged-relevant items, and the sleep cycle's `system/memory.updated`
+completion signal, which publishes outside `_reconcile` (a completion signal is
+not a deduped finding - two runs with the same summary must both deliver) but
+retries through the same park. That one matters most: its transcript cursor has
+already advanced by the time it publishes, so a lost post is lost for good - the
+next run reads no delta, finds nothing durable, and an urgent policy change
+never reaches an inbox.
+
+That "whether or not it is due" is the whole point. The retry used to be
+re-detection: the next interval would find the condition again and fire it
+again. That is true only for a standing condition an interval monitor
+re-derives every tick. A scheduled monitor's next interval is a day away and
+its finding key is date- or instant-stamped, so its lost finding was never
+re-derived and never retried - a daily standup nudge simply did not happen,
+with `outcome: failed` in its run record the only trace (#1006).
+
+The drain runs at the END of a tick, after the due monitors have fired. Its
+staleness bound lives inside a firing, so a drain that went first would publish
+a payload the firing right behind it was about to give up on. The out-of-band
+flavors (description-only, and native checks that invoke an agent) do not
+finish inside the due loop at all - they dispatch a detector and reconcile from
+a waiter thread minutes later - so the drain **holds** those monitors' parks
+until a firing has reconciled. Ordering the two clocks needs both halves: a
+manager back on Thursday must not send Monday's standup nudge out of the same
+tick that dispatched Thursday's check.
+
+The hold is bounded on both sides, because a hold that cannot be released is a
+park that never drains - the failure this whole section exists to stop.
+Whichever firing reconciles first releases it: a reconcile weighs the entire
+park against what the detector currently reports, and a firing still in flight
+cannot hold a more current view than the one that just ran. And it is taken
+only while the park holds a payload no firing has evaluated since it was
+parked, so a monitor due on every tick - which would otherwise take a fresh
+hold in the due loop, every tick, before the drain runs - keeps draining.
+
+The park's bounds, and what they mean for an operator:
+
+- **It gives up when the detector does.** A parked key that the monitor's next
+  firing no longer reports has been retired at the source, and it is dropped:
+  delivering Monday's standup nudge on Tuesday is worse than not delivering it.
+  A standing condition keeps re-appearing and keeps its place in the park.
+  A park belonging to a monitor that has been paused or removed is dropped for
+  the same reason, rather than replayed whenever the monitor comes back - but
+  only when the registry loaded COMPLETELY. It degrades one file or one record
+  at a time (an unclosed bracket in `monitors.yaml` costs that file's monitors
+  and nothing else), and a monitor missing from a partial load has not been
+  deleted, so nothing is pruned against that view. An unrelated config typo
+  must not silently discard findings nobody has heard.
+  **Two parks are held rather than retired.** A relevance-gated monitor's,
+  because re-detection there costs a model call - dropping a judged payload
+  means paying to judge the same item twice, or losing it outright when a
+  window-scoped detector's item ages out. And the sleep cycle's, which has no
+  detector to give up: nothing re-derives a completion signal whose cursor has
+  already moved.
+- **One failed post ends the drain for that tick.** A failure means the
+  transport is down, so the remaining payloads are not attempted - a dead event
+  server costs one 10s timeout per tick, not one per parked payload. Both the
+  monitor order and the order within a park rotate, so a payload the server
+  rejects outright cannot blackhole the ones behind it. The two rotations count
+  separately - the monitor order per tick, a park's order per attempt on THAT
+  monitor. One counter driving both aliases them: a monitor is reached on the
+  ticks its own rotation selects, and across exactly those ticks a shared
+  counter pins the within-park offset to a subset of slots, leaving whatever
+  sits in the others never attempted at all.
+- **It holds at most 50 payloads per monitor**, so a detector reporting
+  hundreds of conditions into a dead server cannot grow the state file without
+  bound. A payload that cannot join a full park is a give-up too, and is
+  reported as `DROPPED` rather than as parked - nothing will retry it. So is a
+  payload that is not strict JSON (Python accepts `NaN`, the wire does not):
+  no retry can ever land it, so it is never parked.
+- **A recovery writes its own run record**, so the ledger a lost firing is
+  diagnosed from shows the delivery that eventually followed it. One row per
+  recovery, not one per tick - at 50 rows per monitor, a row per tick would
+  evict the very firing the row exists to explain - so a recovery spread over
+  several ticks banks what landed and writes one row when it ends. A drain that
+  delivered part of a batch still owes that row: those payloads left the park,
+  and a delivery with no ledger row is the same silence #1006 is about.
+- **A firing that leaves anything parked is `failed`, never `quiet`** -
+  including a later firing that skips a key because the park still owns it. A
+  monitor that cannot deliver must not read as healthy.
+
+Both give-up paths (a retired key, a full park) are written to `manager.log`
+and to the firing's run record, and both are named as give-ups: a run record
+never says "parked for a mechanical retry" about a finding no mechanism will
+retry. Neither yet reaches the operator's inbox - surfacing them is the open
+half of #1006, and it needs an off-bus sink, because during an event-server
+outage the inbox is exactly what is unreachable.
+
+## Run records: what each firing actually did
+
+`monitor_state.json` answers "when did this last run" and "what is currently
+active". It cannot answer "did the 09:15 tick post anything, or did it fail?" -
+`last_run` is overwritten every tick and `system/monitor.error` is an ephemeral
+bus event. Run records (`run_records.py`) close that gap: **one record per
+firing**, written when the firing finishes - plus one per recovery when the
+retry park lands what a failed firing owed the bus (see above).
+
+Each record carries `monitor`, `started_at` / `ended_at`, `flavor`
+(`notify` · `command` · `check:<name>` · `sleep_cycle` · `description`), and:
+
+- **`outcome`** - `notified` (published at least one event), `quiet`
+  (completed, nothing new to say), or `failed`. A firing whose finding did not
+  reach the event server is `failed`, not `notified`: the payload is parked for
+  a mechanical retry and nobody has heard about it yet.
+- **`reason`** - why it failed, in the same words as the `system/monitor.error`
+  event (`spawn-failed: ...`, `command exited 3: ...`, `check agent returned no
+  usable verdict`). The first reason recorded wins - it is the one nearest the
+  root cause.
+- **`published`** - how many events actually landed.
+- **`script_cache_mode`** - for script-cache monitors, whether this tick ran
+  the $0 cached script or paid an agent (`cached` · `first_gen` ·
+  `fallback_regen`).
+- **`session_ref`** - the session an out-of-band firing ran under, when there
+  was one, so a run can be traced to its transcript.
+
+Out-of-band flavors (description checks, relevance gates, the sleep cycle) are
+recorded when their verdict lands, not when they were dispatched - a spawned
+run that is still working has no record yet, and is visible through its session
+instead. A manager that dies mid-firing therefore leaves no record for that
+firing, which is the intended trade: nothing is ever stranded as permanently
+"running".
+
+Records live one file per monitor under `run/state/monitor_runs/<name>.json`,
+newest first, capped at `RETENTION_PER_MONITOR` (50) per monitor. The cap is
+the whole retention policy - this is a debugging ledger, not an audit log.
+Recording is best-effort: a ledger write that fails is logged and never breaks
+the firing.
+
+Records surface in the agent page's runs table alongside sessions and workflow
+runs - `notified` and `quiet` both read as a completed run, `failed` lands under
+the tab for everything needing a human. See
+[RUNS_VIEW.md](RUNS_VIEW.md) for that fold.
 
 ---
 
@@ -243,6 +411,11 @@ tick
 A self-heal tick is never wasted: the agent both produces this tick's result and
 emits the script for next time.
 
+The whole lifecycle above runs on a worker thread, not the scheduler thread -
+`script_cache` is an `out_of_band` runner (see "Flavors"), because a self-heal
+blocks for as long as the agent takes and the scheduler has only one thread to
+evaluate every other monitor with.
+
 ## What it caches: an LLM wrote this script
 
 The load-bearing fact is that a cron now runs **machine-generated code
@@ -285,6 +458,7 @@ per-monitor `extra` key overrides them:
 | `http_hosts` | `[]` | host allowlist when `allow_http` is on |
 | `max_age` | unset | refresh a pinned script older than this |
 | `on_persistent_failure` | `degrade` | `degrade` (backoff) or `pause` after repeated regen failures |
+| `notify_channel` | unset | Slack channel for a best-effort direct message, additive to the event publish (needs `SLACK_BOT_TOKEN`) |
 
 ## Pinning, trust, and the capability envelope
 
@@ -333,7 +507,8 @@ The counter and backoff reset on any successful cached run or pin.
 
 ```
 $BOBI_HOME/agents/<name>/run/state/
-├── monitor_state.json            # scheduler-owned: last-run, active keys
+├── monitor_state.json            # scheduler-owned: last-run, active keys,
+│                                 #   parked payloads (pending_publish)
 └── scripts/
     ├── <monitor>.sc.sh           # active pinned script (executable)
     ├── <monitor>.state.json      # trusted sidecar: sha256, envelope, counters

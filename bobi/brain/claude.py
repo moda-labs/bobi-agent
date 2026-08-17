@@ -20,13 +20,11 @@ import logging
 import os
 from collections import deque
 from contextlib import suppress
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     ERROR_KIND_MAX_TURNS,
     AssistantText,
-    BrainCapabilities,
     BrainCost,
     BrainMessage,
     BrainSession,
@@ -99,7 +97,6 @@ class _ClaudeSession:
             DEFAULT_CONNECT_BACKOFF_SECONDS,
         )
 
-        last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             if attempt > 1:
                 self._client = self._new_client()
@@ -107,7 +104,6 @@ class _ClaudeSession:
                 await self._connect_once(prompt)
                 return
             except Exception as exc:
-                last_error = exc
                 should_retry = attempt < attempts and _is_initialize_timeout(exc)
                 if not should_retry:
                     raise
@@ -123,9 +119,6 @@ class _ClaudeSession:
                 )
                 if backoff > 0:
                     await asyncio.sleep(backoff * attempt)
-
-        if last_error is not None:
-            raise last_error
 
     async def _connect_once(self, prompt: str | None = None) -> None:
         # Match the historical call shape: a bare connect() when there is no
@@ -347,7 +340,9 @@ def _max_turns_from_transcript(
     session_id: str,
 ) -> tuple[bool, int | None, int | None]:
     """Fallback for Claude SDK runs whose JSONL has terminal metadata only."""
-    transcript = _claude_transcript_path(session_id)
+    from bobi.chat_history import find_claude_transcript
+
+    transcript = find_claude_transcript(session_id)
     if transcript is None:
         return False, None, None
     try:
@@ -364,34 +359,6 @@ def _max_turns_from_transcript(
         if found:
             return found, max_turns, turn_count
     return False, None, None
-
-
-def _claude_transcript_path(session_id: str) -> Path | None:
-    if not session_id:
-        return None
-    projects_dirs = []
-    if os.environ.get("CLAUDE_CONFIG_DIR"):
-        projects_dirs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
-    projects_dirs.append(Path.home() / ".claude" / "projects")
-
-    seen: set[str] = set()
-    for projects in projects_dirs:
-        key = str(projects)
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            if not projects.is_dir():
-                continue
-            for project_dir in projects.iterdir():
-                if not project_dir.is_dir():
-                    continue
-                candidate = project_dir / f"{session_id}.jsonl"
-                if candidate.exists():
-                    return candidate
-        except OSError:
-            continue
-    return None
 
 
 def _render_max_turns_error(max_turns: int | None,

@@ -218,6 +218,21 @@ class TestDeliver:
         assert not ok
         assert "stopped" in resp
 
+    def test_deliver_rejects_an_orderly_teardown_that_dropped_its_pid(
+            self, bobi_install):
+        # The shape Session._run's teardown actually writes: a terminal status
+        # AND pid=0, because the pid is stale the moment it is recorded. The
+        # dead-pid check is keyed on a truthy pid, so it is skipped here and
+        # the terminal-status check is the ONLY thing standing between a caller
+        # and a message published to a session that will never read it.
+        from bobi.sdk import get_registry, SessionEntry
+        get_registry().register(SessionEntry(
+            name="torn-down", cwd="/tmp", pid=0, status="stopped",
+            terminal_at=time.time()))
+        ok, resp = deliver("torn-down", "hello")
+        assert not ok
+        assert "torn-down" in resp and "stopped" in resp
+
     def test_nonblocking_deliver_publishes(self, bobi_install):
         _register_live_session("test-nb")
         with patch("bobi.events.publish.publish_inbox", return_value=True) as pub:

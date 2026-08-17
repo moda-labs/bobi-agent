@@ -146,12 +146,12 @@ settled scope — spec only the ticket's slice and never re-litigate it.
 - Run the project's test command before every PR
 - The test command is auto-detected from package.json / pyproject.toml / Makefile
 - If a local test run fails during collection because optional test dependencies
-  are missing, install the same extras CI uses and rerun the exact failed command
-  before reporting it as a caveat. For this repo, broad non-integration tests use
-  `pip install -e ".[dev,kb]"`. Only report a dependency caveat if the install or
+  are missing, install the same extras CI uses — read them from the repo's own CI
+  workflow and contributor docs — and rerun the exact failed command before
+  reporting it as a caveat. Only report a dependency caveat if the install or
   rerun still fails, and name that failure. Do not leave stale "missing
-  pytest/numpy/fastembed/sqlite_vec" caveats in a PR summary after the matching
-  command passes locally or in CI.
+  <package>" caveats in a PR summary after the matching command passes locally
+  or in CI.
 
 ---
 
@@ -336,9 +336,14 @@ is already set to the worktree path — you do not need to create one manually.
 The worktree lives at `.claude/worktrees/<session-name>` inside the repo root.
 The branch name follows the `agent/<issue-id>` convention.
 
-**Cleanup is automatic.** When a PR is closed (merged or abandoned), the
-`pr-closed` workflow removes the worktree and branch deterministically.
-You never need to clean up worktrees manually.
+**Cleanup is automatic for merged PRs.** When a PR is merged, the `pr-closed`
+workflow removes the worktree and branch deterministically. You never need to
+clean up worktrees manually.
+
+A PR closed **without** merging keeps its branch and worktree: that head may be
+the only copy of the work, so the workflow re-reads the PR's state from GitHub
+and preserves everything unless GitHub says it merged. Deleting an abandoned
+PR's branch is a human decision.
 
 ### Push
 
