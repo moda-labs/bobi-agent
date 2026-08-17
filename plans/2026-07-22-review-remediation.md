@@ -251,7 +251,28 @@ Each appendix entry names the surviving implementation — move callers to it; n
 - [x] **D095** `bobi/events/adapters.py:81` — Running `git remote get-url origin` and normalizing the remote URL to a GitHub owner/repo slug is implemented twice:…
 - [x] **Q019** `bobi/events/adapters.py:118` — adapters.py hand-rolls Slack channel name→ID resolution (_resolve_channel_names + _is_channel_id) that bobi/slack.py's resolve_channel_id already…
 - [x] **D096** `bobi/events/adapters.py:209` — _detect_slack inlines a Slack auth.test call (GET + bearer header + team_id/bot_id extraction) that events/server._slack_auth_info already provides,…
-- [ ] **Q108** `bobi/events/client.py:49` — Wall-clock timestamps are written in two conflicting conventions — local-naive time.strftime ISO strings in six modules vs timezone-aware UTC… *(plausible — re-verify first)*
+- [x] **Q108** `bobi/events/client.py:49` — Wall-clock timestamps are written in two conflicting conventions — local-naive time.strftime ISO strings in six modules vs timezone-aware UTC… *(plausible — re-verify first)*
+  - Re-derived 2026-08-17: 10 naive write sites in 6 modules (the finding's 9
+    in 6 had drifted). Re-verified CONFIRMED with one correction to its
+    premise: not "every consumer applies the house parsing rule" —
+    webapp/runs._epoch deliberately read naive as LOCAL, matched to its
+    writers. Each parser was matched to its writer; the fragility was the
+    match, not a live misread.
+  - Applied: bobi/timeutil.py owns the convention — now_iso() writes,
+    parse_iso() reads (promoted from monitors/run_records, where D093 had
+    already consolidated the parser). All 10 naive sites convert;
+    setup/webui's two aware sites converge; kb/store's _now() delegate
+    collapses. registry.py's one aware site deliberately untouched — #1037
+    (in flight) edits the surrounding lines; one-line follow-up after both
+    land.
+  - Old state on disk: runs._epoch keeps its naive-means-writer-local branch
+    for pre-upgrade workflow runs, with a docstring saying why it must not
+    fold into parse_iso. CLI displays slice [:19] and render both formats;
+    displayed clocks move local→UTC by design.
+  - Pinned: WorkflowRun.create's started_at aware-UTC (red mutant reverting
+    the writer to naive strftime); _epoch reads both eras; live spot check —
+    real workflow run + event-log entry on disk aware-UTC, parse round-trip,
+    runs fold correct.
 - [x] **D077/Q105** `bobi/events/drain.py:76` — _without_placeholder_fields is duplicated verbatim in drain.py and channels.py.
 - [x] **Q064** `bobi/events/server.py:236` — ensure_running remaps five unprefixed env vars to BOBI_ES_* with five identical two-line if-blocks.
 - [x] **Q112** `bobi/events/server.py:413` — authorize_resources repeats the same 6-line 'log warning / append unbacked / keep-if-not-filtering / continue' tail four times. *(plausible — re-verify first)*
