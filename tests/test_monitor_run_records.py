@@ -403,5 +403,3 @@ class TestSchedulerRecordsOutOfBandRuns:
         assert gates == []
         assert len(run_records.load("inbox")) == 1
         assert run_records.load("inbox")[0].outcome == QUIET
-
-

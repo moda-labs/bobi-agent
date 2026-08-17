@@ -273,6 +273,20 @@ Each appendix entry names the surviving implementation — move callers to it; n
     the writer to naive strftime); _epoch reads both eras; live spot check —
     real workflow run + event-log entry on disk aware-UTC, parse round-trip,
     runs fold correct.
+  - Review round (5 finders): caught a REAL bug this diff introduced —
+    `bobi events` sorted mixed-era timestamp strings lexicographically, so on
+    a UTC+N host post-upgrade events sorted hours early and `--tail` hid the
+    newest ones. Fixed failing-test-first (Tokyo TZ forced): the sort now
+    keys on `timeutil.epoch_seconds`, the promoted both-era reader that
+    `webapp/runs._epoch` also aliases. Also from review: the legacy-naive
+    era pin was vacuous on CI's UTC runners (local and UTC readings
+    coincide) — now TZ-forced with an explicit inequality against the
+    naive-means-UTC reading; aware-era workflow rows now fold through
+    build_runs in tests (the fixture had only produced the retired naive
+    shape); scripts/seed-agent-page.py's naive writer got a do-not-fix guard
+    comment (it deliberately exercises the legacy branch); timeutil's
+    docstring stopped over-claiming (the monitors' injectable now-callables
+    isoformat the same value); import placements normalized.
 - [x] **D077/Q105** `bobi/events/drain.py:76` — _without_placeholder_fields is duplicated verbatim in drain.py and channels.py.
 - [x] **Q064** `bobi/events/server.py:236` — ensure_running remaps five unprefixed env vars to BOBI_ES_* with five identical two-line if-blocks.
 - [x] **Q112** `bobi/events/server.py:413` — authorize_resources repeats the same 6-line 'log warning / append unbacked / keep-if-not-filtering / continue' tail four times. *(plausible — re-verify first)*
@@ -760,6 +774,12 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   **D093/Q058's two copies are not "duplicated verbatim", and the difference is load-bearing.** `scheduler._parse_iso` caught `ValueError`; `script_cache_checks._parse_iso` caught `(ValueError, AttributeError)`. That second clause is what lets a **non-string** pulled out of a JSON state document read as absent instead of raising — and both callers there read `state.get(...)` off exactly such a document. The tolerant body is therefore the survivor, which means the scheduler's two call sites are **widened**, not preserved: a torn `monitor_state.json` holding a non-string `last_run` now reads as "no last run" where it previously raised. That is the direction this repo's loaders already go (unparseable state is empty, never fatal), so it shipped, but it is a behavior change and is recorded as one rather than filed under "behavior-preserving".
 
   **The survivor went to `run_records.py`, not to `tool_checks.py` as the finding suggests.** The appendix justified `tool_checks` only by "a shared home exists". `run_records` is the better one on two counts: it is the package's only **leaf** module (it imports nothing intra-package, so it cannot ever be one end of a cycle), and it already owns `_now_iso`, the *writer* of these strings — the reader now sits beside the writer, so the accepted format has one definition. It is also where Q108 will land when someone takes it.
+
+  **2026-08-17 correction (Q108):** superseded — Q108 promoted the pair to
+  `bobi/timeutil.py` (`now_iso`/`parse_iso`), the neutral home its many
+  non-monitor writers needed; `run_records` now imports `now_iso` from there.
+  The one-definition property this paragraph argued for is preserved, one
+  level up.
 
   **There is a fourth `_parse_iso`, deliberately left alone.** `agents/eng-team/monitors/github_checks.py` carries its own copy. It is a **pack** file, not framework code — it is loaded by `_load_checks`' spec machinery precisely because it has no importable package parent — and packs are the distribution unit for domain behavior, so it should not reach into a framework private. `tests/test_checks.py` binds that copy, not either of the two consolidated here.
 

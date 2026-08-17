@@ -85,6 +85,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bobi.fsutil import atomic_write_json
+from bobi.timeutil import parse_iso
 
 
 def _load_framework_checks() -> dict:
@@ -151,7 +152,6 @@ def _load_checks(project_path: Path | None = None) -> dict:
 
 from .registry import MonitorRegistry
 from .run_records import RunTracker
-from bobi.timeutil import parse_iso
 from .schema import Condition
 
 log = logging.getLogger(__name__)

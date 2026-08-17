@@ -50,21 +50,30 @@ def _session(install, name, *, status="completed", role="review-worker",
     }))
 
 
+def _utc(epoch):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
 def _workflow(install, run_id, *, status="completed", name="triage",
               started_at=NOW - 1800, completed_at=NOW - 1500,
               suspended_at_step=-1, await_event="", session_name="",
-              resumed_at=0.0):
+              resumed_at=0.0, aware=False):
+    # aware=False writes the legacy naive-LOCAL timestamps of pre-timeutil
+    # versions; aware=True writes what WorkflowRun records today (aware UTC).
+    # Both shapes exist on real disks, so both must fold correctly.
+    ts = _utc if aware else _iso
     runs_dir = install.state_dir / "workflow" / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     (runs_dir / f"{run_id}.json").write_text(json.dumps({
         "run_id": run_id, "workflow_name": name,
         "trigger_event": {"type": "github/issue.opened", "data": {}},
-        "started_at": _iso(started_at),
-        "completed_at": _iso(completed_at) if completed_at else "",
+        "started_at": ts(started_at),
+        "completed_at": ts(completed_at) if completed_at else "",
         "status": status, "suspended_at_step": suspended_at_step,
         "await_event": await_event, "session_name": session_name,
         "variable_scopes": {}, "repo": "", "cwd": "", "run_key": "",
-        "resumed_at": _iso(resumed_at) if resumed_at else "",
+        "resumed_at": ts(resumed_at) if resumed_at else "",
     }))
 
 
@@ -81,11 +90,6 @@ def _monitor(install, monitor="inbox-watch", *, outcome=QUIET, reason="",
     return run
 
 
-def _utc(epoch):
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
-
-
 def _rows(install, **kw):
     kw.setdefault("now", NOW)
     return build_runs(install.repo_path, **kw)
@@ -96,22 +100,6 @@ def _by_key(payload):
 
 
 # === status vocabulary ===
-
-
-class TestEpochReadsBothTimestampEras:
-    def test_aware_utc_is_read_as_utc(self):
-        from datetime import datetime, timezone
-        from bobi.webapp.runs import _epoch
-        expected = datetime(2026, 8, 17, 18, 0, 0, tzinfo=timezone.utc).timestamp()
-        assert _epoch("2026-08-17T18:00:00+00:00") == expected
-
-    def test_legacy_naive_is_read_as_the_writer_local_time(self):
-        # Workflow runs written by older versions carry naive LOCAL
-        # timestamps; their meaning must not shift when read back.
-        from datetime import datetime
-        from bobi.webapp.runs import _epoch
-        expected = datetime(2026, 8, 17, 18, 0, 0).astimezone().timestamp()
-        assert _epoch("2026-08-17T18:00:00") == expected
 
 
 class TestSessionStatus:
@@ -152,6 +140,21 @@ class TestWorkflowStatus:
                   started_at=NOW - AWAITING_ACTION_AFTER_SECONDS + 60,
                   suspended_at_step=2, await_event="pr.merged")
         assert _by_key(_rows(bobi_install))["workflow:wf-1"]["status"] == "idle"
+
+    def test_aware_era_completed_run_folds_duration_correctly(self, bobi_install):
+        _workflow(bobi_install, "wf-aware", aware=True,
+                  started_at=NOW - 1800, completed_at=NOW - 1500)
+        row = _by_key(_rows(bobi_install))["workflow:wf-aware"]
+        assert row["status"] == "done"
+        assert row["duration_seconds"] == 300.0
+
+    def test_aware_era_waiting_run_awaits_action_at_the_threshold(self, bobi_install):
+        _workflow(bobi_install, "wf-aware", aware=True, status="waiting",
+                  completed_at=0,
+                  started_at=NOW - AWAITING_ACTION_AFTER_SECONDS,
+                  suspended_at_step=2, await_event="pr.merged")
+        assert (_by_key(_rows(bobi_install))["workflow:wf-aware"]["status"]
+                == "awaiting_action")
 
     def test_old_waiting_run_awaits_action_at_the_threshold(self, bobi_install):
         _workflow(bobi_install, "wf-1", status="waiting", completed_at=0,

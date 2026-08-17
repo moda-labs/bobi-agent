@@ -33,10 +33,10 @@ from bobi.subagent import (
     _timeout_error,
     _tool_crash_error,
 )
+from bobi.timeutil import now_iso
 from bobi.workflow.schema import Workflow, StepDef
 from bobi.workflow.state import WorkflowRun
 from bobi.workflow.variables import VariableContext
-from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 

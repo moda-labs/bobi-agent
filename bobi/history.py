@@ -11,8 +11,9 @@ so the index covers the same transcripts the replay path reads.
 
 import json
 import sqlite3
-from bobi.timeutil import now_iso
 from pathlib import Path
+
+from bobi.timeutil import now_iso
 
 
 def _projects_dirs() -> list[Path]:

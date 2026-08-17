@@ -12,11 +12,12 @@ import hashlib
 import json
 import logging
 import re
-from bobi.timeutil import now_iso
 from collections.abc import Callable
 from pathlib import Path
 
 import apsw
+
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 

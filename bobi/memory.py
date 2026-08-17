@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from bobi.timeutil import now_iso
 from collections.abc import Callable
 from pathlib import Path
+
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 

@@ -1,6 +1,7 @@
 """Unit tests for WorkflowRun — persistence and querying."""
 
 import json
+from datetime import datetime
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -56,7 +57,6 @@ class TestWorkflowRunCreate:
     def test_create_writes_aware_utc_started_at(self):
         # The one wall-clock convention (bobi.timeutil): timestamps persist
         # with an explicit UTC offset, never naive local time.
-        from datetime import datetime
         run = WorkflowRun.create("lifecycle", {"type": "t", "data": {}})
         dt = datetime.fromisoformat(run.started_at)
         assert dt.tzinfo is not None

@@ -36,13 +36,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from bobi import http, paths
 from bobi.setup.state import SPEC_SLOTS, STAGE_ORDER, SetupState, Stage
+from bobi.timeutil import now_iso
 from bobi.webui_common.launcher import serve_local
 from bobi.webui_common.security import (
     WEBUI_TOKEN_HEADER,
     install_security,
 )
 from bobi.webui_common.static import mount_static, serve_index
-from bobi.timeutil import now_iso
 
 STATIC_DIR = Path(__file__).parent / "static"
 NONCE_HEADER = WEBUI_TOKEN_HEADER
