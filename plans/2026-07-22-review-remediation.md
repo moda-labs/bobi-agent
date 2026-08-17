@@ -279,6 +279,15 @@ Each appendix entry names the surviving implementation — move callers to it; n
     leg: tests/integration/test_manager_sdk.py drove 5 live Claude sessions
     through the moved resolver. No mutant needed: the old symbols are deleted,
     so any stale reference is an ImportError, not a silent pass.
+  - Review additions: `_resolve_cli_path` collapsed into `get_cli_path` (its
+    only remaining caller once CLAUDE_CLI died, and its docstring contrasted
+    against that dead constant); the moved docstring's dangling
+    `docs/CONTAINERIZED_DEPLOYMENT.md` citation now names the private deploy
+    repo like its sibling docs; `_claude_available` no longer double-probes
+    PATH and no longer reads the resolver's bare-name exec fallback as an
+    installed CLI via a CWD-relative `.exists()` (failing test first, both
+    arms pinned); `_delta_text`'s false "setup.llm re-exports it" claim
+    dropped.
 - [x] **Q085** `bobi/sdk.py:121` — Bound-root access is split between two routes: monitors import paths.bound_root directly (aliased as get_project_root) while kb/embedder.py and…
 - [x] **Q084** `bobi/sdk.py:538` — load_resumable_session_id re-reads '<name>.brain' inline instead of calling load_session_brain defined 30 lines above.
 - [x] **Q021** `bobi/setup/actions.py:185` — save_credential's prompt_fn injection is vestigial: every live caller passes a constant-returning lambda, and the only real prompt implementation…

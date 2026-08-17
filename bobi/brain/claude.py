@@ -58,16 +58,19 @@ DEFAULT_MAX_BUFFER_SIZE = 64 * 1024 * 1024  # 64 MB
 _SDK_DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024  # 1 MB
 
 
-def _resolve_cli_path() -> str:
-    """Locate the ``claude`` CLI, container-safe.
+def get_cli_path() -> str:
+    """Locate the ``claude`` CLI at call time, container-safe.
 
     Prefer ``PATH`` — the only thing that works in the Linux container image,
-    where the pinned CLI is installed on ``PATH``
-    (docs/CONTAINERIZED_DEPLOYMENT.md, The image). When it isn't found, fall
+    where the pinned CLI is installed on ``PATH`` (the private deploy repo's
+    CONTAINERIZED_DEPLOYMENT.md, The image). When it isn't found, fall
     back to the Homebrew location *only* on
     macOS dev machines; on every other platform fall back to the bare name so
     exec still resolves it via ``PATH`` at spawn time rather than a
     macOS-specific absolute path that doesn't exist in the container.
+
+    Re-resolves on every call so a CLI that lands on ``PATH`` after import —
+    or a test that patches the environment — is picked up.
     """
     found = shutil.which("claude")
     if found:
@@ -77,21 +80,11 @@ def _resolve_cli_path() -> str:
     return "claude"
 
 
-def get_cli_path() -> str:
-    """Resolve the ``claude`` CLI path at call time (container-safe).
-
-    Re-resolves rather than returning the import-time constant so a CLI that
-    lands on ``PATH`` after import — or a test that patches the environment —
-    is picked up.
-    """
-    return _resolve_cli_path()
-
-
 def _delta_text(event: Any) -> str:
     """Pull the text out of one raw Anthropic streaming event, or ''.
 
     The canonical home for the vendor-specific partial-stream shape
-    (``content_block_delta`` / ``text_delta``); ``setup.llm`` re-exports it.
+    (``content_block_delta`` / ``text_delta``).
     """
     if not isinstance(event, dict):
         return ""
