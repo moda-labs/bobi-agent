@@ -18,6 +18,8 @@ import asyncio
 import json
 import logging
 import os
+import platform
+import shutil
 from collections import deque
 from contextlib import suppress
 from typing import Any, AsyncIterator
@@ -54,6 +56,35 @@ DEFAULT_MAX_BUFFER_SIZE = 64 * 1024 * 1024  # 64 MB
 # The SDK's own default, used as an absolute floor for the operator override so
 # the knob can only raise the ceiling, never drop it back into the kill zone.
 _SDK_DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024  # 1 MB
+
+
+def _resolve_cli_path() -> str:
+    """Locate the ``claude`` CLI, container-safe.
+
+    Prefer ``PATH`` — the only thing that works in the Linux container image,
+    where the pinned CLI is installed on ``PATH``
+    (docs/CONTAINERIZED_DEPLOYMENT.md, The image). When it isn't found, fall
+    back to the Homebrew location *only* on
+    macOS dev machines; on every other platform fall back to the bare name so
+    exec still resolves it via ``PATH`` at spawn time rather than a
+    macOS-specific absolute path that doesn't exist in the container.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    if platform.system() == "Darwin":
+        return "/opt/homebrew/bin/claude"
+    return "claude"
+
+
+def get_cli_path() -> str:
+    """Resolve the ``claude`` CLI path at call time (container-safe).
+
+    Re-resolves rather than returning the import-time constant so a CLI that
+    lands on ``PATH`` after import — or a test that patches the environment —
+    is picked up.
+    """
+    return _resolve_cli_path()
 
 
 def _delta_text(event: Any) -> str:
@@ -472,8 +503,6 @@ class ClaudeBrain(GatewayAwareEngine):
     ) -> BrainSession:
         from claude_agent_sdk import ClaudeAgentOptions
 
-        from bobi.sdk import get_cli_path
-
         from bobi.brain import with_default_effort_option, with_default_model_option
 
         extra = with_default_effort_option(with_default_model_option(options))
@@ -515,8 +544,6 @@ class ClaudeBrain(GatewayAwareEngine):
             TextBlock,
             query,
         )
-
-        from bobi.sdk import get_cli_path
 
         _configure_initialize_timeout()
         attempts = _env_int("BOBI_CLAUDE_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)

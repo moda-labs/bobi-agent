@@ -98,7 +98,7 @@ class _SetupHost:
 def _claude_available() -> bool:
     import shutil
 
-    from bobi.sdk import get_cli_path
+    from bobi.brain.claude import get_cli_path
 
     return bool(shutil.which("claude")) or Path(get_cli_path()).exists()
 

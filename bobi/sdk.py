@@ -19,8 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
-import shutil
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -52,25 +50,6 @@ DEAD_STATUSES = (
     "stopped", "error", "cancelled", "done",
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
-
-
-def _resolve_cli_path() -> str:
-    """Locate the ``claude`` CLI, container-safe.
-
-    Prefer ``PATH`` — the only thing that works in the Linux container image,
-    where the pinned CLI is installed on ``PATH``
-    (docs/CONTAINERIZED_DEPLOYMENT.md, The image). When it isn't found, fall
-    back to the Homebrew location *only* on
-    macOS dev machines; on every other platform fall back to the bare name so
-    exec still resolves it via ``PATH`` at spawn time rather than a
-    macOS-specific absolute path that doesn't exist in the container.
-    """
-    found = shutil.which("claude")
-    if found:
-        return found
-    if platform.system() == "Darwin":
-        return "/opt/homebrew/bin/claude"
-    return "claude"
 
 
 def compute_manifest_hash(project_path: Path | None = None) -> str:
@@ -218,16 +197,6 @@ def session_log_path(name: str, *, root: Path | None = None) -> Path:
     p = _sessions_dir(root) / name / "log.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
-
-
-def get_cli_path() -> str:
-    """Resolve the ``claude`` CLI path at call time (container-safe).
-
-    Re-resolves rather than returning the import-time constant so a CLI that
-    lands on ``PATH`` after import — or a test that patches the environment —
-    is picked up.
-    """
-    return _resolve_cli_path()
 
 
 def _has_tokens(entry: Any) -> bool:

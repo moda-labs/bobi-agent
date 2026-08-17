@@ -202,7 +202,7 @@ async def test_stream_once_injects_gateway_env(monkeypatch):
         TextBlock=type("TB", (), {}),
     )
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:4000")
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     with patch.dict("sys.modules", {"claude_agent_sdk": fake_sdk}):
         async for _ in ClaudeBrain().stream_once(
             system_prompt="sys", user_prompt="hi", cwd="/tmp",
