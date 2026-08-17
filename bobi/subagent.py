@@ -1219,9 +1219,8 @@ def _resolve_self_github_login() -> str | None:
     """Best-effort lookup of the bot's own GitHub login via ``gh api user``.
 
     Cached for the process lifetime. Returns None when ``gh`` is unavailable or
-    unauthenticated — the reactor's self-author guard then stays inactive
-    (fail open) rather than dropping events. Used to skip auto-dispatching
-    pr-feedback on the bot's own comments (issue #411).
+    unauthenticated. The self-author guard then stays inactive (fail open),
+    while rules that explicitly match ``$self`` fail closed.
     """
     global _self_github_login, _self_github_login_resolved
     if _self_github_login_resolved:
@@ -1240,6 +1239,15 @@ def _resolve_self_github_login() -> str | None:
     except (OSError, sp.SubprocessError) as e:
         log.info("Could not resolve bot GitHub login (self-author guard off): %s", e)
     return _self_github_login
+
+
+def _auto_dispatch_needs_self_login(rules: list[dict]) -> bool:
+    """Return whether dispatch matching or hygiene needs the GitHub identity."""
+    return any(
+        not rule.get("allow_self_authored")
+        or "$self" in (rule.get("match") or {}).values()
+        for rule in rules
+    )
 
 
 def _start_event_subscription(session_name: str, subscribe: list[str],
@@ -1507,12 +1515,9 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     reactor = None
     if has_external and cfg.auto_dispatch:
         from bobi.events.reactor import EventReactor
-        # Resolve the bot's own GitHub login so the reactor can skip
-        # auto-dispatching on the bot's own events (issue #411). Self-author
-        # skip is the default, so we need the login unless EVERY rule opts back
-        # in via allow_self_authored.
+        # Resolve identity for both self-author hygiene and `$self` match values.
         self_login = None
-        if any(not r.get("allow_self_authored") for r in cfg.auto_dispatch):
+        if _auto_dispatch_needs_self_login(cfg.auto_dispatch):
             self_login = _resolve_self_github_login()
         reactor = EventReactor.from_config(
             cfg.auto_dispatch, cwd=str(project_path), self_login=self_login)

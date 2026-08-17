@@ -666,3 +666,34 @@ class TestResolveSelfGitHubLogin:
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         from bobi.subagent import _resolve_self_github_login
         assert _resolve_self_github_login() is None
+
+
+class TestAutoDispatchIdentityRequirement:
+    def test_self_match_requires_identity_even_when_self_authored_is_allowed(self):
+        from bobi.subagent import _auto_dispatch_needs_self_login
+
+        rules = [{
+            "event": "github.issues",
+            "match": {"action": "assigned", "assignee": "$self"},
+            "allow_self_authored": True,
+        }]
+
+        assert _auto_dispatch_needs_self_login(rules) is True
+
+    def test_literal_match_with_self_authored_allowed_needs_no_identity(self):
+        from bobi.subagent import _auto_dispatch_needs_self_login
+
+        rules = [{
+            "event": "github.issues",
+            "match": {"action": "assigned"},
+            "allow_self_authored": True,
+        }]
+
+        assert _auto_dispatch_needs_self_login(rules) is False
+
+    def test_default_self_author_guard_still_requires_identity(self):
+        from bobi.subagent import _auto_dispatch_needs_self_login
+
+        assert _auto_dispatch_needs_self_login([
+            {"event": "github.pull_request_review"},
+        ]) is True

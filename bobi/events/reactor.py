@@ -46,14 +46,35 @@ class AutoDispatchRule:
     # defers to per-step agents, which still switch only when model/effort changes.
     role: str = ""
 
-    def matches(self, event: dict) -> bool:
+    def matches(self, event: dict, self_login: str | None = None) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
         if event.get("type") != self.event:
             return False
         fields = event.get("fields", {})
         if not self.match:
             return True
-        return all(fields.get(k) == v for k, v in self.match.items())
+        for key, expected in self.match.items():
+            if expected != "$self":
+                if fields.get(key) != expected:
+                    return False
+                continue
+
+            if not self_login:
+                return False
+            if key == "assignee":
+                assignees = {
+                    login.strip()
+                    for login in str(fields.get("assignees", "")).split(",")
+                    if login.strip()
+                }
+                assignee = fields.get("assignee")
+                if assignee:
+                    assignees.add(str(assignee))
+                if self_login not in assignees:
+                    return False
+            elif fields.get(key) != self_login:
+                return False
+        return True
 
     def dedup_key(self, event: dict) -> str:
         """Build a dedup key from the event to prevent rapid duplicate dispatches.
@@ -182,7 +203,7 @@ class EventReactor:
             or ``None`` if no rule matched.
         """
         for rule in self.rules:
-            if not rule.matches(event):
+            if not rule.matches(event, self_login=self.self_login):
                 continue
 
             # Dispatch-hygiene guard (issue #411): never spin up a feedback
