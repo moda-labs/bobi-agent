@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -103,7 +102,8 @@ def _expectations(project_root: Path | None) -> dict:
     monitors: list[dict] = []
     try:
         from bobi.events import discover_subscriptions
-        subscriptions = sorted(set(discover_subscriptions(project_root) or []))
+        if project_root is not None:
+            subscriptions = sorted(set(discover_subscriptions(project_root) or []))
     except Exception:
         pass
     try:
@@ -158,6 +158,13 @@ def build_heartbeat(*, identity: dict, state: SupervisorState,
             "last_restart_at": state.last_restart_at,
         },
         "sessions": _sessions(health),
+        # Load grace (#903, additive): null unless a liveness verdict was
+        # deferred THIS poll because the host is pegged by the manager's own
+        # busy worker tree. A working poll clears it, so the block is an
+        # instantaneous "currently deferring" flag, not an accumulating
+        # counter: {active, since, spell_s, deferred, load1, ncpu,
+        # busy_descendants, tree_cpu_cores, tree_cpu_ratio}.
+        "load_grace": state.load_grace,
         # Phase A telemetry is a pure HTTP publish with no persistent WS client,
         # and /health does not expose the manager's bus-client stats yet, so the
         # block is reported null. Populated when the sidecar gains its own WS

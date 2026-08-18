@@ -85,6 +85,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bobi.fsutil import atomic_write_json
+from bobi.timeutil import parse_iso
 
 
 def _load_framework_checks() -> dict:
@@ -150,7 +151,7 @@ def _load_checks(project_path: Path | None = None) -> dict:
     return all_checks
 
 from .registry import MonitorRegistry
-from .run_records import RunTracker, _parse_iso
+from .run_records import RunTracker
 from .schema import Condition
 
 log = logging.getLogger(__name__)
@@ -936,7 +937,7 @@ class MonitorScheduler:
             return self._due_at(monitor, now, last_run)
         if not last_run:
             return True  # never run -> run on startup
-        last = _parse_iso(last_run)
+        last = parse_iso(last_run)
         if last is None:
             return True
         try:
@@ -966,7 +967,7 @@ class MonitorScheduler:
         except ValueError as e:
             log.warning(f"Monitor {monitor.name} has a bad at/days schedule: {e}")
             return False
-        last = _parse_iso(last_run) if last_run else None
+        last = parse_iso(last_run) if last_run else None
         if last is None:
             self._rebaseline_at(monitor, now)
             return False

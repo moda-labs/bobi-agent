@@ -6,16 +6,20 @@ dedupes on it, and operators read it off the registry. So a re-dispatch of the
 same unit reuses the name — and, before `fresh`, silently resumed the previous
 run's transcript along with its spent turn budget.
 
-That is worst on the adhoc path, where `spawn_adhoc` derives the name from
-`sha256(task)[:8]`: re-running an identical task string collides by
-construction. A worker whose state lives in a committed artifact rather than in
-context wants the stable name and a clean transcript, which is what `fresh`
-buys.
+That is worst on the adhoc path, where `spawn_adhoc` derives the name from the
+task: re-running an identical task string collides by construction. A worker
+whose state lives in a committed artifact rather than in context wants the
+stable name and a clean transcript, which is what `fresh` buys.
 
-The default stays resume — that is the workflow engine's documented retry
-contract (`launch_agent`'s docstring) — so every test here has a
-default-behavior twin. Without it the `fresh` assertions would pass vacuously
-against a code path that never resumed in the first place.
+Under an EXPLICIT run key the default stays resume - that is the workflow
+engine's documented retry contract (`launch_agent`'s docstring) - so every test
+here has a default-behavior twin. Without it the `fresh` assertions would pass
+vacuously against a code path that never resumed in the first place.
+
+Under a DERIVED key it does not: #850 made every un-keyed launch land on a
+stable name, and a name the caller never chose is not an assertion that this
+continues an earlier run. Deriving implies `fresh`, which is also what an
+un-keyed launch always got before #850, when its name was random.
 """
 
 from __future__ import annotations
@@ -105,13 +109,27 @@ class TestSpawnAdhocFresh:
 
         assert captured["fresh"] is True
 
-    def test_default_reaches_the_session_as_false(self, bobi_install):
+    def test_a_derived_name_implies_fresh(self, bobi_install):
+        """No `name` given, so the name is inferred from the task - and an
+        inference is not the caller saying "continue that run" (#850)."""
         from bobi.subagent import spawn_adhoc
 
         captured: dict = {}
         with patch("bobi.session.Session", side_effect=self._capture(captured)), \
              patch("bobi.subagent._emit_lifecycle_event"):
             spawn_adhoc(cwd="/tmp", task="work the checklist")
+
+        assert captured["fresh"] is True
+
+    def test_an_explicit_name_keeps_the_resume_default(self, bobi_install):
+        """The non-vacuity twin: `fresh` is still opt-in where a caller named
+        the run, which is the engine's retry contract."""
+        from bobi.subagent import spawn_adhoc
+
+        captured: dict = {}
+        with patch("bobi.session.Session", side_effect=self._capture(captured)), \
+             patch("bobi.subagent._emit_lifecycle_event"):
+            spawn_adhoc(cwd="/tmp", task="work the checklist", name="unit-3")
 
         assert captured["fresh"] is False
 

@@ -251,7 +251,7 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -292,7 +292,7 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -332,7 +332,7 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -373,7 +373,7 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -404,7 +404,7 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -466,7 +466,7 @@ class TestRunAgentSupervisedDeferral:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -533,7 +533,7 @@ class TestRunAgentSupervisedDeferral:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -579,7 +579,7 @@ class TestRunAgentSupervisedDeferral:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -622,7 +622,7 @@ class TestRunAgentSupervisedResume:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -704,7 +704,7 @@ class TestRunAgentSupervisedExceptions:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -739,7 +739,7 @@ class TestRunAgentSupervisedExceptions:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -791,7 +791,7 @@ class TestRunAgentSupervisedExceptions:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=registry), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             # The outer wait_for mirrors the sole caller, with the generous
@@ -847,7 +847,7 @@ class TestRunAgentSupervisedExceptions:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -889,7 +889,7 @@ class TestRunAgentSupervisedTracking:
              patch(f"{SDK_PATCH}.save_session_id") as mock_save, \
              patch(f"{SDK_PATCH}.log_activity") as mock_log, \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -939,7 +939,7 @@ class TestRunAgentSupervisedTracking:
              patch(f"{SDK_PATCH}.save_session_id"), \
              patch(f"{SDK_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             await _run_agent_supervised(

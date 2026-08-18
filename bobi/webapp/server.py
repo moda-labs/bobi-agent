@@ -96,11 +96,13 @@ class _SetupHost:
 
 
 def _claude_available() -> bool:
-    import shutil
+    from bobi.brain.claude import get_cli_path
 
-    from bobi.sdk import get_cli_path
-
-    return bool(shutil.which("claude")) or Path(get_cli_path()).exists()
+    # The resolver's bare-name fallback ("claude") is meant for exec via
+    # PATH; testing it with .exists() would read a stray CWD-relative file
+    # as an installed CLI. Only an absolute resolution counts.
+    resolved = Path(get_cli_path())
+    return resolved.is_absolute() and resolved.exists()
 
 
 def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:

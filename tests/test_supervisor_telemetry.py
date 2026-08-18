@@ -330,3 +330,141 @@ class TestSupervisorLoggingIsStdoutOnly:
         assert any(s is sys.stdout for s in streams), (
             f"run() did not attach a stdout handler (streams: {streams})"
         )
+
+
+def _grace(deferred="stalled_turn", **kw):
+    block = {"active": True, "since": 1000.0, "spell_s": 1.2,
+             "deferred": deferred, "load1": 8.0, "ncpu": 2,
+             "busy_descendants": 2, "tree_cpu_cores": 1.9,
+             "tree_cpu_ratio": 0.95}
+    block.update(kw)
+    return block
+
+
+class TestLoadGraceTelemetry:
+
+    def test_grace_freezes_the_probe_episode(self, monkeypatch):
+        """While a verdict is deferred, the wedged read does NOT open a
+        probe_failing episode - the supervisor itself judged it ambiguous.
+        The episode trail carries only the load-grace edges."""
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(tele.probe, "status_file_age",
+                            lambda root, session, now: 1.0)
+        published = []
+        t = _telemetry(published)
+
+        t.poll(_state(status="idle"))                              # healthy
+        t.poll(_state(status="running", idle=9999, load_grace=_grace()))
+        t.poll(_state(status="running", idle=9999, load_grace=_grace()))
+        t.poll(_state(status="idle"))                              # cleared
+
+        lifecycle = [d for (topic, s, d) in published
+                     if topic == "fleet/lifecycle"]
+        assert [d["event"] for d in lifecycle] == [
+            "load_grace_active", "load_grace_cleared"]
+
+    def test_grace_active_edge_carries_the_deferral_evidence(self, monkeypatch):
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(tele.probe, "status_file_age",
+                            lambda root, session, now: 1.0)
+        published = []
+        t = _telemetry(published)
+        t.poll(_state(status="error", idle=0,
+                      load_grace=_grace(deferred="dead_director")))
+
+        lifecycle = [d for (topic, s, d) in published
+                     if topic == "fleet/lifecycle"]
+        assert len(lifecycle) == 1
+        edge = lifecycle[0]
+        assert edge["event"] == "load_grace_active"
+        assert edge["deferred"] == "dead_director"
+        assert edge["load1"] == 8.0
+        assert edge["ncpu"] == 2
+        assert edge["busy_descendants"] == 2
+        assert edge["tree_cpu_cores"] == 1.9
+        assert edge["tree_cpu_ratio"] == 0.95
+        assert "since" in edge
+
+    def test_grace_cleared_edge_carries_duration(self, monkeypatch):
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(tele.probe, "status_file_age",
+                            lambda root, session, now: 1.0)
+        published = []
+        # Each poll calls now() several times; any positive duration proves the
+        # stretch was measured, the exact value is clock-dependent.
+        t = _telemetry(published)
+        t.poll(_state(status="running", idle=9999, load_grace=_grace()))
+        t.poll(_state(status="idle"))
+
+        lifecycle = [d for (topic, s, d) in published
+                     if topic == "fleet/lifecycle"]
+        cleared = [d for d in lifecycle if d["event"] == "load_grace_cleared"]
+        assert cleared and cleared[0]["duration_s"] > 0
+
+    def test_heartbeat_carries_the_grace_block(self, monkeypatch):
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(tele.probe, "status_file_age",
+                            lambda root, session, now: 1.0)
+        published = []
+        t = _telemetry(published)
+
+        t.poll(_state(status="idle"))
+        hb = [d for (topic, s, d) in published if topic == "fleet/heartbeat"]
+        assert hb[-1]["load_grace"] is None  # no deferral this poll
+
+        t.poll(_state(status="error", idle=0, load_grace=_grace("dead_director")))
+        hb = [d for (topic, s, d) in published if topic == "fleet/heartbeat"]
+        block = hb[-1]["load_grace"]
+        assert block is not None and block["deferred"] == "dead_director"
+        assert block["load1"] == 8.0
+
+    def test_open_probe_episode_resumes_after_grace(self, monkeypatch):
+        """A probe_failing episode that was OPEN before the deferral stays
+        open (frozen) during it, and closes on the first non-grace poll with
+        a healthy verdict - the deferral must not fake a recovery."""
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(tele.probe, "status_file_age",
+                            lambda root, session, now: 1.0)
+        published = []
+        t = _telemetry(published)
+
+        t.poll(_state(status="idle"))
+        t.poll(_state(status="running", idle=9999))                  # real wedge
+        t.poll(_state(status="running", idle=9999, load_grace=_grace()))
+        t.poll(_state(status="running", idle=9999, load_grace=_grace()))
+        t.poll(_state(status="idle"))                                # recovered
+
+        lifecycle = [d for (topic, s, d) in published
+                     if topic == "fleet/lifecycle"]
+        events = [d["event"] for d in lifecycle]
+        assert events == ["probe_failing", "load_grace_active",
+                          "load_grace_cleared", "probe_recovered"]
+        # The recovered edge measures from the original failure, not the
+        # deferral window.
+        recovered = [d for d in lifecycle if d["event"] == "probe_recovered"]
+        assert recovered[0]["downtime_s"] > 0
+
+    def test_operator_stop_during_grace_emits_cleared_not_recovered(
+            self, monkeypatch):
+        """An operator stop mid-deferral closes the grace episode; the probe
+        episode stays closed silently (a stop is not a recovery)."""
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(tele.probe, "status_file_age",
+                            lambda root, session, now: 1.0)
+        published = []
+        t = _telemetry(published)
+
+        t.poll(_state(status="running", idle=9999, load_grace=_grace()))
+        t.poll(_state(status="idle", load_grace=None, desired_state="stopped"))
+
+        lifecycle = [d for (topic, s, d) in published
+                     if topic == "fleet/lifecycle"]
+        events = [d["event"] for d in lifecycle]
+        assert events == ["load_grace_active", "load_grace_cleared"]
+        assert not [d for d in lifecycle if "probe" in d["event"]]

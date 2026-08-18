@@ -1277,7 +1277,7 @@ class TestHonestTerminalEmit:
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: client_cls(),
                  ClaudeAgentOptions=MagicMock,
@@ -1399,7 +1399,7 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -1457,7 +1457,7 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -1833,7 +1833,7 @@ class TestQAPhase:
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -1947,7 +1947,7 @@ class TestResumeWorkflowTimestamps:
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,

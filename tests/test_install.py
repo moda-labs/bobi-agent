@@ -6,6 +6,7 @@ Variance enters via ${VAR}/.env only. The install manifest lets doctor
 flag hand-edits before a reinstall silently destroys them.
 """
 
+import hashlib
 import json
 import os
 
@@ -17,6 +18,7 @@ from bobi import paths
 from bobi.cli import _install_pack, _write_install_gitignore, main
 from bobi.config import parse_env_file
 from bobi.doctor import _check_install_integrity
+from bobi.install import verify_install_manifest
 
 
 def _force_write(path, text):
@@ -129,6 +131,47 @@ def test_manifest_covers_installed_files(pack, project):
     assert "agent.yaml" in manifest["files"]
     assert "roles/manager/ROLE.md" in manifest["files"]
     assert "workflows/adhoc.yaml" in manifest["files"]
+
+
+def test_manifest_verifier_reports_missing_and_mismatched_files(pack, project):
+    _install_pack(pack, project)
+    dest = paths.package_dir(project)
+    role = dest / "roles" / "manager" / "ROLE.md"
+    workflow = dest / "workflows" / "adhoc.yaml"
+    _force_write(role, "")
+    _force_unlink(workflow)
+
+    failures = verify_install_manifest(dest)
+
+    assert "roles/manager/ROLE.md (sha256 mismatch)" in failures
+    assert "workflows/adhoc.yaml (missing)" in failures
+
+
+@pytest.mark.parametrize("rel", ["../outside", "/tmp/outside"])
+def test_manifest_verifier_rejects_paths_outside_package(tmp_path, rel):
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "install-manifest.json").write_text(json.dumps({
+        "files": {rel: hashlib.sha256(b"").hexdigest()},
+    }))
+
+    failures = verify_install_manifest(package)
+
+    assert failures == [f"{rel} (unsafe manifest path)"]
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [[], {}, {"files": []}, {"files": {}}, {"files": {"x": 1}}],
+)
+def test_manifest_verifier_rejects_malformed_schema(tmp_path, manifest):
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "install-manifest.json").write_text(json.dumps(manifest))
+
+    failures = verify_install_manifest(package)
+
+    assert failures
 
 
 def test_local_source_gitignore_covers_image(pack, project):
@@ -272,6 +315,18 @@ class TestDoctorIntegrity:
         paths.package_dir(project).mkdir(parents=True)
         self._set_root(project, monkeypatch)
         assert _check_install_integrity().ok
+
+    def test_malformed_manifest_is_actionable(self, project, monkeypatch):
+        package = paths.package_dir(project)
+        package.mkdir(parents=True)
+        (package / "install-manifest.json").write_text("[]")
+        self._set_root(project, monkeypatch)
+
+        result = _check_install_integrity()
+
+        assert not result.ok
+        assert result.detail == "invalid install manifest"
+        assert "Re-run" in result.hint
 
 
 class TestRuntimeWritePolicy:
@@ -646,3 +701,62 @@ class TestResolveAgentPack:
         from bobi.install import resolve_agent_pack
         monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
         assert resolve_agent_pack("nope", tmp_path / "proj") is None
+
+
+class TestInstallReportsProcessesOnOldCode:
+    """The upgrade path itself says which components still run replaced code.
+
+    Upgrading bobi in place and reinstalling the team is the flow that creates
+    the drift, and it does not restart the event server. Naming it here is what
+    keeps the operator from having to think to ask doctor (#928).
+    """
+
+    @pytest.fixture
+    def live_pid(self):
+        import subprocess
+        import sys
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            yield proc.pid
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    def _install(self, pack, home, args=()):
+        return CliRunner().invoke(
+            main,
+            ["agents", "install", str(pack), "--non-interactive", *args],
+            catch_exceptions=False,
+        )
+
+    def test_names_the_stale_processes_and_their_remedy(self, pack, tmp_path,
+                                                        monkeypatch, live_pid):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
+        run_root = home / "agents" / "my-team" / "run"
+        paths.state_path(run_root).mkdir(parents=True)
+        # A manager and an event server that predate this install.
+        paths.manager_pid_path(run_root).write_text(str(live_pid))
+        paths.event_server_pid_path(run_root).write_text(str(live_pid))
+
+        result = self._install(pack, home)
+
+        assert result.exit_code == 0, result.output
+        assert "Still running the code this install replaced" in result.output
+        assert "manager" in result.output
+        assert "event server" in result.output
+        assert "bobi agent my-team restart" in result.output
+        assert "bobi agent my-team event-server restart" in result.output
+
+    def test_a_fresh_install_says_nothing(self, pack, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
+
+        result = self._install(pack, home)
+
+        assert result.exit_code == 0, result.output
+        assert "Still running" not in result.output

@@ -54,7 +54,7 @@ class TestManagerSDKDirect:
             ClaudeSDKClient,
             ResultMessage,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -88,7 +88,7 @@ class TestManagerSDKDirect:
             ResultMessage,
             TextBlock,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -128,7 +128,7 @@ class TestManagerSDKDirect:
             ResultMessage,
             TextBlock,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -169,7 +169,7 @@ class TestManagerSDKDirect:
             ClaudeSDKClient,
             ResultMessage,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -213,7 +213,7 @@ class TestManagerSessionModule:
             ResultMessage,
             TextBlock,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",

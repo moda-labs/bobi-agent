@@ -85,6 +85,10 @@ class Workflow:
 def load_workflow(path: Path) -> Workflow:
     """Parse a workflow YAML file into a Workflow dataclass."""
     raw = yaml.safe_load(path.read_text())
+    if raw is None:
+        raise ValueError("workflow file is empty")
+    if not isinstance(raw, dict):
+        raise ValueError("workflow file must contain a YAML mapping")
 
     steps = []
     for s in raw.get("steps", []):

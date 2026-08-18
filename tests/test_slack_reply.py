@@ -15,7 +15,7 @@ from click.testing import CliRunner
 from bobi import http as pooled
 from bobi import paths
 from bobi.cli import main
-from bobi.config import save_bubble_state
+from bobi.events.state import save_bubble_state
 
 
 def _setup_project(tmp_path, monkeypatch, *, with_bubble=True):
