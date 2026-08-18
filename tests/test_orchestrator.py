@@ -13,13 +13,14 @@ from dataclasses import dataclass
 import pytest
 
 from bobi import paths
+from bobi.brain import TurnResult
 from bobi.workflow.schema import (
     DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
 from bobi.workflow.orchestrator import (
     _build_step_prompt, _read_handoff, _validate_handoff,
-    _setup_worktree,
+    _drain_response, _setup_worktree,
     run_workflow, resume_workflow, try_resume_for_event,
     make_session_name,
 )
@@ -39,6 +40,41 @@ def _bind_runtime_root(root: Path, monkeypatch) -> Path:
     monkeypatch.setenv("BOBI_BRAIN", "claude")
     paths.bind_root(root)
     return root
+
+
+@pytest.mark.asyncio
+async def test_workflow_drain_emits_credit_alert(tmp_path, monkeypatch):
+    _bind_runtime_root(tmp_path, monkeypatch)
+    posts = []
+    monkeypatch.setattr(
+        "bobi.events.publish.post_event",
+        lambda topic, payload, project_path=None: posts.append((topic, payload)),
+    )
+    monkeypatch.setattr(
+        "bobi.workflow.orchestrator.save_session_id", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "bobi.workflow.orchestrator.log_activity", lambda *args, **kwargs: None
+    )
+
+    class Client:
+        provider = "openai"
+
+        async def receive_response(self):
+            yield TurnResult(
+                session_id="workflow-credit",
+                is_error=True,
+                error_kind="credits_exhausted",
+                error_message="You've hit your usage limit",
+            )
+
+    result = await _drain_response(
+        Client(), "workflow-session", "MOD-360", model="gpt-test"
+    )
+
+    assert result.final_text is None
+    assert result.error_kind == "credits_exhausted"
+    assert [topic for topic, _ in posts] == ["system/brain.credits.exhausted"]
 
 
 # ---------------------------------------------------------------------------

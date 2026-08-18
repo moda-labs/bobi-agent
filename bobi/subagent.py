@@ -27,6 +27,7 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
+from bobi.brain_availability import observe_brain_turn
 from bobi.transient import is_transient_api_error
 from bobi.env import (
     agent_spawn_env,
@@ -497,6 +498,11 @@ async def _run_agent_supervised(
                     return result
 
                 save_session_id(name, result_msg.session_id, model=model)
+                observe_brain_turn(
+                    result_msg,
+                    session=name,
+                    provider=getattr(client, "provider", "anthropic"),
+                )
                 result.session_id = result_msg.session_id
                 result.duration_ms += result_msg.duration_ms
                 result.total_cost_usd += result_msg.total_cost_usd or 0.0

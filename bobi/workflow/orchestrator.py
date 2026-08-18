@@ -33,6 +33,7 @@ from bobi.subagent import (
     _timeout_error,
     _tool_crash_error,
 )
+from bobi.brain_availability import observe_brain_turn
 from bobi.workflow.schema import Workflow, StepDef
 from bobi.workflow.state import WorkflowRun
 from bobi.workflow.variables import VariableContext
@@ -1221,6 +1222,11 @@ async def _drain_response(
                                  session=session_name)
             elif isinstance(msg, TurnResult):
                 save_session_id(session_name, msg.session_id, model=model)
+                observe_brain_turn(
+                    msg,
+                    session=session_name,
+                    provider=getattr(client, "provider", "anthropic"),
+                )
                 # Every terminal fact the brain reported, in the session log
                 # (#845). A bare `stop` record is why diagnosing a turn-cap
                 # kill used to require the vendor CLI's own transcript: the

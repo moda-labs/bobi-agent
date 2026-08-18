@@ -12,7 +12,11 @@ import asyncio
 import pytest
 
 from bobi.brain import get_brain
-from bobi.brain.base import AssistantText, TurnResult
+from bobi.brain.base import (
+    ERROR_KIND_CREDITS_EXHAUSTED,
+    AssistantText,
+    TurnResult,
+)
 from bobi.brain.stub import STUB_BRAIN_ENV, StubBrain
 
 
@@ -91,6 +95,15 @@ def test_auth_directive_reports_structured_failure(stub_enabled):
     assert msgs[-1].is_error is True
     assert msgs[-1].error_kind == "authentication_failed"
     assert msgs[-1].error_message
+
+
+def test_credits_directive_reports_structured_failure(stub_enabled):
+    session = get_brain("stub").make_session(cwd=None, system_prompt=None)
+    msgs = asyncio.run(_drain(session, "__stub__:credits"))
+
+    assert isinstance(msgs[-1], TurnResult)
+    assert msgs[-1].is_error is True
+    assert msgs[-1].error_kind == ERROR_KIND_CREDITS_EXHAUSTED
 
 
 def test_hang_directive_stalls_until_cancelled(stub_enabled):
