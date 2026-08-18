@@ -798,6 +798,25 @@ class TestCheckPackageRequires:
         assert not results[0].ok
         assert "run setup" in results[0].hint
 
+    def test_failure_detail_survives_a_declared_why(self, tmp_path):
+        """`why:` must not suppress what the check actually reported (#771).
+
+        A blocked dispatch tells the operator to run doctor for details, so
+        doctor showing standing context instead of the failure is the same
+        unattributability bug one surface over.
+        """
+        self._write_config(tmp_path, """\
+              - name: ga4-report
+                check: ">&2 echo 'ga4: command not found'; exit 127"
+                why: "GA4 reporting needs the CLI"
+                fix: "pipx install ga4" """)
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_package_requires
+            results = _check_package_requires()
+        assert not results[0].ok
+        assert "ga4: command not found" in results[0].detail
+        assert "GA4 reporting needs the CLI" in results[0].detail
+
     def test_no_requires(self, tmp_path):
         config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True, exist_ok=True)

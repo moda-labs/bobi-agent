@@ -1023,31 +1023,60 @@ def check_requires(project_path: Path) -> list[tuple]:
     return results
 
 
+_REQUIRES_DETAIL_MAX = 160
+
+
+def _log_requires_failure(failures: list[tuple]) -> None:
+    """Record every failed requires check at ERROR, with its full detail.
+
+    This is the report that always happens. The Slack alert needs a
+    configured channel and the raised error is truncated for readability;
+    without this line a preflight failure is unattributable (#771) - a
+    timeout, a missing command, and an auth error all read identically.
+    """
+    from bobi.config import requires_detail
+    for entry, detail in failures:
+        line = f"Requires check failed: {entry.name}: {requires_detail(detail)}"
+        if entry.why:
+            line += f" | why: {entry.why}"
+        if entry.fix:
+            line += f" | fix: {entry.fix}"
+        log.error(line)
+
+
 def _alert_requires_failure(
     project_path: Path,
     failures: list[tuple],
 ) -> None:
-    """Post a Slack alert about failed requires checks. Best-effort."""
+    """Post a Slack alert about failed requires checks. Best-effort.
+
+    Alerting is a bonus surface, not the record: callers log the same
+    failures at ERROR first, so a team without `channels:` still gets the
+    detail. `channels:` also scopes event subscription, so it is not a
+    field an operator can set just to turn alerting on.
+    """
     try:
-        from bobi.config import Config
+        from bobi.config import Config, requires_detail
         cfg = Config.load(project_path)
         slack_svc = next(
             (s for s in cfg.services if s.name == "slack" and s.channels),
             None,
         )
         if not slack_svc:
-            log.warning("No Slack service with channels configured — "
-                        "cannot alert on requires failure")
+            log.warning("No Slack service with channels configured; "
+                        "requires failure reported to the log only")
             return
         token = slack_svc.credentials.get("bot_token", "")
         if not token:
-            log.warning("Slack bot_token not configured — "
-                        "cannot alert on requires failure")
+            log.warning("Slack bot_token not configured; "
+                        "requires failure reported to the log only")
             return
         channel = slack_svc.channels[0]
         lines = []
         for entry, detail in failures:
-            line = f"*{entry.name}*: {entry.why or detail}"
+            line = f"*{entry.name}*: {requires_detail(detail)}"
+            if entry.why:
+                line += f"\nWhy: {entry.why}"
             if entry.fix:
                 line += f"\nFix: `{entry.fix}`"
             lines.append(line)
@@ -1217,10 +1246,17 @@ def launch_agent(
     req_results = check_requires(root)
     req_failures = [(entry, detail) for entry, ok, detail in req_results if not ok]
     if req_failures:
+        # Log before alerting: the log is the one surface that is always
+        # there, and the alert is best-effort by design.
+        _log_requires_failure(req_failures)
         _alert_requires_failure(root, req_failures)
-        names = ", ".join(e.name for e, _ in req_failures)
+        from bobi.config import requires_detail
+        summary = "; ".join(
+            f"{e.name}: {requires_detail(d, _REQUIRES_DETAIL_MAX)}"
+            for e, d in req_failures
+        )
         raise RuntimeError(
-            f"Required dependency check failed: {names}. "
+            f"Required dependency check failed: {summary}. "
             f"Run `bobi agent <name> doctor` for details and fix commands."
         )
 

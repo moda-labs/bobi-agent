@@ -4,6 +4,7 @@ For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 """
 
 import json
+import logging
 import os
 import tempfile
 import shutil
@@ -286,6 +287,151 @@ class TestAlertRequiresFailure:
                                    why="skills", fix="setup"), "failed")]
         # Should not raise
         _alert_requires_failure(tmp_path, failures)
+
+    @patch("bobi.slack.post_slack_message")
+    def test_alert_carries_detail_alongside_why(self, mock_post, tmp_path):
+        """`why:` is standing context, not a substitute for what went wrong.
+
+        Rendering `why or detail` hid the real failure from every team that
+        bothered to document its dependency (#771).
+        """
+        from bobi.config import RequiresEntry
+        from bobi.subagent import _alert_requires_failure
+        _write_agent_yaml(
+            tmp_path,
+            "entry_point: x\nservices:\n  - name: slack\n    channels: [C123]\n"
+            "    credentials:\n      bot_token: xoxb-test\n",
+        )
+        failures = [(RequiresEntry(name="ga4-report", check="ga4 --version",
+                                   why="GA4 reporting needs the CLI",
+                                   fix="pipx install ga4"),
+                     "check timed out (10s)")]
+        _alert_requires_failure(tmp_path, failures)
+        body = mock_post.call_args[0][2]
+        assert "ga4-report" in body
+        assert "check timed out (10s)" in body
+        assert "GA4 reporting needs the CLI" in body
+        assert "pipx install ga4" in body
+
+
+class TestRequiresFailureAttribution:
+    """A blocked dispatch has to say WHICH check failed and WHY (#771).
+
+    `run_requires_checks` already distinguishes a timeout from a missing
+    command from the check's own stderr; that detail must reach the operator
+    through the raised error and the manager log, whether or not Slack
+    alerting is configured.
+    """
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path):
+        # No `services:` here, so the Slack alert cannot fire from this root,
+        # which is exactly the configuration the detail has to survive.
+        _write_agent_yaml(tmp_path)
+        paths.bind_root(tmp_path)
+        yield
+        paths.bind_root(None)
+
+    @staticmethod
+    def _failures(*specs):
+        """Build check_requires() output: (entry, passed, detail) tuples."""
+        from bobi.config import RequiresEntry
+        return [
+            (RequiresEntry(name=name, check="ga4 --version", why=why, fix=fix),
+             False, detail)
+            for name, detail, why, fix in specs
+        ]
+
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_raise_carries_per_entry_detail(self, mock_launch, mock_reg, tmp_path):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        failures = self._failures(
+            ("ga4-report", "check timed out (10s)", "", ""))
+        with patch("bobi.subagent.check_requires", return_value=failures):
+            with pytest.raises(RuntimeError) as exc:
+                launch_agent(task="Fix #1", cwd=str(tmp_path),
+                             workflow_name="adhoc")
+        assert "ga4-report: check timed out (10s)" in str(exc.value)
+        mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_raise_names_every_failing_check(self, mock_launch, mock_reg,
+                                             tmp_path):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        failures = self._failures(
+            ("ga4-report", "check timed out (10s)", "", ""),
+            ("gstack", "check command failed: [Errno 2] no browse", "", ""),
+        )
+        with patch("bobi.subagent.check_requires", return_value=failures):
+            with pytest.raises(RuntimeError) as exc:
+                launch_agent(task="Fix #1", cwd=str(tmp_path),
+                             workflow_name="adhoc")
+        msg = str(exc.value)
+        assert "ga4-report: check timed out (10s)" in msg
+        assert "gstack: check command failed: [Errno 2] no browse" in msg
+
+    @patch("bobi.slack.post_slack_message")
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_error_log_carries_detail_when_slack_cannot_alert(
+            self, mock_launch, mock_reg, mock_post, tmp_path, caplog):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        failures = self._failures(
+            ("ga4-report", "check timed out (10s)",
+             "GA4 reporting needs the CLI", "pipx install ga4"))
+        with caplog.at_level(logging.ERROR, logger="bobi.subagent"):
+            with patch("bobi.subagent.check_requires", return_value=failures):
+                with pytest.raises(RuntimeError):
+                    launch_agent(task="Fix #1", cwd=str(tmp_path),
+                                 workflow_name="adhoc")
+        errors = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.ERROR]
+        assert any(
+            "ga4-report" in m and "check timed out (10s)" in m
+            and "pipx install ga4" in m
+            for m in errors
+        ), errors
+        # The alert path no-ops safely with no `channels:`: no post, no raise.
+        mock_post.assert_not_called()
+
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_raise_truncates_a_runaway_detail(self, mock_launch, mock_reg,
+                                              tmp_path, caplog):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        long_detail = ("stderr line that will not stop " * 40).strip()
+        failures = self._failures(("ga4-report", long_detail, "", ""))
+        with caplog.at_level(logging.ERROR, logger="bobi.subagent"):
+            with patch("bobi.subagent.check_requires", return_value=failures):
+                with pytest.raises(RuntimeError) as exc:
+                    launch_agent(task="Fix #1", cwd=str(tmp_path),
+                                 workflow_name="adhoc")
+        msg = str(exc.value)
+        assert "ga4-report: stderr line that will not stop" in msg
+        assert len(msg) < 400
+        # Truncation is display-only: the log still records the whole detail.
+        assert any(long_detail in r.getMessage() for r in caplog.records
+                   if r.levelno >= logging.ERROR)
+
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_detail_free_failure_still_reads_cleanly(self, mock_launch,
+                                                     mock_reg, tmp_path):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        failures = self._failures(("gstack", "", "", ""))
+        with patch("bobi.subagent.check_requires", return_value=failures):
+            with pytest.raises(RuntimeError) as exc:
+                launch_agent(task="Fix #1", cwd=str(tmp_path),
+                             workflow_name="adhoc")
+        msg = str(exc.value)
+        assert "gstack: no detail" in msg
 
 
 class TestLaunchAgent:

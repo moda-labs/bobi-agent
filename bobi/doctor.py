@@ -233,7 +233,7 @@ def _check_bobi_install_integrity() -> CheckResult:
 
 def _check_package_requires() -> list[CheckResult]:
     """Check host-level dependencies declared in agent.yaml requires: block."""
-    from bobi.config import Config, run_requires_checks
+    from bobi.config import Config, requires_detail, run_requires_checks
 
     root = bound_root()
     if not root:
@@ -251,10 +251,16 @@ def _check_package_requires() -> list[CheckResult]:
             results.append(CheckResult(
                 f"Requires: {entry.name}", ok=True, detail="healthy"))
         else:
+            # `why` is standing context, never a substitute for what actually
+            # failed - doctor is where a blocked dispatch sends the operator,
+            # so it has to show the check's own detail (#771).
+            text = requires_detail(detail)
+            if entry.why:
+                text += f" (needed for: {entry.why})"
             hint = f"Fix: {entry.fix}" if entry.fix else ""
             results.append(CheckResult(
                 f"Requires: {entry.name}", ok=False,
-                detail=entry.why or detail,
+                detail=text,
                 hint=hint))
     return results
 
