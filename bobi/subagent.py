@@ -478,10 +478,7 @@ async def _run_agent_supervised(
         # `except asyncio.TimeoutError` (until now unreachable) and is recorded.
         async with asyncio.timeout(timeout if timeout and timeout > 0 else None):
             try:
-                connect_prompt = prompt if not saved_id else None
-                await client.connect(connect_prompt)
-                if saved_id:
-                    await client.query(prompt)
+                await client.connect()
             except Exception as e:
                 if not saved_id:
                     raise
@@ -499,7 +496,10 @@ async def _run_agent_supervised(
                 except Exception:
                     pass
                 client = _build_client("")
-                await client.connect(prompt)
+                await client.connect()
+            # The task is turn 1, explicitly — connect() is never a turn
+            # (#1016). Fresh and resumed sessions now take one identical path.
+            await client.query(prompt)
 
             while True:
                 result_msg = None

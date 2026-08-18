@@ -275,7 +275,8 @@ async def test_gateway_openai_session_routes_default_responses_to_stub(
         system_prompt="Reply exactly STUB-REPLY and stop.",
     )
     try:
-        await session.connect("First turn.")
+        await session.connect()
+        await session.query("First turn.")
         first_text, first_result = await _drain(session)
         await session.query("Second turn.")
         second_text, second_result = await _drain(session)
@@ -327,7 +328,8 @@ async def test_gateway_openai_session_routes_fresh_and_resume_to_stub(
         system_prompt="Reply exactly STUB-REPLY and stop.",
     )
     try:
-        await session.connect("First turn.")
+        await session.connect()
+        await session.query("First turn.")
         first_text, first_result = await _drain(session)
         await session.query("Second turn.")
         second_text, second_result = await _drain(session)

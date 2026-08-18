@@ -105,10 +105,9 @@ class _StubSession:
         self._options = options or {}
         self._pending: str | None = None
 
-    async def connect(self, prompt: str | None = None) -> None:
-        # Returns promptly (a real connect can be slow; the stub never is) so
-        # the manager leaves "starting" as soon as the startup turn drains.
-        self._pending = prompt
+    async def connect(self) -> None:
+        # Setup only, never a turn (#1016) — input arrives via query().
+        return None
 
     async def query(self, text: str) -> None:
         self._pending = text

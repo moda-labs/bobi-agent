@@ -529,10 +529,11 @@ class Session:
     async def _attempt_reconnect(self):
         """Build and connect one fresh rotation candidate under a hard bound.
 
-        ``BrainSession.connect(None)`` opens a session without sending input, so
-        it creates no turn and there is deliberately no ``receive_response``
-        call here. The old code drained that nonexistent turn and made every
-        successful Claude reconnect look hung for 240 seconds (#799).
+        ``BrainSession.connect()`` is setup only — it never creates a turn
+        (#1016 made that the interface-wide invariant), so there is
+        deliberately no ``receive_response`` call here. The old code drained
+        that nonexistent turn and made every successful Claude reconnect look
+        hung for 240 seconds (#799).
 
         The candidate is not published through ``self._client``. The inbox loop
         remains the single owner of that pointer and swaps only between turns.
@@ -1467,30 +1468,35 @@ class Session:
         self._client = self._make_brain_session(resume=resume_id)
 
         try:
-            connect_prompt = startup_prompt if not resume_id else None
-            await self._client.connect(connect_prompt)
+            await self._client.connect()
         except Exception as e:
             if resume_id:
                 log.warning(f"Resume failed for '{self.name}', retrying fresh: {e}")
                 save_session_id(self.name, "")
                 self._client = self._make_brain_session(resume=None)
-                await self._client.connect(startup_prompt)
+                await self._client.connect()
             else:
                 raise
 
         self._input_ready = asyncio.Event()
-        self._set_state("running")
+        self._set_state("waiting_input")
         registry = get_registry()
-        registry.update(self.name, status="running")
+        registry.update(self.name, status="idle")
 
-        if startup_prompt and not resume_id:
-            await self._drain_turn()
-        elif startup_prompt and resume_id:
-            await self._client.query(startup_prompt)
-            await self._drain_turn()
-        else:
-            self._set_state("waiting_input")
-            registry.update(self.name, status="idle")
+        if startup_prompt:
+            # The launch brief is a message, not a connect-time turn (#1016):
+            # it goes through _process_message like everything the inbox
+            # delivers — same activity log, same transient-error retry, same
+            # turn machinery — so no text can execute inside the handshake.
+            # _run drives this first delivery inline (rather than queueing it
+            # for the inbox loop) because start() keeps its contract: it
+            # returns only once the startup turn drained, and one-shot
+            # callers read the session's results immediately after.
+            await self._process_message(Message(
+                id=f"startup-{os.getpid()}-{int(time.time())}",
+                sender="launch",
+                text=startup_prompt,
+            ))
 
         self._ready.set()
         log.info(f"Session '{self.name}' ready")

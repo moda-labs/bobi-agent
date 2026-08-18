@@ -125,7 +125,8 @@ async def test_gateway_session_routes_to_stub(stub_gateway, tmp_path, monkeypatc
         options={"max_turns": 1},
     )
     try:
-        await session.connect("Say hello.")
+        await session.connect()
+        await session.query("Say hello.")
         text, result = await _drain(session)
     finally:
         await session.disconnect()
@@ -175,7 +176,8 @@ async def test_gateway_live_backend_completes_a_turn(tmp_path, monkeypatch):
         options={"max_turns": 1},
     )
     try:
-        await session.connect("Reply with exactly: GATEWAY-OK")
+        await session.connect()
+        await session.query("Reply with exactly: GATEWAY-OK")
         text, result = await _drain(session)
     finally:
         await session.disconnect()

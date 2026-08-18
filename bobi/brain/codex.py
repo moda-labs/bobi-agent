@@ -232,10 +232,11 @@ class _CodexSession:
             env=self._mcp_env or agent_spawn_env(),
         )
 
-    async def connect(self, prompt: str | None = None) -> None:
-        # No persistent process — just stash any startup prompt for the first
-        # receive_response (mirrors how session.py drains the connect turn).
-        self._pending = prompt
+    async def connect(self) -> None:
+        # No persistent process, and no prompt: connect is setup only (#1016).
+        # Input arrives via query(); a drain with nothing pending emits a
+        # no-op result (see receive_response).
+        return None
 
     async def query(self, text: str) -> None:
         self._pending = text

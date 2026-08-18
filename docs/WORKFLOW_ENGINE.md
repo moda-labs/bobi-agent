@@ -377,10 +377,26 @@ the step's output scope and feed downstream routing and templating.
    in the registry. A suspended run is *not* terminal: it skips this entirely
    and stays `waiting`.
 
-The session is created once and reused across all prompt steps, so the agent
-keeps full context. The engine drains exactly one turn per prompt
-(`_drain_response`) and saves the returned session ID so a resumed run can pick
-the same conversation back up.
+The brain session opens **lazily, at the first prompt step that executes**, and
+is then reused across all prompt steps, so the agent keeps full context. The
+engine drains exactly one turn per prompt (`_drain_response`) and saves the
+returned session ID so a resumed run can pick the same conversation back up. A
+workflow whose reachable steps are all deterministic opens no brain session at
+all.
+
+**`connect()` is never a turn (#1016).** Opening a session delivers no text, so
+no execution point exists before step 0. The launch task is not an instruction
+the agent acts on directly: it reaches the agent as a labelled YAML context
+block (`input.task`, alongside the other scopes) prepended to the **first
+prompt step's** prompt — on a fresh transcript, and on a resumed transcript
+when a new dispatch arrives. The same fold delivers the persisted scopes when a
+mid-run model/agent switch starts a fresh session; no turn is spent on context
+injection anywhere. Before this invariant, the raw task text drained as a full
+tool-enabled agent turn *before* step 0, which is how one catch-up dispatch of
+`daily-standup` published two standups. If a run completes without any prompt
+step executing, the engine says so — it emits
+`agent/workflow.brief_undelivered` rather than letting the launch brief vanish
+silently.
 
 A launch is admitted before any of this runs. `max_launch_depth` bounds how
 deep a chain of runs launching runs can go, and a run launching a named
