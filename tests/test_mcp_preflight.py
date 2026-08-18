@@ -84,7 +84,7 @@ def _install_fake_client(monkeypatch, snapshots, interval=0.0):
     _FakeClient.HANG_DISCONNECT = False
     _FakeClient.LAST_OPTIONS = None
     monkeypatch.setattr(bobi.brain, "get_brain", lambda: _FakeClaudeBrain())
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "claude")
     # Don't actually sleep between polls.
     monkeypatch.setattr(validate, "MCP_PROBE_POLL_INTERVAL", interval)
 

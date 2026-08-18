@@ -1214,7 +1214,7 @@ class TestBubbleIsolation:
     def test_cli_events_publish_delivers_custom_topic(self, event_server, bobi_env):
         """`bobi agent <name> events publish source/type` uses the same signed
         publish path as library callers and reaches a source/type subscriber."""
-        from bobi.config import bubble_state_path, save_bubble_state
+        from bobi.events.state import bubble_state_path, save_bubble_state
 
         base_url, *_ = event_server
         dep = _register(base_url, "custom-topic-cli", ["alert/firing"])
@@ -1411,7 +1411,7 @@ class TestSchedulerEndToEnd:
 
     def test_native_check_finding_delivered_to_subscriber(
             self, event_server, bobi_env):
-        from bobi.config import bubble_state_path
+        from bobi.events.state import bubble_state_path
         from bobi.events import publish as publish_mod
         from bobi.events.server import ensure_bubble
         from bobi.events.subscriptions import monitor_subscription_keys

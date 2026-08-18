@@ -118,6 +118,45 @@ def test_installed_artifact_spawns_directly_with_sanitized_environment(
     assert env["WS_NO_UTF_8_VALIDATE"] == "1"
 
 
+def test_start_records_the_bundle_it_launched(tmp_path, monkeypatch):
+    """The node process outlives an upgrade that overwrites its bundle (#928).
+
+    Recording the bundle's digest at launch is what lets doctor say the
+    running server is executing bytes that no longer exist on disk.
+    """
+    from bobi import launch_stamp
+
+    es_dir = tmp_path / "event-server"
+    _write_valid_artifact(es_dir)
+    paths.state_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+
+    class FakePopen:
+        # A live pid, so the staleness check sees a running process.
+        pid = os.getpid()
+
+    monkeypatch.setattr(es, "_is_installed_event_server_dir", lambda path: True)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "resolve_node_runtime", lambda: ("/node20", "v20.19.2"))
+    monkeypatch.setattr(es.subprocess, "Popen", lambda args, **kwargs: FakePopen())
+    monkeypatch.setattr(es, "health", _started_health())
+
+    assert es.ensure_running(8080, project_path=tmp_path) == "started"
+
+    bundle = es_dir / "dist" / artifact.BUNDLE_NAME
+    stamp = json.loads(
+        launch_stamp.stamp_path(tmp_path, launch_stamp.EVENT_SERVER).read_text())
+    assert stamp["pid"] == os.getpid()
+    assert stamp["artifact"] == str(bundle)
+    assert stamp["artifact_sha256"] == hashlib.sha256(bundle.read_bytes()).hexdigest()
+    assert launch_stamp.stale_processes(tmp_path) == []
+
+    # The upgrade replaces the bundle under the running node.
+    bundle.write_bytes(b"console.log('upgraded')\n")
+    (stale,) = launch_stamp.stale_processes(tmp_path)
+    assert stale.name == "event server"
+    assert artifact.BUNDLE_NAME in stale.detail
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

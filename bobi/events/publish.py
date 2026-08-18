@@ -47,7 +47,7 @@ def bubble_context(project_path: Path | None) -> tuple[str, str, str]:
     else:
         project_path = Path(project_path)
 
-    from bobi.config import load_bubble_state
+    from bobi.events.state import load_bubble_state
 
     bubble = load_bubble_state(project_path)
     return (_event_server_url(project_path),

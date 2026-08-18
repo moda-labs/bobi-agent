@@ -130,6 +130,56 @@ class TestRequiresGating:
 
         assert not results[0][1]  # failed
 
+    def test_blocked_dispatch_attributes_the_real_check(self, tmp_path, caplog):
+        """The whole preflight path, from agent.yaml to the operator (#771).
+
+        No stubbed check results: a real `requires:` entry runs a real failing
+        command, and the operator has to be able to tell WHICH dependency
+        failed and HOW from the raised error and the manager log alone. The
+        team has no `channels:`, so the Slack alert cannot fire - which is the
+        configuration that made these failures unattributable.
+        """
+        import logging
+
+        from bobi import paths
+        from bobi.subagent import _requires_cache, launch_agent
+
+        config_dir = tmp_path / "package"
+        config_dir.mkdir()
+        (config_dir / "agent.yaml").write_text(textwrap.dedent("""\
+            agent: t
+            entry_point: manager
+            services:
+              - name: slack
+                credentials:
+                  bot_token: xoxb-test
+            requires:
+              - name: ga4-report
+                check: ">&2 echo 'ga4: command not found'; exit 127"
+                why: "GA4 reporting needs the CLI"
+                fix: "pipx install ga4"
+        """))
+        _requires_cache.clear()
+        paths.bind_root(tmp_path)
+        try:
+            with caplog.at_level(logging.ERROR, logger="bobi.subagent"), \
+                    patch("bobi.subagent.get_registry") as mock_reg, \
+                    patch("bobi.subagent._launch_detached") as mock_launch:
+                mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+                with pytest.raises(RuntimeError) as exc:
+                    launch_agent(task="Fix #1", cwd=str(tmp_path),
+                                 workflow_name="adhoc")
+        finally:
+            paths.bind_root(None)
+            _requires_cache.clear()
+
+        assert "ga4-report: ga4: command not found" in str(exc.value)
+        mock_launch.assert_not_called()
+        errors = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.ERROR]
+        assert any("ga4-report" in m and "ga4: command not found" in m
+                   and "pipx install ga4" in m for m in errors), errors
+
 
 class TestAgentResult:
     """AgentResult dataclass fields."""

@@ -161,10 +161,19 @@ class TestShippedPacksRoute:
         event = {
             "type": "github.issues",
             "fields": {"action": "assigned", "number": "42",
-                       "repo": "moda-labs/bobi-agent", "title": "a task"},
+                       "repo": "moda-labs/bobi-agent", "title": "a task",
+                       "assignees": "alice, bobi"},
         }
-        matched = [r for r in rules if r.matches(event)]
+        matched = [r for r in rules if r.matches(event, self_login="bobi")]
         assert [r.workflow for r in matched] == ["issue-lifecycle"]
+
+        other_assignment = {
+            **event,
+            "fields": {**event["fields"], "assignees": "alice, bob"},
+        }
+        assert not any(
+            r.matches(other_assignment, self_login="bobi") for r in rules
+        )
 
 
 # --- the drift pin --------------------------------------------------------

@@ -500,6 +500,7 @@ def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
         "_check_workflows",
         "_check_bubble_auth",
         "_check_event_server",
+        "_check_running_code",
         "_check_ingress_reachability",
         "_check_recent_events",
         "_check_long_term_memory",
@@ -513,8 +514,14 @@ def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
     monkeypatch.setattr(
         doctor, "_check_slack_socket_mode", lambda: socket_check, raising=False,
     )
+    # The stale-process check is only useful if `doctor` actually runs it (#928).
+    running_code = CheckResult("Running code", ok=True, detail="sentinel")
+    monkeypatch.setattr(doctor, "_check_running_code", lambda: running_code)
 
-    assert socket_check in doctor.run_doctor()
+    results = doctor.run_doctor()
+
+    assert socket_check in results
+    assert running_code in results
 
 
 def test_event_server_check_surfaces_node_prerequisite(monkeypatch):
@@ -791,6 +798,25 @@ class TestCheckPackageRequires:
         assert not results[0].ok
         assert "run setup" in results[0].hint
 
+    def test_failure_detail_survives_a_declared_why(self, tmp_path):
+        """`why:` must not suppress what the check actually reported (#771).
+
+        A blocked dispatch tells the operator to run doctor for details, so
+        doctor showing standing context instead of the failure is the same
+        unattributability bug one surface over.
+        """
+        self._write_config(tmp_path, """\
+              - name: ga4-report
+                check: ">&2 echo 'ga4: command not found'; exit 127"
+                why: "GA4 reporting needs the CLI"
+                fix: "pipx install ga4" """)
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_package_requires
+            results = _check_package_requires()
+        assert not results[0].ok
+        assert "ga4: command not found" in results[0].detail
+        assert "GA4 reporting needs the CLI" in results[0].detail
+
     def test_no_requires(self, tmp_path):
         config_dir = paths.package_dir(tmp_path)
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -805,3 +831,96 @@ class TestCheckPackageRequires:
             from bobi.doctor import _check_package_requires
             results = _check_package_requires()
         assert results == []
+
+
+# --- Running code vs installed code (#928) ---
+
+
+class TestCheckRunningCode:
+    """`doctor` reported a six-day-old event server healthy while the bundle
+    it executes had been overwritten by an upgrade. The pack-drift check has
+    always had this instinct for FILES; this is the same question asked of
+    running PROCESSES."""
+
+    @pytest.fixture
+    def live_pid(self):
+        import subprocess
+        import sys
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            yield proc.pid
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    def _bind(self, tmp_path, monkeypatch):
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("bobi.doctor.bound_root", lambda: tmp_path)
+
+    def test_nothing_running_passes(self, tmp_path, monkeypatch):
+        from bobi.doctor import _check_running_code
+
+        self._bind(tmp_path, monkeypatch)
+
+        result = _check_running_code()
+
+        assert result.ok
+        assert "no long-lived local processes" in result.detail
+
+    def test_matching_launch_passes_and_names_the_version(self, tmp_path,
+                                                          monkeypatch, live_pid):
+        from bobi import launch_stamp
+        from bobi.doctor import _check_running_code
+
+        self._bind(tmp_path, monkeypatch)
+        paths.manager_pid_path(tmp_path).write_text(str(live_pid))
+        launch_stamp.record_launch(tmp_path, launch_stamp.MANAGER, live_pid)
+
+        result = _check_running_code()
+
+        assert result.ok
+        assert "manager" in result.detail
+        assert launch_stamp.installed_bobi_version() in result.detail
+
+    def test_stale_processes_are_named_with_their_remedy(self, tmp_path,
+                                                        monkeypatch, live_pid):
+        """The upgrade case: both long-lived processes predate the install."""
+        from bobi.doctor import _check_running_code
+
+        self._bind(tmp_path, monkeypatch)
+        paths.manager_pid_path(tmp_path).write_text(str(live_pid))
+        paths.event_server_pid_path(tmp_path).write_text(str(live_pid))
+
+        result = _check_running_code()
+
+        assert not result.ok
+        # A warning, not a failure: the install is fine, a restart is pending.
+        assert not result.required
+        assert "manager" in result.detail and "event server" in result.detail
+        assert "restart" in result.hint
+        assert "event-server restart" in result.hint
+
+    def test_restarting_the_named_process_clears_the_check(self, tmp_path,
+                                                           monkeypatch, live_pid):
+        from bobi import launch_stamp
+        from bobi.doctor import _check_running_code
+
+        self._bind(tmp_path, monkeypatch)
+        paths.event_server_pid_path(tmp_path).write_text(str(live_pid))
+        assert not _check_running_code().ok
+
+        launch_stamp.record_launch(tmp_path, launch_stamp.EVENT_SERVER, live_pid)
+
+        assert _check_running_code().ok
+
+    def test_no_runtime_selected_says_so(self, monkeypatch):
+        from bobi.doctor import _check_running_code
+
+        monkeypatch.setattr("bobi.doctor.bound_root", lambda: None)
+
+        result = _check_running_code()
+
+        assert result.ok
+        assert result.detail == "no runtime selected"

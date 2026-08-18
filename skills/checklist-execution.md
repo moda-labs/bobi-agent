@@ -260,6 +260,11 @@ wait
 Two turns instead of one per poll. Each fanned-out unit gets none of your
 context, so every task string must stand alone.
 
+That requirement now has teeth: an un-keyed launch derives its run key from the
+task text, so two units sharing a task string share a run. Give each unit a
+distinct task - or a distinct `--id` - and the keys follow. `--id-random` is for
+the rare case where N copies of a genuinely identical task are the point.
+
 ## Re-dispatching after a death
 
 A worker that died is restarted by a human, and the restart is an ordinary

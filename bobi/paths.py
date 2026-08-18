@@ -234,6 +234,10 @@ def manager_log_path(root: Path | None = None) -> Path:
     return state_dir(root) / "manager.log"
 
 
+def event_server_pid_path(root: Path | None = None) -> Path:
+    return state_path(root) / "event-server.pid"
+
+
 def long_term_memory_path(root: Path | None = None) -> Path:
     return state_path(root) / "long_term_memory.md"
 

@@ -20,7 +20,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from bobi.config import Config, save_bubble_state
+from bobi.config import Config
+from bobi.events.state import save_bubble_state
 from bobi.events.server import (
     _post_register,
     ensure_running,

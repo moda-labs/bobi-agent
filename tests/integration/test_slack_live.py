@@ -35,7 +35,7 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-from bobi.config import save_bubble_state
+from bobi.events.state import save_bubble_state
 from bobi.events.gateway import channels_history, channels_send
 from bobi.events.server import _post_register, ensure_running
 from bobi.events.signing import signed_request

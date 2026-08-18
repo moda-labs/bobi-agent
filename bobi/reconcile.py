@@ -33,6 +33,7 @@ import time
 
 from bobi.sdk import (
     ACTIVE_STATUSES,
+    DIED_WITHOUT_TERMINAL,
     FAILED_STATUSES,
     TERMINAL_COMPLETED,
     TERMINAL_CRASHED,
@@ -102,6 +103,48 @@ def _completed_payload(entry) -> dict:
     }
 
 
+def is_dead_run(entry) -> bool:
+    """An entry claiming to be running whose process is gone."""
+    return (entry.status in _RECONCILABLE_ACTIVE
+            and bool(entry.pid) and not pid_alive(entry.pid))
+
+
+def close_dead_run(entry, registry=None, *, emit=None):
+    """Crash-close one dead run and emit for it.
+
+    Returns ``(closed_entry, emit_landed)``.
+
+    Factored out of :func:`reconcile_sessions` because launch admission needs
+    the same close: since #850 an un-keyed relaunch lands on its predecessor's
+    session name, so admission is the first thing to notice a run that died
+    without reporting a terminal status, and it must clear that corpse or the
+    run refuses its own relaunch until the next manager start.
+
+    Emitting here rather than leaving it to the next sweep is the point.
+    Admission calls this immediately before ``register()`` replaces the entry
+    wholesale - the crash record, and the un-emitted ``emit_confirmed=False``
+    the sweep keys off, would be gone. Nobody would ever learn the run died.
+    """
+    from dataclasses import replace
+
+    registry = registry or get_registry()
+    emit = emit or _default_emit
+    error = entry.error or DIED_WITHOUT_TERMINAL
+    registry.mark_terminal(entry.name, TERMINAL_CRASHED, error=error,
+                           reconciled=True)
+    # The crashed view is synthesized in memory, NOT re-read from state.json -
+    # the same rule SessionRegistry._reap_if_dead documents. mark_terminal
+    # no-ops on a missing or torn file, so a re-read can hand back the stale
+    # ACTIVE entry, and admission decides whether to refuse from this value.
+    closed = replace(entry, status=TERMINAL_CRASHED, pid=0, error=error,
+                     terminal_at=time.time())
+    landed = emit("agent/session.failed", _failed_payload(closed, "crashed"))
+    if landed:
+        registry.update(entry.name, emit_confirmed=True)
+        closed = replace(closed, emit_confirmed=True)
+    return closed, landed
+
+
 def reconcile_sessions(registry=None, *, now: float | None = None,
                        emit=None, cancel=None,
                        exclude_names: set[str] | None = None) -> list[dict]:
@@ -148,17 +191,8 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
             continue
 
         # (2) Live status, dead pid → crashed + emit.
-        if entry.pid and not pid_alive(entry.pid):
-            registry.mark_terminal(
-                entry.name, TERMINAL_CRASHED,
-                error=(entry.error
-                       or "agent process died without reporting a terminal status"),
-                reconciled=True,
-            )
-            landed = emit("agent/session.failed",
-                          _failed_payload(registry.get(entry.name), "crashed"))
-            if landed:
-                registry.update(entry.name, emit_confirmed=True)
+        if is_dead_run(entry):
+            _closed, landed = close_dead_run(entry, registry, emit=emit)
             actions.append({"name": entry.name, "action": "crashed",
                             "emitted": landed})
             continue

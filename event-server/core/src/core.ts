@@ -51,7 +51,7 @@ export interface DeploymentRecord {
 
 // A trust bubble. Minted once per named agent start; every deployment of that
 // instance JOINs it. The key signs publishes and join-registrations to prove
-// bubble membership. See bobi/config.py:load_or_mint_bubble.
+// bubble membership. See bobi/events/server.py:ensure_bubble (persistence in bobi/events/state.py).
 export interface BubbleRecord {
 	id: string;
 	key: string;

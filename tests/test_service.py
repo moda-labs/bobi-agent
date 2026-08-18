@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 def test_launch_team_spawns_detached_manager_and_returns_entry(bobi_install, monkeypatch):
     from bobi import paths
-    from bobi.config import save_bubble_state, save_deployment_state
+    from bobi.events.state import save_bubble_state, save_deployment_state
     from bobi.sdk import SessionEntry, get_registry
     from bobi.service import launch_team
 
@@ -254,3 +254,54 @@ def test_team_status_returns_manager_and_active_agents(bobi_install):
         "bobi-test-agent-director",
         "wf-test-agent-task",
     ]
+
+
+def test_manager_start_records_the_bobi_it_is_running(bobi_install, monkeypatch,
+                                                      tmp_path):
+    """An in-place upgrade replaces the framework under a live manager (#928).
+
+    Drives the real start path up to the health endpoint, which is the first
+    thing after the pid file is written, and checks the manager recorded what
+    it launched from beside it.
+    """
+    import json
+    import signal
+
+    import pytest
+
+    from bobi import launch_stamp
+    from bobi.config import Config
+    from bobi.service import run_manager_from_config
+
+    class StopAfterPidFile(Exception):
+        pass
+
+    def stop(*args, **kwargs):
+        raise StopAfterPidFile
+
+    # Manager boot renders the team's instructions into the brain's global
+    # instruction files, which live in the operator's real home. Point every
+    # one of them at the sandbox before driving the real start path.
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".codex").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setattr("bobi.manager_health.start", stop)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    try:
+        with pytest.raises(StopAfterPidFile):
+            run_manager_from_config(bobi_install.repo_path,
+                                    Config.load(bobi_install.repo_path))
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+
+    stamp_path = launch_stamp.stamp_path(bobi_install.repo_path,
+                                         launch_stamp.MANAGER)
+    stamp = json.loads(stamp_path.read_text())
+    assert stamp["pid"] == os.getpid()
+    assert stamp["bobi_version"] == launch_stamp.installed_bobi_version()
+    # A manager launched from the installed bobi is not stale - no false
+    # positive on a clean install.
+    assert launch_stamp.stale_processes(bobi_install.repo_path) == []
