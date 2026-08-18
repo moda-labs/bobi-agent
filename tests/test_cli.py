@@ -461,6 +461,29 @@ class TestEventsCommand:
         assert "deploy" in result.output
         assert "1 malformed" in result.output
 
+    def test_orders_mixed_era_timestamps_by_instant_not_string(self, bobi_install,
+                                                                monkeypatch):
+        # An events file spans the aware-UTC upgrade: pre-upgrade lines carry
+        # naive LOCAL timestamps, post-upgrade lines aware UTC. On a UTC+9
+        # host the newer UTC string sorts lexicographically BEFORE the older
+        # local one; ordering (and --tail selection) must go by instant.
+        import time as _time
+        monkeypatch.setenv("TZ", "Asia/Tokyo")
+        _time.tzset()
+        try:
+            older_local = {"timestamp": "2026-01-01T18:00:00",  # 09:00 UTC
+                           "source": "github", "type": "old-evt", "data": {}}
+            newer_aware = {"timestamp": "2026-01-01T10:00:00+00:00",
+                           "source": "github", "type": "new-evt", "data": {}}
+            (bobi_install.state_dir / "events-default.jsonl").write_text(
+                json.dumps(older_local) + "\n" + json.dumps(newer_aware) + "\n")
+            result = self._run_events(bobi_install)
+            assert result.exit_code == 0, result.output
+            assert result.output.index("old-evt") < result.output.index("new-evt")
+        finally:
+            monkeypatch.undo()
+            _time.tzset()
+
     def test_deduplicates_events_by_seq_deployment(self, bobi_install):
         ev = {"timestamp": "2026-01-01T00:00:01", "source": "github",
               "type": "push", "seq": 5, "deployment_id": "d1"}

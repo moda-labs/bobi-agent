@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import time
 from collections.abc import Callable
 from pathlib import Path
+
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ def sync_reference_to_cold_memory_kb(
     metadata = {
         "category": _reference_category(content),
         "source_session": source_session,
-        "first_seen": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "first_seen": now_iso(),
     }
 
     with _cold_memory_store(root) as store:

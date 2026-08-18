@@ -251,7 +251,42 @@ Each appendix entry names the surviving implementation — move callers to it; n
 - [x] **D095** `bobi/events/adapters.py:81` — Running `git remote get-url origin` and normalizing the remote URL to a GitHub owner/repo slug is implemented twice:…
 - [x] **Q019** `bobi/events/adapters.py:118` — adapters.py hand-rolls Slack channel name→ID resolution (_resolve_channel_names + _is_channel_id) that bobi/slack.py's resolve_channel_id already…
 - [x] **D096** `bobi/events/adapters.py:209` — _detect_slack inlines a Slack auth.test call (GET + bearer header + team_id/bot_id extraction) that events/server._slack_auth_info already provides,…
-- [ ] **Q108** `bobi/events/client.py:49` — Wall-clock timestamps are written in two conflicting conventions — local-naive time.strftime ISO strings in six modules vs timezone-aware UTC… *(plausible — re-verify first)*
+- [x] **Q108** `bobi/events/client.py:49` — Wall-clock timestamps are written in two conflicting conventions — local-naive time.strftime ISO strings in six modules vs timezone-aware UTC… *(plausible — re-verify first)*
+  - Re-derived 2026-08-17: 10 naive write sites in 6 modules (the finding's 9
+    in 6 had drifted). Re-verified CONFIRMED with one correction to its
+    premise: not "every consumer applies the house parsing rule" —
+    webapp/runs._epoch deliberately read naive as LOCAL, matched to its
+    writers. Each parser was matched to its writer; the fragility was the
+    match, not a live misread.
+  - Applied: bobi/timeutil.py owns the convention — now_iso() writes,
+    parse_iso() reads (promoted from monitors/run_records, where D093 had
+    already consolidated the parser). All 10 naive sites convert;
+    setup/webui's two aware sites converge; kb/store's _now() delegate
+    collapses. registry.py's one aware site deliberately untouched — #1037
+    (in flight) edits the surrounding lines; one-line follow-up after both
+    land.
+  - Old state on disk: runs._epoch keeps its naive-means-writer-local branch
+    for pre-upgrade workflow runs, with a docstring saying why it must not
+    fold into parse_iso. CLI displays slice [:19] and render both formats;
+    displayed clocks move local→UTC by design.
+  - Pinned: WorkflowRun.create's started_at aware-UTC (red mutant reverting
+    the writer to naive strftime); _epoch reads both eras; live spot check —
+    real workflow run + event-log entry on disk aware-UTC, parse round-trip,
+    runs fold correct.
+  - Review round (5 finders): caught a REAL bug this diff introduced —
+    `bobi events` sorted mixed-era timestamp strings lexicographically, so on
+    a UTC+N host post-upgrade events sorted hours early and `--tail` hid the
+    newest ones. Fixed failing-test-first (Tokyo TZ forced): the sort now
+    keys on `timeutil.epoch_seconds`, the promoted both-era reader that
+    `webapp/runs._epoch` also aliases. Also from review: the legacy-naive
+    era pin was vacuous on CI's UTC runners (local and UTC readings
+    coincide) — now TZ-forced with an explicit inequality against the
+    naive-means-UTC reading; aware-era workflow rows now fold through
+    build_runs in tests (the fixture had only produced the retired naive
+    shape); scripts/seed-agent-page.py's naive writer got a do-not-fix guard
+    comment (it deliberately exercises the legacy branch); timeutil's
+    docstring stopped over-claiming (the monitors' injectable now-callables
+    isoformat the same value); import placements normalized.
 - [x] **D077/Q105** `bobi/events/drain.py:76` — _without_placeholder_fields is duplicated verbatim in drain.py and channels.py.
 - [x] **Q064** `bobi/events/server.py:236` — ensure_running remaps five unprefixed env vars to BOBI_ES_* with five identical two-line if-blocks.
 - [x] **Q112** `bobi/events/server.py:413` — authorize_resources repeats the same 6-line 'log warning / append unbacked / keep-if-not-filtering / continue' tail four times. *(plausible — re-verify first)*
@@ -739,6 +774,12 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   **D093/Q058's two copies are not "duplicated verbatim", and the difference is load-bearing.** `scheduler._parse_iso` caught `ValueError`; `script_cache_checks._parse_iso` caught `(ValueError, AttributeError)`. That second clause is what lets a **non-string** pulled out of a JSON state document read as absent instead of raising — and both callers there read `state.get(...)` off exactly such a document. The tolerant body is therefore the survivor, which means the scheduler's two call sites are **widened**, not preserved: a torn `monitor_state.json` holding a non-string `last_run` now reads as "no last run" where it previously raised. That is the direction this repo's loaders already go (unparseable state is empty, never fatal), so it shipped, but it is a behavior change and is recorded as one rather than filed under "behavior-preserving".
 
   **The survivor went to `run_records.py`, not to `tool_checks.py` as the finding suggests.** The appendix justified `tool_checks` only by "a shared home exists". `run_records` is the better one on two counts: it is the package's only **leaf** module (it imports nothing intra-package, so it cannot ever be one end of a cycle), and it already owns `_now_iso`, the *writer* of these strings — the reader now sits beside the writer, so the accepted format has one definition. It is also where Q108 will land when someone takes it.
+
+  **2026-08-17 correction (Q108):** superseded — Q108 promoted the pair to
+  `bobi/timeutil.py` (`now_iso`/`parse_iso`), the neutral home its many
+  non-monitor writers needed; `run_records` now imports `now_iso` from there.
+  The one-definition property this paragraph argued for is preserved, one
+  level up.
 
   **There is a fourth `_parse_iso`, deliberately left alone.** `agents/eng-team/monitors/github_checks.py` carries its own copy. It is a **pack** file, not framework code — it is loaded by `_load_checks`' spec machinery precisely because it has no importable package parent — and packs are the distribution unit for domain behavior, so it should not reach into a framework private. `tests/test_checks.py` binds that copy, not either of the two consolidated here.
 
