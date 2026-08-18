@@ -27,12 +27,8 @@ from bobi.sdk import (
     log_activity, SessionEntry, session_handoff_path,
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
-from bobi.subagent import (
-    _emit_lifecycle_event,
-    _network_drop_error,
-    _timeout_error,
-    _tool_crash_error,
-)
+from bobi.brain.turns import drain_turn
+from bobi.subagent import _emit_lifecycle_event
 from bobi.timeutil import now_iso
 from bobi.workflow.schema import Workflow, StepDef
 from bobi.workflow.state import WorkflowRun
@@ -1022,7 +1018,7 @@ async def _run_workflow_async(
 
             await client.query(prompt)
             drain = await _drain_response(
-                client, session_name, run_key, model=current_model,
+                client, session_name, model=current_model,
             )
 
             # A turn-cap kill is recoverable, not terminal (#845): the harness
@@ -1087,7 +1083,7 @@ async def _run_workflow_async(
                     )
                     break
                 drain = await _drain_response(
-                    client, session_name, run_key, model=current_model,
+                    client, session_name, model=current_model,
                 )
 
             if drain.final_text is None:
@@ -1109,7 +1105,7 @@ async def _run_workflow_async(
                     f"Please update your handoff file with these fields and confirm."
                 )
                 await client.query(fix_prompt)
-                await _drain_response(client, session_name, run_key,
+                await _drain_response(client, session_name,
                                       model=current_model)
                 handoff = _read_handoff(session_name, step.name)
                 missing = _validate_handoff(step, handoff)
@@ -1224,7 +1220,7 @@ async def _run_workflow_async(
 
 
 async def _drain_response(
-    client, session_name: str, run_key: str, *, model: str,
+    client, session_name: str, *, model: str,
 ) -> DrainResult:
     """Drain one turn. Returns ``(final_text, error, error_kind)``.
 
@@ -1236,47 +1232,21 @@ async def _drain_response(
     ``model`` is required: it is the model the session currently runs under,
     and every save must record it so the store's model record stays in step
     with mid-run switches (#642).
-    """
-    from bobi.brain import AssistantText, TurnResult
 
-    final_text = ""
-    try:
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantText):
-                if msg.text:
-                    final_text = msg.text
-                    log_activity("response", {"text": final_text[:500]},
-                                 session=session_name)
-            elif isinstance(msg, TurnResult):
-                save_session_id(session_name, msg.session_id, model=model)
-                # Every terminal fact the brain reported, in the session log
-                # (#845). A bare `stop` record is why diagnosing a turn-cap
-                # kill used to require the vendor CLI's own transcript: the
-                # error was in hand right here and none of it was written down.
-                log_activity("stop", {
-                    "session_id": msg.session_id,
-                    "is_error": msg.is_error,
-                    "error_kind": msg.error_kind,
-                    "error_message": msg.error_message,
-                    "api_error_status": msg.api_error_status,
-                    "num_turns": msg.num_turns,
-                    "duration_ms": msg.duration_ms,
-                }, session=session_name)
-                if msg.is_error:
-                    # Prefer the brain's own diagnosis. result_text is EMPTY on
-                    # a turn-cap kill, which is how "turn failed" - a literal
-                    # fallback - reached operators as the whole story (#845).
-                    return DrainResult(None, msg.error_text(), msg.error_kind)
-                return DrainResult(final_text, "", "")
-    except asyncio.TimeoutError:
-        error = _timeout_error()
-        log.error(f"Drain timeout: {error}")
-        return DrainResult(None, error, "timeout")
-    except Exception as e:
-        error = _tool_crash_error(e)
-        log.error(f"Drain error: {error}")
-        return DrainResult(None, error, "tool_crash")
-    return DrainResult(None, _network_drop_error(), "network_drop")
+    The drain itself (text capture, session-id save, activity records,
+    stream-failure normalization) is the shared primitive; this adapter only
+    folds the brain's own turn verdict into the step loop's flat shape.
+    """
+    outcome = await drain_turn(client, session_name, model=model)
+    msg = outcome.result
+    if msg is None:
+        return DrainResult(None, outcome.failure, outcome.failure_kind)
+    if msg.is_error:
+        # Prefer the brain's own diagnosis. result_text is EMPTY on a
+        # turn-cap kill, which is how "turn failed" - a literal fallback -
+        # reached operators as the whole story (#845).
+        return DrainResult(None, msg.error_text(), msg.error_kind)
+    return DrainResult(outcome.final_text, "", "")
 
 
 def _emit_step_failed(run_key, workflow_name, step_name, error):

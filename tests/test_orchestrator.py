@@ -474,7 +474,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             return run_workflow(workflow, **kwargs)
 
@@ -738,7 +740,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    side_effect=["", "sess-live"]), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(
                 wf, task="t", repo="r", cwd=cwd, run_key="1",
@@ -800,7 +804,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -923,7 +929,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="live-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
 
@@ -957,8 +965,11 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("bobi.workflow.orchestrator.save_session_id") as save_mock, \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id") as save_mock, \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
 
@@ -1004,7 +1015,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="live-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
 
@@ -1052,7 +1065,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="stale-id"), \
              patch("bobi.workflow.orchestrator.save_session_id") as save_mock, \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
 
@@ -1099,7 +1114,9 @@ class TestConnectIsNeverATurn:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value=saved_id), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(workflow, **kwargs)
         return result, calls, clients, emits
@@ -1276,7 +1293,9 @@ class TestHonestTerminalEmit:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"), \
              patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: client_cls(),
@@ -1398,7 +1417,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"), \
              patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
@@ -1456,7 +1477,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"), \
              patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
@@ -1513,7 +1536,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -1576,7 +1601,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -1629,7 +1656,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -1683,7 +1712,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -1832,7 +1863,9 @@ class TestQAPhase:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"), \
              patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
@@ -1946,7 +1979,9 @@ class TestResumeWorkflowTimestamps:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value="/tmp"), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"), \
              patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
@@ -2025,7 +2060,9 @@ class TestResumeRegistryRefresh:
              patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             success = resume_workflow(run, wf, timeout=1234)
 
         assert success is True
@@ -2169,7 +2206,9 @@ class TestSessionConstructionFailureIsTerminal:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
         return result, emitted
 

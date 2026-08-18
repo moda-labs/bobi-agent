@@ -72,6 +72,7 @@ class FakeClient:
 
 
 SDK_PATCH = "bobi.subagent"
+TURNS_PATCH = "bobi.brain.turns"
 
 
 def _sdk_module(client):
@@ -101,7 +102,8 @@ def _register(run_key, phase, role=""):
 async def _run(client, run_key, phase):
     with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
          patch(f"{SDK_PATCH}.save_session_id"), \
-         patch(f"{SDK_PATCH}.log_activity"), \
+         patch(f"{TURNS_PATCH}.save_session_id"), \
+         patch(f"{TURNS_PATCH}.log_activity"), \
          patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
          patch.dict("sys.modules", {"claude_agent_sdk": _sdk_module(client)}):
         return await _run_agent_supervised(
@@ -168,8 +170,7 @@ class TestHonestTerminalStatus:
         result = await _run(client, "LOST-1", "implement")
         assert result.success is False
         assert result.error == (
-            "network drop: response stream ended before turn result "
-            "(no ResultMessage)"
+            "network drop: response stream ended before turn result"
         )
         assert get_registry().get(name).status == TERMINAL_FAILED
 

@@ -481,7 +481,9 @@ class TestNotifyStepInWorkflow:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"), \
              patch("bobi.brain.get_brain", return_value=FakeBrain()), \
              patch("bobi.workflow.orchestrator._execute_notify_step") as mock_notify, \
              patch("bobi.workflow.orchestrator._find_project_root", return_value=Path(tmp_path or "/tmp")):
