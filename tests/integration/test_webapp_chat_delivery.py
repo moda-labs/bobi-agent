@@ -31,6 +31,7 @@ dressing - it is the acceptance bar.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 import urllib.request
@@ -81,10 +82,18 @@ def chat_event_server(bobi_env):
         agent_yaml.write_text(yaml.dump(data))
     _pub._es_url_cache.clear()   # the resolved URL is cached per project root
 
+    # Never skip on CI. This suite's whole value is that the message really
+    # travels, so a green that silently skipped it proves nothing - and CI
+    # installs the event server's Node deps precisely so it can run.
+    def _unavailable(why: str) -> None:
+        if os.environ.get("CI"):
+            pytest.fail(f"the local event server is required on CI: {why}")
+        pytest.skip(f"local event server unavailable: {why}")
+
     try:
         ensure_running(port, project_path=bobi_env.project_path)
     except RuntimeError as e:      # no Node, or its deps cannot be installed
-        pytest.skip(f"local event server unavailable: {e}")
+        _unavailable(str(e))
 
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
@@ -95,13 +104,12 @@ def chat_event_server(bobi_env):
         except Exception:
             time.sleep(0.25)
     else:
-        pytest.skip("local event server never became healthy")
+        _unavailable("it never became healthy")
 
     yield url
 
     pid_file = bobi_env.state_dir / "event-server.pid"
     if pid_file.exists():
-        import os
         import signal
         try:
             os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
