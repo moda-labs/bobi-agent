@@ -11,6 +11,10 @@ from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).parent
 BASE_PATH = PROMPTS_DIR / "base.md"
+# Framework communication baseline, rendered into every team's brain-native
+# global-instructions files by bobi.brain.instructions. Operator opt-out:
+# BOBI_COMMUNICATION_STYLE=off.
+COMMUNICATION_STYLE_PATH = PROMPTS_DIR / "communication_style.md"
 # Framework default sleep-cycle prompt (#456). Team-overridable via
 # <run>/package/prompts/sleep_cycle.md — see MonitorScheduler._load_sleep_cycle_prompt.
 SLEEP_CYCLE_PATH = PROMPTS_DIR / "sleep_cycle.md"
