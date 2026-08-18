@@ -1707,9 +1707,9 @@ class TestIntro:
         # mirroring registry.fetch + copy_into without hitting the network.
         from bobi.setup import open_mode
 
-        def fake_fetch_into(proj, name, dest):
-            _seed_team(proj, name)  # writes agents/<name>/
-            open_mode.copy_into(proj / "agents" / name, dest)
+        def fake_fetch_into(name, dest):
+            _seed_team(project, name)  # writes agents/<name>/
+            open_mode.copy_into(project / "agents" / name, dest)
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project)
@@ -1732,9 +1732,9 @@ class TestIntro:
         # library slot (agents/<name>/src) and be visible on /api/home.
         from bobi.setup import open_mode
 
-        def fake_fetch_into(proj, name, dest):
-            _seed_team(proj, name)  # writes agents/<name>/
-            open_mode.copy_into(proj / "agents" / name, dest)
+        def fake_fetch_into(name, dest):
+            _seed_team(project, name)  # writes agents/<name>/
+            open_mode.copy_into(project / "agents" / name, dest)
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project, home_root=home)
@@ -1777,7 +1777,7 @@ class TestIntro:
         # leftover would 409 every retry and permanently block the slot.
         from bobi.setup import open_mode
 
-        def failing_fetch_into(proj, name, dest):
+        def failing_fetch_into(name, dest):
             dest.mkdir(parents=True)
             (dest / "agent.yaml").write_text("agent: eng-team\n")  # partial
             raise RuntimeError("network died")
@@ -1790,9 +1790,9 @@ class TestIntro:
         assert not (home / "agents" / "eng-team" / "src").exists()
         assert state.source_dir == ""
         # ...and the retry succeeds once the fetch works.
-        def ok_fetch_into(proj, name, dest):
-            _seed_team(proj, name)
-            open_mode.copy_into(proj / "agents" / name, dest)
+        def ok_fetch_into(name, dest):
+            _seed_team(project, name)
+            open_mode.copy_into(project / "agents" / name, dest)
         monkeypatch.setattr(open_mode, "fetch_into", ok_fetch_into)
         assert c.post("/api/start", json={"mode": "registry",
                                           "team": "eng-team"}).status_code == 200
@@ -1813,9 +1813,9 @@ class TestIntro:
         # ("Eng Team") still lands at agents/eng-team/src.
         from bobi.setup import open_mode
 
-        def fake_fetch_into(proj, name, dest):
-            _seed_team(proj, "eng-team")
-            open_mode.copy_into(proj / "agents" / "eng-team", dest)
+        def fake_fetch_into(name, dest):
+            _seed_team(project, "eng-team")
+            open_mode.copy_into(project / "agents" / "eng-team", dest)
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project, home_root=home)
@@ -1856,9 +1856,9 @@ class TestIntro:
         # scaffolding — an empty dir is not "an existing team".
         from bobi.setup import open_mode
 
-        def fake_fetch_into(proj, name, dest):
-            _seed_team(proj, name)
-            open_mode.copy_into(proj / "agents" / name, dest)
+        def fake_fetch_into(name, dest):
+            _seed_team(project, name)
+            open_mode.copy_into(project / "agents" / name, dest)
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         empty = home / "agents" / "new-agent" / "src"
