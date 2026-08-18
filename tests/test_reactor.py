@@ -102,6 +102,43 @@ class TestAutoDispatchRule:
         }
         assert rule.matches(event) is False
 
+    @pytest.mark.parametrize(
+        ("fields", "expected"),
+        [
+            ({"assignee": "bobi"}, True),
+            ({"assignee": "alice"}, False),
+            ({"assignees": "alice, bobi"}, True),
+            ({"assignees": "alice, bob"}, False),
+        ],
+    )
+    def test_self_match_resolves_single_and_multiple_assignees(
+        self, fields, expected
+    ):
+        rule = AutoDispatchRule(
+            event="github.issues",
+            workflow="issue-lifecycle",
+            match={"action": "assigned", "assignee": "$self"},
+        )
+        event = {
+            "type": "github.issues",
+            "fields": {"action": "assigned", **fields},
+        }
+
+        assert rule.matches(event, self_login="bobi") is expected
+
+    def test_self_match_fails_closed_when_identity_is_unresolved(self):
+        rule = AutoDispatchRule(
+            event="github.issues",
+            workflow="issue-lifecycle",
+            match={"action": "assigned", "assignee": "$self"},
+        )
+        event = {
+            "type": "github.issues",
+            "fields": {"action": "assigned", "assignee": "bobi"},
+        }
+
+        assert rule.matches(event, self_login=None) is False
+
     def test_matches_without_match_dict(self):
         """No match conditions = match any event of the right type."""
         rule = AutoDispatchRule(
@@ -1057,3 +1094,42 @@ class TestPrFeedbackDispatchHygiene:
 
         _wait_calls(mock_launch, 1)
         assert mock_launch.call_args[1]["run_key"] == "7-review-4242"
+        assert mock_launch.call_args[1]["random_key"] is False
+
+    @patch("bobi.subagent.launch_agent")
+    def test_id_less_events_launch_with_an_explicitly_random_key(self, mock_launch):
+        """#850's task-derived default must not reach the reactor blind.
+
+        ``_build_task`` renders every id-less review on a PR to the same
+        sentence - the comment text and id are not in it. Letting launch_agent
+        derive a key from that string would collapse two genuinely different
+        reviews onto one run and drop the second, which is exactly the silent
+        drop #326 fixed. So an id-less event asks for a random key by name.
+        """
+        mock_launch.return_value = "wf-x"
+        rule = AutoDispatchRule(
+            event="github.pull_request_review",
+            workflow="pr-feedback",
+            match={"review_state": "changes_requested"},
+        )
+        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="bobi")
+
+        def _event(delivery):
+            return {
+                "type": "github.pull_request_review", "source": "github",
+                "id": delivery, "topics": ["github:moda-labs/bobi"],
+                "fields": {"number": 7, "sender": "zach",
+                           "review_state": "changes_requested"},
+            }
+
+        assert reactor.process(_event("d1")) == "dispatched"
+        assert reactor.process(_event("d2")) == "dispatched"
+
+        _wait_calls(mock_launch, 2)
+        for call in mock_launch.call_args_list:
+            assert call[1]["run_key"] is None
+            assert call[1]["random_key"] is True
+        # The two tasks really are indistinguishable - which is why deriving
+        # from them would have been wrong.
+        assert (mock_launch.call_args_list[0][1]["task"]
+                == mock_launch.call_args_list[1][1]["task"])

@@ -93,6 +93,7 @@ Default launch shape:
 bobi agent <agent> subagents launch \
   -w <workflow> \
   --role engineer \
+  --id <issue-or-pr-number> \
   --task "<source reference and concise instructions>"
 ```
 
@@ -101,6 +102,7 @@ completion lifecycle events can route back to the original thread:
 
 ```bash
 bobi agent <agent> subagents launch -w adhoc --role engineer \
+  --id <thread_ts> \
   --task "Investigate <request>. Source event type: slack/slack.mention. Repo: <owner/repo>." \
   --requested-by '{"from":"<user_id>","workspace":"<workspace>","channel":"<channel>","thread_ts":"<thread_ts>"}'
 ```
@@ -131,10 +133,18 @@ workflow handoff is available.
 
 ### Dispatch Examples
 
+Every dispatch here, and the default shape above, carries `--id`. This work has
+a natural key - the issue or PR number, the Slack thread - and passing it is
+what correlates the run, lets a re-dispatch resume it, and collapses a duplicate
+dispatch of the same ticket onto one run. Omitting it falls back to a key
+derived from the launch itself, which is a weaker handle for work that already
+has an identity.
+
 ```bash
 bobi agent <agent> subagents launch \
   -w issue-lifecycle \
   --role engineer \
+  --id 554 \
   --task "Fix moda-labs/bobi-agent#554. Source event type: github/github.issues. Repo: moda-labs/bobi-agent."
 ```
 
@@ -142,6 +152,7 @@ bobi agent <agent> subagents launch \
 bobi agent <agent> subagents launch \
   -w pr-feedback \
   --role engineer \
+  --id 123-review \
   --task "Address review feedback on moda-labs/bobi-agent#123. Include reviewer excerpts from <url>."
 ```
 
@@ -149,6 +160,7 @@ bobi agent <agent> subagents launch \
 bobi agent <agent> subagents launch \
   -w merge-conflict \
   --role engineer \
+  --id 123-conflict \
   --task "Resolve merge conflicts on moda-labs/bobi-agent#123. Merge base main, verify tests, and push."
 ```
 

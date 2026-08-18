@@ -73,6 +73,11 @@ class Telemetry(SupervisorObserver):
         self._last_status: str | None = None
         self._probe_failing = False
         self._probe_since: float | None = None
+        # Load-grace episode state (#903): ``load_grace_active`` /
+        # ``load_grace_cleared`` edges mirror the deferral block carried in the
+        # heartbeat, and while a deferral is active the probe episode freezes.
+        self._load_grace_active = False
+        self._load_grace_since: float | None = None
         # The most recent heartbeat snapshot, exposed for the admin `status`
         # command (#9) so a status reply reuses the tier-1 body verbatim.
         self.last_snapshot: dict | None = None
@@ -168,14 +173,23 @@ class Telemetry(SupervisorObserver):
         self.last_snapshot = snapshot
         self._publish(HEARTBEAT_TOPIC, snapshot)
 
+        # The load-grace episode tracks the deferral itself, on every poll.
+        # It runs BEFORE the probe episode: this poll's gate state is an
+        # input to the verdict reporting, so the cleared edge lands before
+        # the recovered edge that the first un-gated verdict produces.
+        self._update_grace_episode(state, now)
+
         if state.desired_state == "stopped":
             # An operator stop is not a recovery: close any open failing episode
             # silently rather than emitting a misleading probe_recovered into the
             # lifecycle trail (the manager was stopped, it did not heal).
             self._probe_failing = False
             self._probe_since = None
-        else:
-            # Edge-trigger the probe episode from the outside verdict.
+        elif state.load_grace is None:
+            # Edge-trigger the probe episode from the outside verdict. Frozen
+            # while a verdict is deferred: the manager's liveness signals are
+            # known-starved, so a wedged read there is not a failing episode
+            # (nor is the working poll that ends the deferral a recovery).
             self._update_probe_episode(derived, now)
 
     def _update_probe_episode(self, derived: str, now: float) -> None:
@@ -192,6 +206,35 @@ class Telemetry(SupervisorObserver):
             self._probe_since = None
             self._emit_lifecycle("probe_recovered", status=derived,
                                  downtime_s=downtime)
+
+    def _update_grace_episode(self, state: SupervisorState, now: float) -> None:
+        """Edge-trigger ``load_grace_active`` / ``load_grace_cleared`` (#903).
+
+        The supervisor's ``load_grace`` block is an instantaneous per-poll flag
+        (set on the poll that deferred, cleared on the first working poll), so
+        one episode per continuous deferral stretch: the active edge carries the
+        deferral evidence, the cleared edge the stretch's duration.
+        """
+        grace = state.load_grace
+        if grace is not None and not self._load_grace_active:
+            self._load_grace_active = True
+            self._load_grace_since = now
+            self._emit_lifecycle(
+                "load_grace_active",
+                since=_iso(now),
+                deferred=grace.get("deferred"),
+                load1=grace.get("load1"),
+                ncpu=grace.get("ncpu"),
+                busy_descendants=grace.get("busy_descendants"),
+                tree_cpu_cores=grace.get("tree_cpu_cores"),
+                tree_cpu_ratio=grace.get("tree_cpu_ratio"),
+            )
+        elif grace is None and self._load_grace_active:
+            self._load_grace_active = False
+            duration = None if self._load_grace_since is None else round(
+                now - self._load_grace_since, 1)
+            self._load_grace_since = None
+            self._emit_lifecycle("load_grace_cleared", duration_s=duration)
 
     def _emit_lifecycle(self, event: str, *, correlation_id: str | None = None,
                         **fields) -> None:

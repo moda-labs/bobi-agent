@@ -124,6 +124,74 @@ class TestDrainAutoDispatch:
         mock_launch.assert_not_called()
 
     @patch("bobi.subagent.launch_agent")
+    def test_issue_assignment_dispatches_only_for_resolved_self(self, mock_launch):
+        reactor = EventReactor(
+            rules=[
+                AutoDispatchRule(
+                    event="github.issues",
+                    workflow="issue-lifecycle",
+                    match={"action": "assigned", "assignee": "$self"},
+                    cooldown=0,
+                ),
+            ],
+            cwd="/tmp/proj",
+            self_login="bobi",
+        )
+        assigned_to_self = {
+            "type": "github.issues",
+            "text": "[org/repo] assigned issue #5",
+            "delivery": "bulk",
+            "topics": ["github:org/repo"],
+            "fields": {
+                "action": "assigned",
+                "number": 5,
+                "assignees": "alice, bobi",
+            },
+        }
+
+        delivered = self._run_drain_one_batch(
+            [assigned_to_self], reactor=reactor
+        )
+
+        assert len(delivered) == 1
+        assert "AUTO-DISPATCHED" in delivered[0]
+        _wait_calls(mock_launch, 1)
+        mock_launch.assert_called_once()
+
+    @patch("bobi.subagent.launch_agent")
+    def test_other_user_issue_assignment_passes_through(self, mock_launch):
+        reactor = EventReactor(
+            rules=[
+                AutoDispatchRule(
+                    event="github.issues",
+                    workflow="issue-lifecycle",
+                    match={"action": "assigned", "assignee": "$self"},
+                    cooldown=0,
+                ),
+            ],
+            cwd="/tmp/proj",
+            self_login="bobi",
+        )
+        assigned_to_humans = {
+            "type": "github.issues",
+            "text": "[org/repo] assigned issue #5",
+            "delivery": "bulk",
+            "topics": ["github:org/repo"],
+            "fields": {
+                "action": "assigned",
+                "number": 5,
+                "assignees": "alice, bob",
+            },
+        }
+
+        delivered = self._run_drain_one_batch(
+            [assigned_to_humans], reactor=reactor
+        )
+
+        assert delivered == ["[org/repo] assigned issue #5"]
+        mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.launch_agent")
     def test_deduped_event_is_not_delivered(self, mock_launch):
         """dedup_only lets first delivery through and drops redeliveries."""
         reactor = EventReactor(

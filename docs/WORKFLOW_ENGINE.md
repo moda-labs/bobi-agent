@@ -356,6 +356,15 @@ the step's output scope and feed downstream routing and templating.
    (`wf-<workflow>-<repo>-<run_key>`), create a git worktree if any step
    declares `worktree: true`, and register one `SessionEntry` in the registry
    with status `running`. Emit `agent/workflow.started`.
+
+   The run key is the launch's `--id`. Without one, `launch_agent` derives it
+   from the launch's own dials: workflow, project, role, model, effort and task
+   text (`subagent.derive_run_key`). An identical launch therefore lands on the
+   same session name and is refused by the admission check while the first is
+   active, so duplicate suppression is the default rather than something each
+   caller opts into (#850). A derived key also starts a fresh transcript, and
+   refuses to take over a suspended (`waiting`) run; `--id-random` opts out of
+   the derivation entirely for deliberate parallel fan-out.
 2. **Seed context.** Build the `VariableContext` with the `input`,
    `requested_by`, and (if used) `worktree` scopes.
 3. **Run the step loop** in `_run_workflow_async`. Walk steps by index.

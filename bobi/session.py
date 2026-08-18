@@ -323,9 +323,13 @@ class Session:
         # (orchestrator._setup_worktree) and are what the launch admission
         # check dedupes on — so a re-dispatch reuses the name and would
         # otherwise inherit the DEAD session's context and its spent turn
-        # budget. Opt-in, not the default: the workflow engine's documented
-        # retry semantics (launch_agent's docstring) resume a failed run on
-        # purpose. skills/checklist-execution.md sets it on every re-dispatch.
+        # budget. Opt-in under an EXPLICIT run key, not the default: the
+        # workflow engine's documented retry semantics (launch_agent's
+        # docstring) resume a failed run on purpose, and
+        # skills/checklist-execution.md sets it on every re-dispatch. The
+        # launchers set it themselves when the run key was DERIVED from the
+        # task (#850): that name is an inference about task text, not a caller
+        # pointing at a run to continue.
         self._fresh = fresh
         # Extra event topics beyond this session's own inbox/<self> (e.g. the
         # manager's external resource topics). inbox/<self> is always added.

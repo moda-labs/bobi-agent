@@ -728,20 +728,53 @@ class TestWaitPathIsGuarded:
         assert len(seen["chain"]) == 1
 
     def test_stamped_name_is_the_name_spawn_adhoc_registers(self, project):
-        """The lineage invariant on this path: both derive it from the shared
-        adhoc_session_name(), so a link can never name a session that never
-        exists."""
-        from bobi.subagent import adhoc_session_name
+        """The lineage invariant on this path: a link can never name a session
+        that never exists.
+
+        The caller resolves the name ONCE and hands it to spawn_adhoc, so the
+        two cannot drift - there is no second derivation to disagree with the
+        stamped one (#850).
+
+        Asserting the stamped link against spawn_adhoc's `name` kwarg alone
+        would compare a variable to itself. It is checked against the real
+        production derivation as well, so a caller that stopped passing the
+        resolved name - or passed a differently-derived one - is caught."""
+        from bobi.subagent import (_resolve_project_name,
+                                   resolve_adhoc_session_name)
         seen: dict = {}
 
         def _spawn(**kwargs):
             seen["chain"] = current_lineage()
-            seen["name"] = adhoc_session_name(kwargs["task"], kwargs["name"])
+            seen["name"] = kwargs["name"]
             return MagicMock(final_text="", success=True, error="")
 
         with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
             with _process_env({}):
                 self._run_wait(project, task="delegate this")
+        # Every dial the CLI passes has to be passed here too, or this asserts
+        # against a name production never produces.
+        expected, derived = resolve_adhoc_session_name(
+            "delegate this", project=_resolve_project_name(str(project)),
+            role="engineer")
+        assert derived is True
+        assert seen["name"] == expected
+        assert seen["chain"][-1].session == expected
+
+    def test_stamped_name_holds_for_a_random_key(self, project):
+        """The case a recomputed name could not survive: --id-random mints a
+        key that cannot be derived twice, so a stamp site that recomputed it
+        would name a session that never registers."""
+        seen: dict = {}
+
+        def _spawn(**kwargs):
+            seen["chain"] = current_lineage()
+            seen["name"] = kwargs["name"]
+            return MagicMock(final_text="", success=True, error="")
+
+        with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
+            with _process_env({}):
+                self._run_wait(project, task="delegate this", random_key=True)
+        assert seen["name"].startswith("rand-")
         assert seen["chain"][-1].session == seen["name"]
 
     def test_a_deep_chain_is_refused_and_nothing_spawns(self, project):

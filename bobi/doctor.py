@@ -44,6 +44,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_workflows())
     results.append(_check_bubble_auth())
     results.append(_check_event_server())
+    results.append(_check_running_code())
     slack_socket = _check_slack_socket_mode()
     if slack_socket:
         results.append(slack_socket)
@@ -151,9 +152,6 @@ def _check_install_integrity() -> CheckResult:
     `bobi agents install` — so hand-edits are silently lost on the next install.
     Compare on-disk files against the hashes recorded at install time.
     """
-    import hashlib
-    import json
-
     root = bound_root()
     if not root:
         return CheckResult("Installed team", ok=True, detail="no runtime selected")
@@ -164,21 +162,21 @@ def _check_install_integrity() -> CheckResult:
         return CheckResult("Installed team", ok=True,
                            detail="no install manifest")
     try:
+        import json
         manifest = json.loads(manifest_path.read_text())
     except (json.JSONDecodeError, OSError):
         return CheckResult("Installed team", ok=False,
                            detail="unreadable install manifest",
                            hint="Re-run `bobi agents install ... --name <agent>`")
+    if not isinstance(manifest, dict):
+        return CheckResult("Installed team", ok=False,
+                           detail="invalid install manifest",
+                           hint="Re-run `bobi agents install ... --name <agent>`")
     if not manifest.get("frozen", True):
         return CheckResult("Installed team", ok=True,
                            detail=f"{manifest.get('agent', '?')} (downloaded — editable)")
-    drifted = []
-    for rel, digest in manifest.get("files", {}).items():
-        f = dest / rel
-        if not f.is_file():
-            drifted.append(f"{rel} (missing)")
-        elif hashlib.sha256(f.read_bytes()).hexdigest() != digest:
-            drifted.append(rel)
+    from bobi.install import verify_install_manifest
+    drifted = verify_install_manifest(dest)
     if drifted:
         shown = ", ".join(drifted[:3]) + ("…" if len(drifted) > 3 else "")
         return CheckResult(
@@ -232,7 +230,7 @@ def _check_bobi_install_integrity() -> CheckResult:
 
 def _check_package_requires() -> list[CheckResult]:
     """Check host-level dependencies declared in agent.yaml requires: block."""
-    from bobi.config import Config, run_requires_checks
+    from bobi.config import Config, requires_detail, run_requires_checks
 
     root = bound_root()
     if not root:
@@ -250,10 +248,16 @@ def _check_package_requires() -> list[CheckResult]:
             results.append(CheckResult(
                 f"Requires: {entry.name}", ok=True, detail="healthy"))
         else:
+            # `why` is standing context, never a substitute for what actually
+            # failed - doctor is where a blocked dispatch sends the operator,
+            # so it has to show the check's own detail (#771).
+            text = requires_detail(detail)
+            if entry.why:
+                text += f" (needed for: {entry.why})"
             hint = f"Fix: {entry.fix}" if entry.fix else ""
             results.append(CheckResult(
                 f"Requires: {entry.name}", ok=False,
-                detail=entry.why or detail,
+                detail=text,
                 hint=hint))
     return results
 
@@ -400,8 +404,7 @@ def _check_bubble_auth() -> CheckResult:
     if not bubble_id:
         # No bubble yet — might be fine if the instance hasn't started.
         from bobi import paths
-        pid_file = paths.state_dir(root) / "event-server.pid"
-        if pid_file.exists():
+        if paths.event_server_pid_path(root).exists():
             return CheckResult(
                 "Bubble auth", ok=False,
                 detail="no bubble credential but event server appears running",
@@ -487,6 +490,41 @@ def _check_event_server() -> CheckResult:
     return CheckResult("Event server", ok=False,
                        detail="not running",
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")
+
+
+def _check_running_code() -> CheckResult:
+    """Flag long-lived processes still running code the install has replaced.
+
+    A local `uv tool install --upgrade` swaps bobi's files underneath the
+    manager and the local event server; `_check_event_server` above then probes
+    a stale server, gets a healthy `/health`, and says so (#928). The processes
+    record what they launched from, and this compares it to what is installed.
+
+    A warning, not a failure: nothing is broken - a restart is pending, and the
+    remedy is one command. Reporting a red install would fire on every upgrade
+    between `bobi agents install` and the restart it asks for.
+    """
+    root = bound_root()
+    if not root:
+        return CheckResult("Running code", ok=True, detail="no runtime selected")
+    from bobi.launch_stamp import inspect_processes, installed_bobi_version
+
+    running = inspect_processes(root)
+    stale = [p for p in running if p.stale]
+    if not running:
+        return CheckResult("Running code", ok=True,
+                           detail="no long-lived local processes running")
+    if not stale:
+        names = ", ".join(f"{p.name} (pid {p.pid})" for p in running)
+        return CheckResult(
+            "Running code", ok=True,
+            detail=f"{names} on bobi {installed_bobi_version()}")
+    return CheckResult(
+        "Running code", ok=False,
+        detail="; ".join(f"{p.name}: {p.detail}" for p in stale),
+        hint="Restart to pick up the installed code: "
+             + ", ".join(f"`{p.remedy}`" for p in stale),
+        required=False)
 
 
 def _check_slack_socket_mode() -> CheckResult | None:
@@ -728,4 +766,3 @@ def _check_long_term_memory() -> CheckResult:
     return CheckResult(
         "Long-term memory", ok=True,
         detail=f"long_term_memory.md present ({size} chars, under {MAX_MEMORY_CHARS} cap)")
-

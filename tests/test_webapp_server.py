@@ -414,6 +414,26 @@ class _FakeSpawn:
 
 # --- hosted onboarding (the setup app mounted under /setup) ----------------
 
+class TestClaudeAvailable:
+    def test_absolute_resolution_counts(self, tmp_path, monkeypatch):
+        cli = tmp_path / "claude"
+        cli.write_text("#!/bin/sh\n")
+        monkeypatch.setattr("bobi.brain.claude.shutil.which",
+                            lambda name: str(cli))
+        assert server._claude_available() is True
+
+    def test_cwd_relative_fallback_is_not_availability(self, tmp_path,
+                                                       monkeypatch):
+        # On Linux with no CLI on PATH the resolver falls back to the bare
+        # name "claude" (correct for exec). A stray file of that name in the
+        # server's CWD must not read as an installed CLI.
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "claude").mkdir()
+        monkeypatch.setattr("bobi.brain.claude.shutil.which", lambda name: None)
+        monkeypatch.setattr("bobi.brain.claude.platform.system", lambda: "Linux")
+        assert server._claude_available() is False
+
+
 class TestSetupHosting:
     def _open(self, client, monkeypatch, name="new-team"):
         monkeypatch.setattr(server, "_claude_available", lambda: True)

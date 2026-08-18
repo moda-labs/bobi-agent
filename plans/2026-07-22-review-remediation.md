@@ -325,7 +325,26 @@ Each appendix entry names the surviving implementation — move callers to it; n
 - [x] **D094** `bobi/monitors/script_cache_checks.py:564` — _scripts_dir() and the monitor-name sanitizer (replace('/', '_').replace('..', '_')) are duplicated between script_cache_checks.py and tool_checks.py…
 - [x] **Q016** `bobi/monitors/script_cache_checks.py:794` — _slack_notify bypasses the module's own policy-resolution chokepoint: it re-reads and re-parses agent.yaml via _install_policy() and consults…
 - [ ] **Q018** `bobi/registry.py:52` — The project_path parameter is threaded through ~15 registry functions but never actually used — the cache and registry list are global.
-- [ ] **Q028** `bobi/sdk.py:51` — Claude-CLI path resolution (_resolve_cli_path/get_cli_path/CLAUDE_CLI) lives in the generic session-registry module instead of the claude brain…
+- [x] **Q028** `bobi/sdk.py:51` — Claude-CLI path resolution (_resolve_cli_path/get_cli_path/CLAUDE_CLI) lives in the generic session-registry module instead of the claude brain…
+  - Applied 2026-08-17. `_resolve_cli_path`/`get_cli_path` moved to
+    `bobi/brain/claude.py`; the finding's third symbol, `CLAUDE_CLI`, no longer
+    exists (Phase 5 removed it). Both lazy `from bobi.sdk import get_cli_path`
+    legs in claude.py deleted; webapp/server.py's one import retargeted; 31
+    test patch-strings and test_container_paths.py moved mechanically.
+    sdk.py's docstring claim "Nothing in this module is Claude-specific" is now
+    true. Proven by the full unit suite at baseline (4616/1) plus the real-brain
+    leg: tests/integration/test_manager_sdk.py drove 5 live Claude sessions
+    through the moved resolver. No mutant needed: the old symbols are deleted,
+    so any stale reference is an ImportError, not a silent pass.
+  - Review additions: `_resolve_cli_path` collapsed into `get_cli_path` (its
+    only remaining caller once CLAUDE_CLI died, and its docstring contrasted
+    against that dead constant); the moved docstring's dangling
+    `docs/CONTAINERIZED_DEPLOYMENT.md` citation now names the private deploy
+    repo like its sibling docs; `_claude_available` no longer double-probes
+    PATH and no longer reads the resolver's bare-name exec fallback as an
+    installed CLI via a CWD-relative `.exists()` (failing test first, both
+    arms pinned); `_delta_text`'s false "setup.llm re-exports it" claim
+    dropped.
 - [x] **Q085** `bobi/sdk.py:121` — Bound-root access is split between two routes: monitors import paths.bound_root directly (aliased as get_project_root) while kb/embedder.py and…
 - [x] **Q084** `bobi/sdk.py:538` — load_resumable_session_id re-reads '<name>.brain' inline instead of calling load_session_brain defined 30 lines above.
 - [x] **Q021** `bobi/setup/actions.py:185` — save_credential's prompt_fn injection is vestigial: every live caller passes a constant-returning lambda, and the only real prompt implementation…

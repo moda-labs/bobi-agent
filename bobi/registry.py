@@ -391,6 +391,17 @@ def _install_team_tar(project_path: Path, tar: "tarfile.TarFile", *,
             if not (extracted / "agent.yaml").is_file():
                 raise RuntimeError(f"Extraction failed for the team at {source}")
 
+            from bobi.install import verify_install_manifest
+            failures = verify_install_manifest(extracted)
+            if failures:
+                shown = ", ".join(failures[:3])
+                suffix = "..." if len(failures) > 3 else ""
+                raise RuntimeError(
+                    f"Package verification failed for {source}: "
+                    f"{len(failures)} file(s) differ from install-manifest.json: "
+                    f"{shown}{suffix}"
+                )
+
             resolved = (
                 name
                 or _agent_name_from_yaml(extracted / "agent.yaml")
