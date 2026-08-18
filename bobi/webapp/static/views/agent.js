@@ -799,7 +799,8 @@ export function mountAgent(el, { api, name }) {
     box.innerHTML = "";
     box.hidden = false;
 
-    const input = mk("textarea", "composer-input");
+    const label = live ? "Send" : "Continue in a new session";
+    const input = mk("textarea");
     input.rows = 2;
     input.placeholder = live ? "Reply to this session…"
                              : "Say what should happen next…";
@@ -812,20 +813,21 @@ export function mountAgent(el, { api, name }) {
       : "This session has ended, so nothing here can answer. Sending asks "
         + "the manager to start a fresh session that picks up this run's "
         + "context."));
-    const send = mk("button", "btn bobi-btn small primary",
-                    live ? "Send" : "Continue in a new session");
+    const send = mk("button", "btn bobi-btn small primary", label);
     send.type = "button";
     foot.appendChild(send);
 
     const status = mk("p", "composer-status");
+    // The outcome arrives minutes later with no focus change, so a screen
+    // reader has to be told rather than left to notice.
+    status.setAttribute("role", "status");
     status.hidden = true;
 
     box.appendChild(input);
     box.appendChild(foot);
     box.appendChild(status);
 
-    const ui = { input, send, status, live,
-                 label: live ? "Send" : "Continue in a new session" };
+    const ui = { input, send, status, live, label };
     send.addEventListener("click", () => sendComposer(row, ui));
     input.addEventListener("keydown", (e) => {
       // Enter sends and Shift+Enter breaks the line: the chat idiom, and the
