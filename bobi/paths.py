@@ -218,6 +218,22 @@ def manager_pid_path(root: Path | None = None) -> Path:
     return state_path(root) / "manager.pid"
 
 
+def manager_log_path(root: Path | None = None) -> Path:
+    """The manager's append-only log.
+
+    Several writers land in this one file - the manager's own stderr, a
+    runtime log handler, and the monitor scheduler's direct appends - so it
+    is spelled here once rather than at each of them.
+
+    `state_dir`, not `state_path`: every caller opens the result for write,
+    and on a runtime whose `state/` does not exist yet the non-creating form
+    raises into `bobi agent <name> ...` and is swallowed whole by the
+    scheduler's best-effort appends - losing the very line this exists to
+    write.
+    """
+    return state_dir(root) / "manager.log"
+
+
 def event_server_pid_path(root: Path | None = None) -> Path:
     return state_path(root) / "event-server.pid"
 

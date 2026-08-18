@@ -373,7 +373,7 @@ def spawn_team(
             manager_session_name(project_path), project_path
         )
 
-    log_file = paths.state_dir(project_path) / "manager.log"
+    log_file = paths.manager_log_path(project_path)
     from bobi.env import child_agent_env
     env = child_agent_env(project_path)
     venv_bin = str(Path(sys.executable).parent)
