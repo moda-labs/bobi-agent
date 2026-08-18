@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from bobi import http, paths
 from bobi.setup.state import SPEC_SLOTS, STAGE_ORDER, SetupState, Stage
+from bobi.timeutil import now_iso
 from bobi.webui_common.launcher import serve_local
 from bobi.webui_common.security import (
     WEBUI_TOKEN_HEADER,
@@ -701,7 +702,6 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
     # --- ingress: how public webhooks reach the event server ------------
     @app.post("/api/ingress/verify")
     def ingress_verify(payload: dict) -> JSONResponse:
-        from datetime import datetime, timezone
         from bobi.config import DEFAULT_EVENT_SERVER
         mode = (payload.get("mode") or state.ingress.mode or "local").strip()
         url = (payload.get("url") or state.ingress.url or "").strip().rstrip("/")
@@ -711,7 +711,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             state.ingress.mode = "local"
             state.ingress.url = ""
             state.ingress.verified = True
-            state.ingress.verified_at = datetime.now(timezone.utc).isoformat()
+            state.ingress.verified_at = now_iso()
             state.ingress.error = ""
             _persist_ingress_env(project, state)
             state.save(project)
@@ -730,7 +730,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
             state.ingress.mode = mode
             state.ingress.url = url
             state.ingress.verified = True
-            state.ingress.verified_at = datetime.now(timezone.utc).isoformat()
+            state.ingress.verified_at = now_iso()
             state.ingress.error = ""
             _persist_ingress_env(project, state)
             state.save(project)

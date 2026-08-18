@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import os
-import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from bobi.fsutil import atomic_write_json
+from bobi.timeutil import now_iso
 
 def _runs_dir(root: Path | None = None) -> Path:
     """The runs directory for *root*, or the bound root when omitted.
@@ -112,7 +112,7 @@ class WorkflowRun:
             if current.status != "waiting":
                 os.replace(str(claiming), str(src))
                 return False
-            resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            resumed_at = now_iso()
             current.status = self.status = "resuming"
             current.resumed_at = self.resumed_at = resumed_at
             # Process-unique temp: the previous name was derived only from
@@ -144,7 +144,7 @@ class WorkflowRun:
                 os.replace(str(closing), str(src))
                 return None
             run.status = "cancelled"
-            run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            run.completed_at = now_iso()
             run.await_event = ""
             run.suspended_at_step = -1
             atomic_write_json(src, asdict(run))
@@ -209,5 +209,5 @@ class WorkflowRun:
             run_id=str(uuid.uuid4())[:8],
             workflow_name=workflow_name,
             trigger_event=event,
-            started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            started_at=now_iso(),
         )

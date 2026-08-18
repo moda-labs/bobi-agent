@@ -146,7 +146,7 @@ def clear_manager_session(project_path: Path) -> None:
     """Clear persisted manager conversation and event-server bubble state."""
     import shutil
 
-    from bobi.config import clear_bubble_state
+    from bobi.events.state import clear_bubble_state
     from bobi.sdk import save_session_id
 
     save_session_id(manager_session_name(project_path), "", root=project_path)
@@ -320,7 +320,7 @@ def _wait_for_manager_transport(
     manager_name: str,
     timeout: float,
 ) -> None:
-    from bobi.config import load_bubble_state, load_deployment_state
+    from bobi.events.state import load_bubble_state, load_deployment_state
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

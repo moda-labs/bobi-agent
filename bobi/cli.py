@@ -2096,7 +2096,11 @@ def _show_events(tail: int, decisions_only: bool) -> None:
         click.echo("No events yet.")
         return
 
-    entries.sort(key=lambda e: e[0])
+    # Sort by instant, not by string: a log can span the aware-UTC timestamp
+    # convention change, and pre-upgrade naive-LOCAL strings do not order
+    # lexicographically against aware-UTC ones.
+    from bobi.timeutil import epoch_seconds
+    entries.sort(key=lambda e: epoch_seconds(e[0]))
     for _, text in entries[-tail:]:
         click.echo(text)
 

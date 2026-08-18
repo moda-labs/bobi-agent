@@ -114,6 +114,9 @@ session("check-agent-1", role="monitor", run_key="stale-drafts",
         terminal_at=NOW - 288)
 
 
+# DELIBERATELY naive-local: this seeds the pre-timeutil legacy era so the
+# webapp's both-era reader (bobi.timeutil.epoch_seconds naive branch) stays
+# exercised. Do not "fix" this to now_iso().
 def _local(e):
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(e))
 

@@ -65,7 +65,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bobi.fsutil import atomic_write_json, atomic_write_text
-from bobi.monitors.run_records import _parse_iso
+from bobi.timeutil import parse_iso
 from bobi.monitors.schema import Condition
 # Reuse the parse helpers verbatim — no behavior change to tool_poll.
 from bobi.monitors.tool_checks import (
@@ -881,7 +881,7 @@ def _record_tick(state: dict, mode: str, cost: float, *,
 # ---------------------------------------------------------------------------
 
 def _backoff_active(state: dict) -> bool:
-    until = _parse_iso(state.get("backoff_until"))
+    until = parse_iso(state.get("backoff_until"))
     return until is not None and _now() < until
 
 
@@ -924,7 +924,7 @@ def _run_active(monitor, state: dict, policy: dict, fp: str, env: dict,
     if max_age:
         try:
             from bobi.monitors.schema import parse_interval
-            pinned = _parse_iso(state.get("pinned_at"))
+            pinned = parse_iso(state.get("pinned_at"))
             if pinned and (_now() - pinned).total_seconds() > parse_interval(max_age):
                 log.info("script_cache %s: max_age exceeded — regenerating", monitor.name)
                 return False
