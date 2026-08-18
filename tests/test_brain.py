@@ -1122,3 +1122,57 @@ def test_continuation_token_tolerates_capability_less_factory():
     assert continuation_token(
         Bare(), session_id="sid", from_model="a", to_model="a",
     ) == "sid"
+
+
+class TestBrainFactoryContract:
+    """Q026: the BrainFactory protocol says what the call sites require.
+
+    ``stream_once`` was a de facto requirement for years - ``bobi.setup.llm``
+    calls it on whatever brain the process is bound to - while the protocol
+    declared only ``make_session``. A brain without it failed with a bare
+    ``AttributeError``, laundered into ``LLMError``, naming nothing.
+    """
+
+    def test_every_registered_brain_implements_the_protocol(self):
+        import inspect
+
+        from bobi.brain import _BRAINS
+        from bobi.brain.base import BrainFactory
+
+        required = [n for n, v in vars(BrainFactory).items()
+                    if not n.startswith("_") and inspect.isfunction(v)]
+        assert "stream_once" in required, "the protocol must declare it"
+        assert "make_session" in required
+
+        for kind, factory in _BRAINS.items():
+            for method in required:
+                assert callable(getattr(factory, method, None)), (
+                    f"brain {kind!r} does not implement {method}")
+
+    @pytest.mark.asyncio
+    async def test_codex_stream_once_names_itself(self):
+        from bobi.brain.codex import CodexBrain
+
+        with pytest.raises(NotImplementedError) as exc:
+            async for _ in CodexBrain().stream_once(
+                    system_prompt="s", user_prompt="u"):
+                pass  # pragma: no cover - the first step raises
+
+        assert "codex" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_setup_pour_surfaces_the_named_gap(self, monkeypatch):
+        """The transport still raises LLMError - with a message that helps."""
+        import bobi.brain as brain_mod
+        from bobi.brain.codex import CodexBrain
+        from bobi.setup import llm
+
+        monkeypatch.setattr(brain_mod, "get_brain", lambda *a, **k: CodexBrain())
+        monkeypatch.setattr("bobi.runtime_guard.prepare_brain_runtime", lambda: None)
+
+        with pytest.raises(llm.LLMError) as exc:
+            async for _ in llm._sdk_stream(system_prompt="s", user_prompt="u"):
+                pass  # pragma: no cover - the first step raises
+
+        assert "codex" in str(exc.value)
+        assert "AttributeError" not in str(exc.value)

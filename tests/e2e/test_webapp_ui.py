@@ -13,10 +13,10 @@ session / workflow / monitor records, written with the same helpers
 `tests/test_webapp_runs.py` proves those folds against, and the state tri-state
 comes from a manager pid that is genuinely alive.
 
-Two things are driven from the browser side instead, and only two, because
-their success needs something this process cannot have offline: a Slack post
-(`remind`) and a server that fails a read on demand (the `runsError` branch).
-Both have an unstubbed companion test alongside them.
+One thing is driven from the browser side instead, and only one, because it
+needs something this process cannot have offline: a server that fails a read on
+demand (the `runsError` branch). It has an unstubbed companion test alongside
+it.
 
 Skips cleanly when Playwright isn't installed (the unit job doesn't need it).
 """
@@ -38,7 +38,6 @@ from tests.test_webapp_runs import NOW, _monitor, _session, _workflow  # noqa: E
 
 RUNS_URL = re.compile(r"/api/agents/[^/]+/runs\?")
 DETAILS_URL = re.compile(r"/api/agents/[^/]+/runs/[^/]+/details")
-REMIND_URL = re.compile(r"/api/agents/[^/]+/workflows/runs/[^/]+/remind")
 
 # The runs table pages at 100. One row past it is the whole pager contract.
 PAGE_SIZE = 100
@@ -465,35 +464,15 @@ class TestWriteActions:
     def _gate_row(self, page):
         return page.locator(".runs tbody tr", has_text="adhoc")
 
-    def test_remind_reflects_sent_and_returns_to_remind(self, webapp, page):
-        # A real reminder is a real Slack post, which this process cannot make
-        # offline, so only the delivery is answered at the wire. What is under
-        # test is the button's own lifecycle, which is browser-side entirely.
-        page.route(REMIND_URL, lambda route: route.fulfill(
-            status=200, content_type="application/json",
-            body='{"ok": true, "delivered": true}'))
+    def test_an_awaiting_row_offers_close_and_no_reminder(self, webapp, page):
+        # Remind was cut from this page (MOD-371): the button never delivered.
+        # The endpoint behind it stays, for the CLI and the hosted admin
+        # protocol, so the guard belongs here, on what the row renders.
         _seed_runs(webapp.install)
         _agent(page, webapp)
 
-        remind = self._gate_row(page).locator("button.remind")
-        remind.click()
-        expect(remind).to_have_text("Sent")
-        expect(remind).to_be_disabled()
-        # It goes back on its own; a button stuck on "Sent" cannot be used again.
-        expect(remind).to_have_text("Remind", timeout=10_000)
-        expect(remind).to_be_enabled()
-
-    def test_a_failed_remind_reports_and_restores_the_button(self, webapp, page):
-        # Unstubbed: no Slack credentials, so the real delivery really fails.
-        _seed_runs(webapp.install)
-        _agent(page, webapp)
-
-        remind = self._gate_row(page).locator("button.remind")
-        remind.click()
-        expect(page.locator(".band-report .rep-head")).to_have_text(
-            "reminder failed")
-        expect(remind).to_have_text("Remind")
-        expect(remind).to_be_enabled()
+        actions = self._gate_row(page).locator(".row-actions button")
+        expect(actions).to_have_text(["Transcript", "Details", "Close"])
 
     def test_close_asks_first_and_cancelling_posts_nothing(self, webapp, page):
         _seed_runs(webapp.install)
@@ -540,3 +519,58 @@ class TestMissingAgent:
         expect(stub.locator("a")).to_have_text("All agents")
         stub.locator("a").click()
         page.wait_for_selector(".agent-tile")
+
+
+# --- the saved popover's window --------------------------------------------
+
+class TestSavedPopover:
+    """The window the figures cover (MOD-373).
+
+    Every number in this card is lifetime-cumulative - `rollup_costs` folds
+    each session's whole recorded cost with no time filter. Saying so is the
+    difference between "saved ~$50" meaning this week and meaning since the
+    first run, and the reader cannot tell them apart from the figures.
+    """
+
+    def _open(self, page, webapp):
+        _agent(page, webapp)
+        chip = page.locator('[data-el="savedChip"]')
+        expect(chip).not_to_have_text("saved …", timeout=10_000)
+        chip.click()
+        card = page.locator('[data-el="savedCard"]')
+        expect(card).to_be_visible()
+        return card
+
+    def test_the_eyebrow_states_the_figures_are_lifetime(self, webapp, page):
+        _seed_runs(webapp.install)
+        card = self._open(page, webapp)
+        # Scoped on the heading, so it covers every row, not just the total.
+        expect(card.locator(".eyebrow")).to_have_text("saved · lifetime")
+
+    def test_the_window_is_stated_once_not_twice(self, webapp, page):
+        """The note used to carry the only mention, buried in the estimate
+        sentence. Now the eyebrow owns the window and the note owns the
+        caveat - say either twice and neither reads as load-bearing."""
+        _seed_runs(webapp.install)
+        card = self._open(page, webapp)
+        note = card.locator(".note")
+        # The honest limit on "lifetime" survives; the duplicate does not.
+        expect(note).to_contain_text("over runs still on disk")
+        assert "lifetime" not in note.inner_text().lower()
+
+    def test_the_chip_counts_a_single_run_in_the_singular(self, webapp, page):
+        """`_seed_runs` leaves exactly one session with usage to fold, which
+        the chip rendered as "1 runs" - the dashboard's session count next to
+        it has always pluralised."""
+        _seed_runs(webapp.install)
+        _agent(page, webapp)
+        chip = page.locator('[data-el="savedChip"]')
+        expect(chip).to_contain_text("1 run", timeout=10_000)
+        assert "1 runs" not in chip.inner_text()
+
+    def test_the_label_holds_when_there_is_nothing_saved(self, webapp, page):
+        """A team with no priced usage renders no total row. The window is a
+        property of the read, not of having spent - it must not vanish with
+        the figures it qualifies."""
+        card = self._open(page, webapp)
+        expect(card.locator(".eyebrow")).to_have_text("saved · lifetime")

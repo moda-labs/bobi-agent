@@ -204,6 +204,51 @@ jobs:
         working-directory: event-server
         run: npm run build:local
 
+      - name: Record the release-major bundle digest
+        id: release-bundle
+        working-directory: event-server
+        run: |
+          set -euo pipefail
+          test -s dist/local.js
+          echo "sha256=$(sha256sum dist/local.js | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # The 20+ gate is sound only while pinned esbuild emits identical bytes.
+      # Exercise the actual build hook and wheel contents, not just esbuild.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: event-server/package-lock.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Wheel builds on a newer Node major and ships an identical bundle
+        env:
+          RELEASE_BUNDLE_SHA256: ${{ steps.release-bundle.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_BUNDLE_SHA256"
+          python -m pip install --quiet build
+          python -m build --wheel --outdir dist-node24
+          wheel="$(ls dist-node24/*.whl)"
+          shipped="$(python -c '
+          import hashlib, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as wheel:
+              bundle = wheel.read("bobi/event-server/dist/local.js")
+          print(hashlib.sha256(bundle).hexdigest())
+          ' "$wheel")"
+          test -n "$shipped"
+          if [ "$shipped" != "$RELEASE_BUNDLE_SHA256" ]; then
+            echo "The shipped bundle depends on the host Node major:" >&2
+            echo "  node 20: $RELEASE_BUNDLE_SHA256" >&2
+            echo "  node 24: $shipped" >&2
+            echo "Restore the exact-major gate or fix the nondeterminism." >&2
+            exit 1
+          fi
+          echo "Wheel built on Node 24 ships an identical bundle: $shipped"
+
   e2e:
     name: E2E (Playwright)
     needs: changes

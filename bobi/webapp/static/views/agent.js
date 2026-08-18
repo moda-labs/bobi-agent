@@ -323,11 +323,21 @@ export function mountAgent(el, { api, name }) {
     const cacheSaved = cache.estimated_savings_usd || 0;
     const total = estimated + cacheSaved;
 
+    // Pluralised like the dashboard's session count - a fresh team's first
+    // run rendered "1 runs".
+    const runs = spend.sessions_counted || 0;
+    const ran = `${runs} run${runs === 1 ? "" : "s"}`;
     els.savedChip.textContent = total > 0
-      ? `saved ~${fmtUsd(total)} · ${spend.sessions_counted || 0} runs`
-      : `saved · ${spend.sessions_counted || 0} runs`;
+      ? `saved ~${fmtUsd(total)} · ${ran}`
+      : `saved · ${ran}`;
 
-    card.appendChild(mk("div", "eyebrow", "saved"));
+    // Every figure below is lifetime-cumulative (the fold applies no time
+    // filter), so the window is stated on the heading rather than beside
+    // one row - "saved ~$50" is unreadable without it.
+    const head = mk("div", "eyebrow", "saved");
+    head.appendChild(document.createTextNode(" · "));
+    head.appendChild(mk("span", "scope", "lifetime"));
+    card.appendChild(head);
     kv(card, "list-price value of tokens", fmtEst(estimated) || "—");
     kv(card, "recorded spend", recorded > 0 ? fmtUsd(recorded)
                                             : "$0 (subscription)");
@@ -353,9 +363,11 @@ export function mountAgent(el, { api, name }) {
            fmtTok((t.input_tokens || 0) + (t.output_tokens || 0)) + " tok");
       }
     }
+    // The eyebrow owns the window; this owns the limit ON it - sessions are
+    // read off disk, so "lifetime" means every run still there.
     card.appendChild(mk("div", "note",
       "Estimated at API list price for the tokens this team actually used." +
-      " Lifetime, over runs still on disk." + EST_NOTE));
+      " Counted over runs still on disk." + EST_NOTE));
   }
 
   /** about — composition, read-only. Editing lives in setup. */
@@ -592,8 +604,8 @@ export function mountAgent(el, { api, name }) {
     }, 250);
   });
 
-  /** Transcript stays visible on every row. Awaiting workflows add delivery
-      and closure actions; neither action advances the approval gate. */
+  /** Transcript stays visible on every row. Awaiting workflows add a closure
+      action, which ends the run without advancing the approval gate. */
   function rowActions(row) {
     const actions = mk("div", "row-actions");
     const transcript = mk("button", "btn bobi-btn small", "Transcript");
@@ -617,14 +629,6 @@ export function mountAgent(el, { api, name }) {
     }
 
     if (row.status === "awaiting_action") {
-      const remindButton = mk("button", "btn bobi-btn small remind", "Remind");
-      remindButton.type = "button";
-      remindButton.addEventListener("click", (e) => {
-        e.stopPropagation();
-        remind(row, remindButton);
-      });
-      actions.appendChild(remindButton);
-
       const closeButton = mk("button", "btn bobi-btn small quiet", "Close");
       closeButton.type = "button";
       closeButton.addEventListener("click", (e) => {
@@ -634,27 +638,6 @@ export function mountAgent(el, { api, name }) {
       actions.appendChild(closeButton);
     }
     return actions;
-  }
-
-  async function remind(row, button) {
-    button.disabled = true;
-    button.textContent = "Sending…";
-    const { ok, data } = await api(
-      `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/remind`,
-      { method: "POST", body: "{}" });
-    if (!ok) {
-      button.disabled = false;
-      button.textContent = "Remind";
-      showReport("reminder failed", (data && data.error) || "");
-      return;
-    }
-    button.textContent = "Sent";
-    setTimeout(() => {
-      if (button.isConnected) {
-        button.disabled = false;
-        button.textContent = "Remind";
-      }
-    }, 1800);
   }
 
   async function closeRun(row, button) {

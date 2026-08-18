@@ -13,6 +13,11 @@ existed only in an "open" state would strand as permanently-running whenever a
 manager died mid-firing, and live monitor work is already visible through its
 session, not through this ledger.
 
+One other thing writes here, and it is not a firing: when the scheduler's
+retry drain finishes recovering a park — the deliveries a failed firing owed
+the bus (#1006) — it records that as its own run, so the delivery sits in the
+ledger next to the firing that failed to make it.
+
 Records are per-monitor files under `run/state/monitor_runs/`, newest first,
 capped at `RETENTION_PER_MONITOR`. The cap is the whole retention policy: this
 is a debugging ledger, not an audit log.
@@ -212,7 +217,9 @@ class RunTracker:
     when the firing resolves — synchronously for the in-thread flavors, from a
     waiter thread for the out-of-band ones. Closing twice is a no-op, so a
     flavor that can resolve down two paths (a spawn that fails before it
-    starts, then its callback) records exactly one run.
+    starts, then its callback) records exactly one run. The retry drain builds
+    one too, for a recovery rather than a firing, and closes it only once the
+    park it was recovering is empty.
     """
 
     def __init__(self, monitor_name: str, flavor: str = "", *, now=None):

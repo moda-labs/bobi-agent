@@ -505,6 +505,31 @@ class KBStore:
         with conn:
             return self._remove_source_entries(conn, source)
 
+    def source_index_complete(self, source: str, source_hash: str,
+                              content: str) -> bool:
+        """Is *content* fully indexed under (*source*, *source_hash*)?
+
+        "Fully" means every chunk this store would produce for *content* has
+        both an entry row AND a vector row — a partially-embedded source is
+        stale, not present. The chunking rule and the schema both belong to
+        this store, so the question is answered here rather than by a caller
+        reaching for ``_connect``/``_fetchone``/``_chunk_text``.
+        """
+        counts = _fetchone(
+            self._connect(),
+            """SELECT COUNT(*) AS entry_count,
+                      COUNT(v.entry_id) AS vector_count
+               FROM entries
+               LEFT JOIN entries_vec v ON v.entry_id = entries.id
+               WHERE source = ? AND source_hash = ?""",
+            (source, source_hash),
+        ) or {}
+        expected = len(_chunk_text(content))
+        return (
+            int(counts.get("entry_count", 0) or 0) == expected
+            and int(counts.get("vector_count", 0) or 0) == expected
+        )
+
     def delete(self) -> None:
         self.close()
         if self._db_path.exists():

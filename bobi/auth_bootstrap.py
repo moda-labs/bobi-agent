@@ -39,6 +39,7 @@ from bobi.brain import (
     set_process_brain_from_config,
 )
 from bobi.config import Config
+from bobi.conversation import parse_conversation
 from bobi.slack import post_slack_message
 
 log = logging.getLogger(__name__)
@@ -274,21 +275,6 @@ def _write_line(master_fd: int, text: str) -> None:
 
 # --- event-bus wait ---------------------------------------------------------
 
-def _parse_conversation(ref: str) -> tuple[str, str, str, str] | None:
-    """Return ``(source, scope, chat_type, chat_id)`` for a gateway ref."""
-    parts = ref.split(":")
-    if len(parts) not in (4, 6):
-        return None
-    if any(not p for p in parts):
-        return None
-    if len(parts) == 6 and parts[4] != "thread":
-        return None
-    source, scope, chat_type, chat_id = parts[:4]
-    if chat_type not in {"dm", "group", "channel"}:
-        return None
-    return source, scope, chat_type, chat_id
-
-
 def _slack_topic(cfg: Config) -> str:
     from bobi.slack import require_app_identity
 
@@ -299,7 +285,7 @@ def _slack_topic(cfg: Config) -> str:
 
 def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
     """Resolve ``BOBI_LOGIN_CHANNEL`` to a post destination and bus topic."""
-    conv = _parse_conversation(raw)
+    conv = parse_conversation(raw)
     if conv is None:
         token = cfg.credential("slack", "bot_token")
         if not token:
@@ -316,7 +302,7 @@ def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
             legacy_slack_channel=channel,
         )
 
-    source, scope, _chat_type, _chat_id = conv
+    source, scope = conv.source, conv.scope
     if source == "slack":
         return LoginChannel(destination=raw, source=source, topic=_slack_topic(cfg))
     if source in {"discord", "whatsapp"}:
@@ -598,7 +584,6 @@ def _wait_for_code(project_path: Path, channel: LoginChannel | str,
 def run_bootstrap(
     project_path: Path,
     *,
-    channel: str | None = None,
     timeout: float = 600,
     url_timeout: float = 120,
     spawn_login=None,
@@ -612,6 +597,9 @@ def run_bootstrap(
     CLID/flow/credential path is used). The pty spawn, Slack post, code scrape,
     and event-bus wait are injectable so the orchestration is unit-testable
     without a real CLI, Slack, or Worker.
+
+    The destination is ``$BOBI_LOGIN_CHANNEL`` and takes no override - see the
+    comment on ``channel_ref`` below.
     """
     spawn_login = spawn_login or _spawn_login
     post_message = post_message or post_slack_message
@@ -650,7 +638,15 @@ def run_bootstrap(
             "Unset it before subscription login."
         )
 
-    channel_ref = channel or os.environ.get(LOGIN_CHANNEL_ENV, "")
+    # The destination is configuration, never a caller's argument. The login
+    # URL is a live credential-granting link, and the code pasted back into it
+    # is read from this same channel and written to the login CLI's stdin - so
+    # whoever picks the channel drives both ends of the flow. `login-bootstrap`
+    # sits on the `agent` group any worker's shell can reach, and a worker
+    # handling a fork diff, an issue body, or a webhook payload is handling
+    # untrusted text (docs/SECURITY.md). It once took a `--channel` that
+    # outranked this env var; it does not.
+    channel_ref = os.environ.get(LOGIN_CHANNEL_ENV, "")
     if not channel_ref:
         raise RuntimeError(
             f"{LOGIN_CHANNEL_ENV} is unset — need a private chat channel to post "

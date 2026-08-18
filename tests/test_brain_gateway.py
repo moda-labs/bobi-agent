@@ -418,3 +418,43 @@ def test_resume_guard_keeps_pre_789_gateway_records(tmp_path, monkeypatch):
     # against real Anthropic
     monkeypatch.delenv(GATEWAY_BASE_URL_ENV)
     assert load_resumable_session_id("mgr", "qwen3:14b") == ""
+
+
+class TestGatewayModuleOwnsItsConstants:
+    """Q083: every base-url semantic lives in bobi.brain.gateway.
+
+    The unresolved-URL sentinel used to live in ``bobi.brain``, which imports
+    ``gateway`` at load, so ``require_gateway_base_url`` reached back for it
+    through a function-level import - a circular-import workaround standing in
+    for module ownership.
+    """
+
+    def test_sentinel_is_defined_in_gateway(self):
+        import bobi.brain as brain_mod
+        import bobi.brain.gateway as gateway_mod
+
+        assert "GATEWAY_UNRESOLVED_BASE_URL" in vars(gateway_mod)
+        # Still re-exported under the spelling every caller and test uses.
+        assert (brain_mod.GATEWAY_UNRESOLVED_BASE_URL
+                is gateway_mod.GATEWAY_UNRESOLVED_BASE_URL)
+        assert "GATEWAY_UNRESOLVED_BASE_URL" in brain_mod.__all__
+
+    def test_require_works_without_importing_the_package(self, monkeypatch):
+        """gateway.py resolves the sentinel itself - it never reaches back.
+
+        Deleting the package's re-export is the discriminator: with the old
+        deferred ``from bobi.brain import GATEWAY_UNRESOLVED_BASE_URL`` this
+        raises ImportError instead of the actionable config error.
+        """
+        import bobi.brain as brain_mod
+        import bobi.brain.gateway as gateway_mod
+
+        monkeypatch.delattr(brain_mod, "GATEWAY_UNRESOLVED_BASE_URL")
+
+        monkeypatch.setenv(GATEWAY_BASE_URL_ENV,
+                           gateway_mod.GATEWAY_UNRESOLVED_BASE_URL)
+        with pytest.raises(RuntimeError, match="brain.base_url"):
+            gateway_mod.require_gateway_base_url()
+
+        monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://gw")
+        assert gateway_mod.require_gateway_base_url() == "http://gw"

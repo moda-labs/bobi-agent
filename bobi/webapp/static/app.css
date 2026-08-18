@@ -853,6 +853,14 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   border-radius: var(--radius-xl); box-shadow: var(--elev-4);
 }
 .pop-card .eyebrow { margin-bottom: 10px; }
+/* The window the card's figures cover. Regular weight is what makes it read
+   as a qualifier rather than a second heading, so the colour does not also
+   have to recede: --text-faint is 3.75:1 here, under AA, and this label
+   changes how every figure below it is read. --text-secondary matches the kv
+   keys it sits above. */
+.pop-card .eyebrow .scope {
+  color: var(--text-secondary); font-weight: var(--weight-regular);
+}
 .agent-page .eyebrow {
   font-family: var(--font-sans); font-size: 13.5px;
   color: var(--text-primary); font-weight: var(--weight-medium);
@@ -1013,10 +1021,6 @@ table.runs { width: 100%; border-collapse: collapse; }
 .r-tok { text-align: right; }
 .runs td.r-act { text-align: right; white-space: nowrap; }
 .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
-.row-actions .btn.remind {
-  border-color: var(--status-waiting-edge); background: var(--status-waiting-soft);
-  color: var(--status-waiting);
-}
 .row-actions .btn[disabled] { opacity: .45; cursor: default; }
 .runs-empty { padding: 28px 18px; color: var(--text-secondary); font-size: 14px; text-align: center; }
 .runs-pager {

@@ -468,6 +468,39 @@ def _all_entries():
                   if p.is_dir() and (p / "tool.yaml").is_file())
 
 
+def test_python_artifacts_are_not_catalog_entries(tmp_path, monkeypatch):
+    """`CATALOG_DIR` IS the package directory, so its own Python artifacts sit
+    beside the entries — they must never be offered as `tool_library:` ids.
+
+    Before the module moved into the package it used to shadow, the catalog
+    directory held nothing but entries and this could not happen. Now
+    `__init__.py` and `__pycache__/` live there too, and the only thing keeping
+    them out of `available_entries` is the `tool.yaml` predicate. Dropping that
+    predicate turns this red.
+    """
+    cat = tmp_path / "cat"
+    _write(cat / "__init__.py", "# the module itself\n")
+    _write(cat / "__pycache__" / "__init__.cpython-312.pyc", "\x00")
+    _write(cat / "real" / "tool.yaml", "success: true\n")
+    _write(cat / "real" / "guide.md", "x")
+    monkeypatch.setattr(tool_library, "CATALOG_DIR", cat)
+
+    assert tool_library.available_entries() == ["real"]
+
+    with pytest.raises(compose.ComposeError):
+        tool_library.load_entry("__pycache__")
+
+
+def test_real_catalog_lists_only_the_shipped_entries():
+    """The live package directory, not a fixture: the four shipped entries and
+    nothing else. Non-vacuous because importing the package has already made
+    `__pycache__` a real sibling of them."""
+    assert (tool_library.CATALOG_DIR / "__init__.py").is_file(), (
+        "CATALOG_DIR should be the tool_library package's own directory")
+    assert tool_library.available_entries() == [
+        "codex", "gstack", "otel", "venn"]
+
+
 def test_no_floating_refs_in_catalog():
     """No `@latest`, bare `HEAD`, or unpinned ref in any tool.yaml (#380)."""
     floating = ("@latest", "@HEAD", "@main", "@master")

@@ -12,6 +12,7 @@ wheel, not this one (#707).
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -444,34 +445,74 @@ def test_invalid_carried_artifact_reports_rebuild_failure(tmp_path, monkeypatch)
         hatch_build,
         "_build_fresh_artifact",
         lambda *args: (_ for _ in ()).throw(
-            hatch_build.EventServerBuildError("Node.js 20 was not found")
+            hatch_build.EventServerBuildError("npm ci failed (exit 1)")
         ),
     )
 
     with pytest.raises(
         hatch_build.EventServerBuildError,
-        match=r"bundle digest mismatch.*Node\.js 20 was not found",
+        match=r"bundle digest mismatch.*npm ci failed",
     ):
         _hook(tmp_path).initialize("standard", {})
 
 
-def test_build_node_must_be_exact_major_20(tmp_path, monkeypatch):
+def _stub_build_toolchain(monkeypatch, node_version: str) -> None:
     monkeypatch.setattr(
         hatch_build.shutil,
         "which",
-        lambda name: f"/bin/{name}",
+        lambda name: f"/safe/{name}",
     )
     monkeypatch.setattr(
         hatch_build,
         "_run_command",
-        lambda args, **kwargs: "v21.1.0" if args[-1] == "--version" else "",
+        lambda args, **kwargs: node_version if args[0] == "/safe/node" else "10.9.2",
+    )
+
+
+@pytest.mark.parametrize("node_version", ["v20.19.2", "v21.1.0", "v25.9.0"])
+def test_build_accepts_node_20_and_newer(tmp_path, monkeypatch, node_version):
+    _stub_build_toolchain(monkeypatch, node_version)
+
+    assert hatch_build._require_build_node(tmp_path, env={"PATH": "/safe"}) == (
+        node_version,
+        "10.9.2",
+    )
+
+
+@pytest.mark.parametrize("node_version", ["v18.20.4", "v19.9.0"])
+def test_build_rejects_node_older_than_20(tmp_path, monkeypatch, node_version):
+    _stub_build_toolchain(monkeypatch, node_version)
+
+    with pytest.raises(
+        hatch_build.EventServerBuildError,
+        match=rf"Node\.js 20 or newer.*{re.escape(node_version)}.*Upgrade Node\.js",
+    ):
+        hatch_build._require_build_node(tmp_path, env={"PATH": "/safe"})
+
+
+def test_build_rejects_an_unparseable_node_version(tmp_path, monkeypatch):
+    _stub_build_toolchain(monkeypatch, "Downloading...")
+
+    with pytest.raises(
+        hatch_build.EventServerBuildError,
+        match=r"could not parse Node\.js version 'Downloading\.\.\.'",
+    ):
+        hatch_build._require_build_node(tmp_path, env={"PATH": "/safe"})
+
+
+def test_build_rejects_an_npm_that_reports_no_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(hatch_build.shutil, "which", lambda name: f"/safe/{name}")
+    monkeypatch.setattr(
+        hatch_build,
+        "_run_command",
+        lambda args, **kwargs: "v20.19.2" if args[0] == "/safe/node" else "",
     )
 
     with pytest.raises(
         hatch_build.EventServerBuildError,
-        match=r"Node\.js 20 is required.*v21\.1\.0",
+        match=r"npm at /safe/npm returned an empty version",
     ):
-        hatch_build._require_build_node(tmp_path, env={"PATH": "/bin"})
+        hatch_build._require_build_node(tmp_path, env={"PATH": "/safe"})
 
 
 def _fresh_hook(
@@ -737,7 +778,9 @@ def test_build_command_failure_has_exit_path_and_bounded_output(
     assert len(message) < 2_200
 
 
-def _write_failed_target_probe(project: Path, marker: Path) -> Path:
+def _write_failed_target_probe(
+    project: Path, marker: Path, node_version: str = "v20.19.2"
+) -> Path:
     """Create a tiny VCS checkout whose hook succeeds before the wheel fails."""
     (project / ".git").write_text("gitdir: unavailable\n")
     shutil.copy2(PROJECT_ROOT / "hatch_build.py", project / "hatch_build.py")
@@ -786,7 +829,7 @@ def _write_failed_target_probe(project: Path, marker: Path) -> Path:
     fake_bin = project / "fake-bin"
     fake_bin.mkdir()
     node = fake_bin / "node"
-    node.write_text("#!/bin/sh\nprintf 'v20.19.2\\n'\n")
+    node.write_text(f"#!/bin/sh\nprintf '{node_version}\\n'\n")
     node.chmod(0o755)
 
     dependency_data = {
@@ -858,11 +901,14 @@ def _write_failed_target_probe(project: Path, marker: Path) -> Path:
     return fake_bin
 
 
-def test_pep517_target_failure_cleans_staging_on_backend_exit(tmp_path):
+# The newer-major marker proves a real PEP 517 build crossed the gate before
+# failing later during target construction.
+@pytest.mark.parametrize("node_version", ["v20.19.2", "v25.9.0"])
+def test_pep517_target_failure_cleans_staging_on_backend_exit(tmp_path, node_version):
     project = tmp_path / "probe"
     project.mkdir()
     marker = tmp_path / "artifact-built"
-    fake_bin = _write_failed_target_probe(project, marker)
+    fake_bin = _write_failed_target_probe(project, marker, node_version)
     backend_tmp = tmp_path / "backend-tmp"
     backend_tmp.mkdir()
     env = os.environ.copy()
@@ -896,3 +942,34 @@ def test_pep517_target_failure_cleans_staging_on_backend_exit(tmp_path):
     assert not list(backend_tmp.glob("bobi-event-server-build-*"))
     assert not list(project.rglob("__pycache__"))
     assert not list(project.rglob("*.pyc"))
+
+
+def test_pep517_build_rejects_node_older_than_20_before_npm(tmp_path):
+    project = tmp_path / "probe"
+    project.mkdir()
+    marker = tmp_path / "artifact-built"
+    fake_bin = _write_failed_target_probe(project, marker, "v18.20.4")
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--no-isolation",
+            str(project),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists()
+    diagnostic = result.stdout + result.stderr
+    assert "Node.js 20 or newer" in diagnostic
+    assert "Upgrade Node.js" in diagnostic

@@ -469,8 +469,9 @@ tarball.
 
 ## Where the code lives
 
-- `bobi/tool_library.py` - the dependency model, catalog loader, `expand()`, and
-  `dependency_list_hash`.
+- `bobi/tool_library/__init__.py` - the dependency model, catalog loader,
+  `expand()`, and `dependency_list_hash`. The catalog entry directories are
+  package data sitting beside it in the same package.
 - `bobi/dep_bootstrap.py` - the bootstrap-agent harness, the `render_team_deps`
   build seam, and the CLI (`python -m bobi.dep_bootstrap <team> --render`).
 - `bobi/local_deps.py` - local materialization (`install --with-deps`): plan /

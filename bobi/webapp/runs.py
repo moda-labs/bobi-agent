@@ -7,7 +7,9 @@ agent's work is recorded have to become one shape:
 - **sessions** (`SessionRegistry`) — the manager and every subagent it ran
 - **workflow runs** (`run/state/workflow/runs/*.json`) — including the ones
   suspended waiting for an event that never came
-- **monitor run records** (`run/state/monitor_runs/*.json`) — one per firing
+- **monitor run records** (`run/state/monitor_runs/*.json`) — one per firing,
+  plus one per recovery when the retry drain lands a park an earlier firing
+  failed to publish (#1006)
 
 Deliberately NOT here: decisions and raw event deliveries. They are log lines,
 not runs — no status, no cost, nothing to open (`bobi agent events` still

@@ -158,6 +158,20 @@ therefore runs untrusted-author code against your credentials.
   prompt-injected agent could exfiltrate its own instance's tokens. This is an
   accepted internal-only risk today, mitigated by scoped per-instance tokens; an
   egress proxy is tracked for any non-employee/tenant use (epic #395).
+- **The subscription login destination is configuration, never an argument.**
+  `login-bootstrap` posts a live credential-granting sign-in URL and then reads
+  the code pasted back to that same place, so whoever picks the destination
+  drives both ends of the brain's OAuth flow. It sits on the `agent` group any
+  worker's shell reaches, and workers run with `bypassPermissions`, so the
+  destination is `$BOBI_LOGIN_CHANNEL` and the command takes no `--channel`
+  override. That removes the affordance, not the capability: a process that
+  can already run arbitrary shell as the agent user can set the env var on the
+  invocation (process env outranks the runtime `.env` by design,
+  `bobi/config.py`), which is also the operator's one-off escape hatch. The
+  bound is the accepted risk two bullets up - what a prompt-injected agent can
+  reach is what its own uid can reach. What the removal does buy is that a
+  documented flag no longer advertises "redirect the brain's login here" to a
+  model reading `--help` and following an injected instruction.
 - **An OTLP ingest token must be write-only and per-instance.** The accepted risk
   directly above is bounded by "its own instance's tokens", and a vendor OTLP
   token breaks that bound: a Grafana Cloud OTLP credential is typically

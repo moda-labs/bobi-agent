@@ -1399,8 +1399,6 @@ def serve(project: Path, *, model: str | None = None,
         lambda nonce: build_app(state, project, nonce=nonce, model=model),
         open_browser=open_browser,
         label="bobi setup",
-        announce=lambda url:
-            f"\n  bobi setup is running at {url}\n  (Ctrl-C to stop)\n",
     )
 
     if state.finished:

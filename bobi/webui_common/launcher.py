@@ -1,4 +1,13 @@
-"""Shared launchers for Bobi's local web UIs."""
+"""Shared launchers for Bobi's local web UIs.
+
+`serve_local` and `serve_container` are the two whole-launch entry points.
+Below them sit the primitives they are built from — `serve_socket`,
+`run_server`, `write_secret`, `open_browser_soon` — which exist as their own
+names because a launcher that cannot use either entry point should still
+compose the shared contract rather than re-solve it. The webapp daemon is
+that caller: it needs a fixed port and pid/port files written between bind
+and serve, so it binds its own socket but shares everything else.
+"""
 
 from __future__ import annotations
 
@@ -16,14 +25,17 @@ import uvicorn
 from bobi.fsutil import atomic_write_text
 
 AppFactory = Callable[[str], FastAPI]
-Announcer = Callable[[str], str]
 
 
 def _new_secret() -> str:
     return secrets.token_urlsafe(24)
 
 
-def _serve_socket(host: str, port: int) -> socket.socket:
+def serve_socket(host: str, port: int) -> socket.socket:
+    """A bound, reusable listening socket for *host* — IPv6 when *host* is one.
+
+    Raises `OSError` if the port is taken; the caller owns closing it.
+    """
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     sock = socket.socket(family, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -31,36 +43,63 @@ def _serve_socket(host: str, port: int) -> socket.socket:
     return sock
 
 
+def run_server(app: FastAPI, sock: socket.socket) -> None:
+    """Serve *app* on the already-bound *sock* until it stops.
+
+    The server is attached to `app.state.uvicorn_server` so an app can end
+    its own process cleanly (setup's "Close & end setup" button posts
+    /api/shutdown, which flips `should_exit`). Ctrl-C is a normal way to
+    stop a foreground UI, not an error. Closing *sock* is the caller's job:
+    it may have other teardown to sequence around it.
+    """
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
+    app.state.uvicorn_server = server
+    try:
+        server.run(sockets=[sock])
+    except KeyboardInterrupt:
+        pass
+
+
+def write_secret(path: Path) -> str:
+    """Mint a launch secret, persist it at *path*, and lock it to 0600.
+
+    The chmod is best-effort: on a filesystem that has no POSIX modes the
+    token is still usable, and the loopback Host guard — not the token — is
+    the primary boundary for every local UI.
+    """
+    secret = _new_secret()
+    path.write_text(secret)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return secret
+
+
+def open_browser_soon(url: str, *, delay: float = 0.5) -> None:
+    """Open *url* after *delay*, giving the server time to start listening."""
+    threading.Timer(delay, lambda: webbrowser.open(url)).start()
+
+
 def serve_local(
     app_factory: AppFactory,
     *,
     open_browser: bool = True,
     label: str = "web UI",
-    announce: Announcer | None = None,
 ) -> int:
     """Run a local web UI on `127.0.0.1:0` in the foreground."""
     secret = _new_secret()
-    sock = _serve_socket("127.0.0.1", 0)
+    sock = serve_socket("127.0.0.1", 0)
     port = sock.getsockname()[1]
     url = f"http://127.0.0.1:{port}/?n={secret}"
 
     app = app_factory(secret)
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-    # Let the app end its own process cleanly (e.g. setup's "Close & end
-    # setup" button posts /api/shutdown, which flips should_exit).
-    app.state.uvicorn_server = server
-
     if open_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
-    if announce is not None:
-        print(announce(url))
-    else:
-        print(f"\n  {label} is running at {url}\n  (Ctrl-C to stop)\n")
+        open_browser_soon(url)
+    print(f"\n  {label} is running at {url}\n  (Ctrl-C to stop)\n")
 
     try:
-        server.run(sockets=[sock])
-    except KeyboardInterrupt:
-        pass
+        run_server(app, sock)
     finally:
         sock.close()
     return 0
@@ -79,23 +118,15 @@ def serve_container(
 
     token = os.environ.get("BOBI_UI_TOKEN", "")
     if not token:
-        token = _new_secret()
-        tok_file = state_dir / "ui.token"
-        tok_file.write_text(token)
-        try:
-            os.chmod(tok_file, 0o600)
-        except OSError:
-            pass
+        token = write_secret(state_dir / "ui.token")
 
-    sock = _serve_socket(bind_host, bind_port)
+    sock = serve_socket(bind_host, bind_port)
     bound_port = sock.getsockname()[1]
     atomic_write_text(state_dir / "ui.port", str(bound_port))
 
     app = app_factory(token)
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-
     threading.Thread(
-        target=lambda: server.run(sockets=[sock]),
+        target=lambda: run_server(app, sock),
         daemon=True,
         name="agent-ui",
     ).start()

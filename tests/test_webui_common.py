@@ -1,12 +1,21 @@
+import re
 import socket
 import stat
 import types
+
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from bobi.webui_common import resolve_static_asset
-from bobi.webui_common.launcher import serve_container, serve_local
+from bobi.webui_common.launcher import (
+    open_browser_soon,
+    serve_container,
+    serve_local,
+    serve_socket,
+    write_secret,
+)
 from bobi.webui_common.security import (
     WEBUI_TOKEN_HEADER,
     install_security,
@@ -170,6 +179,68 @@ def test_static_routes_serve_shared_brand_fonts(tmp_path):
     assert resolve_static_asset(static_dir, "fonts/../../secret.txt") is None
 
 
+class TestLaunchPrimitives:
+    """The shared launch contract, called directly.
+
+    `serve_local`/`serve_container` are not the only launchers: the webapp
+    daemon binds its own socket because its port is fixed and it must write
+    pid/port files between bind and serve. These primitives are what it
+    composes instead of re-solving them (D097/Q024), so they are tested as
+    the contract they now are.
+    """
+
+    def test_write_secret_persists_a_private_token(self, tmp_path):
+        path = tmp_path / "ui.token"
+        token = write_secret(path)
+
+        assert len(token) > 20
+        assert path.read_text() == token
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_write_secret_is_a_fresh_token_each_call(self, tmp_path):
+        assert write_secret(tmp_path / "a") != write_secret(tmp_path / "b")
+
+    def test_serve_socket_binds_loopback_and_is_reusable(self):
+        sock = serve_socket("127.0.0.1", 0)
+        try:
+            assert sock.family == socket.AF_INET
+            assert sock.getsockname()[0] == "127.0.0.1"
+            assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR)
+        finally:
+            sock.close()
+
+    def test_serve_socket_picks_ipv6_for_an_ipv6_host(self):
+        sock = serve_socket("::1", 0)
+        try:
+            assert sock.family == socket.AF_INET6
+        finally:
+            sock.close()
+
+    def test_serve_socket_raises_when_the_port_is_taken(self):
+        held = serve_socket("127.0.0.1", 0)
+        try:
+            port = held.getsockname()[1]
+            held.listen(1)
+            with pytest.raises(OSError):
+                serve_socket("127.0.0.1", port).close()
+        finally:
+            held.close()
+
+    def test_open_browser_soon_defers_the_open(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            "bobi.webui_common.launcher.threading.Timer",
+            lambda delay, fn: types.SimpleNamespace(
+                start=lambda: seen.update(delay=delay, result=fn())))
+        monkeypatch.setattr("bobi.webui_common.launcher.webbrowser.open",
+                            lambda url: seen.setdefault("url", url))
+
+        open_browser_soon("http://127.0.0.1:1/", delay=0.25)
+
+        assert seen["url"] == "http://127.0.0.1:1/"
+        assert seen["delay"] == 0.25
+
+
 def test_serve_local_mints_secret_opens_browser_and_runs_bound_socket(monkeypatch):
     seen = {}
 
@@ -197,6 +268,35 @@ def test_serve_local_mints_secret_opens_browser_and_runs_bound_socket(monkeypatc
     assert seen["sockname"][0] == "127.0.0.1"
     assert seen["url"].startswith("http://127.0.0.1:")
     assert seen["url"].endswith("/?n=minted-token")
+
+
+def test_serve_local_banner_is_the_label_line_operators_read(monkeypatch, capsys):
+    """The startup banner is the only thing telling an operator where the UI is.
+
+    `bobi setup` used to pass its own `announce` callback that reproduced this
+    line character-for-character; the callback is gone, so the label branch is
+    now the single source of that text and its exact shape is load-bearing.
+    """
+    class FakeServer:
+        def __init__(self, config):
+            pass
+
+        def run(self, sockets):
+            pass
+
+    monkeypatch.setattr("bobi.webui_common.launcher.secrets.token_urlsafe",
+                        lambda n: "minted-token")
+    monkeypatch.setattr("bobi.webui_common.launcher.uvicorn.Server", FakeServer)
+
+    assert serve_local(lambda secret: FastAPI(), open_browser=False,
+                       label="bobi setup") == 0
+
+    out = capsys.readouterr().out
+    port = re.search(r"127\.0\.0\.1:(\d+)", out).group(1)
+    assert out == (
+        f"\n  bobi setup is running at "
+        f"http://127.0.0.1:{port}/?n=minted-token\n  (Ctrl-C to stop)\n\n"
+    )
 
 
 def test_serve_container_writes_token_and_port_and_uses_ipv6_host(tmp_path, monkeypatch):

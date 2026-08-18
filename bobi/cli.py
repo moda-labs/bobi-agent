@@ -217,6 +217,12 @@ def main(ctx):
         datefmt="%H:%M:%S",
         handlers=[logging.StreamHandler()],
     )
+    # httpx logs every request at INFO, which the root level above would put
+    # in front of the user's actual output — and `bobi app start` polls
+    # /api/ping every 0.2s while the daemon comes up, so a slow start would
+    # bury its own "running at ..." line under a stack of transport chatter.
+    # Transport logs are debugging detail, not product output.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     # Top-level commands are machine/repo scoped. Runtime identity is bound by
     # `bobi agent <name> ...` or inherited BOBI_ROOT in child processes.
     if ctx.invoked_subcommand is None:
@@ -486,19 +492,21 @@ def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
 
 
 @main.command("login-bootstrap")
-@click.option("--channel", default=None,
-              help="Private chat channel or gateway conversation ref to post "
-                   "the login URL into (default: $BOBI_LOGIN_CHANNEL).")
 @click.option("--timeout", default=600, type=int,
               help="Seconds to wait for the pasted auth code (default: 600).")
-def login_bootstrap(channel, timeout):
+def login_bootstrap(timeout):
     """Bootstrap subscription auth over a chat channel + the event bus.
 
     For BOBI_AUTH=subscription first boot with no credentials on the
     volume: drive `claude auth login --claudeai` under a pty, post the OAuth
-    URL to a private chat channel, and wait for the pasted code to arrive as
+    URL to $BOBI_LOGIN_CHANNEL, and wait for the pasted code to arrive as
     a chat event over the event bus. Idempotent — a no-op if credentials
     already exist. Fallback: `fly ssh console` then `claude auth login`.
+
+    The destination is $BOBI_LOGIN_CHANNEL only. This command is on the
+    `agent` group any worker can reach and the URL it posts grants
+    credentials, so it takes no caller-chosen destination; an operator
+    retargeting a one-off sets the env var on the invocation.
     """
     from bobi import auth_bootstrap
     project_path = _detect_project_root()
@@ -507,8 +515,7 @@ def login_bootstrap(channel, timeout):
         click.echo("Subscription credentials already present — nothing to do.")
         return
     try:
-        ok = auth_bootstrap.run_bootstrap(
-            project_path, channel=channel, timeout=timeout)
+        ok = auth_bootstrap.run_bootstrap(project_path, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         click.echo(f"Login bootstrap failed: {exc}", err=True)
         raise SystemExit(1)
@@ -779,6 +786,12 @@ def app_stop(force):
             "anyway."
         )
         return
+    if st.not_permitted:
+        raise click.ClickException(
+            f"Process {st.pid} is the bobi app but runs as another user, so "
+            "the stop signal was refused. It is still running; stop it as "
+            "that user (or with sudo)."
+        )
     click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
 
 
@@ -1394,17 +1407,14 @@ def _find_transcript(session: str) -> Path | None:
         return session_log
 
     # Fallback: Claude Code transcript via session ID
+    from bobi.chat_history import find_claude_transcript
     from bobi.sdk import _sessions_dir
     id_file = _sessions_dir() / f"{session}.id"
     if id_file.exists():
         session_id = id_file.read_text().strip()
-        if session_id:
-            claude_projects = Path.home() / ".claude" / "projects"
-            if claude_projects.exists():
-                for project_dir in claude_projects.iterdir():
-                    candidate = project_dir / f"{session_id}.jsonl"
-                    if candidate.exists():
-                        return candidate
+        transcript = find_claude_transcript(session_id)
+        if transcript is not None:
+            return transcript
 
     click.echo(f"No session '{session}'.")
     registry = get_registry()
@@ -2247,8 +2257,9 @@ def ingest_token_revoke(token_id):
 def transcript_index(project):
     """Index conversation JSONL files into searchable SQLite.
 
-    Scans ~/.claude/projects/*/conversations/ for JSONL files and indexes
-    messages into a local SQLite database for fast searching.
+    Scans the Claude Code transcript roots — $CLAUDE_CONFIG_DIR/projects when
+    set, then ~/.claude/projects — for */*.jsonl and indexes messages into a
+    local SQLite database for fast searching.
 
     Usage:
         bobi agent eng transcript index                # index all projects
@@ -3573,12 +3584,11 @@ def recall_memory(query, limit):
     """Search the cold long-term memory reference KB."""
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
-    from bobi.memory import cold_memory_kb_name
+    from bobi.memory import COLD_MEMORY_KB_NAME
 
     _detect_project_root()
-    name = cold_memory_kb_name()
     try:
-        store = KBStore(name)
+        store = KBStore(COLD_MEMORY_KB_NAME)
     except FileNotFoundError:
         click.echo("No cold memory index yet.")
         return
@@ -3628,7 +3638,7 @@ def costs(ctx, group_by):
 
     project_path = _detect_project_root()
     sessions_dir = paths.sessions_dir(project_path)
-    summary = rollup_costs(sessions_dir, group_by=group_by)
+    summary = rollup_costs(sessions_dir)
 
     if summary.sessions_counted == 0:
         click.echo("No cost data found. Costs are recorded as sessions run.")

@@ -20,7 +20,6 @@ import logging
 import os
 from collections import deque
 from contextlib import suppress
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -341,7 +340,9 @@ def _max_turns_from_transcript(
     session_id: str,
 ) -> tuple[bool, int | None, int | None]:
     """Fallback for Claude SDK runs whose JSONL has terminal metadata only."""
-    transcript = _claude_transcript_path(session_id)
+    from bobi.chat_history import find_claude_transcript
+
+    transcript = find_claude_transcript(session_id)
     if transcript is None:
         return False, None, None
     try:
@@ -358,34 +359,6 @@ def _max_turns_from_transcript(
         if found:
             return found, max_turns, turn_count
     return False, None, None
-
-
-def _claude_transcript_path(session_id: str) -> Path | None:
-    if not session_id:
-        return None
-    projects_dirs = []
-    if os.environ.get("CLAUDE_CONFIG_DIR"):
-        projects_dirs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
-    projects_dirs.append(Path.home() / ".claude" / "projects")
-
-    seen: set[str] = set()
-    for projects in projects_dirs:
-        key = str(projects)
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            if not projects.is_dir():
-                continue
-            for project_dir in projects.iterdir():
-                if not project_dir.is_dir():
-                    continue
-                candidate = project_dir / f"{session_id}.jsonl"
-                if candidate.exists():
-                    return candidate
-        except OSError:
-            continue
-    return None
 
 
 def _render_max_turns_error(max_turns: int | None,
