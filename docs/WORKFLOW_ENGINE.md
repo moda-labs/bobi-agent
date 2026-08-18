@@ -379,7 +379,8 @@ the step's output scope and feed downstream routing and templating.
 
 The brain session opens **lazily, at the first prompt step that executes**, and
 is then reused across all prompt steps, so the agent keeps full context. The
-engine drains exactly one turn per prompt (`_drain_response`) and saves the
+engine drains exactly one turn per prompt (`_drain_response`, a thin adapter
+over the shared `bobi/brain/turns.py` drain primitive, #1048) and saves the
 returned session ID so a resumed run can pick the same conversation back up. A
 workflow whose reachable steps are all deterministic opens no brain session at
 all.
