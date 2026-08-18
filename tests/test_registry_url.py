@@ -236,7 +236,7 @@ def test_fetch_from_archive_rejects_non_archive(project, tmp_path):
 def test_fetch_from_archive_rejects_manifest_mismatch_before_cache_install(
     project, tmp_path,
 ):
-    cached = registry._cache_dir(project) / "eng-team"
+    cached = registry._cache_dir() / "eng-team"
     cached_role = cached / "roles" / "manager" / "ROLE.md"
     cached_role.parent.mkdir(parents=True)
     cached_role.write_text("known-good cached role\n")
@@ -260,7 +260,7 @@ def test_fetch_from_archive_rejects_manifest_mismatch_before_cache_install(
         tar.add(src, arcname="eng-team")
 
     with pytest.raises(RuntimeError, match="Package verification failed") as exc:
-        registry.fetch_from_archive(project, arc)
+        registry.fetch_from_archive(arc)
 
     assert "roles/manager/ROLE.md (sha256 mismatch)" in str(exc.value)
     assert cached_role.read_text() == "known-good cached role\n"
