@@ -102,6 +102,43 @@ class TestAutoDispatchRule:
         }
         assert rule.matches(event) is False
 
+    @pytest.mark.parametrize(
+        ("fields", "expected"),
+        [
+            ({"assignee": "bobi"}, True),
+            ({"assignee": "alice"}, False),
+            ({"assignees": "alice, bobi"}, True),
+            ({"assignees": "alice, bob"}, False),
+        ],
+    )
+    def test_self_match_resolves_single_and_multiple_assignees(
+        self, fields, expected
+    ):
+        rule = AutoDispatchRule(
+            event="github.issues",
+            workflow="issue-lifecycle",
+            match={"action": "assigned", "assignee": "$self"},
+        )
+        event = {
+            "type": "github.issues",
+            "fields": {"action": "assigned", **fields},
+        }
+
+        assert rule.matches(event, self_login="bobi") is expected
+
+    def test_self_match_fails_closed_when_identity_is_unresolved(self):
+        rule = AutoDispatchRule(
+            event="github.issues",
+            workflow="issue-lifecycle",
+            match={"action": "assigned", "assignee": "$self"},
+        )
+        event = {
+            "type": "github.issues",
+            "fields": {"action": "assigned", "assignee": "bobi"},
+        }
+
+        assert rule.matches(event, self_login=None) is False
+
     def test_matches_without_match_dict(self):
         """No match conditions = match any event of the right type."""
         rule = AutoDispatchRule(
