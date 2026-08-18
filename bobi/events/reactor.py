@@ -96,9 +96,12 @@ class AutoDispatchRule:
         resulting ``session_name`` identical for two dispatches of the same
         comment, so the persisted "A run is already active" guard rejects the
         duplicate even across processes — a second, process-independent line of
-        defense behind the in-memory dedup. Returns ``None`` (→ launch_agent
-        mints its own random key) when no stable id is available, preserving the
-        prior behavior for events without a comment/review.
+        defense behind the in-memory dedup. Returns ``None`` when no stable id
+        is available, and ``_dispatch`` then launches with an explicitly random
+        key: ``_build_task`` renders every id-less review on a PR to the same
+        sentence, so letting #850's task-derived default apply here would
+        collapse two genuinely different reviews into one and drop the second
+        (#326). The in-memory ``dedup_key`` still guards redelivery.
         """
         fields = event.get("fields", {})
         number = fields.get("number")
@@ -250,6 +253,12 @@ class EventReactor:
 
         # Deterministic per-comment launch key (issue #411) — see run_key().
         run_key = rule.run_key(event)
+        # No stable id → do NOT let launch_agent derive one from the task text.
+        # _build_task is lossy for exactly these events: two different reviews
+        # on one PR render to the same sentence, so a derived key would collapse
+        # them and drop the second - the silent-drop #326 fixed. A random key
+        # keeps the documented pre-#850 behavior for id-less events.
+        random_key = run_key is None
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
 
@@ -267,6 +276,7 @@ class EventReactor:
                     workflow_name=rule.workflow,
                     role=rule.role,
                     run_key=run_key,
+                    random_key=random_key,
                     input_fields=input_fields,
                 )
             except RuntimeError as e:

@@ -327,6 +327,9 @@ class TestLaunchAgent:
     def test_rejects_active_run(self, mock_launch, mock_reg, mock_check):
         active = MagicMock()
         active.status = "running"
+        # A LIVE pid: admission crash-closes an active entry whose process is
+        # gone, and a MagicMock pid would read as dead (#850).
+        active.pid = os.getpid()
         mock_reg.return_value = MagicMock(get=MagicMock(return_value=active))
         from bobi.subagent import launch_agent
         with pytest.raises(RuntimeError, match="already active"):
@@ -524,6 +527,363 @@ class TestLaunchAgent:
         registry.mark_terminal.assert_called_once()
         assert registry.mark_terminal.call_args.args[0] == registered.name
         assert registry.mark_terminal.call_args.args[1] == TERMINAL_CRASHED
+
+
+class TestDeriveRunKey:
+    """The default run key is derived, so identical launches collide (#850)."""
+
+    def test_same_workflow_and_task_gives_same_key(self):
+        from bobi.subagent import derive_run_key
+        assert (derive_run_key("adhoc", "Investigate the backlog")
+                == derive_run_key("adhoc", "Investigate the backlog"))
+
+    def test_different_tasks_give_different_keys(self):
+        from bobi.subagent import derive_run_key
+        assert (derive_run_key("adhoc", "Investigate the backlog")
+                != derive_run_key("adhoc", "Investigate the other backlog"))
+
+    def test_workflow_participates(self):
+        from bobi.subagent import derive_run_key
+        assert (derive_run_key("adhoc", "Do the thing")
+                != derive_run_key("issue-lifecycle", "Do the thing"))
+
+    def test_whitespace_is_normalized(self):
+        """A task re-emitted with different wrapping is the same task."""
+        from bobi.subagent import derive_run_key
+        assert (derive_run_key("adhoc", "  Fix   the\n  login bug ")
+                == derive_run_key("adhoc", "Fix the login bug"))
+
+    def test_case_is_not_folded(self):
+        """Normalization stays conservative - a false collision refuses work."""
+        from bobi.subagent import derive_run_key
+        assert derive_run_key("adhoc", "Deploy") != derive_run_key("adhoc", "deploy")
+
+    def test_keeps_adhoc_prefix_so_unkeyed_runs_stay_visible(self):
+        from bobi.subagent import derive_run_key
+        assert derive_run_key("adhoc", "x").startswith("adhoc-")
+
+    @pytest.mark.parametrize("dial", ["project", "role", "model", "effort"])
+    def test_every_launch_dial_participates(self, dial):
+        """One task at two settings is two runs, not a duplicate.
+
+        Deriving from task text alone refuses the second - and skills/bobi.md
+        documents varying exactly these per delegation.
+        """
+        from bobi.subagent import derive_run_key
+        assert (derive_run_key("adhoc", "Do the thing", **{dial: "a"})
+                != derive_run_key("adhoc", "Do the thing", **{dial: "b"}))
+
+    def test_an_explicit_dial_equal_to_the_default_is_not_the_default(self):
+        """The documented conservative edge: dials are the values as PASSED.
+
+        Two launches that both omit --model agree on "" and collide - the
+        incident's shape. One that passes the role's default explicitly reads
+        as different, which errs toward launching rather than toward a false
+        refusal.
+        """
+        from bobi.subagent import derive_run_key
+        assert (derive_run_key("adhoc", "t")
+                != derive_run_key("adhoc", "t", model="opus"))
+
+    def test_key_is_twelve_hex_chars(self):
+        """48 bits is what makes an accidental collision negligible; a shorter
+        digest would silently start refusing unrelated tasks."""
+        from bobi.subagent import derive_run_key
+        digest = derive_run_key("adhoc", "t").removeprefix("adhoc-")
+        assert len(digest) == 12
+        assert all(c in "0123456789abcdef" for c in digest)
+
+
+class TestLaunchAgentUnkeyedDedup:
+    """Omitting --id must not silently remove duplicate-run protection (#850).
+
+    The incident: 50 launches of one task, none carrying --id, every one of them
+    minted a random key, so the "already active" guard never fired and the chain
+    ran to the spend cap.
+    """
+
+    TASK = "Investigate the sales-calls backlog and report"
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path):
+        _write_agent_yaml(tmp_path)
+        paths.bind_root(tmp_path)
+        yield
+        paths.bind_root(None)
+
+    @pytest.fixture
+    def registry(self, tmp_path):
+        """A REAL registry on an isolated root.
+
+        The duplicate guard reads back what a previous launch wrote, so the
+        collision has to be genuine. A mock answers whatever the test told it
+        to and passes even when the two launches never collided - which is the
+        bug. Real dead-pid reaping matters here too.
+        """
+        from bobi.sdk import SessionRegistry
+        return SessionRegistry(tmp_path)
+
+    # A pid that cannot be alive. The spawned pid is written to the registry,
+    # and these tests need the predecessor to read as DEAD so the relaunch is
+    # admitted; a small literal like 123 exists on plenty of container hosts
+    # and would fail the collision tests for a reason unrelated to dedup.
+    DEAD_PID = 2 ** 22
+
+    @staticmethod
+    def _mocks():
+        return (patch("bobi.subagent.check_requires", return_value=[]),
+                patch("bobi.subagent._launch_detached",
+                      return_value=TestLaunchAgentUnkeyedDedup.DEAD_PID))
+
+    def _launch(self, registry, **kwargs):
+        from bobi.subagent import launch_agent
+        checks, detached = self._mocks()
+        with checks, detached, patch("bobi.subagent.get_registry",
+                                     return_value=registry):
+            return launch_agent(task=kwargs.pop("task", self.TASK),
+                                cwd="/tmp/test", workflow_name="adhoc",
+                                **kwargs)
+
+    @staticmethod
+    def _mark_running(registry, name, pid):
+        """Put a live-looking entry back, the way a crash or a peer leaves one."""
+        from dataclasses import replace
+        registry.register(replace(registry.get(name), status="running", pid=pid))
+
+    def test_identical_unkeyed_launches_share_one_session_name(self, registry):
+        names = {self._launch(registry) for _ in range(5)}
+        assert len(names) == 1, f"un-keyed launches did not collide: {names}"
+
+    def test_second_identical_launch_is_refused_while_the_first_runs(self, registry):
+        """The incident, in miniature: the guard only fires if the names agree."""
+        name = self._launch(registry)
+        self._mark_running(registry, name, os.getpid())
+        with pytest.raises(RuntimeError, match="already active"):
+            self._launch(registry)
+
+    def test_a_different_task_still_launches_alongside(self, registry):
+        """Suppression must not become a global lock on one agent at a time."""
+        first = self._launch(registry)
+        self._mark_running(registry, first, os.getpid())
+        second = self._launch(registry, task="Something else entirely")
+        assert first != second
+
+    def test_refusal_names_the_opt_out(self, registry):
+        """An agent reading the error needs to know how to run both on purpose."""
+        self._mark_running(registry, self._launch(registry), os.getpid())
+        with pytest.raises(RuntimeError, match="--id-random"):
+            self._launch(registry)
+
+    def test_explicit_key_refusal_does_not_mention_the_opt_out(self, registry):
+        """--id 42 twice is a deliberate correlation, not an accidental one."""
+        self._mark_running(registry, self._launch(registry, run_key="42"),
+                           os.getpid())
+        with pytest.raises(RuntimeError) as exc:
+            self._launch(registry, run_key="42")
+        assert "--id-random" not in str(exc.value)
+
+    def test_random_key_restores_distinct_names_for_parallel_fan_out(self, registry):
+        names = {self._launch(registry, random_key=True) for _ in range(5)}
+        assert len(names) == 5
+
+    def test_random_key_is_greppable_in_the_session_list(self, registry):
+        """`rand-`, not `adhoc-`: a screen of dedup-disabled runs should be
+        readable at a glance, not a hash-length comparison."""
+        assert "rand-" in self._launch(registry, random_key=True)
+
+    @pytest.mark.parametrize("dial,a,b", [
+        ("role", "engineer", "reviewer"),
+        ("model", "opus", "haiku"),
+        ("effort", "high", "low"),
+    ])
+    def test_one_task_at_two_settings_is_two_runs(self, registry, dial, a, b):
+        """The widened derivation, end to end through the launcher.
+
+        Testing derive_run_key alone is not enough: launch_agent has to FORWARD
+        each dial. Dropping one there is invisible until two delegations that
+        differ only by --model refuse each other - the false refusal the
+        derivation's docstring calls the worse failure.
+        """
+        first = self._launch(registry, **{dial: a})
+        self._mark_running(registry, first, os.getpid())
+        assert self._launch(registry, **{dial: b}) != first
+
+    def test_derived_key_starts_a_clean_transcript(self, registry):
+        """A derived key names a slot for collision, not a conversation to resume."""
+        from bobi.subagent import launch_agent
+        checks, detached = self._mocks()
+        with checks, detached as mock_detached, \
+                patch("bobi.subagent.get_registry", return_value=registry):
+            launch_agent(task=self.TASK, cwd="/tmp/test", workflow_name="adhoc")
+        assert json.loads(mock_detached.call_args[0][1][0])["fresh"] is True
+
+    def test_explicit_key_keeps_the_resume_contract(self, registry):
+        """--id is the workflow engine's retry handle: it resumes by default."""
+        from bobi.subagent import launch_agent
+        checks, detached = self._mocks()
+        with checks, detached as mock_detached, \
+                patch("bobi.subagent.get_registry", return_value=registry):
+            launch_agent(task=self.TASK, cwd="/tmp/test",
+                         workflow_name="adhoc", run_key="42")
+        assert json.loads(mock_detached.call_args[0][1][0])["fresh"] is False
+
+    def test_a_crashed_run_does_not_block_its_own_relaunch(self, registry):
+        """The corpse problem: a stable name means a dead run is read back.
+
+        A run killed by OOM/SIGKILL leaves status="running" with a dead pid.
+        Un-keyed launches never read a stale entry back before (new name every
+        time), so nothing had to reap; now they land on the same one and an
+        unreaped corpse would refuse the relaunch forever. reconcile_sessions
+        only runs at manager startup, so nothing else clears it in time.
+        """
+        name = self._launch(registry)
+        self._mark_running(registry, name, self.DEAD_PID)
+        assert self._launch(registry) == name  # no exception
+
+    def test_a_live_run_still_blocks_its_relaunch(self, registry):
+        """The reap must not swallow the guard for a process that is alive."""
+        self._mark_running(registry, self._launch(registry), os.getpid())
+        with pytest.raises(RuntimeError, match="already active"):
+            self._launch(registry)
+
+    def test_a_crashed_predecessor_is_reported_before_it_is_replaced(self, registry):
+        """Reaping the corpse silently loses the only record that it died.
+
+        Admission registers a brand-new entry over the dead one moments later,
+        taking the crash status and the un-emitted flag the reconciler's sweep
+        keys off with it. Whoever launched the dead run would never learn it
+        died, so the close emits here, not in a later sweep.
+        """
+        emitted = []
+        name = self._launch(registry)
+        self._mark_running(registry, name, self.DEAD_PID)
+        with patch("bobi.reconcile._default_emit",
+                   side_effect=lambda t, d: emitted.append((t, d)) or True):
+            assert self._launch(registry) == name
+
+        assert [t for t, _ in emitted] == ["agent/session.failed"]
+        assert "died without reporting a terminal status" in emitted[0][1]["error"]
+        # And the relaunch's own entry is what survives, not the crash record.
+        assert registry.get(name).status == "starting"
+
+    def test_a_suspended_run_is_not_taken_over_by_a_derived_key(self, registry):
+        """`waiting` is dormant, not free - its process exited on purpose.
+
+        A launch that matched only by task text cannot mean "resume that", and
+        admitting it would hand the new run the suspended one's session name,
+        worktree branch and registry entry.
+        """
+        from dataclasses import replace
+        name = self._launch(registry)
+        registry.register(replace(registry.get(name), status="waiting", pid=0))
+        with pytest.raises(RuntimeError, match="suspended run already holds"):
+            self._launch(registry)
+
+    def test_an_explicit_key_may_still_redispatch_onto_a_suspended_run(self, registry):
+        """--id 42 means "this is run 42" - resuming it is the retry contract."""
+        from dataclasses import replace
+        name = self._launch(registry, run_key="42")
+        registry.register(replace(registry.get(name), status="waiting", pid=0))
+        assert self._launch(registry, run_key="42") == name  # no exception
+
+    def test_the_suspended_refusal_names_a_remedy_that_works(self, registry):
+        """`subagents cancel` refuses a waiting run outright (cancel_agent only
+        touches ACTIVE_STATUSES), so telling the caller to cancel or to wait
+        would leave --id-random - duplicating parked work - as the only move
+        with an effect. That is the storm this guard exists to stop.
+        """
+        from dataclasses import replace
+        from bobi.subagent import DuplicateRunError
+        name = self._launch(registry)
+        entry = replace(registry.get(name), status="waiting", pid=0)
+        registry.register(entry)
+        with pytest.raises(DuplicateRunError) as exc:
+            self._launch(registry)
+        message = str(exc.value)
+        assert "cannot be cancelled" in message, message
+        assert f"--id {entry.run_key!r}" in message, message
+        # And it still quotes the parked run's task, so the reader can tell
+        # whether it is really the same work.
+        assert entry.title in message, message
+
+    def test_refusal_is_typed_so_callers_can_tell_it_from_a_failure(self, registry):
+        """A dependency preflight failure is not "this work already happening"."""
+        from bobi.subagent import DuplicateRunError
+        self._mark_running(registry, self._launch(registry), os.getpid())
+        with pytest.raises(DuplicateRunError) as exc:
+            self._launch(registry)
+        assert exc.value.derived_key is True
+        assert exc.value.status == "running"
+
+    def test_random_key_is_rejected_alongside_an_explicit_one(self, registry):
+        from bobi.subagent import launch_agent
+        checks, detached = self._mocks()
+        with checks, detached, patch("bobi.subagent.get_registry",
+                                     return_value=registry):
+            with pytest.raises(ValueError, match="random_key"):
+                launch_agent(task=self.TASK, cwd="/tmp/test",
+                             workflow_name="adhoc", run_key="42",
+                             random_key=True)
+
+    def test_a_persistent_agent_blocks_its_twin_but_not_its_restart(self, registry):
+        """`idle` is an active status and a persistent agent parks there.
+
+        Two identical persistent launches are a duplicate and must be refused;
+        a crashed one must still be restartable, or `--subscribe` (which
+        implies --persistent) becomes a one-shot.
+        """
+        name = self._launch(registry, persistent=True)
+        self._mark_running(registry, name, os.getpid())
+        registry.update(name, status="idle")
+        with pytest.raises(RuntimeError, match="already active"):
+            self._launch(registry, persistent=True)
+
+        registry.update(name, pid=self.DEAD_PID)
+        assert self._launch(registry, persistent=True) == name
+
+
+class TestSpawnAdhocUnkeyedDedup:
+    """`--wait` derives its key from the same helper (#850)."""
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path):
+        _write_agent_yaml(tmp_path)
+        paths.bind_root(tmp_path)
+        yield
+        paths.bind_root(None)
+
+    @staticmethod
+    def _run(**kwargs):
+        from bobi.subagent import spawn_adhoc
+        with patch("bobi.session.Session") as session_cls, \
+             patch("bobi.subagent._emit_session_started"), \
+             patch("bobi.subagent._emit_session_finished"):
+            session_cls.return_value.start.return_value = True
+            session_cls.return_value._last_is_error = False
+            spawn_adhoc(cwd="/tmp/test", task="Investigate CI", **kwargs)
+            return session_cls.call_args.kwargs
+
+    def test_derived_key_matches_the_shared_derivation(self):
+        from bobi.subagent import resolve_adhoc_session_name
+        assert self._run()["name"] == resolve_adhoc_session_name(
+            "Investigate CI")[0]
+
+    def test_does_not_collide_with_a_persistent_launch_of_the_same_task(self):
+        """Both use the key as the session name outright, so one namespace
+        would give them one inbox, one registry pid and one transcript."""
+        from bobi.subagent import derive_run_key
+        assert self._run()["name"] != derive_run_key("adhoc", "Investigate CI")
+
+    def test_derived_key_starts_a_clean_transcript(self):
+        assert self._run()["fresh"] is True
+
+    def test_explicit_name_keeps_the_resume_contract(self):
+        kwargs = self._run(name="manager-x")
+        assert kwargs["name"] == "manager-x"
+        assert kwargs["fresh"] is False
+
+    def test_random_key_restores_distinct_names(self):
+        assert self._run(random_key=True)["name"] != self._run(random_key=True)["name"]
 
 
 class TestRunAgentEntryRootBinding:

@@ -44,6 +44,10 @@ ACTIVE_STATUSES = ("starting", "running", "idle")
 FAILED_STATUSES = (TERMINAL_FAILED, TERMINAL_CRASHED)
 # Honest terminal vocabulary (``done`` kept as a legacy read alias).
 TERMINAL_STATUSES = (TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED, "done")
+# What a run that vanished without reporting a terminal status is recorded as.
+# Shared so the two places that close one - a list read's reap here, and launch
+# admission's close in bobi/reconcile.py - cannot drift apart.
+DIED_WITHOUT_TERMINAL = "agent process died without reporting a terminal status"
 # A session in any of these has torn down its inbox/subscription — publishing to
 # it would succeed but no one would consume it (inbox.py guard).
 DEAD_STATUSES = (
@@ -550,7 +554,7 @@ class SessionRegistry:
             return entry
         if not entry.pid or pid_alive(entry.pid):
             return entry
-        msg = "agent process died without reporting a terminal status"
+        msg = DIED_WITHOUT_TERMINAL
         self.mark_terminal(entry.name, TERMINAL_CRASHED, error=msg)
         # Return the crashed view synthesized in memory, NOT a re-read of
         # state.json: the marking can race a concurrent cleanup or rewrite

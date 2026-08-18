@@ -117,12 +117,38 @@ bobi agent <name> subagents show <id>
 bobi agent <name> subagents cancel <id>
 ```
 
+### Run keys and duplicate suppression
+
+Every launch has a run key. It names the session
+(`wf-<workflow>-<project>-<key>`), so two launches that agree on it are the same
+run: the second is refused while the first is active, and resumes it once it is
+not.
+
+- `--id <key>` sets it explicitly. Use it for work with a natural identity - an
+  issue number, a checklist unit. Relaunching that key resumes that run.
+- With no `--id` the key is **derived** from the launch itself - workflow,
+  project, role, model, effort and the task text - so relaunching an identical
+  one while the first is still running is refused. That is the guardrail
+  against a dispatch chain that keeps launching itself; rewording the task to
+  get past it defeats it. Fanning one task across two roles is fine: they
+  derive different keys.
+- `--id-random` mints a random key, for deliberately running N copies of an
+  identical task at once. It cannot be combined with `--id`, and its keys are
+  prefixed `rand-` so `subagents list` shows which runs opted out.
+
+A derived key also implies `--fresh`: it is an inference about the launch, not a
+caller pointing at a run to continue. It additionally refuses to land on a
+**suspended** (`waiting`) run - only an explicit `--id` may re-dispatch onto one.
+
 `--wait` blocks until the launched adhoc agent completes. It requires
 `-w adhoc`: waiting works by running the task as one prompt, while a multi-step
-workflow returns as soon as it is dispatched, so there is no run to join.
+workflow returns as soon as it is dispatched, so there is no run to join. It
+derives its key from the same dials, in its own namespace, and has no active-run
+guard - identical `--wait` launches still run side by side.
 `--as-check` is the explicit short-lived monitoring-check harness; it prints
 verdict JSON and is the only `subagents launch` mode that accepts
-`--post-event`.
+`--post-event`. It never reaches the launch admission path, so run keys do not
+apply to it.
 
 To fan out and join without burning a turn per check, start the units in the
 background and block on all of them in a **single** shell command:
