@@ -695,7 +695,13 @@ class LocalRuntime(TeamRuntime):
             from bobi import service
 
             try:
-                service.ask(root, session, text,
+                # An empty session means the team manager. The route documents
+                # `subagent` as optional and the hosted runtime has always read
+                # it that way (supervisor/admin.py), so both runtimes resolve
+                # it identically rather than one answering `unknown agent ''`.
+                target = (session or "").strip() \
+                    or service.manager_session_name(root)
+                service.ask(root, target, text,
                             timeout=DEFAULT_CHAT_TIMEOUT)
                 outcome = {"team": name, "status": "done"}
             except Exception as e:  # noqa: BLE001 - job must resolve

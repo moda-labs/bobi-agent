@@ -357,7 +357,7 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     """
     now = time.time() if now is None else now
     from bobi.costs import session_usage
-    from bobi.sdk import SessionRegistry
+    from bobi.sdk import ACTIVE_STATUSES, SessionRegistry
 
     # Sessions are read once and indexed: a workflow run and a monitor record
     # both point at a session, and neither should re-walk the registry.
@@ -365,6 +365,10 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     usage_by_session = {
         e.name: session_usage(e.model_usage, e.total_cost_usd) for e in entries
     }
+    # Who can be spoken to right now. The same predicate `list_active` uses,
+    # off the same read - and the read reaps, so an active status with a dead
+    # pid is already `crashed` here rather than a chat target that is gone.
+    live_sessions = {e.name for e in entries if e.status in ACTIVE_STATUSES}
 
     rows = _session_rows(entries, manager_name=manager_name,
                          usage_by_session=usage_by_session)
@@ -373,6 +377,13 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
 
     # Before anything counts or sorts them: one piece of work, one row.
     rows = _claim_sessions(rows)
+
+    # Liveness is a fact about the registry, not about a row's kind, so it is
+    # stamped once here for every shape rather than three times upstream.
+    # `status` cannot answer it: `idle` is both a live manager and a freshly
+    # suspended gate whose process has already exited.
+    for row in rows:
+        row["detail"]["live"] = row["session_id"] in live_sessions
 
     # Live first, then newest first — a running job is what you came for.
     attention_rank = {RUNNING: 0, AWAITING_ACTION: 1}

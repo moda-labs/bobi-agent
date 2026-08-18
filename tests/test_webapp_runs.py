@@ -58,7 +58,7 @@ def _utc(epoch):
 def _workflow(install, run_id, *, status="completed", name="triage",
               started_at=NOW - 1800, completed_at=NOW - 1500,
               suspended_at_step=-1, await_event="", session_name="",
-              resumed_at=0.0, aware=False):
+              resumed_at=0.0, aware=False, run_key=""):
     # aware=False writes the legacy naive-LOCAL timestamps of pre-timeutil
     # versions; aware=True writes what WorkflowRun records today (aware UTC).
     # Both shapes exist on real disks, so both must fold correctly.
@@ -72,7 +72,7 @@ def _workflow(install, run_id, *, status="completed", name="triage",
         "completed_at": ts(completed_at) if completed_at else "",
         "status": status, "suspended_at_step": suspended_at_step,
         "await_event": await_event, "session_name": session_name,
-        "variable_scopes": {}, "repo": "", "cwd": "", "run_key": "",
+        "variable_scopes": {}, "repo": "", "cwd": "", "run_key": run_key,
         "resumed_at": ts(resumed_at) if resumed_at else "",
     }))
 
@@ -173,6 +173,84 @@ class TestWorkflowStatus:
                   started_at=NOW - 3 * 86400, resumed_at=NOW - 3600,
                   suspended_at_step=2, await_event="pr.merged")
         assert _by_key(_rows(bobi_install))["workflow:wf-1"]["status"] == "idle"
+
+
+class TestLiveness:
+    """`detail.live` - can this row's session receive a message right now.
+
+    The composer in the run modal picks its branch off this field (#987): a
+    live session is chatted with, a finished one is continued in a fresh
+    session. Getting it wrong in the permissive direction is a box that
+    accepts typing and then answers `unknown agent`, so the server answers
+    the question it already knows the answer to rather than the client
+    re-deriving it from `status`.
+    """
+
+    @pytest.mark.parametrize("recorded,live", [
+        ("running", True), ("starting", True), ("idle", True),
+        ("completed", False), ("failed", False), ("crashed", False),
+        ("stopped", False),
+    ])
+    def test_a_session_row_is_live_exactly_when_it_is_addressable(
+            self, bobi_install, recorded, live):
+        # The same predicate `SessionRegistry.list_active` uses, which is the
+        # membership guard `service.ask` applies before delivering.
+        _session(bobi_install, "worker", status=recorded, terminal_at=0.0)
+        assert _by_key(_rows(bobi_install))["session:worker"]["detail"]["live"] \
+            is live
+
+    def test_a_waiting_gate_is_not_live_even_though_it_renders_as_idle(
+            self, bobi_install):
+        """The ambiguity this field exists to remove.
+
+        A freshly suspended workflow and a live-but-waiting manager both
+        render `idle`, so `status` cannot tell the composer whether anyone is
+        listening. The gate's session is gone (the orchestrator disconnects
+        and returns at the await step), and `waiting` is not an active status.
+        """
+        _session(bobi_install, "wf-gate-session", status="waiting")
+        _workflow(bobi_install, "wf-gate", status="waiting", completed_at=0,
+                  started_at=NOW - 60, suspended_at_step=7,
+                  await_event="approval", session_name="wf-gate-session")
+        row = _by_key(_rows(bobi_install))["workflow:wf-gate"]
+        assert row["status"] == "idle"
+        assert row["detail"]["live"] is False
+
+    def test_a_workflow_row_running_through_a_live_session_is_live(
+            self, bobi_install):
+        _session(bobi_install, "wf-live-session", status="running",
+                 terminal_at=0.0)
+        _workflow(bobi_install, "wf-live", status="running", completed_at=0,
+                  session_name="wf-live-session")
+        assert _by_key(_rows(bobi_install))["workflow:wf-live"]["detail"]["live"] \
+            is True
+
+    def test_a_row_with_no_session_is_never_live(self, bobi_install):
+        _workflow(bobi_install, "wf-headless", status="waiting",
+                  completed_at=0, suspended_at_step=1, await_event="approval")
+        assert _by_key(_rows(bobi_install))["workflow:wf-headless"]["detail"][
+            "live"] is False
+
+    def test_a_monitor_row_carries_the_field_too(self, bobi_install):
+        # One field, stamped in one place, for every row shape - so the
+        # composer never has to ask what kind of row it is on.
+        _monitor(bobi_install, session_ref="monitor-session")
+        row = next(r for r in _rows(bobi_install)["runs"]
+                   if r["kind"] == "monitor")
+        assert row["detail"]["live"] is False
+
+    def test_a_dead_pid_on_an_active_status_is_not_live(self, bobi_install):
+        """The reap is what makes the predicate safe, and it runs on this read.
+
+        A session recorded `running` whose process is gone is reaped to
+        `crashed` by `list_all(reap_dead=True)`, so a stale registry entry
+        cannot present a dead process as a chat target.
+        """
+        _session(bobi_install, "worker", status="running", pid=999_999_999,
+                 terminal_at=0.0)
+        row = _by_key(_rows(bobi_install))["session:worker"]
+        assert row["status"] == "crashed"
+        assert row["detail"]["live"] is False
 
 
 class TestMonitorStatus:

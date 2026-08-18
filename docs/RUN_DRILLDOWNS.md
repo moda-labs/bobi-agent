@@ -56,6 +56,44 @@ records none — Codex rollouts do not carry per-entry timestamps in this shape.
 Substituting the read time would date every old line to whenever the page was
 opened, which is worse than an empty column.
 
+## The composer: replying from the transcript
+
+A transcript slab carries a reply box at its foot. It is the page's only
+typing surface besides the runs search, and it has **two branches**, chosen by
+`detail.live` ([RUNS_VIEW.md](RUNS_VIEW.md#detaillive-can-this-row-be-spoken-to-right-now))
+rather than by the row's kind:
+
+| `detail.live` | What the box says | What sending does |
+|---|---|---|
+| true | Send | `POST .../chat` with `subagent: <session_id>`. The text is delivered to that session through `inbox.deliver` - the same function `bobi agent <name> message` reaches from a terminal. |
+| false | Continue in a new session | `POST .../chat` with an empty `subagent`, which means the team manager. The text travels inside a relay naming the ended session and its run, as a request to carry the work forward in a FRESH session. |
+
+Both use the endpoint pair that already existed; neither adds one.
+
+**Why a finished row does not simply refuse.** A suspended gate has no process:
+the orchestrator disconnects its client and returns at the await step, so the
+session exits while its registry entry stays `waiting`. `deliver` refuses a
+dead pid, and a terminal cannot reach those rows either. The continuation
+branch is what the operator gets instead, and it is a request rather than a
+spawn - the manager is an agent, and it decides.
+
+**A reply re-reads the transcript; a continuation does not.** The slab is
+otherwise one-shot (the 4s timers refresh the table, not this), so the live
+branch re-fetches `/transcript` when the turn lands or the answer would be
+invisible until the run was reopened. The continuation's reply lands in the
+*manager's* transcript, not this dead session's, so re-rendering this one
+would read as the message having been swallowed. It reports where the message
+went instead, and the new run appears in the table on its own.
+
+**Nothing here resumes a workflow run, by any route.** A suspended run records
+`suspended_at_step = step_idx + 1` - the step *after* its gate - and
+`resume_workflow` feeds that straight back as the starting step. Resuming a
+run parked on an approval therefore skips the approval and starts the next
+step. `agent.js` has no call to the resume route, gains none, and
+`tests/test_webapp_composer.py` fails if it ever does. The relay message says
+the same thing in words, because the manager *can* resume even though the page
+cannot.
+
 ## `GET .../runs/{run_id}/details`
 
 For a run with no session. Two of them are ordinary, not broken: a `$0`

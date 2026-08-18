@@ -38,6 +38,10 @@ from tests.test_webapp_runs import NOW, _monitor, _session, _workflow  # noqa: E
 
 RUNS_URL = re.compile(r"/api/agents/[^/]+/runs\?")
 DETAILS_URL = re.compile(r"/api/agents/[^/]+/runs/[^/]+/details")
+TRANSCRIPT_URL = re.compile(r"/api/agents/[^/]+/subagents/[^/]+/transcript")
+CHAT_URL = re.compile(r"/api/agents/[^/]+/chat$")
+CHAT_JOB_URL = re.compile(r"/api/agents/[^/]+/chat/[^/]+$")
+RESUME_URL = re.compile(r"/resume")
 
 # The runs table pages at 100. One row past it is the whole pager contract.
 PAGE_SIZE = 100
@@ -503,6 +507,218 @@ class TestWriteActions:
         self._gate_row(page).locator("button", has_text="Close").click()
         expect(self._gate_row(page).locator(".rstat span:not(.rdot)")
                ).to_have_text("Closed", timeout=10_000)
+
+
+# --- the composer -----------------------------------------------------------
+
+class TestComposer:
+    """The reply box at the foot of a transcript (#987).
+
+    Two branches, and the read model picks between them: a live session is
+    delivered to, a finished one is carried forward by asking the manager for
+    a fresh session. Both post to `/chat`, which is why what they post is the
+    assertion here - the payload is the entire contract, and a box that sends
+    the wrong thing looks exactly like a box that works.
+
+    The chat endpoints are answered from the browser side, for the same
+    reason the `runsError` branch is: resolving one for real needs a live
+    agent process to take a turn, which this test process does not have.
+    Delivery itself is proven against real sessions in
+    `tests/integration/test_webapp_chat_delivery.py`; what is proven here is
+    the front end, which that test cannot see.
+    """
+
+    LIVE = "worker-live"
+    GATE = "wf-issue-lifecycle-test-repo-987"
+
+    def _seed(self, install):
+        """One live session and one parked gate, both with a transcript."""
+        _session(install, self.LIVE, status="running", title="Live worker",
+                 terminal_at=0.0)
+        _session(install, self.GATE, status="waiting", title="gate session",
+                 terminal_at=0.0)
+        _workflow(install, "11d31ce5", status="waiting", name="issue-lifecycle",
+                  started_at=NOW - 90000, completed_at=0, suspended_at_step=7,
+                  await_event="approval", session_name=self.GATE,
+                  run_key="987")
+
+    def _chat(self, page, *, outcome="done", error=""):
+        """Answer the chat endpoints and hand back the POSTed payloads."""
+        posted = []
+
+        def submit(route, request):
+            posted.append(json.loads(request.post_data))
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"message_id": "mid-1"}))
+
+        job = {"status": outcome}
+        if error:
+            job["error"] = error
+        page.route(CHAT_URL, submit)
+        page.route(CHAT_JOB_URL, lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(job)))
+        return posted
+
+    def _open(self, page, webapp, title):
+        _agent(page, webapp)
+        page.locator(".runs tbody tr", has_text=title).first.click()
+        expect(page.locator(".composer")).to_be_visible()
+        return page.locator(".composer")
+
+    def test_a_live_session_offers_a_reply(self, webapp, page):
+        self._seed(webapp.install)
+        composer = self._open(page, webapp, "Live worker")
+        expect(composer.locator("button")).to_have_text("Send")
+        expect(composer.locator(".composer-note")).to_contain_text(
+            "the same way the CLI delivers a message")
+
+    def test_a_finished_session_offers_a_continuation_instead(self, webapp,
+                                                              page):
+        # The honest label: nothing is behind this row, so "Send" would be a
+        # promise the page cannot keep.
+        self._seed(webapp.install)
+        composer = self._open(page, webapp, "issue-lifecycle")
+        expect(composer.locator("button")).to_have_text(
+            "Continue in a new session")
+        expect(composer.locator(".composer-note")).to_contain_text(
+            "This session has ended, so nothing here can answer")
+
+    def test_a_row_with_no_session_gets_no_composer(self, webapp, page):
+        # The details branch. There is no session, so there is nothing to
+        # talk to and nothing to continue.
+        _seed_runs(webapp.install)
+        _agent(page, webapp)
+        page.locator(".runs tbody tr", has_text="inbox-watch").click()
+        expect(page.locator("[data-el=slabKind]")).to_have_text("details")
+        expect(page.locator(".composer")).to_be_hidden()
+
+    def test_the_live_branch_delivers_to_that_session(self, webapp, page):
+        self._seed(webapp.install)
+        posted = self._chat(page)
+        composer = self._open(page, webapp, "Live worker")
+
+        composer.locator("textarea").fill("how is it going?")
+        composer.locator("button").click()
+
+        expect(composer.locator("textarea")).to_have_value("", timeout=10_000)
+        assert posted == [{"subagent": self.LIVE, "text": "how is it going?"}]
+
+    def test_the_live_branch_re_reads_the_transcript_when_the_turn_lands(
+            self, webapp, page):
+        """The slab is otherwise one-shot: the 4s timers refresh the table,
+        not this. Without the re-read the answer is invisible until the run
+        is reopened, which reads as the message having been swallowed."""
+        self._seed(webapp.install)
+        self._chat(page)
+        composer = self._open(page, webapp, "Live worker")
+
+        reread = _record_requests(page, TRANSCRIPT_URL)
+        composer.locator("textarea").fill("ping")
+        composer.locator("button").click()
+        expect(composer.locator("textarea")).to_have_value("", timeout=10_000)
+        assert len(reread) == 1, reread
+
+    def test_the_continuation_branch_addresses_the_manager(self, webapp, page):
+        """An empty `subagent` is the manager, on both runtimes. The
+        operator's words travel inside a relay that names the run they were
+        typed on, because a fresh session is otherwise starting blind."""
+        self._seed(webapp.install)
+        posted = self._chat(page)
+        composer = self._open(page, webapp, "issue-lifecycle")
+
+        composer.locator("textarea").fill("pick this back up please")
+        composer.locator("button").click()
+        expect(composer.locator(".composer-status")).to_be_visible(
+            timeout=10_000)
+
+        assert len(posted) == 1, posted
+        assert posted[0]["subagent"] == ""
+        relay = posted[0]["text"]
+        assert "pick this back up please" in relay
+        assert self.GATE in relay
+        assert "987" in relay
+        assert "11d31ce5" in relay
+        assert "Do NOT resume run 11d31ce5" in relay
+
+    def test_the_continuation_branch_says_what_it_did_and_does_not_re_read(
+            self, webapp, page):
+        """The reply landed in the MANAGER's transcript, not this dead
+        session's. Re-rendering an unchanged transcript would read as the
+        message having gone nowhere, so the confirmation says where it went
+        and the slab is left alone."""
+        self._seed(webapp.install)
+        self._chat(page)
+        composer = self._open(page, webapp, "issue-lifecycle")
+
+        reread = _record_requests(page, TRANSCRIPT_URL)
+        composer.locator("textarea").fill("carry on")
+        composer.locator("button").click()
+
+        status = composer.locator(".composer-status")
+        expect(status).to_contain_text("Sent to the manager", timeout=10_000)
+        # Honest about what it cannot promise: the manager decides.
+        expect(status).to_contain_text("its")
+        assert not reread
+
+    def test_a_failed_delivery_is_reported_inline_and_the_box_recovers(
+            self, webapp, page):
+        """The failure this whole design exists to avoid is a box that
+        accepts typing and reports nothing. It must name the reason, in the
+        modal being read, and hand the control back."""
+        self._seed(webapp.install)
+        self._chat(page, outcome="error",
+                   error="session 'worker-live' process is dead")
+        composer = self._open(page, webapp, "Live worker")
+
+        composer.locator("textarea").fill("anyone there?")
+        composer.locator("button").click()
+
+        expect(composer.locator(".composer-status")).to_have_text(
+            "session 'worker-live' process is dead", timeout=10_000)
+        expect(composer.locator(".composer-status")).to_have_class(
+            "composer-status bad")
+        expect(composer.locator("button")).to_be_enabled()
+        expect(composer.locator("textarea")).to_be_enabled()
+        # Their words are not thrown away by a failure they did not cause.
+        expect(composer.locator("textarea")).to_have_value("anyone there?")
+
+    def test_the_control_is_disabled_while_the_turn_is_in_flight(self, webapp,
+                                                                 page):
+        # A turn can take minutes. Leaving the box live invites a second send
+        # against a session already taking a turn.
+        self._seed(webapp.install)
+        self._chat(page, outcome="pending")
+        composer = self._open(page, webapp, "Live worker")
+
+        composer.locator("textarea").fill("slow one")
+        composer.locator("button").click()
+        expect(composer.locator("button")).to_be_disabled()
+        expect(composer.locator("button")).to_have_text("Sending…")
+        expect(composer.locator("textarea")).to_be_disabled()
+
+    def test_the_composer_never_reaches_the_resume_route(self, webapp, page):
+        """The sharp edge, asserted as behaviour rather than as source.
+
+        A suspended run records the step AFTER its gate, so resuming this one
+        would start `implement` against a spec nobody approved. Using the
+        composer on a parked gate must not go near that route.
+        """
+        self._seed(webapp.install)
+        self._chat(page)
+        resumes = _record_requests(page, RESUME_URL)
+        composer = self._open(page, webapp, "issue-lifecycle")
+
+        composer.locator("textarea").fill("continue this")
+        composer.locator("button").click()
+        expect(composer.locator(".composer-status")).to_be_visible(
+            timeout=10_000)
+        assert not resumes
+
+    def test_closing_the_slab_takes_the_composer_with_it(self, webapp, page):
+        self._seed(webapp.install)
+        self._open(page, webapp, "Live worker")
+        page.locator("[data-el=slabClose]").click()
+        expect(page.locator(".composer")).to_be_hidden()
 
 
 # --- the agent that isn't there --------------------------------------------

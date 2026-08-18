@@ -1,6 +1,6 @@
 # 987 - A reply box on the run slab
 
-Status: **awaiting Gate 1** (design approval). No code written.
+Status: **approved and built** (Gate 1 granted by Luke, 2026-08-18: ["Approved, let's go ahead and build this feature and test it"](https://github.com/moda-labs/bobi-agent/issues/987#issuecomment-5334520258)). Implemented in this PR; see §10 for how each reserved decision resolved and §11 for what shipped.
 Issue: [#987](https://github.com/moda-labs/bobi-agent/issues/987) · Linear MOD-372 (part of MOD-368)
 Author: engineer agent · **Revision 4, 2026-08-18** (Luke's condition, see §11)
 Base: `agent/987` @ `99f5e23`, cut from `main` @ `2c10d5a`
@@ -371,7 +371,7 @@ inbox.py:309-322  (deliver, defined at 280)
 Executed against a live gate, from the worktree under test:
 
 ```
-bobi loaded from: .../worktrees/987-luke-simpler/bobi/__init__.py
+(import path: .../worktrees/987-luke-simpler/bobi/__init__.py)
 gate session: status=waiting pid=19290
 deliver(gate) -> (False, "session 'wf-issue-lifecycle-eng-team-987' process is dead")
 ask(gate)   -> MessageDeliveryError: unknown agent 'wf-issue-lifecycle-eng-team-987'
@@ -820,6 +820,18 @@ Tests first, each step independently reviewable.
 
 ## 10. Decisions reserved for Gate 1
 
+> **Resolved 2026-08-18.** Luke approved the spec as written, which selects
+> the primary option on each decision below. Recorded here so the build is
+> auditable against what was approved rather than against a reading of it.
+>
+> | # | Resolution | Where it landed |
+> |---|---|---|
+> | 1 | Accepted. The reply branch serves live sessions; the gate row gets §6's continuation. Luke had already accepted the scope shift in Slack, conditioned on §6. | `renderComposer` branches on `detail.live` |
+> | 2 | Accepted: the additive `detail.live` field. The rejected client-side derivation was not built. | `runs.py` `build_runs`, `docs/RUNS_VIEW.md` |
+> | 3 | Confirmed: a dated amendment, not a silent rewrite. | `plans/2026-07-31-single-agent-view.md`, 2026-08-18 entry |
+> | 4 | Confirmed: the resume path's pre-existing defects stay unbundled. Nothing in §7's Out list was touched. | - |
+> | 5 | The **relay** through the live manager, which was the recommendation and the only option that is genuinely existing machinery. `continue_run` was **not** built. | `continuationRelay` + the one `runtime.py` line |
+
 1. **Accept that the *reply* branch serves live sessions, not awaiting-action gates.**
    The issue's title asks for a box on the awaiting-action slab. §4 shows there is no live agent behind those rows and the terminal cannot reach them either, so the reply branch appears on live sessions. §6 gives the gate row a continuation branch instead, which is Luke's condition and not a chat.
    That lands on Linear MOD-372's own title ("chat with a **running** agent") and is narrower than GitHub #987's. It should be accepted knowingly, and #987's title updated to match.
@@ -836,6 +848,47 @@ No code will be written until these are answered. **Luke's Slack message is a co
 ---
 
 ## 11. Revision record
+
+### Build - 2026-08-18, Gate 1 granted
+
+Luke approved revision 4 and asked for it to be tested. Built as specified;
+the design below is unchanged, so this section records only what shipped and
+where the build learned something the spec did not say.
+
+**Landed** (`agent/987`, this PR): the composer and its two branches in
+`agent.js`, its slab-surface styling in `app.css`, the additive `detail.live`
+in `runs.py`, and the one `runtime.py` line resolving an empty `subagent` to
+the manager. Plus docs: `RUN_DRILLDOWNS.md` (the slab's write surface),
+`RUNS_VIEW.md` (`detail.live`), and the dated plan amendment §3.5 called for.
+
+**One structural change to §9's plan, and the reason for it.** The relay
+message moved out of `agent.js` into its own module,
+`webapp/static/views/composer.js`. `agent.js` imports `shell.js`, which reads
+the page token from a meta tag at module scope, so the view cannot be imported
+under Node without faking a DOM - and faking one to test a pure string
+function proves nothing about the string. This is the same split
+`markdown.js` already has in this directory, for the same reason: the relay
+IS the contract with the manager, and it is only testable while it is
+importable.
+
+**Verification, against §8.** Every listed test exists.
+`tests/test_webapp_runs.py::TestLiveness` covers the `detail.live` fold
+including the `waiting`-renders-as-`idle` ambiguity;
+`tests/test_webapp_server.py` covers the empty-`subagent` line against the
+name `service.manager_session_name` returns;
+`tests/test_webapp_composer.py` runs the relay under Node and pins the
+absence of a resume call; `tests/e2e/test_webapp_ui.py::TestComposer` drives
+the real page in Chromium for both branches, the payloads, the re-fetch
+asymmetry, and the inline error; and
+`tests/integration/test_webapp_chat_delivery.py` proves delivery against real
+sessions on both brains - the reply reaches a live session's transcript, a
+suspended gate refuses it rather than swallowing it, the relay reaches a live
+manager, and the parked run record is byte-identical afterwards.
+
+**The `[stub]+[claude]` judgement, made rather than inherited.** §8 called a
+real-Claude leg warranted, and the build agrees: what is being proven is that
+a message typed in a browser becomes a *turn taken by a brain*, which is the
+case CLAUDE.md's rule names. Both legs run and both pass.
 
 ### Revision 4 - 2026-08-18, Luke's condition
 
