@@ -94,6 +94,50 @@ async def test_run_bounds_hung_active_client_disconnect(
 
 
 @pytest.mark.asyncio
+async def test_startup_prompt_is_a_message_not_a_connect_turn(bobi_install):
+    """#1016: the launch brief takes the _process_message path as an explicit
+    query — connect() receives no text — and start()'s contract holds: the
+    startup turn has drained before the session reports ready."""
+
+    class RecordingClient:
+        provider = "anthropic"
+
+        def __init__(self):
+            self.connect_args = []
+            self.queries = []
+
+        async def connect(self, *args):
+            self.connect_args.append(args)
+
+        async def query(self, text):
+            self.queries.append(text)
+
+        async def receive_response(self):
+            yield TurnResult(session_id="s-1")
+
+        async def disconnect(self):
+            pass
+
+    s = Session(name="test-startup-msg", cwd=str(bobi_install.repo_path))
+    client = RecordingClient()
+    s._make_brain_session = lambda resume=None: client
+    recv = s.inbox.recv
+    s.inbox.recv = lambda timeout=2.0: recv(timeout=0.01)
+
+    run_task = asyncio.create_task(s._run("boot brief"))
+    while s._keep_alive is None:
+        await asyncio.sleep(0)
+    # _keep_alive exists only after the inline startup delivery, so by the
+    # time the session is ready the brief has already drained as turn 1 —
+    # via query, never via connect.
+    assert client.queries == ["boot brief"]
+    assert client.connect_args == [()]
+    s._keep_alive.set()
+    await asyncio.wait_for(run_task, timeout=1.0)
+    assert s.detect_state() == "stopped"
+
+
+@pytest.mark.asyncio
 async def test_ack_timeout_surfaces_terminally_without_queue_growth(
     bobi_install, monkeypatch
 ):

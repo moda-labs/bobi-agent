@@ -89,7 +89,7 @@ class _ClaudeSession:
 
         return ClaudeSDKClient(self._options)
 
-    async def connect(self, prompt: str | None = None) -> None:
+    async def connect(self) -> None:
         _configure_initialize_timeout()
         attempts = _env_int("BOBI_CLAUDE_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)
         backoff = _env_float(
@@ -101,7 +101,9 @@ class _ClaudeSession:
             if attempt > 1:
                 self._client = self._new_client()
             try:
-                await self._connect_once(prompt)
+                # Bare connect: setup only, no turn (#1016). The SDK defaults
+                # prompt to None, which keeps no-arg fakes/clients working.
+                await self._client.connect()
                 return
             except Exception as exc:
                 should_retry = attempt < attempts and _is_initialize_timeout(exc)
@@ -119,15 +121,6 @@ class _ClaudeSession:
                 )
                 if backoff > 0:
                     await asyncio.sleep(backoff * attempt)
-
-    async def _connect_once(self, prompt: str | None = None) -> None:
-        # Match the historical call shape: a bare connect() when there is no
-        # connect-prompt (the SDK defaults prompt to None), an explicit
-        # connect(prompt) otherwise. Keeps no-arg fakes/clients working.
-        if prompt is None:
-            await self._client.connect()
-        else:
-            await self._client.connect(prompt)
 
     async def query(self, text: str) -> None:
         await self._client.query(text)

@@ -668,6 +668,47 @@ class TestResolveRepoRoot:
 
         assert result == str(child)
 
+    def test_checkouts_layout_finds_repo(self, tmp_path):
+        """Deployed-team layout (#1016 §5.2): <root>/checkouts/<name>. Before
+        this branch existed every pr-closed run on a deployed team resolved to
+        None and the gated cleanup action was inert."""
+        from bobi.workflow.orchestrator import _resolve_repo_root
+
+        checkout = tmp_path / "checkouts" / "myrepo"
+        checkout.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=checkout, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin",
+             "https://github.com/org/myrepo.git"],
+            cwd=checkout, capture_output=True,
+        )
+
+        ctx = self._make_ctx("org/myrepo")
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result == str(checkout)
+
+    def test_checkouts_layout_slug_mismatch_returns_none(self, tmp_path):
+        """A checkouts dir holding a same-named repo from ANOTHER org must not
+        resolve — git ops against it would hit the wrong repo."""
+        from bobi.workflow.orchestrator import _resolve_repo_root
+
+        checkout = tmp_path / "checkouts" / "myrepo"
+        checkout.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=checkout, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin",
+             "https://github.com/other-org/myrepo.git"],
+            cwd=checkout, capture_output=True,
+        )
+
+        ctx = self._make_ctx("org/myrepo")
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result is None
+
     def test_single_repo_layout(self, tmp_path):
         """When the installation root itself is a git repo whose remote
         matches the slug, resolve to it."""

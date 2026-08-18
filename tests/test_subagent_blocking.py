@@ -482,7 +482,8 @@ class TestRunAgentSupervisedDeferral:
         assert result.duration_ms == 4000  # 1000 + 3000
         assert result.total_cost_usd == pytest.approx(0.25)
         assert result.num_turns == 7  # 2 + 5
-        assert client.queries == ["Use Postgres"]
+        # The prompt is turn 1's explicit query (#1016), then the answer.
+        assert client.queries == ["Build the feature", "Use Postgres"]
 
     @pytest.mark.asyncio
     async def test_multiple_deferrals(self):
@@ -549,7 +550,8 @@ class TestRunAgentSupervisedDeferral:
         assert result.total_cost_usd == pytest.approx(0.14)
         assert result.num_turns == 6
         assert answers == ["Framework?", "ORM?"]
-        assert client.queries == ["FastAPI", "SQLAlchemy"]
+        # The prompt is turn 1's explicit query (#1016), then both answers.
+        assert client.queries == ["Build it", "FastAPI", "SQLAlchemy"]
 
     @pytest.mark.asyncio
     async def test_deferral_without_handler_ignored(self):
@@ -672,8 +674,10 @@ class TestRunAgentSupervisedResume:
         assert result.success is True
         load_mock.assert_not_called()
         assert captured["session_kwargs"]["resume"] is None
-        assert captured["connect_prompt"] == "Check current state"
-        assert captured.get("queries", []) == []
+        # connect is never a turn (#1016): fresh and resumed sessions both
+        # deliver the prompt as an explicit query.
+        assert captured["connect_prompt"] is None
+        assert captured.get("queries", []) == ["Check current state"]
 
 
 # ---------------------------------------------------------------------------
