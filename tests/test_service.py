@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 def test_launch_team_spawns_detached_manager_and_returns_entry(bobi_install, monkeypatch):
     from bobi import paths
-    from bobi.config import save_bubble_state, save_deployment_state
+    from bobi.events.state import save_bubble_state, save_deployment_state
     from bobi.sdk import SessionEntry, get_registry
     from bobi.service import launch_team
 

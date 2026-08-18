@@ -373,7 +373,8 @@ def _check_bubble_auth() -> CheckResult:
     if not root:
         return CheckResult("Bubble auth", ok=True, detail="no runtime selected")
 
-    from bobi.config import Config, load_bubble_state
+    from bobi.config import Config
+    from bobi.events.state import load_bubble_state
 
     bubble = load_bubble_state(root)
     bubble_id = bubble.get("bubble_id", "")

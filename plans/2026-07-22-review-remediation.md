@@ -243,7 +243,29 @@ Each appendix entry names the surviving implementation — move callers to it; n
   - Re-derived 2026-08-10 against `03d4ee1`. The finding's load-bearing evidence is FALSE at current main: `tests/integration/conftest.py:71` writes `"event_server": {"url": ...}` — the dict form is what every integration test's agent.yaml uses — and the raw `event_server_url:` key appears in nine test files, not the two named. Deleting the dict branch breaks the integration harness, and narrowing an accepted config spelling is a behaviour change this behaviour-preserving phase cannot decide.
   - APPLIED (the half that is unambiguous and behaviour-preserving): the `ingress.py` hint now names `event_server`, the spelling every pack, doc and `bobi setup` actually writes, instead of the parses-but-unauthored `event_server_url`. Two hint assertions retargeted.
   - NOT APPLIED: collapsing the three spellings to one. Needs a lane that can take a schema-compatibility decision.
-- [ ] **Q093** `bobi/config.py:615` — The event-server deployment/cursor/bubble state persistence (config.py:601-701) is transport session state, not package configuration, and sits in a…
+- [x] **Q093** `bobi/config.py:615` — The event-server deployment/cursor/bubble state persistence (config.py:601-701) is transport session state, not package configuration, and sits in a…
+  - Applied 2026-08-17. The block (at `config.py:714-815` by then) moved whole
+    to `bobi/events/state.py` beside its consumer `events/server.py:
+    ensure_bubble`; function-local `json`/`os`/`re`/`paths` imports hoisted to
+    module top. Five source importers (doctor, events/publish, events/server,
+    service, subagent) and 19 test files retargeted; `fsutil.py`'s and
+    AGENTS.md's `config.save_bubble_state` pointers updated. config.py sheds
+    ~100 lines and its `atomic_write_json` import. The three deployment-state
+    tests moved from test_config.py to test_bubble.py with the code they test.
+  - The 0600 exception (CLAUDE.md's one sanctioned bypass of the atomic
+    helper) was asserted by NO test; now pinned in test_bubble.py. Review
+    caught the first version of that pin half-vacuous (the trailing chmod
+    satisfied both arms; O_TRUNC unexercised) — the final test neutralizes
+    chmod in the creation arm and proves truncation by byte-equality, with
+    three named red mutants (loose create mode, dropped O_TRUNC, dropped
+    trailing chmod).
+  - Review additions: `event-server/core/src/core.ts`'s doubly-dead pointer
+    (`bobi/config.py:load_or_mint_bubble` — wrong file AND a function that
+    never existed) retargeted to `ensure_bubble`/`events/state.py`;
+    config.py's docstring no longer claims an fsutil dependency it lost;
+    the duplicate `TestDeploymentState` in integration/test_config_resolution
+    deleted (verbatim copies of the moved unit tests, with dead setup);
+    state.py's over-claiming module docstring rewritten.
 - [x] **Q092** `bobi/costs.py:156` — rollup_costs takes a group_by parameter that its body never references.
 - [x] **Q114** `bobi/dep_bootstrap.py:88` — ResolvedRecipe.from_install and ResolvedRecipe.from_agent are the identical one-line function under two names. *(plausible — re-verify first)*
 - [x] **Q091** `bobi/dep_bootstrap.py:419` — pathlib.Path is imported inside four separate functions (and string-quoted in signatures) although a top-level stdlib import has no cycle risk.

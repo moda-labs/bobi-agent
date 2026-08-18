@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from bobi import http as pooled
-from bobi.config import save_bubble_state
+from bobi.events.state import save_bubble_state
 from bobi.events.signing import (
     ALGO,
     SignedJSONRequestError,
