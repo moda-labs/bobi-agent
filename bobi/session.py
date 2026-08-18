@@ -21,6 +21,7 @@ import time
 import threading
 
 from bobi.brain import AssistantText, TurnResult, get_brain
+from bobi.brain.base import ERROR_KIND_AUTHENTICATION
 from bobi.inbox import Inbox, Message
 from bobi.sdk import (
     save_session_id,
@@ -944,6 +945,26 @@ class Session:
                             )
                     self._last_api_error_status = msg.api_error_status
                     if msg.is_error:
+                        if msg.error_kind == ERROR_KIND_AUTHENTICATION:
+                            error = (
+                                msg.error_message
+                                or msg.result_text
+                                or "brain authentication failed"
+                            )
+                            log.error(
+                                "Session '%s' brain authentication failed: %s",
+                                self.name,
+                                error[:200],
+                            )
+                            self._set_state("error")
+                            registry.update(
+                                self.name,
+                                status="error",
+                                session_id=msg.session_id,
+                                error=error,
+                                terminal_at=time.time(),
+                            )
+                            continue
                         # A turn-level API error (e.g. 529 Overloaded, rate
                         # limit) is transient and scoped to this turn — the SDK
                         # client stays connected. It must NOT drop the session

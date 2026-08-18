@@ -96,6 +96,9 @@ class TurnResult:
         )
 
 
+# Provider-neutral cause emitted when the brain cannot authenticate.
+ERROR_KIND_AUTHENTICATION = "authentication_failed"
+
 # The brain-neutral error kind for a turn the harness cut off at its turn cap.
 # One constant so the cap's terminal handling (resume, retry-vs-give-up) keys
 # off the same string the adapters set.

@@ -884,6 +884,30 @@ async def test_receive_response_converts_assistant_and_result():
 
 
 @pytest.mark.asyncio
+async def test_receive_response_preserves_structured_auth_failure():
+    """Claude's assistant error field is the stable auth classifier."""
+    text = "Not logged in - Please run /login"
+    assistant = AssistantMessage(
+        content=[TextBlock(text=text)],
+        model="<synthetic>",
+        error="authentication_failed",
+    )
+    result = _result(is_error=True, result=text)
+
+    out = [
+        message
+        async for message in _claude_session_over(
+            [assistant, result]
+        ).receive_response()
+    ]
+
+    assert isinstance(out[-1], TurnResult)
+    assert out[-1].is_error is True
+    assert out[-1].error_kind == "authentication_failed"
+    assert out[-1].error_message == text
+
+
+@pytest.mark.asyncio
 async def test_assistant_without_text_still_carries_usage():
     """An assistant message with no TextBlocks yields empty text but keeps usage
     (the rotation metric reads usage even on a text-less step)."""
@@ -1033,6 +1057,35 @@ async def test_claude_stream_once_sets_default_initialize_timeout(monkeypatch):
         out.append(msg)
 
     assert isinstance(out[-1], TurnResult)
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_once_preserves_structured_auth_failure(monkeypatch):
+    text = "Not logged in - Please run /login"
+
+    async def _query(*, prompt, options):
+        yield AssistantMessage(
+            content=[TextBlock(text=text)],
+            model="<synthetic>",
+            error="authentication_failed",
+        )
+        yield _result(is_error=True, result=text)
+
+    monkeypatch.setattr("claude_agent_sdk.query", _query)
+    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+
+    out = [
+        message
+        async for message in ClaudeBrain().stream_once(
+            system_prompt="sys",
+            user_prompt="hello",
+            cwd="/tmp",
+        )
+    ]
+
+    assert isinstance(out[-1], TurnResult)
+    assert out[-1].error_kind == "authentication_failed"
+    assert out[-1].error_message == text
 
 
 @pytest.mark.asyncio

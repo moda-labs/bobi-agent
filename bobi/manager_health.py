@@ -138,6 +138,8 @@ def _manager_block_from_registry(manager_session: str | None):
         "status": entry.status,
         "last_activity": entry.last_activity,
         "idle_seconds": max(0.0, time.time() - entry.last_activity),
+        "error": getattr(entry, "error", "") or None,
+        "terminal_at": getattr(entry, "terminal_at", 0.0) or None,
     }
 
 
