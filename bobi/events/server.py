@@ -19,6 +19,7 @@ from pathlib import Path
 
 import httpx
 
+from bobi import launch_stamp
 from bobi.events import artifact as event_server_artifact
 from bobi.fsutil import atomic_write_text
 
@@ -425,8 +426,7 @@ def resolve_local_port(project_path: Path) -> int:
     """
     from bobi import paths
 
-    state = paths.state_path(project_path)
-    pid_file = state / "event-server.pid"
+    pid_file = paths.event_server_pid_path(project_path)
     port_file = local_port_file(project_path)
 
     def _remembered() -> int | None:
@@ -552,7 +552,7 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     from bobi import paths
     state = paths.state_dir(project_path)
     log_file = state / "event-server.log"
-    pid_file = state / "event-server.pid"
+    pid_file = paths.event_server_pid_path(project_path)
 
     env = dict(os.environ)
     env["BOBI_ES_PORT"] = str(port)
@@ -594,14 +594,19 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     env["WS_NO_BUFFER_UTIL"] = "1"
     env["WS_NO_UTF_8_VALIDATE"] = "1"
 
+    bundle = es_dir / "dist" / event_server_artifact.BUNDLE_NAME
     with open(log_file, "a") as lf:
         proc = subprocess.Popen(
-            [node, str(es_dir / "dist" / "local.js")],
+            [node, str(bundle)],
             stdout=lf, stderr=lf,
             env=env, start_new_session=True,
         )
 
-    pid_file.write_text(str(proc.pid))
+    atomic_write_text(pid_file, str(proc.pid))
+    # Record the bundle these bytes came from: an in-place bobi upgrade
+    # overwrites it under the running node, and nothing else would notice (#928).
+    launch_stamp.record_launch(project_path, launch_stamp.EVENT_SERVER,
+                               proc.pid, artifact=bundle)
 
     for _ in range(30):
         time.sleep(0.5)

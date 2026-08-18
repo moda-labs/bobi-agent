@@ -646,3 +646,62 @@ class TestResolveAgentPack:
         from bobi.install import resolve_agent_pack
         monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
         assert resolve_agent_pack("nope", tmp_path / "proj") is None
+
+
+class TestInstallReportsProcessesOnOldCode:
+    """The upgrade path itself says which components still run replaced code.
+
+    Upgrading bobi in place and reinstalling the team is the flow that creates
+    the drift, and it does not restart the event server. Naming it here is what
+    keeps the operator from having to think to ask doctor (#928).
+    """
+
+    @pytest.fixture
+    def live_pid(self):
+        import subprocess
+        import sys
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            yield proc.pid
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    def _install(self, pack, home, args=()):
+        return CliRunner().invoke(
+            main,
+            ["agents", "install", str(pack), "--non-interactive", *args],
+            catch_exceptions=False,
+        )
+
+    def test_names_the_stale_processes_and_their_remedy(self, pack, tmp_path,
+                                                        monkeypatch, live_pid):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
+        run_root = home / "agents" / "my-team" / "run"
+        paths.state_path(run_root).mkdir(parents=True)
+        # A manager and an event server that predate this install.
+        paths.manager_pid_path(run_root).write_text(str(live_pid))
+        paths.event_server_pid_path(run_root).write_text(str(live_pid))
+
+        result = self._install(pack, home)
+
+        assert result.exit_code == 0, result.output
+        assert "Still running the code this install replaced" in result.output
+        assert "manager" in result.output
+        assert "event server" in result.output
+        assert "bobi agent my-team restart" in result.output
+        assert "bobi agent my-team event-server restart" in result.output
+
+    def test_a_fresh_install_says_nothing(self, pack, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        monkeypatch.setenv("BOBI_EVENT_SERVER", "wss://events.example.com")
+
+        result = self._install(pack, home)
+
+        assert result.exit_code == 0, result.output
+        assert "Still running" not in result.output

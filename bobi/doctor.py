@@ -44,6 +44,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_workflows())
     results.append(_check_bubble_auth())
     results.append(_check_event_server())
+    results.append(_check_running_code())
     slack_socket = _check_slack_socket_mode()
     if slack_socket:
         results.append(slack_socket)
@@ -400,8 +401,7 @@ def _check_bubble_auth() -> CheckResult:
     if not bubble_id:
         # No bubble yet — might be fine if the instance hasn't started.
         from bobi import paths
-        pid_file = paths.state_dir(root) / "event-server.pid"
-        if pid_file.exists():
+        if paths.event_server_pid_path(root).exists():
             return CheckResult(
                 "Bubble auth", ok=False,
                 detail="no bubble credential but event server appears running",
@@ -487,6 +487,41 @@ def _check_event_server() -> CheckResult:
     return CheckResult("Event server", ok=False,
                        detail="not running",
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")
+
+
+def _check_running_code() -> CheckResult:
+    """Flag long-lived processes still running code the install has replaced.
+
+    A local `uv tool install --upgrade` swaps bobi's files underneath the
+    manager and the local event server; `_check_event_server` above then probes
+    a stale server, gets a healthy `/health`, and says so (#928). The processes
+    record what they launched from, and this compares it to what is installed.
+
+    A warning, not a failure: nothing is broken - a restart is pending, and the
+    remedy is one command. Reporting a red install would fire on every upgrade
+    between `bobi agents install` and the restart it asks for.
+    """
+    root = bound_root()
+    if not root:
+        return CheckResult("Running code", ok=True, detail="no runtime selected")
+    from bobi.launch_stamp import inspect_processes, installed_bobi_version
+
+    running = inspect_processes(root)
+    stale = [p for p in running if p.stale]
+    if not running:
+        return CheckResult("Running code", ok=True,
+                           detail="no long-lived local processes running")
+    if not stale:
+        names = ", ".join(f"{p.name} (pid {p.pid})" for p in running)
+        return CheckResult(
+            "Running code", ok=True,
+            detail=f"{names} on bobi {installed_bobi_version()}")
+    return CheckResult(
+        "Running code", ok=False,
+        detail="; ".join(f"{p.name}: {p.detail}" for p in stale),
+        hint="Restart to pick up the installed code: "
+             + ", ".join(f"`{p.remedy}`" for p in stale),
+        required=False)
 
 
 def _check_slack_socket_mode() -> CheckResult | None:

@@ -218,6 +218,10 @@ def manager_pid_path(root: Path | None = None) -> Path:
     return state_path(root) / "manager.pid"
 
 
+def event_server_pid_path(root: Path | None = None) -> Path:
+    return state_path(root) / "event-server.pid"
+
+
 def long_term_memory_path(root: Path | None = None) -> Path:
     return state_path(root) / "long_term_memory.md"
 
