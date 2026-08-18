@@ -966,7 +966,6 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.brain.turns.save_session_id") as save_mock, \
              patch("bobi.workflow.orchestrator.log_activity"), \
              patch("bobi.brain.turns.log_activity"):

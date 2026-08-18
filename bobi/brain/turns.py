@@ -22,6 +22,9 @@ import logging
 from dataclasses import dataclass
 
 from bobi.brain.base import AssistantText, TurnResult
+# Safe only while bobi.sdk keeps its own bobi.brain imports function-local
+# (sdk.py does, deliberately) - hoisting those would close an import cycle
+# through this module.
 from bobi.sdk import log_activity, save_session_id
 
 log = logging.getLogger(__name__)
@@ -79,8 +82,9 @@ async def drain_turn(client, session_name: str, *, model: str) -> TurnOutcome:
     wall-clock enforcement (D067) still lands in the caller's handler.
     """
     final_text = ""
+    stream = client.receive_response()
     try:
-        async for msg in client.receive_response():
+        async for msg in stream:
             if isinstance(msg, AssistantText):
                 if msg.text:
                     final_text = msg.text
@@ -100,12 +104,24 @@ async def drain_turn(client, session_name: str, *, model: str) -> TurnOutcome:
                 return TurnOutcome(msg, final_text)
     except asyncio.TimeoutError:
         error = timeout_error()
-        log.error(f"Drain timeout: {error}")
+        log.error("Drain timeout for '%s': %s", session_name, error)
         return TurnOutcome(None, final_text, error, "timeout")
     except Exception as e:
         error = tool_crash_error(e)
-        log.error(f"Drain error: {error}")
+        log.error("Drain error for '%s': %s", session_name, error)
         return TurnOutcome(None, final_text, error, "tool_crash")
+    finally:
+        # Returning at the terminal result leaves an async generator suspended
+        # at its yield; close it NOW so adapter-side teardown (e.g. the codex
+        # runner's subprocess reaping) runs deterministically instead of at
+        # the loop's asyncgen-shutdown hook.
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
     error = network_drop_error()
-    log.error(f"Drain ended without a terminal result: {error}")
+    log.error("Drain for '%s' ended without a terminal result: %s",
+              session_name, error)
     return TurnOutcome(None, final_text, error, "network_drop")

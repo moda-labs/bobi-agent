@@ -932,10 +932,16 @@ class TestRunAgentSupervisedTracking:
         # registry's mark_terminal, asserted above.
         stop_calls = [c for c in mock_log.call_args_list
                       if c.args and c.args[0] == "stop"]
-        assert stop_calls, "no stop record written"
-        payload = stop_calls[-1].args[1]
+        assert len(stop_calls) == 1
+        payload = stop_calls[0].args[1]
         assert payload["session_id"] == "sess-track"
         assert payload["is_error"] is False
+        # Every #845 fact rides the record - drift in the payload shape is a
+        # regression, not a detail.
+        assert set(payload) == {
+            "session_id", "is_error", "error_kind", "error_message",
+            "api_error_status", "num_turns", "duration_ms",
+        }
 
     @pytest.mark.asyncio
     async def test_registry_updated_on_error(self):

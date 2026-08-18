@@ -1222,20 +1222,17 @@ async def _run_workflow_async(
 async def _drain_response(
     client, session_name: str, *, model: str,
 ) -> DrainResult:
-    """Drain one turn. Returns ``(final_text, error, error_kind)``.
+    """Adapt one drained turn into the step loop's flat shape.
 
     ``final_text`` is None exactly when the turn failed; ``error`` is then
     always non-empty and ``error_kind`` carries the brain's classification
     (e.g. ``max_turns_reached``) so callers can act on the failure MODE
     without pattern-matching prose.
 
-    ``model`` is required: it is the model the session currently runs under,
-    and every save must record it so the store's model record stays in step
-    with mid-run switches (#642).
-
-    The drain itself (text capture, session-id save, activity records,
-    stream-failure normalization) is the shared primitive; this adapter only
-    folds the brain's own turn verdict into the step loop's flat shape.
+    The drain itself (text capture, the model-stamped session-id save,
+    activity records, stream-failure normalization) is
+    ``bobi.brain.turns.drain_turn``; this adapter only folds the brain's own
+    turn verdict into that flat shape.
     """
     outcome = await drain_turn(client, session_name, model=model)
     msg = outcome.result

@@ -174,6 +174,42 @@ class TestHonestTerminalStatus:
         )
         assert get_registry().get(name).status == TERMINAL_FAILED
 
+    @pytest.mark.asyncio
+    async def test_mid_stream_crash_records_crashed_not_failed(self):
+        """A drain that dies mid-stream is a CRASH, exactly as it was when
+        the exception reached the outer handler pre-#1048 - not a clean
+        failure. The reconciler and the crashed-vs-failed counts key off
+        this distinction."""
+
+        class CrashingClient(FakeClient):
+            async def receive_response(self):
+                yield FakeAssistantMessage(content=[FakeTextBlock(text="hm")])
+                raise RuntimeError("subprocess died")
+
+        name = _register("CRASH-2", "implement")
+        result = await _run(CrashingClient([]), "CRASH-2", "implement")
+        assert result.success is False
+        assert result.error == "tool crash: subprocess died"
+        assert get_registry().get(name).status == TERMINAL_CRASHED
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_timeout_records_failed(self):
+        """An SDK-internal TimeoutError mid-drain is a failed run (the
+        wall-clock budget handler at the asyncio.timeout boundary is a
+        separate path, covered in test_subagent_blocking)."""
+        import asyncio
+
+        class TimingOutClient(FakeClient):
+            async def receive_response(self):
+                raise asyncio.TimeoutError()
+                yield  # pragma: no cover
+
+        name = _register("TMO-2", "implement")
+        result = await _run(TimingOutClient([]), "TMO-2", "implement")
+        assert result.success is False
+        assert result.error == "subprocess timeout while draining response"
+        assert get_registry().get(name).status == TERMINAL_FAILED
+
 
 # --- RC#3: durable terminal status survives a swallowed emit ----------------
 
