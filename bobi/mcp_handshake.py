@@ -26,6 +26,7 @@ nothing more.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import os
 
@@ -52,6 +53,39 @@ def preflight_timeout(default: float = PREFLIGHT_DEFAULT_TIMEOUT) -> float:
     except ValueError:
         return default
     return value if math.isfinite(value) and value > 0 else default
+
+
+@contextlib.asynccontextmanager
+async def open_streamable_http(url: str, headers: dict[str, str] | None = None):
+    """Open one streamable-HTTP transport across the mcp 2.0 rename.
+
+    mcp 2.0 renamed ``streamablehttp_client`` → ``streamable_http_client`` and
+    moved header configuration onto a caller-supplied ``httpx.AsyncClient``
+    (built here with the SDK's own ``create_mcp_http_client`` so the
+    MCP-recommended timeouts survive); releases before 1.29 ship only the
+    legacy spelling, which takes ``headers`` directly. Both yield the same
+    ``(read, write, get_session_id)`` tuple. The dependency floor is
+    ``mcp>=1.23``, so both spellings stay reachable; imports stay lazy to keep
+    the SDK off the framework import path.
+
+    The one transport opener for every streamable-HTTP caller (this module's
+    ``_probe_http`` and the setup wizard's) - the rename must not be handled
+    twice.
+    """
+    try:
+        from mcp.client.streamable_http import (
+            create_mcp_http_client,
+            streamable_http_client,
+        )
+    except ImportError:  # mcp < 1.29: only the legacy spelling exists
+        from mcp.client.streamable_http import streamablehttp_client
+
+        async with streamablehttp_client(url, headers=headers) as streams:
+            yield streams
+        return
+    async with create_mcp_http_client(headers=headers) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as streams:
+            yield streams
 
 
 async def _handshake(read, write) -> list[str]:
@@ -86,13 +120,11 @@ async def _probe_stdio(spec: dict, base_env: dict | None) -> list[str]:
 
 
 async def _probe_http(spec: dict) -> list[str]:
-    from mcp.client.streamable_http import streamablehttp_client
-
     url = str(spec.get("url") or "").strip()
     if not url:
         raise ValueError("http/sse server has no url")
     headers = {k: str(v) for k, v in (spec.get("headers") or {}).items()}
-    async with streamablehttp_client(url, headers=headers) as streams:
+    async with open_streamable_http(url, headers=headers) as streams:
         return await _handshake(streams[0], streams[1])
 
 
