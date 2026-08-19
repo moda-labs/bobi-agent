@@ -6,6 +6,38 @@
 
 set -euo pipefail
 
+release_marker=""
+released_tool_root=""
+release_failed=0
+
+relock_framework_roots() {
+    local tool_root="$1"
+    local root
+    [[ -d "$tool_root/lib" ]] || return 0
+    while IFS= read -r root; do
+        chmod -R a-w "$root" || true
+    done < <(find "$tool_root/lib" -type d \( -name bobi -o -name 'bobi-*.dist-info' \))
+}
+
+remove_release_marker() {
+    if [[ -n "$release_marker" ]]; then
+        rm -f "$release_marker"
+    fi
+}
+
+on_exit() {
+    local status=$?
+    if (( release_failed )); then
+        remove_release_marker
+    fi
+    if (( release_failed )) && [[ -n "$released_tool_root" ]]; then
+        relock_framework_roots "$released_tool_root"
+    fi
+    exit "$status"
+}
+
+trap on_exit EXIT
+
 require_supported_node() {
     local version
     local major
@@ -43,12 +75,57 @@ if ! command -v uv &>/dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
+resolve_bobi_home() {
+    local raw="${BOBI_HOME:-$HOME/.bobi}"
+    case "$raw" in
+        "~") raw="$HOME" ;;
+        \~/*) raw="$HOME/${raw:2}" ;;
+    esac
+    if [[ "$raw" != /* ]]; then
+        raw="$PWD/$raw"
+    fi
+    mkdir -p "$raw"
+    (cd "$raw" && pwd -P)
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '%s' "$value"
+}
+
+release_write_guard() {
+    local tool_dir="$1"
+    local tool_root="$tool_dir/bobi"
+    local bobi_home
+    local marker_tmp
+    local expires_at
+
+    [[ -d "$tool_root" ]] || return 0
+    bobi_home="$(resolve_bobi_home)"
+    release_marker="$bobi_home/runtime-guard-released"
+    released_tool_root="$tool_root"
+    release_failed=1
+    marker_tmp="$release_marker.$$"
+    expires_at="$(( $(date +%s) + 900 ))"
+    printf '{"prefix":"%s","expires_at":%s,"opened_by":"scripts/install.sh","pid":%s}\n' \
+        "$(json_escape "$tool_root")" "$expires_at" "$$" > "$marker_tmp"
+    mv "$marker_tmp" "$release_marker"
+    chmod -R u+w "$tool_root"
+    release_failed=0
+}
+
 echo "Installing bobi..."
 tool_dir="$(uv tool dir)"
-if [[ -d "$tool_dir/bobi" ]]; then
-    chmod -R u+w "$tool_dir/bobi"
-fi
+release_write_guard "$tool_dir"
 uv tool install --force bobi
+remove_release_marker
+release_marker=""
+released_tool_root=""
 
 echo ""
 echo "Done. Run 'bobi setup <name>' to create a Bobi Agent, or"

@@ -121,6 +121,11 @@ bobi reply <conversation> "markdown text"
 bobi reply <conversation> --edit <ts> "text"     # resolve a placeholder
 bobi reply <conversation> --file <path> "comment"
 bobi read-conversation <conversation> [-n 50] [--json-output]
+
+# Machine-level framework write guard (no agent selection required)
+bobi guard status
+bobi guard release
+bobi guard reapply
 ```
 
 Use `bobi reply` and `bobi read-conversation` for Slack and any other
@@ -129,15 +134,25 @@ chat channel delivered through the channel gateway.
 ## Upgrading Bobi In Place
 
 A local upgrade replaces bobi's files underneath whatever is already
-running, and neither the team reinstall nor `bobi agent <name> restart`
-restarts the local event server. Restart both:
+running. Stop the team first, then use the installer as the universal uv
+upgrade/recovery path; it does not import Bobi and therefore works after a
+partially destructive failed upgrade:
 
 ```bash
-uv tool install --upgrade bobi
+bobi agent <name> stop
+curl -sL https://raw.githubusercontent.com/moda-labs/bobi-agent/main/scripts/install.sh | bash
 bobi agents install ./agents/<team> --name <name>
-bobi agent <name> restart
+bobi agent <name> start
 bobi agent <name> event-server restart
 ```
+
+On versions that provide the guard CLI, `bobi guard release && uv tool install
+--force bobi` opens the same 15-minute window explicitly. For pipx, run `bobi
+guard release && pipx upgrade bobi`. `bobi guard status` shows which install is
+covered and when the window expires; `bobi guard reapply` closes it early. Team
+packages stay locked throughout. Hot-swapping the framework under a running
+manager is unsupported even though the window prevents monitor or agent launches
+from re-locking the framework during the package-manager operation.
 
 Each long-lived process records the bobi it launched from, so anything
 still on the replaced code is named - by the install itself, and by the

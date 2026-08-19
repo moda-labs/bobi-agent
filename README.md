@@ -117,20 +117,29 @@ See [scripts/install.sh](scripts/install.sh) for what the installer does.
 
 ### Upgrading Bobi
 
-Stop all running teams, release the framework guard, then use your package
-manager's normal upgrade command:
+Stop all running teams, then rerun the installer. This is the universal uv
+upgrade and recovery path: it works even when a previous failed upgrade left
+the `bobi` command unable to import.
 
 ```bash
-bobi guard release
-uv tool upgrade bobi
+curl -sL https://raw.githubusercontent.com/moda-labs/bobi-agent/main/scripts/install.sh | bash
 ```
 
-For pipx or Homebrew, replace the second command with `pipx upgrade bobi` or
-`brew upgrade bobi`. The guard automatically returns on the next agent launch.
-If a previous upgrade already left `bobi` unable to start, rerun
-`scripts/install.sh`; it unlocks uv's Bobi tool directory without importing
-Bobi. Manual recovery is `chmod -R u+w "$(uv tool dir)/bobi"` followed by
-`uv tool install --force bobi`.
+On versions that include the guard CLI, you can instead open the same bounded
+15-minute release window explicitly:
+
+```bash
+bobi guard release && uv tool install --force bobi
+```
+
+Use `pipx upgrade bobi` or `brew upgrade bobi` after `bobi guard release` for
+those install methods. `bobi guard status` shows the imported installation,
+marker, expiry, and root modes; `bobi guard reapply` closes the window early.
+Do not hot-swap Bobi under a running team.
+
+Manual recovery for a broken uv install is `chmod -R u+w "$(uv tool dir)/bobi"`
+followed by `uv tool install --force bobi`. `--force` is required because uv's
+receipt may still claim the partially removed environment is installed.
 
 ## Quick Start
 

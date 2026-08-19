@@ -147,6 +147,17 @@ therefore runs untrusted-author code against your credentials.
   hard sandbox when the agent process owns the files because the same UID can
   deliberately restore write bits. Managed deployments that need a stronger
   boundary should use read-only mounts or split ownership.
+- Package-manager upgrades use an observable, scoped release window rather than
+  weakening that at-rest policy. `bobi guard release` restores owner-write only
+  on Bobi's framework package and distribution metadata, never on an installed
+  team package. A JSON marker under `$BOBI_HOME` records the covered install,
+  opener, process, and expiry; malformed, expired, future-dated, or
+  prefix-mismatched markers fail closed. The window lasts at most 15 minutes,
+  appears in `bobi guard status` and doctor, and can be closed immediately with
+  `bobi guard reapply`. It remains a same-UID guardrail, not a privilege boundary:
+  an actor with that UID can still chmod files or renew the marker. Stop running
+  teams before upgrading because replacing imported code under a live process is
+  unsupported.
 
 ## Deployed instances
 

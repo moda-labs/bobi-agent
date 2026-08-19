@@ -6,14 +6,18 @@ import base64
 import contextlib
 import hashlib
 import importlib.metadata as metadata
+import json
 import logging
+import math
 import os
 import stat
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Literal
 
-from bobi import paths
+from bobi import fsutil, paths
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,11 @@ ProtectedKind = Literal[
     "venv",
     "dependency",
 ]
+
+FRAMEWORK_KINDS = frozenset({"bobi-package", "bobi-dist-info"})
+RELEASE_WINDOW = 15 * 60
+RELEASE_CLOCK_SKEW = 60
+RELEASE_MARKER = "runtime-guard-released"
 
 
 @dataclass(frozen=True)
@@ -37,7 +46,53 @@ class ProtectedRoot:
 @dataclass
 class GuardReport:
     protected: list[ProtectedRoot] = field(default_factory=list)
+    released: list[ProtectedRoot] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ReleaseWindowStatus:
+    marker_path: Path
+    state: Literal["missing", "open", "expired", "invalid"]
+    detail: str
+    prefix: Path | None = None
+    expires_at: float | None = None
+    opened_by: str = ""
+    pid: int | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.state == "open"
+
+    def covers(self, root: Path) -> bool:
+        return bool(
+            self.is_open
+            and self.prefix is not None
+            and _is_relative_to(root, self.prefix)
+        )
+
+
+@dataclass
+class ReleaseReport:
+    roots: list[ProtectedRoot] = field(default_factory=list)
+    released: list[ProtectedRoot] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    marker_path: Path | None = None
+    prefix: Path | None = None
+    expires_at: float | None = None
+    opened_by: str = ""
+    noop_reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.skipped
+
+
+@dataclass
+class ReapplyReport:
+    guard: GuardReport
+    marker_path: Path
+    marker_error: str = ""
 
 
 @dataclass
@@ -45,7 +100,9 @@ class PolicyCheck:
     ok: bool
     detail: str = ""
     protected: list[ProtectedRoot] = field(default_factory=list)
+    released: list[ProtectedRoot] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    window: ReleaseWindowStatus | None = None
 
 
 def _writable_bits(mode: int) -> int:
@@ -139,6 +196,91 @@ def _looks_like_source_checkout(package_dir: Path) -> bool:
     return False
 
 
+def release_marker_path() -> Path:
+    return paths.home_dir() / RELEASE_MARKER
+
+
+def release_window_status(*, now: float | None = None) -> ReleaseWindowStatus:
+    marker = release_marker_path()
+    if not marker.exists():
+        return ReleaseWindowStatus(marker, "missing", "no release marker")
+    try:
+        raw = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return ReleaseWindowStatus(marker, "invalid", f"unreadable marker: {exc}")
+    if not isinstance(raw, dict):
+        return ReleaseWindowStatus(marker, "invalid", "marker is not a JSON object")
+
+    prefix_raw = raw.get("prefix")
+    expires_at = raw.get("expires_at")
+    opened_by = raw.get("opened_by")
+    pid = raw.get("pid")
+    if not isinstance(prefix_raw, str) or not prefix_raw:
+        return ReleaseWindowStatus(marker, "invalid", "marker prefix is missing")
+    prefix = Path(prefix_raw).expanduser()
+    if not prefix.is_absolute():
+        return ReleaseWindowStatus(marker, "invalid", "marker prefix is not absolute")
+    try:
+        prefix = prefix.resolve()
+    except OSError as exc:
+        return ReleaseWindowStatus(marker, "invalid", f"marker prefix is invalid: {exc}")
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+        return ReleaseWindowStatus(marker, "invalid", "marker expiry is missing")
+    expires_at = float(expires_at)
+    if not math.isfinite(expires_at):
+        return ReleaseWindowStatus(marker, "invalid", "marker expiry is not finite")
+    if not isinstance(opened_by, str) or not opened_by.strip():
+        return ReleaseWindowStatus(marker, "invalid", "marker opener is missing")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return ReleaseWindowStatus(marker, "invalid", "marker pid is invalid")
+
+    current = time.time() if now is None else now
+    common = dict(
+        prefix=prefix,
+        expires_at=expires_at,
+        opened_by=opened_by,
+        pid=pid,
+    )
+    if expires_at <= current:
+        return ReleaseWindowStatus(marker, "expired", "release window expired", **common)
+    if expires_at > current + RELEASE_WINDOW + RELEASE_CLOCK_SKEW:
+        return ReleaseWindowStatus(
+            marker, "invalid", "marker expiry is too far in the future", **common)
+    return ReleaseWindowStatus(marker, "open", "release window is open", **common)
+
+
+def _framework_install_context() -> tuple[list[ProtectedRoot], str]:
+    import bobi
+
+    package = Path(bobi.__file__).resolve().parent
+    dist = _distribution("bobi")
+    if dist is None:
+        return [], "Bobi distribution metadata was not found"
+    if _is_editable_distribution(dist):
+        return [], "editable install"
+    if _looks_like_source_checkout(package):
+        return [], "source checkout"
+
+    roots = [ProtectedRoot(
+        path=package,
+        kind="bobi-package",
+        reason="installed Bobi framework package",
+    )]
+    dist_info = _dist_info_path(dist)
+    if dist_info and dist_info.exists():
+        roots.append(ProtectedRoot(
+            path=dist_info,
+            kind="bobi-dist-info",
+            reason="installed Bobi distribution metadata",
+        ))
+    return roots, ""
+
+
+def framework_release_roots() -> tuple[list[ProtectedRoot], str]:
+    """Installed framework roots and an honest reason when none exist."""
+    return _framework_install_context()
+
+
 def protected_runtime_roots(runtime_root: Path | None) -> list[ProtectedRoot]:
     roots: list[ProtectedRoot] = []
     if runtime_root is not None:
@@ -150,35 +292,32 @@ def protected_runtime_roots(runtime_root: Path | None) -> list[ProtectedRoot]:
                 reason="installed agent package image",
             ))
 
-    import bobi
-
-    bobi_package = Path(bobi.__file__).resolve().parent
-    dist = _distribution("bobi")
-    editable = _is_editable_distribution(dist) if dist is not None else True
-    source_checkout = _looks_like_source_checkout(bobi_package)
+    framework_roots, _ = _framework_install_context()
+    bobi_package = framework_roots[0].path if framework_roots else None
     assigned_source = (
-        runtime_root is not None
+        bobi_package is not None
+        and runtime_root is not None
         and _is_relative_to(bobi_package, runtime_root)
     )
-    if not editable and not source_checkout and not assigned_source:
-        roots.append(ProtectedRoot(
-            path=bobi_package,
-            kind="bobi-package",
-            reason="installed Bobi framework package",
-        ))
-        dist_info = _dist_info_path(dist)
-        if dist_info and dist_info.exists():
-            roots.append(ProtectedRoot(
-                path=dist_info,
-                kind="bobi-dist-info",
-                reason="installed Bobi distribution metadata",
-            ))
+    if not assigned_source:
+        roots.extend(framework_roots)
     return roots
 
 
-def apply_runtime_write_policy(runtime_root: Path | None) -> GuardReport:
+def _apply_runtime_write_policy(
+    runtime_root: Path | None, *, honor_release_window: bool,
+) -> GuardReport:
     report = GuardReport()
+    window = release_window_status() if honor_release_window else None
     for root in protected_runtime_roots(runtime_root):
+        if (
+            honor_release_window
+            and root.kind in FRAMEWORK_KINDS
+            and window is not None
+            and window.covers(root.path)
+        ):
+            report.released.append(root)
+            continue
         skipped = _chmod_tree(root.path, _readonly_mode)
         if skipped:
             logger.warning(
@@ -191,18 +330,148 @@ def apply_runtime_write_policy(runtime_root: Path | None) -> GuardReport:
     return report
 
 
-def release_runtime_write_policy() -> GuardReport:
-    """Release package-manager-owned framework roots for an upgrade."""
-    report = GuardReport()
-    for root in protected_runtime_roots(None):
-        if root.kind not in ("bobi-package", "bobi-dist-info"):
+def apply_runtime_write_policy(runtime_root: Path | None) -> GuardReport:
+    return _apply_runtime_write_policy(runtime_root, honor_release_window=True)
+
+
+def _framework_prefix(roots: list[ProtectedRoot]) -> Path:
+    interpreter_prefix = Path(sys.prefix).resolve()
+    if all(_is_relative_to(root.path, interpreter_prefix) for root in roots):
+        return interpreter_prefix
+    return Path(os.path.commonpath([str(root.path.resolve()) for root in roots]))
+
+
+def _write_release_marker(prefix: Path, opened_by: str, now: float) -> tuple[Path, float]:
+    marker = release_marker_path()
+    expires_at = now + RELEASE_WINDOW
+    fsutil.atomic_write_json(
+        marker,
+        {
+            "prefix": str(prefix),
+            "expires_at": expires_at,
+            "opened_by": opened_by,
+            "pid": os.getpid(),
+        },
+        indent=None,
+        sort_keys=True,
+    )
+    return marker, expires_at
+
+
+def _mutable_failures(root: ProtectedRoot) -> list[str]:
+    failures: list[str] = []
+    if not root.path.exists():
+        return failures
+    for path in [root.path, *root.path.rglob("*")]:
+        if path.is_symlink():
             continue
-        report.skipped.extend(_chmod_tree(root.path, _mutable_mode))
-        report.protected.append(root)
+        try:
+            mode = path.stat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            failures.append(f"{path}: could not verify writable mode ({exc})")
+            continue
+        if not mode & stat.S_IWUSR:
+            failures.append(f"{path}: owner write bit is not set")
+    return failures
+
+
+def root_mode_state(root: ProtectedRoot) -> Literal["locked", "released", "partial"]:
+    writable = 0
+    locked = 0
+    if not root.path.exists():
+        return "locked"
+    for path in [root.path, *root.path.rglob("*")]:
+        if path.is_symlink():
+            continue
+        try:
+            mode = path.stat().st_mode
+        except OSError:
+            locked += 1
+            continue
+        if mode & stat.S_IWUSR:
+            writable += 1
+        else:
+            locked += 1
+    if writable and locked:
+        return "partial"
+    return "released" if writable else "locked"
+
+
+def _close_release_marker() -> str:
+    marker = release_marker_path()
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"{marker}: could not close release window ({exc})"
+    return ""
+
+
+def release_runtime_write_policy(
+    *, opened_by: str = "bobi guard release", now: float | None = None,
+) -> ReleaseReport:
+    """Open a bounded window and unlock package-manager-owned framework roots."""
+    roots, reason = framework_release_roots()
+    report = ReleaseReport(roots=roots, opened_by=opened_by, noop_reason=reason)
+    if not roots:
+        return report
+
+    current = time.time() if now is None else now
+    prefix = _framework_prefix(roots)
+    report.prefix = prefix
+    try:
+        report.marker_path, report.expires_at = _write_release_marker(
+            prefix, opened_by, current)
+    except OSError as exc:
+        report.marker_path = release_marker_path()
+        report.skipped.append(f"{report.marker_path}: could not open release window ({exc})")
+        return report
+
+    unlock_errors: list[str] = []
+    for root in roots:
+        unlock_errors.extend(_chmod_tree(root.path, _mutable_mode))
+
+    # An apply that read the old closed state can finish after the first +w
+    # sweep. Re-check and retry once so that race becomes visible or repaired.
+    failed_roots = [root for root in roots if _mutable_failures(root)]
+    for root in failed_roots:
+        unlock_errors.extend(_chmod_tree(root.path, _mutable_mode))
+
+    final_failures = [
+        failure
+        for root in roots
+        for failure in _mutable_failures(root)
+    ]
+    window = release_window_status(now=current)
+    if not window.is_open or any(not window.covers(root.path) for root in roots):
+        final_failures.append(
+            f"{report.marker_path}: release window did not remain open ({window.detail})")
+    final_failures = [*unlock_errors, *final_failures]
+    if final_failures:
+        report.skipped.extend(final_failures)
+        marker_error = _close_release_marker()
+        if marker_error:
+            report.skipped.append(marker_error)
+        for root in roots:
+            report.skipped.extend(_chmod_tree(root.path, _readonly_mode))
+        return report
+
+    report.released.extend(roots)
     return report
 
 
-def _check_root(root: ProtectedRoot) -> list[str]:
+def reapply_runtime_write_policy(runtime_root: Path | None = None) -> ReapplyReport:
+    marker = release_marker_path()
+    marker_error = _close_release_marker()
+    guard = _apply_runtime_write_policy(runtime_root, honor_release_window=False)
+    return ReapplyReport(guard=guard, marker_path=marker, marker_error=marker_error)
+
+
+def root_write_failures(
+    root: ProtectedRoot, *, include_writable: bool = True,
+    include_symlink_failures: bool = True,
+) -> list[str]:
     failures: list[str] = []
     if not root.path.exists():
         return failures
@@ -212,6 +481,8 @@ def _check_root(root: ProtectedRoot) -> list[str]:
         except FileNotFoundError:
             continue
         if path.is_symlink():
+            if not include_symlink_failures:
+                continue
             try:
                 resolved = path.resolve(strict=True)
             except OSError as exc:
@@ -220,16 +491,21 @@ def _check_root(root: ProtectedRoot) -> list[str]:
             if not _is_relative_to(resolved, root.path):
                 failures.append(f"{path}: symlink escapes protected root")
             continue
-        if _writable_bits(st.st_mode):
+        if include_writable and _writable_bits(st.st_mode):
             failures.append(f"{path}: writable mode {stat.filemode(st.st_mode)}")
     return failures
 
 
 def check_runtime_write_policy(runtime_root: Path | None) -> PolicyCheck:
     roots = protected_runtime_roots(runtime_root)
+    window = release_window_status()
+    released: list[ProtectedRoot] = []
     failures: list[str] = []
     for root in roots:
-        failures.extend(_check_root(root))
+        covered = root.kind in FRAMEWORK_KINDS and window.covers(root.path)
+        if covered:
+            released.append(root)
+        failures.extend(root_write_failures(root, include_writable=not covered))
     if failures:
         shown = "; ".join(failures[:3])
         suffix = "..." if len(failures) > 3 else ""
@@ -237,12 +513,24 @@ def check_runtime_write_policy(runtime_root: Path | None) -> PolicyCheck:
             ok=False,
             detail=f"{len(failures)} writable/unsafe runtime file(s): {shown}{suffix}",
             protected=roots,
+            released=released,
             failures=failures,
+            window=window,
         )
+    detail = f"{len(roots)} protected runtime root(s)"
+    if released:
+        detail += (
+            f"; release window open for {len(released)} framework root(s) "
+            f"by {window.opened_by} (pid {window.pid}) until {window.expires_at}"
+        )
+    elif window.state == "invalid":
+        detail += f"; invalid release marker ignored: {window.detail}"
     return PolicyCheck(
         ok=True,
-        detail=f"{len(roots)} protected runtime root(s)",
+        detail=detail,
         protected=roots,
+        released=released,
+        window=window,
     )
 
 

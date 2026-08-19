@@ -109,22 +109,36 @@ bobi --version
 
 ### Upgrade or recover Bobi
 
-Stop all running teams before replacing the framework, then run:
+Stop all running teams before replacing the framework. For uv installs, rerun
+the installer; it opens the release window without importing Bobi, so it also
+repairs an installation whose `bobi` command is already broken:
 
 ```bash
-bobi guard release
-uv tool upgrade bobi
+curl -sL https://raw.githubusercontent.com/moda-labs/bobi-agent/main/scripts/install.sh | bash
 ```
 
-Use `pipx upgrade bobi` or `brew upgrade bobi` for those install methods. The
-guard is applied again automatically when an agent next launches. If an earlier
-upgrade already broke the `bobi` command, rerun `scripts/install.sh`, or recover
-manually with:
+On a version that provides `bobi guard`, the explicit path is:
+
+```bash
+bobi guard release && uv tool install --force bobi
+```
+
+Use `pipx upgrade bobi` or `brew upgrade bobi` after the release command for
+those install methods. Inspect the window with `bobi guard status`, or close it
+early with `bobi guard reapply`. The window expires after 15 minutes and the
+guard stays active for team packages throughout. Do not upgrade under a running
+team.
+
+Manual recovery is:
 
 ```bash
 chmod -R u+w "$(uv tool dir)/bobi"
 uv tool install --force bobi
 ```
+
+The forced reinstall matters: after a partial removal, uv can still have a
+receipt that makes a plain install look successful without restoring the
+missing dependencies.
 
 Everything Bobi creates lives under one home directory, `~/.bobi` by default.
 You can inspect or delete it at any time without affecting anything else.

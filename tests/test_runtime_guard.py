@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import shutil
 import stat
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -12,13 +14,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bobi import paths, runtime_guard
-from bobi.doctor import _check_runtime_write_policy
+from bobi.doctor import _check_runtime_release_window, _check_runtime_write_policy
 from bobi.runtime_guard import (
     apply_runtime_write_policy,
     check_bobi_distribution_integrity,
     check_runtime_write_policy,
     protected_runtime_roots,
     release_runtime_write_policy,
+    release_window_status,
+    reapply_runtime_write_policy,
     with_mutable_runtime_package,
 )
 
@@ -36,6 +40,48 @@ def _write_runtime(root: Path) -> Path:
 
 def _sha256_record_value(data: bytes) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
+
+
+def _framework_roots(tmp_path: Path) -> tuple[Path, Path, list]:
+    site = tmp_path / "tool" / "lib" / "python3.13" / "site-packages"
+    framework = site / "bobi"
+    dist_info = site / "bobi-1.0.dist-info"
+    framework.mkdir(parents=True)
+    dist_info.mkdir()
+    (framework / "module.py").write_text("x = 1\n")
+    (dist_info / "METADATA").write_text("Name: bobi\n")
+    roots = [
+        runtime_guard.ProtectedRoot(framework, "bobi-package"),
+        runtime_guard.ProtectedRoot(dist_info, "bobi-dist-info"),
+    ]
+    return framework, dist_info, roots
+
+
+def _write_release_marker(home: Path, prefix: Path, expires_at: float, **overrides):
+    payload = {
+        "prefix": str(prefix),
+        "expires_at": expires_at,
+        "opened_by": "test",
+        "pid": os.getpid(),
+    }
+    payload.update(overrides)
+    home.mkdir(parents=True, exist_ok=True)
+    (home / runtime_guard.RELEASE_MARKER).write_text(json.dumps(payload))
+
+
+@pytest.fixture(autouse=True)
+def _restore_tmp_write_bits(tmp_path):
+    yield
+    for path in sorted(tmp_path.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if not path.is_symlink():
+            try:
+                path.chmod(path.stat().st_mode | stat.S_IWUSR)
+            except OSError:
+                pass
+    try:
+        tmp_path.chmod(tmp_path.stat().st_mode | stat.S_IWUSR)
+    except OSError:
+        pass
 
 
 class TestRuntimeWritePolicy:
@@ -78,23 +124,22 @@ class TestRuntimeWritePolicy:
         self, tmp_path, monkeypatch,
     ):
         team = tmp_path / "team"
-        framework = tmp_path / "bobi"
-        dist_info = tmp_path / "bobi.dist-info"
+        framework, dist_info, framework_roots = _framework_roots(tmp_path)
+        team.mkdir()
+        (team / "file").write_text("x")
         for root in (team, framework, dist_info):
-            root.mkdir()
-            (root / "file").write_text("x")
-            for path in [root / "file", root]:
+            for path in [*root.rglob("*"), root]:
+                if path.is_symlink():
+                    continue
                 path.chmod(path.stat().st_mode & ~0o222)
-        roots = [
-            runtime_guard.ProtectedRoot(team, "team-package"),
-            runtime_guard.ProtectedRoot(framework, "bobi-package"),
-            runtime_guard.ProtectedRoot(dist_info, "bobi-dist-info"),
-        ]
-        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+        monkeypatch.setattr(
+            runtime_guard, "framework_release_roots",
+            lambda: (framework_roots, ""),
+        )
 
         report = release_runtime_write_policy()
 
-        assert [root.kind for root in report.protected] == [
+        assert [root.kind for root in report.released] == [
             "bobi-package", "bobi-dist-info"]
         assert not report.skipped
         assert not (team.stat().st_mode & stat.S_IWUSR)
@@ -116,6 +161,7 @@ class TestRuntimeWritePolicy:
             runtime_guard.ProtectedRoot(dist_info, "bobi-dist-info"),
         ]
         monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+        monkeypatch.setattr(runtime_guard, "framework_release_roots", lambda: (roots, ""))
         guard_report = apply_runtime_write_policy(None)
 
         assert not guard_report.skipped
@@ -129,19 +175,18 @@ class TestRuntimeWritePolicy:
         assert not (tmp_path / "uv" / "tools" / "bobi").exists()
 
     def test_release_reports_partial_failure(self, tmp_path, monkeypatch):
-        framework = tmp_path / "bobi"
-        framework.mkdir()
+        framework, _, roots = _framework_roots(tmp_path)
         denied = framework / "denied"
         denied.write_text("x")
+        for path in [*framework.rglob("*"), framework]:
+            path.chmod(path.stat().st_mode & ~0o222)
         monkeypatch.setattr(
-            runtime_guard,
-            "protected_runtime_roots",
-            lambda _: [runtime_guard.ProtectedRoot(framework, "bobi-package")],
+            runtime_guard, "framework_release_roots", lambda: (roots, ""),
         )
         real_chmod = os.chmod
 
         def chmod(path, mode, **kwargs):
-            if Path(path) == denied:
+            if Path(path) == denied and mode & stat.S_IWUSR:
                 raise PermissionError(1, "Operation not permitted", str(path))
             return real_chmod(path, mode, **kwargs)
 
@@ -149,16 +194,186 @@ class TestRuntimeWritePolicy:
 
         report = release_runtime_write_policy()
 
-        assert len(report.skipped) == 1
-        assert str(denied) in report.skipped[0]
+        assert report.skipped
+        assert any(str(denied) in failure for failure in report.skipped)
+        assert not runtime_guard.release_marker_path().exists()
+        assert not framework.stat().st_mode & stat.S_IWUSR
 
     def test_release_is_honest_noop(self, monkeypatch):
-        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: [])
+        monkeypatch.setattr(
+            runtime_guard, "framework_release_roots",
+            lambda: ([], "editable install"),
+        )
 
         report = release_runtime_write_policy()
 
-        assert not report.protected
+        assert not report.roots
         assert not report.skipped
+        assert report.noop_reason == "editable install"
+
+    @pytest.mark.parametrize("payload", [
+        "not-json",
+        json.dumps({"prefix": "/tmp", "expires_at": time.time() + 3600}),
+    ])
+    def test_malformed_marker_fails_closed(self, tmp_path, monkeypatch, payload):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        home.mkdir()
+        runtime_guard.release_marker_path().write_text(payload)
+        framework, _, roots = _framework_roots(tmp_path)
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+
+        report = apply_runtime_write_policy(None)
+
+        assert not report.released
+        assert not framework.stat().st_mode & stat.S_IWUSR
+        assert release_window_status().state == "invalid"
+
+    def test_future_dated_marker_fails_closed(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        framework, _, roots = _framework_roots(tmp_path)
+        _write_release_marker(home, tmp_path, time.time() + 86400)
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+
+        report = apply_runtime_write_policy(None)
+
+        assert not report.released
+        assert release_window_status().state == "invalid"
+        assert not framework.stat().st_mode & stat.S_IWUSR
+
+    def test_expired_window_resumes_writable_drift_detection(
+        self, tmp_path, monkeypatch,
+    ):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        framework, _, roots = _framework_roots(tmp_path)
+        _write_release_marker(home, tmp_path / "tool", time.time() - 1)
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+
+        result = check_runtime_write_policy(None)
+
+        assert not result.ok
+        assert result.window.state == "expired"
+        assert any(str(framework) in failure for failure in result.failures)
+
+    def test_prefix_mismatch_does_not_cover_framework(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        framework, _, roots = _framework_roots(tmp_path)
+        _write_release_marker(home, tmp_path / "other", time.time() + 60)
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+
+        report = apply_runtime_write_policy(None)
+
+        assert not report.released
+        assert not framework.stat().st_mode & stat.S_IWUSR
+
+    def test_open_window_skips_framework_but_locks_team(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        framework, _, roots = _framework_roots(tmp_path)
+        team = tmp_path / "team"
+        team.mkdir()
+        (team / "agent.yaml").write_text("agent: test\n")
+        team_root = runtime_guard.ProtectedRoot(team, "team-package")
+        _write_release_marker(home, tmp_path / "tool", time.time() + 60)
+        monkeypatch.setattr(
+            runtime_guard, "protected_runtime_roots", lambda _: [team_root, *roots],
+        )
+
+        report = apply_runtime_write_policy(tmp_path)
+
+        assert [root.kind for root in report.released] == [
+            "bobi-package", "bobi-dist-info"]
+        assert framework.stat().st_mode & stat.S_IWUSR
+        assert not team.stat().st_mode & stat.S_IWUSR
+
+    def test_release_retries_after_stale_apply_race(self, tmp_path, monkeypatch):
+        framework, _, roots = _framework_roots(tmp_path)
+        for root in roots:
+            runtime_guard._chmod_tree(root.path, runtime_guard._readonly_mode)
+        monkeypatch.setattr(runtime_guard, "framework_release_roots", lambda: (roots, ""))
+        real_chmod_tree = runtime_guard._chmod_tree
+        raced = False
+
+        def racing_chmod(root, mode_fn, **kwargs):
+            nonlocal raced
+            result = real_chmod_tree(root, mode_fn, **kwargs)
+            if mode_fn is runtime_guard._mutable_mode and not raced:
+                raced = True
+                real_chmod_tree(root, runtime_guard._readonly_mode)
+            return result
+
+        monkeypatch.setattr(runtime_guard, "_chmod_tree", racing_chmod)
+
+        report = release_runtime_write_policy()
+
+        assert report.ok
+        assert raced
+        assert framework.stat().st_mode & stat.S_IWUSR
+
+    def test_release_does_not_chmod_when_marker_cannot_be_written(
+        self, tmp_path, monkeypatch,
+    ):
+        framework, _, roots = _framework_roots(tmp_path)
+        runtime_guard._chmod_tree(framework, runtime_guard._readonly_mode)
+        monkeypatch.setattr(runtime_guard, "framework_release_roots", lambda: (roots, ""))
+        monkeypatch.setattr(
+            runtime_guard.fsutil,
+            "atomic_write_json",
+            lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+        )
+
+        report = release_runtime_write_policy()
+
+        assert not report.ok
+        assert "could not open release window" in report.skipped[0]
+        assert not framework.stat().st_mode & stat.S_IWUSR
+
+    def test_reapply_closes_window_and_locks_framework(self, tmp_path, monkeypatch):
+        framework, _, roots = _framework_roots(tmp_path)
+        monkeypatch.setattr(runtime_guard, "framework_release_roots", lambda: (roots, ""))
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+        release = release_runtime_write_policy()
+        assert release.ok
+
+        report = reapply_runtime_write_policy()
+
+        assert not report.marker_error
+        assert not runtime_guard.release_marker_path().exists()
+        assert not framework.stat().st_mode & stat.S_IWUSR
+
+    def test_window_suppresses_writable_drift_but_not_symlink_escape(
+        self, tmp_path, monkeypatch,
+    ):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        framework, _, roots = _framework_roots(tmp_path)
+        outside = tmp_path / "outside"
+        outside.write_text("x")
+        (framework / "escape").symlink_to(outside)
+        _write_release_marker(home, tmp_path / "tool", time.time() + 60)
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+
+        result = check_runtime_write_policy(None)
+
+        assert not result.ok
+        assert any("symlink escapes" in failure for failure in result.failures)
+
+    def test_team_mutation_window_relocks_while_framework_window_is_open(
+        self, tmp_path, monkeypatch,
+    ):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        team = _write_runtime(tmp_path / "runtime")
+        runtime_guard._chmod_tree(team, runtime_guard._readonly_mode)
+        _write_release_marker(home, tmp_path / "tool", time.time() + 60)
+
+        with with_mutable_runtime_package(tmp_path / "runtime"):
+            assert team.stat().st_mode & stat.S_IWUSR
+
+        assert not team.stat().st_mode & stat.S_IWUSR
 
     def test_doctor_names_release_step_when_framework_is_locked(
         self, tmp_path, monkeypatch,
@@ -179,6 +394,22 @@ class TestRuntimeWritePolicy:
 
         assert result.ok
         assert "bobi guard release" in result.detail
+
+    def test_doctor_reports_open_window_as_warning(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        framework, _, roots = _framework_roots(tmp_path)
+        _write_release_marker(home, tmp_path / "tool", time.time() + 60)
+        monkeypatch.setattr("bobi.doctor.bound_root", lambda: tmp_path)
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+
+        result = _check_runtime_release_window()
+
+        assert result is not None
+        assert not result.ok
+        assert not result.required
+        assert "open by test" in result.detail
+        assert str(runtime_guard.release_marker_path()) in result.detail
 
     def test_mutable_window_fails_loud_on_unowned_files(self, tmp_path, monkeypatch):
         package = _write_runtime(tmp_path)

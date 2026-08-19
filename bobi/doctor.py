@@ -36,6 +36,9 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_local_config())
     results.append(_check_runtime_layout())
     results.append(_check_runtime_write_policy())
+    release_window = _check_runtime_release_window()
+    if release_window:
+        results.append(release_window)
     results.append(_check_install_integrity())
     results.append(_check_bobi_install_integrity())
     results.extend(_check_package_requires())
@@ -200,7 +203,7 @@ def _check_runtime_write_policy() -> CheckResult:
         framework_locked = any(
             protected.kind in ("bobi-package", "bobi-dist-info")
             for protected in result.protected
-        )
+        ) and not result.released
         detail = result.detail
         if framework_locked:
             detail += (
@@ -219,6 +222,44 @@ def _check_runtime_write_policy() -> CheckResult:
             "for a hard boundary. Before upgrading Bobi, stop all teams and run "
             "`bobi guard release`."
         ),
+    )
+
+
+def _check_runtime_release_window() -> CheckResult | None:
+    from bobi.runtime_guard import (
+        FRAMEWORK_KINDS,
+        protected_runtime_roots,
+        release_window_status,
+    )
+
+    window = release_window_status()
+    if window.state == "missing":
+        return None
+    roots = [
+        root for root in protected_runtime_roots(bound_root())
+        if root.kind in FRAMEWORK_KINDS
+    ]
+    covered = [root for root in roots if window.covers(root.path)]
+    if window.is_open and covered:
+        return CheckResult(
+            "Runtime guard release window",
+            ok=False,
+            required=False,
+            detail=(
+                f"open by {window.opened_by} (pid {window.pid}) until "
+                f"{window.expires_at}; marker {window.marker_path}"
+            ),
+            hint="Finish the upgrade or run `bobi guard reapply` to close it now.",
+        )
+    detail = window.detail
+    if window.is_open and roots:
+        detail = "marker prefix does not cover this Bobi installation"
+    return CheckResult(
+        "Runtime guard release window",
+        ok=False,
+        required=False,
+        detail=f"ignored: {detail}; marker {window.marker_path}",
+        hint="Remove the stale marker or run `bobi guard reapply`.",
     )
 
 

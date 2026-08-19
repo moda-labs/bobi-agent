@@ -244,22 +244,110 @@ def guard():
     """Manage Bobi's runtime filesystem guard."""
 
 
+def _guard_running_agents() -> list[str]:
+    from bobi.supervisor.probe import manager_pid_alive
+
+    running = []
+    for name in paths.list_agents():
+        try:
+            if manager_pid_alive(paths.agent_run_root(name)):
+                running.append(name)
+        except OSError:
+            continue
+    return running
+
+
+def _guard_time(timestamp: float | None) -> str:
+    if timestamp is None:
+        return "unknown"
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
 @guard.command("release")
 def guard_release():
     """Release framework files before upgrading Bobi."""
     from bobi.runtime_guard import release_runtime_write_policy
 
     report = release_runtime_write_policy()
-    if not report.protected:
-        click.echo("No installed Bobi framework roots need releasing.")
+    if not report.roots:
+        import bobi
+
+        click.echo(
+            f"No installed Bobi framework roots need releasing "
+            f"({report.noop_reason})."
+        )
+        click.echo(f"Imported Bobi from: {Path(bobi.__file__).resolve()}")
         return
-    for root in report.protected:
-        click.echo(f"Released {root.kind}: {root.path}")
     if report.skipped:
         for skipped in report.skipped:
             click.echo(f"Could not release: {skipped}", err=True)
+        click.echo(
+            "Bobi attempted to close the release window and re-lock framework roots.",
+            err=True,
+        )
         raise SystemExit(1)
-    click.echo("Bobi framework is ready to upgrade. Stop all teams until the upgrade finishes.")
+    for root in report.released:
+        click.echo(f"Released {root.kind}: {root.path}")
+    click.echo(f"Release marker: {report.marker_path}")
+    click.echo(f"Release window expires: {_guard_time(report.expires_at)}")
+    running = _guard_running_agents()
+    if running:
+        click.echo("WARNING: running Bobi Agent managers detected:", err=True)
+        for name in running:
+            click.echo(f"  stop with: bobi agent {name} stop", err=True)
+        click.echo("Hot-swapping Bobi under running agents is unsupported.", err=True)
+    click.echo("Bobi framework is ready for the package-manager upgrade.")
+
+
+@guard.command("reapply")
+def guard_reapply():
+    """Close the release window and lock framework files now."""
+    from bobi.runtime_guard import reapply_runtime_write_policy
+
+    report = reapply_runtime_write_policy()
+    for root in report.guard.protected:
+        click.echo(f"Locked {root.kind}: {root.path}")
+    failures = list(report.guard.skipped)
+    if report.marker_error:
+        failures.insert(0, report.marker_error)
+    if failures:
+        for failure in failures:
+            click.echo(f"Could not reapply: {failure}", err=True)
+        raise SystemExit(1)
+    click.echo(f"Release window closed: {report.marker_path}")
+
+
+@guard.command("status")
+def guard_status():
+    """Show the imported install, release window, and framework modes."""
+    import bobi
+    from bobi.runtime_guard import (
+        framework_release_roots,
+        release_window_status,
+        root_mode_state,
+    )
+
+    roots, reason = framework_release_roots()
+    window = release_window_status()
+    click.echo(f"Imported Bobi from: {Path(bobi.__file__).resolve()}")
+    click.echo(f"Release marker: {window.marker_path}")
+    if window.state == "open":
+        click.echo(
+            f"Release window: open by {window.opened_by} (pid {window.pid}) "
+            f"until {_guard_time(window.expires_at)}"
+        )
+        click.echo(f"Released prefix: {window.prefix}")
+    else:
+        click.echo(f"Release window: {window.state} ({window.detail})")
+    if not roots:
+        click.echo(f"Framework roots: none ({reason})")
+        return
+    for root in roots:
+        mode = root_mode_state(root)
+        coverage = "covered" if window.covers(root.path) else "not covered"
+        click.echo(f"{root.kind}: {mode}, {coverage}: {root.path}")
 
 
 @main.group()

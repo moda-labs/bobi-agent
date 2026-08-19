@@ -43,6 +43,18 @@ import asyncio
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_bobi_home(tmp_path_factory):
+    """Never let guard tests inspect the developer's real release marker."""
+    before = os.environ.get("BOBI_HOME")
+    os.environ["BOBI_HOME"] = str(tmp_path_factory.mktemp("bobi-home"))
+    yield
+    if before is None:
+        os.environ.pop("BOBI_HOME", None)
+    else:
+        os.environ["BOBI_HOME"] = before
+
+
 @pytest.fixture(autouse=True)
 def _isolate_environ():
     """No test may leak an os.environ mutation into the next.

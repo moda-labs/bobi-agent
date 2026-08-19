@@ -324,7 +324,9 @@ jobs:
       - name: Install dependencies
         # Full [dev,kb] so every non-Claude integration test can run.
         # fastembed uses ONNX (no torch needed).
-        run: pip install -e ".[dev,kb]"
+        run: |
+          pip install -e ".[dev,kb]"
+          pip install uv==0.11.7 pipx==1.8.0
 
       - name: Run packaged event-server regression
         run: >-
