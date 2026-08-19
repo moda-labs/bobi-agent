@@ -225,6 +225,157 @@ def test_workflow_validate_is_agent_scoped(bobi_install, tmp_path):
     assert "Valid" in result.output
 
 
+class TestWorkflowResume:
+    """`workflows resume` is how a human gate gets answered (#987).
+
+    Two contracts. The verdict has to REACH the workflow - it lands as the
+    ``event`` scope, which a route step after the await reads back - and the
+    command has to report the run's real ending: ``resume_workflow`` returns
+    True both when a run finishes and when it parks on a LATER await step, so
+    a bare truthiness check calls a re-gated run "completed."
+    """
+
+    def _waiting_run(self):
+        from bobi.workflow.state import WorkflowRun
+        run = WorkflowRun.create("adhoc", {"data": {"run_key": "42"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.run_key = "42"
+        run.save()
+        return run
+
+    def _resume(self, run_id, fake_resume, *args):
+        with patch("bobi.workflow.orchestrator.resume_workflow", fake_resume):
+            return CliRunner().invoke(
+                main,
+                ["agent", TEST_AGENT_NAME, "workflows", "resume", run_id,
+                 *args],
+            )
+
+    def _completes(self, seen):
+        def fake_resume(run, wf, **kwargs):
+            seen.append(kwargs)
+            run.status = "completed"
+            run.save()
+            return True
+        return fake_resume
+
+    def test_the_verdict_reaches_the_workflow_as_the_event_scope(
+            self, bobi_install):
+        """The inlet the whole design turns on. ``event`` already becomes the
+        run's ``event`` scope inside ``resume_workflow``; this is what finally
+        puts something in it."""
+        run = self._waiting_run()
+        seen: list = []
+
+        result = self._resume(run.run_id, self._completes(seen),
+                              "--verdict", "approve", "--reply", "ship it")
+
+        assert result.exit_code == 0, result.output
+        assert seen[0]["event"] == {
+            "data": {"verdict": "approve", "reply": "ship it"}}
+
+    def test_a_resume_with_no_verdict_still_populates_the_scope(
+            self, bobi_install):
+        """An empty verdict and a MISSING scope both resolve to "" in a
+        condition, but only the first does it without a warning about an
+        unknown scope. The route reads either as "not an approval"."""
+        run = self._waiting_run()
+        seen: list = []
+
+        result = self._resume(run.run_id, self._completes(seen))
+
+        assert result.exit_code == 0, result.output
+        assert seen[0]["event"] == {"data": {"verdict": "", "reply": ""}}
+
+    def test_a_verdict_outside_the_vocabulary_is_refused(self, bobi_install):
+        """Refused before anything is claimed or resumed. The route would fail
+        closed on it anyway, but a typo that silently reworks a spec is a
+        worse answer than one that says the word was not understood."""
+        run = self._waiting_run()
+        called: list = []
+
+        def fake_resume(run, wf, **kwargs):
+            called.append(kwargs)
+            return True
+
+        result = self._resume(run.run_id, fake_resume, "--verdict", "approved")
+
+        assert result.exit_code != 0
+        assert not called, "a malformed verdict reached the workflow"
+        from bobi.workflow.state import WorkflowRun
+        assert WorkflowRun.load(run.run_id).status == "waiting"
+
+    def test_suspended_again_is_not_reported_as_completed(self, bobi_install):
+        """A rejected gate reworks and re-gates, so this is the ordinary
+        ending of every reject - not an edge case."""
+        run = self._waiting_run()
+
+        def fake_resume(run, wf, **kwargs):
+            # What the orchestrator does when a later await step parks the run.
+            run.status = "superseded"
+            run.save()
+            return True
+
+        result = self._resume(run.run_id, fake_resume, "--verdict", "approve")
+
+        assert result.exit_code == 0, result.output
+        assert "Workflow completed." not in result.output
+        assert "suspended" in result.output.lower()
+
+    def test_a_rejection_the_workflow_cannot_honour_is_refused(
+            self, bobi_install):
+        """`reject` means "do NOT run the next step". Without a route on the
+        verdict in the slot the resume lands on, that is exactly what resuming
+        would do, so the command refuses rather than doing the opposite of
+        what it was told. The `adhoc` workflow has one prompt step and no
+        route."""
+        run = self._waiting_run()
+        called: list = []
+
+        def fake_resume(run, wf, **kwargs):
+            called.append(kwargs)
+            return True
+
+        result = self._resume(run.run_id, fake_resume, "--verdict", "reject")
+
+        assert result.exit_code == 1
+        assert "no route on the gate's verdict" in result.output
+        assert not called
+
+    def test_a_refusal_never_leaves_the_run_claimed(self, bobi_install):
+        """`claim()` renames <id>.json to <id>.resuming.json and nothing
+        renames it back, so a refusal after claiming would leave the run
+        findable forever and resumable never (state.py's D071). Every check
+        that can refuse resolves before the claim."""
+        from bobi.workflow.state import WorkflowRun
+        run = self._waiting_run()
+
+        self._resume(run.run_id, lambda *a, **k: True, "--verdict", "reject")
+
+        assert WorkflowRun.load(run.run_id).status == "waiting"
+
+    def test_completed_run_is_reported_as_completed(self, bobi_install):
+        run = self._waiting_run()
+        result = self._resume(run.run_id, self._completes([]))
+
+        assert result.exit_code == 0, result.output
+        assert "Workflow completed." in result.output
+
+    def test_failed_run_exits_nonzero(self, bobi_install):
+        run = self._waiting_run()
+
+        def fake_resume(run, wf, **kwargs):
+            run.status = "failed"
+            run.save()
+            return False
+
+        result = self._resume(run.run_id, fake_resume)
+
+        assert result.exit_code == 1
+
+
 class TestSubagents:
     def test_launch_adhoc_workflow(self, bobi_install):
         with patch("bobi.subagent.launch_agent", return_value="wf-adhoc-42") as mock:

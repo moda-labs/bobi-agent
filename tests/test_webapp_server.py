@@ -774,6 +774,49 @@ class TestChat:
         assert seen["root"] == bobi_install.repo_path
         assert seen["agent"] == "bobi-worker-1"
 
+    def test_an_empty_subagent_means_the_manager_on_this_runtime_too(
+            self, bobi_install, monkeypatch):
+        """#987 - one route, two runtimes, one meaning.
+
+        The route documents `subagent` as optional (only `text` is required),
+        and the hosted runtime has always read an empty one as "the team
+        manager" (`supervisor/admin.py`). `LocalRuntime` passed the empty
+        string straight to `service.ask`, which rejected it on its membership
+        guard as `unknown agent ''`, so the same request behaved differently
+        on `bobi app` than on the fleet.
+        """
+        seen = {}
+
+        def fake_ask(root, agent, text, **kw):
+            seen.update(root=root, agent=agent, text=text)
+            return service.MessageResult(address=agent, response="ack")
+
+        monkeypatch.setattr(service, "ask", fake_ask)
+        c = _client()
+        r = c.post(f"/api/agents/{bobi_install.agent_name}/chat",
+                   json={"subagent": "", "text": "continue this"})
+        assert r.status_code == 200
+        job = self._await_job(c, bobi_install.agent_name, r.json()["message_id"])
+        assert job == {"status": "done"}
+        # The same name the supervisor resolves, not a hand-built string.
+        assert seen["agent"] == service.manager_session_name(
+            bobi_install.repo_path)
+
+    def test_an_absent_subagent_key_resolves_the_same_way(self, bobi_install,
+                                                          monkeypatch):
+        seen = {}
+        monkeypatch.setattr(service, "ask", lambda root, agent, text, **kw: (
+            seen.update(agent=agent),
+            service.MessageResult(address=agent, response="ack"))[1])
+        c = _client()
+        r = c.post(f"/api/agents/{bobi_install.agent_name}/chat",
+                   json={"text": "continue this"})
+        assert r.status_code == 200
+        assert self._await_job(c, bobi_install.agent_name,
+                               r.json()["message_id"]) == {"status": "done"}
+        assert seen["agent"] == service.manager_session_name(
+            bobi_install.repo_path)
+
     def test_chat_empty_message_400(self, bobi_install):
         r = _client().post(
             f"/api/agents/{bobi_install.agent_name}/chat",

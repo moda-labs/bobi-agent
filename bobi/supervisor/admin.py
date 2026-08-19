@@ -253,7 +253,7 @@ class AdminListener:
         status, result, error = "done", None, None
         try:
             if command in _RUN_ACTIONS:
-                result = self._run_action(command, args.get("run_id"))
+                result = self._run_action(command, args.get("run_id"), args)
             elif command == "restart":
                 self.supervisor.request_manager_restart()
                 result = {"accepted": True, "action": "restart"}
@@ -467,7 +467,7 @@ class AdminListener:
             raise AdminCommandError(f"unknown run '{target}'",
                                     "unknown_run", run_id=target) from None
 
-    def _run_action(self, command: str, run_id) -> dict:
+    def _run_action(self, command: str, run_id, args: dict | None = None) -> dict:
         """One of the three operator writes on a waiting workflow run.
 
         Delegates to ``bobi.webapp.run_actions``, the same module
@@ -475,12 +475,22 @@ class AdminListener:
         whose reasoning applies here verbatim: resuming inside this process
         would stamp the SUPERVISOR's pid on the run's registry entry, and a
         later reconciler timeout would then signal the supervisor.
+
+        ``resume_run`` additionally carries the gate's answer. Both extra args
+        are optional and additive, so an older console that sends only a
+        ``run_id`` still resumes - with no verdict, which is not an approval.
         """
         from bobi.webapp import run_actions
 
+        args = args or {}
         target = _require_run_id(run_id)
+        extra: dict = {}
+        if command == "resume_run":
+            extra = {"verdict": str(args.get("verdict") or ""),
+                     "reply": str(args.get("reply") or "")}
         try:
-            return getattr(run_actions, command)(self.project_root, target)
+            return getattr(run_actions, command)(
+                self.project_root, target, **extra)
         except run_actions.UnknownRun as e:
             raise AdminCommandError(str(e), "unknown_run",
                                     run_id=target) from None

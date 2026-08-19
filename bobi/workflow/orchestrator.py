@@ -38,6 +38,16 @@ log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
 
+# What one ``_run_workflow_async`` pass ended as. SUSPENDED is dormant, not
+# terminal: the run parked on an await step and a fresh waiting record owns it,
+# so a caller must not emit a terminal workflow event or stamp the record
+# "completed" (docs/WORKFLOW_ENGINE.md: workflow.completed / workflow.failed
+# mean the run reached a terminal outcome). A bare bool cannot tell the two
+# apart, and every caller read True as "done".
+OUTCOME_COMPLETED = "completed"
+OUTCOME_FAILED = "failed"
+OUTCOME_SUSPENDED = "suspended"
+
 # How many times one step may be restarted after the harness cut its session
 # off at the turn cap (#845). A cap hit is not a failure - the transcript is
 # intact and the session id is valid, so the work continues on a fresh CLI
@@ -286,6 +296,9 @@ def run_workflow(
     and by default resumes, which is the retry contract. A worker whose state
     lives in a committed artifact rather than in context wants the opposite,
     and asks for it here. ``resume_workflow`` deliberately never sets it.
+
+    Returns True when the run completed *or* suspended on an await step (a
+    suspend is dormant, not a failure), False when it failed.
     """
     run_key = run_key or "adhoc"
     requested_by = requested_by or {}
@@ -331,7 +344,7 @@ def run_workflow(
     if needs_worktree:
         ctx.set_scope("worktree", {"path": work_cwd})
 
-    success = asyncio.run(
+    outcome = asyncio.run(
         _run_workflow_async(
             workflow, task, repo, work_cwd, run_key, session_name,
             registry, ctx, requested_by, timeout, interactive, role=role,
@@ -340,6 +353,14 @@ def run_workflow(
     )
 
     duration = time.time() - started_at
+    if outcome == OUTCOME_SUSPENDED:
+        # Dormant, not finished: agent/workflow.suspended already fired and the
+        # registry entry stays "waiting" for the resume. A terminal event here
+        # would tell every consumer the run is over while it waits.
+        log.info(f"Workflow {workflow.name} suspended after {duration:.0f}s")
+        return True
+
+    success = outcome == OUTCOME_COMPLETED
     if success:
         _emit_lifecycle_event("agent/workflow.completed", {
             "run_key": run_key,
@@ -377,6 +398,15 @@ def resume_workflow(
 
     Restores the variable context and session, then continues execution
     from the step after the one that suspended.
+
+    *event* carries the answer the gate was waiting for. Its ``data`` becomes
+    the ``event`` scope, so a route step placed after the await can read
+    ``${{event.verdict}}`` and branch on it. A missing scope resolves to the
+    empty string (``variables.py``), which is why a workflow's route must make
+    its ``else`` the safe branch rather than the advancing one.
+
+    Returns True when the resumed run completed *or* suspended again on a
+    later await step, False when it failed.
     """
     session_name = run.session_name
     run_key = run.run_key
@@ -431,7 +461,7 @@ def resume_workflow(
     launch_model = str(runtime_scope.get("launch_model", "") or "")
     launch_effort = str(runtime_scope.get("launch_effort", "") or "")
 
-    success = asyncio.run(
+    outcome = asyncio.run(
         _run_workflow_async(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
             run_key, session_name, registry, ctx, requested_by, timeout,
@@ -441,6 +471,21 @@ def resume_workflow(
     )
 
     duration = time.time() - started_at
+    if outcome == OUTCOME_SUSPENDED:
+        # The resumed run parked on another await step and a fresh waiting
+        # record now owns it. This record's execution is over but the RUN did
+        # not reach a terminal outcome, so it is never stamped "completed" -
+        # a reject that reworks and re-gates goes round this loop every cycle.
+        run.status = "superseded"
+        run.save()
+        # Nothing terminal fires on this path: the suspend left the registry
+        # entry "waiting" for the next resume, and the session is the same one
+        # the fresh record now points at.
+        log.info(f"Resumed workflow {workflow.name} suspended again after "
+                 f"{duration:.0f}s")
+        return True
+
+    success = outcome == OUTCOME_COMPLETED
     if success:
         run.status = "completed"
         run.completed_at = now_iso()
@@ -482,8 +527,13 @@ async def _run_workflow_async(
     launch_model: str = "",
     launch_effort: str = "",
     fresh: bool = False,
-) -> bool:
-    """Async core: one brain session for all steps."""
+) -> str:
+    """Async core: one brain session for all steps.
+
+    Returns one of ``OUTCOME_COMPLETED`` / ``OUTCOME_FAILED`` /
+    ``OUTCOME_SUSPENDED``. A suspend is not a completion, and the callers have
+    to tell them apart before emitting a terminal event or stamping a record.
+    """
     from bobi.brain import (
         ERROR_KIND_MAX_TURNS, continuation_token, get_brain,
         get_process_brain_model, resolve_effort, resolve_max_turns,
@@ -777,7 +827,7 @@ async def _run_workflow_async(
                     continue
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
-                return False
+                return OUTCOME_FAILED
 
             # Route step — deterministic, no LLM
             if step.condition:
@@ -800,7 +850,7 @@ async def _run_workflow_async(
                             _emit_step_failed(
                                 run_key, workflow.name, step.name, error,
                             )
-                            return False
+                            return OUTCOME_FAILED
                         step_idx = jump
                         continue
                 step_idx += 1
@@ -844,7 +894,7 @@ async def _run_workflow_async(
                     )
                     run_failed, failure_error = True, error
                     _emit_step_failed(run_key, workflow.name, step.name, error)
-                    return False
+                    return OUTCOME_FAILED
                 step_idx += 1
                 continue
 
@@ -885,7 +935,7 @@ async def _run_workflow_async(
                         await client.disconnect()
                     except Exception:
                         pass
-                return True
+                return OUTCOME_SUSPENDED
 
             # Prompt step — inject into the persistent session
             step_start = time.time()
@@ -1090,7 +1140,7 @@ async def _run_workflow_async(
                 run_failed, failure_error = True, drain.error
                 _emit_step_failed(run_key, workflow.name, step.name,
                                   drain.error)
-                return False
+                return OUTCOME_FAILED
 
             # Validate handoff
             handoff = _read_handoff(session_name, step.name)
@@ -1114,7 +1164,7 @@ async def _run_workflow_async(
                 error = f"Handoff missing required fields after retries: {missing}"
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
-                return False
+                return OUTCOME_FAILED
 
             # Capture outputs for routing
             outputs = {k: handoff.get(k, "") for k in
@@ -1157,7 +1207,7 @@ async def _run_workflow_async(
                 ),
             })
 
-        return True
+        return OUTCOME_COMPLETED
 
     except Exception as e:
         # An exception with an empty str() (a bare `raise SomeError()`) must
@@ -1171,7 +1221,7 @@ async def _run_workflow_async(
             "error": error,
             "text": f"Workflow error: {error}",
         }, blocking=True)
-        return False
+        return OUTCOME_FAILED
     finally:
         # A suspended run is not terminal — skip the terminal emit + status
         # write entirely (the agent/workflow.suspended event already fired and

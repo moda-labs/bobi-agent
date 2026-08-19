@@ -197,15 +197,24 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
             name, status=status, query=query, offset=max(0, offset),
             limit=limit or None)
 
-    # The runs table's one write action. Resume force-continues a suspended
-    # step, so the page confirms first (naming the awaited event) — see the
-    # plan's design deltas. Sync `def`: FastAPI threadpools it, and the work
-    # here is a spawn, never the workflow itself.
+    # The runs table's one write action. Resume ANSWERS a gate: the verdict
+    # and the human's words ride the body and reach the workflow as its
+    # `event` scope, so the run takes the branch the answer chose rather than
+    # being force-continued past the step it is parked on. The body is
+    # optional and a missing verdict is not an approval — the workflow's route
+    # decides what that means, and it is written so the non-approving branch is
+    # the safe one. Sync `def`: FastAPI threadpools it, and the work here is a
+    # spawn, never the workflow itself.
     @app.post("/api/agents/{name}/workflows/runs/{run_id}/resume")
-    def resume_workflow_run(name: str, run_id: str) -> JSONResponse:
+    def resume_workflow_run(name: str, run_id: str,
+                            payload: dict | None = None) -> JSONResponse:
         if not safe_name(run_id):
             return JSONResponse({"error": "unknown run"}, status_code=404)
-        return JSONResponse(rt.resume_run(name, run_id))
+        payload = payload or {}
+        return JSONResponse(rt.resume_run(
+            name, run_id,
+            verdict=str(payload.get("verdict") or "").strip(),
+            reply=str(payload.get("reply") or "").strip()))
 
     @app.post("/api/agents/{name}/workflows/runs/{run_id}/remind")
     def remind_workflow_run(name: str, run_id: str) -> JSONResponse:
