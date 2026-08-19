@@ -456,8 +456,8 @@ Each appendix entry names the surviving implementation — move callers to it; n
 
 **Validation gate**
 
-- [ ] `pytest tests/ -q` (full suite) green
-- [ ] Spot e2e (stub brain, isolated `BOBI_HOME`): agent boots, one event round-trips — proves the moved plumbing still wires up
+- [x] `pytest tests/ -q` (full suite) green
+- [x] Spot e2e (stub brain, isolated `BOBI_HOME`): agent boots, one event round-trips — proves the moved plumbing still wires up
 
 ### Phase 7 — event-server TS + web UI (bugs, security, duplication)
 
@@ -943,6 +943,21 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   both probe field renames read era-native-first, the transport shim's
   entangled try-import) — never plan items; recorded so the Q108 trail ends
   somewhere.
+
+- **2026-08-18** (same session): **Phase 6's validation gate EXECUTED, both
+  arms, on `main` @ `07e378a1`** (run in a worktree whose tree hash is
+  byte-identical to that merge commit's). Full `pytest tests/ -q` including
+  integration + e2e (Node 20, `npm ci`, real Claude CLI): **5357 passed /
+  52 skipped / 1 failed** — the one failure is the KNOWN parked
+  TZ-sensitive test (`tests/e2e/test_webapp_ui.py::TestRunModal::
+  test_a_row_with_a_session_opens_its_transcript`, fails under PDT, passes
+  under `TZ=UTC` — re-proven this run; reported to Zach 2026-08-13,
+  deliberately unfiled, not a Phase 6 regression; CI's Playwright job is
+  green on the same tree). Spot e2e: `tests/integration/
+  test_e2e_event_flow.py` 4/4 by name — `[stub]` AND `[claude]` legs of
+  webhook→manager injection and response logging, real manager processes,
+  isolated `BOBI_HOME`. Phase 6 closes; the phase's two gate boxes flip in
+  this PR.
 
 ## Notes
 
