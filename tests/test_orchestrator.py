@@ -1735,6 +1735,9 @@ class TestAwaitStep:
         run = WorkflowRun.create("t", {"data": {"run_key": "42"}})
         run.status = "waiting"
         run.await_event = "approval"
+        # The engine stamps the run_key FIELD at run creation and find_waiting
+        # matches on it (#1048); the trigger-event copy is payload.
+        run.run_key = "42"
         run.save()
 
         assert WorkflowRun.find_waiting("approval", run_key="42") is not None
