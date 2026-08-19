@@ -31,7 +31,7 @@ from bobi.brain.turns import drain_turn
 from bobi.subagent import _emit_lifecycle_event
 from bobi.timeutil import now_iso
 from bobi.workflow.schema import Workflow, StepDef
-from bobi.workflow.state import WorkflowRun
+from bobi.workflow.state import WorkflowRun, ledger_lock
 from bobi.workflow.variables import VariableContext
 
 log = logging.getLogger(__name__)
@@ -334,29 +334,96 @@ def run_workflow(
     })
 
     ctx = VariableContext()
+
+    # The run ledger (#1048): EVERY run gets a WorkflowRun entry, opened here
+    # and closed with the honest outcome by the step loop's finally. A retry
+    # of a failed run adopts the failed entry; when its checkpoint still
+    # matches this workflow's step list, the retry restores the persisted
+    # scopes and starts at the checkpoint - the same restore semantics as an
+    # await resume - instead of replaying completed steps. ``fresh`` opts
+    # out, exactly as it does for the session transcript. The literal
+    # "adhoc" default is a shared bucket, never a run identity, so it never
+    # adopts. Under ledger_lock: the load-mutate-save below must not race
+    # another process's admission decision on the same entry.
+    run = None
+    start_step = 0
+    adopted = False
+    with ledger_lock():
+        if not fresh and run_key != "adhoc":
+            prior = WorkflowRun.find_by_run_key(workflow.name, run_key,
+                                                repo=repo)
+            if prior and prior.status == "failed":
+                run = prior
+                run.status = "running"
+                run.resumed_at = now_iso()
+                # Clear the failed attempt's residue: a running retry must
+                # not render with the old attempt's end time, nor a finished
+                # one as parked at a gate the flip left behind.
+                run.completed_at = ""
+                run.await_event = ""
+                run.suspended_at_step = -1
+                # The retry's identity is THIS dispatch's, not the failed
+                # attempt's: a later suspend/resume must come back to the
+                # session and directory the retry actually ran in.
+                run.session_name = session_name
+                run.repo = repo
+                run.cwd = work_cwd
+                if (0 <= run.checkpoint_step < len(workflow.steps)
+                        and run.checkpoint_fingerprint
+                        == workflow.steps_fingerprint()):
+                    adopted = True
+                    start_step = run.checkpoint_step
+                    ctx.scopes = run.variable_scopes
+                    log.info(
+                        "Retrying failed run %s from checkpoint step %d (%s)",
+                        run.run_id, start_step,
+                        workflow.steps[start_step].name,
+                    )
+                else:
+                    # Same entry (one piece of work, one row), but the
+                    # checkpoint no longer indexes this workflow's steps -
+                    # or no step ever completed. Replay from step 0.
+                    run.checkpoint_step = -1
+                    run.checkpoint_fingerprint = ""
+        if run is None:
+            run = WorkflowRun.create(workflow.name, {"data": {"run_key": run_key}})
+            run.run_key = run_key
+            run.session_name = session_name
+            run.repo = repo
+            run.cwd = work_cwd
+        run.title = task[:80]
+        run.error = ""
+        run.save()
+
+    # THIS dispatch's input wins over a restored attempt's: an operator
+    # retrying with a corrected task or input_fields must not have it
+    # silently ignored. Step outputs and _runtime stay restored.
     input_scope = {"task": task, "repo": repo, "run_key": run_key}
     if input_fields:
         input_scope.update(input_fields)
     ctx.set_scope("input", input_scope)
     if requested_by:
         ctx.set_scope("requested_by", requested_by)
-
     if needs_worktree:
         ctx.set_scope("worktree", {"path": work_cwd})
 
     outcome = asyncio.run(
         _run_workflow_async(
             workflow, task, repo, work_cwd, run_key, session_name,
-            registry, ctx, requested_by, timeout, interactive, role=role,
-            launch_model=model, launch_effort=effort, fresh=fresh,
+            registry, ctx, requested_by, timeout, interactive,
+            start_step=start_step, role=role,
+            launch_model=model, launch_effort=effort, fresh=fresh, run=run,
+            adopted_retry=adopted,
         )
     )
 
     duration = time.time() - started_at
     if outcome == OUTCOME_SUSPENDED:
-        # Dormant, not finished: agent/workflow.suspended already fired and the
-        # registry entry stays "waiting" for the resume. A terminal event here
-        # would tell every consumer the run is over while it waits.
+        # Dormant, not finished: agent/workflow.suspended already fired, the
+        # registry entry stays "waiting" for the resume, and the run's own
+        # ledger entry was flipped to waiting by the await branch (#1048). A
+        # terminal event here would tell every consumer the run is over
+        # while it waits.
         log.info(f"Workflow {workflow.name} suspended after {duration:.0f}s")
         return True
 
@@ -440,6 +507,18 @@ def resume_workflow(
     run.await_event = ""
     run.suspended_at_step = -1
     run.resumed_at = now_iso()
+    # Advance the retry anchor past the consumed gate: if the first step
+    # after this resume fails before any checkpoint fires, a retry must
+    # start HERE, not back on the await step - re-arming a gate whose event
+    # already arrived parks the run behind an approval it already has. Only
+    # when the stored fingerprint still matches, though: re-stamping a stale
+    # index with the CURRENT workflow's digest would launder a checkpoint
+    # recorded against a step list that has since changed.
+    if run.checkpoint_fingerprint == workflow.steps_fingerprint():
+        run.checkpoint_step = step_idx
+    else:
+        run.checkpoint_step = -1
+        run.checkpoint_fingerprint = ""
     run.save()
 
     _emit_lifecycle_event("agent/workflow.resumed", {
@@ -466,29 +545,24 @@ def resume_workflow(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
             run_key, session_name, registry, ctx, requested_by, timeout,
             interactive, start_step=step_idx, launch_model=launch_model,
-            launch_effort=launch_effort,
+            launch_effort=launch_effort, run=run,
         )
     )
 
     duration = time.time() - started_at
     if outcome == OUTCOME_SUSPENDED:
-        # The resumed run parked on another await step and a fresh waiting
-        # record now owns it. This record's execution is over but the RUN did
-        # not reach a terminal outcome, so it is never stamped "completed" -
-        # a reject that reworks and re-gates goes round this loop every cycle.
-        run.status = "superseded"
-        run.save()
-        # Nothing terminal fires on this path: the suspend left the registry
-        # entry "waiting" for the next resume, and the session is the same one
-        # the fresh record now points at.
+        # Parked again at a later await step. The run is the SAME ledger
+        # entry now (#1048), already persisted as "waiting" by the await
+        # branch - there is no second record to supersede, and a terminal
+        # status or event here would close a run that is merely parked.
+        # A reject that reworks and re-gates goes round this loop every
+        # cycle on its one entry.
         log.info(f"Resumed workflow {workflow.name} suspended again after "
                  f"{duration:.0f}s")
         return True
 
     success = outcome == OUTCOME_COMPLETED
     if success:
-        run.status = "completed"
-        run.completed_at = now_iso()
         _emit_lifecycle_event("agent/workflow.completed", {
             "run_key": run_key,
             "workflow": workflow.name,
@@ -496,14 +570,11 @@ def resume_workflow(
             "text": f"Workflow {workflow.name} completed for {run_key} in {duration:.0f}s",
         }, blocking=True)
     else:
-        run.status = "failed"
         _emit_lifecycle_event("agent/workflow.failed", {
             "run_key": run_key,
             "workflow": workflow.name,
             "text": f"Workflow {workflow.name} failed for {run_key}",
         }, blocking=True)
-
-    run.save()
     _close_if_still_active(registry, session_name)
     log.info(f"Resumed workflow {workflow.name} {'completed' if success else 'failed'} "
              f"in {duration:.0f}s")
@@ -527,12 +598,19 @@ async def _run_workflow_async(
     launch_model: str = "",
     launch_effort: str = "",
     fresh: bool = False,
+    *,
+    run: WorkflowRun,
+    adopted_retry: bool = False,
 ) -> str:
     """Async core: one brain session for all steps.
 
     Returns one of ``OUTCOME_COMPLETED`` / ``OUTCOME_FAILED`` /
     ``OUTCOME_SUSPENDED``. A suspend is not a completion, and the callers have
-    to tell them apart before emitting a terminal event or stamping a record.
+    to tell them apart before emitting a terminal event.
+
+    ``run`` is this run's ledger entry (#1048), owned by the caller. The loop
+    checkpoints it after each completed step, flips it to "waiting" at an
+    await step, and closes it with the honest outcome in its finally.
     """
     from bobi.brain import (
         ERROR_KIND_MAX_TURNS, continuation_token, get_brain,
@@ -816,6 +894,23 @@ async def _run_workflow_async(
                 )
             return -1, error
 
+        def _checkpoint(next_idx: int) -> None:
+            # Persist "the next step is next_idx" plus everything needed to
+            # get there again (#1048): a retry of a failed run restores these
+            # scopes and resumes here, exactly like an await resume. The ONE
+            # writer of the _runtime restore scope - the await branch calls
+            # this too, so the two persist paths cannot drift.
+            ctx.set_scope("_runtime", {
+                "model": current_model,
+                "launch_model": launch_model,
+                "launch_effort": launch_effort,
+                "visits": visit_counts,
+            })
+            run.checkpoint_step = next_idx
+            run.checkpoint_fingerprint = workflow.steps_fingerprint()
+            run.variable_scopes = ctx.scopes
+            run.save()
+
         while step_idx < len(workflow.steps):
             step = workflow.steps[step_idx]
             visit_counts[step.name] = int(visit_counts.get(step.name, 0)) + 1
@@ -870,6 +965,7 @@ async def _run_workflow_async(
                     "outputs": result,
                     "text": f"Native step {step.name} completed: {result.get('status', '')}",
                 })
+                _checkpoint(step_idx + 1)
                 step_idx += 1
                 continue
 
@@ -895,30 +991,27 @@ async def _run_workflow_async(
                     run_failed, failure_error = True, error
                     _emit_step_failed(run_key, workflow.name, step.name, error)
                     return OUTCOME_FAILED
+                _checkpoint(step_idx + 1)
                 step_idx += 1
                 continue
 
-            # Await step — suspend and persist state for resume
+            # Await step - suspend and persist state for resume. The run is
+            # the ledger entry opened at launch (#1048), flipped to waiting
+            # here - suspension is a state of THIS run, not a new record.
             if step.await_event:
                 log.info(f"Await step {step.name}: suspending, waiting for '{step.await_event}'")
-                registry.update(session_name, status="waiting", phase=step.name)
-
-                run = WorkflowRun.create(workflow.name, {"data": {"run_key": run_key}})
+                # Ledger BEFORE registry, mirroring the terminal path's
+                # ordering: admission's liveness check reads "registry
+                # non-active + ledger running" as a dead run, so the registry
+                # must never say waiting while the ledger still says running.
                 run.status = "waiting"
                 run.suspended_at_step = step_idx + 1
                 run.await_event = step.await_event
-                run.session_name = session_name
-                ctx.set_scope("_runtime", {
-                    "model": current_model,
-                    "launch_model": launch_model,
-                    "launch_effort": launch_effort,
-                    "visits": visit_counts,
-                })
-                run.variable_scopes = ctx.scopes
-                run.repo = repo
-                run.cwd = cwd
-                run.run_key = run_key
-                run.save()
+                # _checkpoint persists the _runtime scope, the scopes, and
+                # the retry anchor, and saves - one writer for the whole
+                # restore payload.
+                _checkpoint(step_idx + 1)
+                registry.update(session_name, status="waiting", phase=step.name)
 
                 _emit_lifecycle_event("agent/workflow.suspended", {
                     "run_key": run_key,
@@ -949,10 +1042,14 @@ async def _run_workflow_async(
                 # mid-run. The context block is owed whenever the transcript
                 # does not already carry THIS dispatch's input: always on a
                 # fresh run's first prompt turn (a resumed transcript holds
-                # the previous dispatch, not this task), and on any fresh
-                # transcript for a resumed run.
+                # the previous dispatch, not this task), on any fresh
+                # transcript for a resumed run, and on a checkpoint retry -
+                # its resumed transcript holds the FAILED dispatch's brief,
+                # and the retry may carry a corrected one.
                 resumed = await _open_session()
-                context_pending = (start_step == 0) or not resumed
+                context_pending = (
+                    (start_step == 0) or not resumed or adopted_retry
+                )
 
             step_model = _effective_step_model(step)
             step_effort = _effective_step_effort(step)
@@ -1185,6 +1282,7 @@ async def _run_workflow_async(
             })
             log.info(f"Step {step.name} completed ({duration:.0f}s): {outputs}")
 
+            _checkpoint(step_idx + 1)
             step_idx += 1
 
         if client is None and start_step == 0 and task:
@@ -1250,6 +1348,17 @@ async def _run_workflow_async(
                     "requested_by": requested_by or None,
                     "text": f"{role or 'Agent'} finished {run_key}",
                 }, blocking=True)
+            # Close the ledger entry FIRST, then the registry (#1048). The
+            # ordering is load-bearing for admission's liveness check: a
+            # terminal registry entry must imply a terminal ledger entry, or
+            # a dispatcher arriving in between reads "ledger running, session
+            # over", concludes the run died, flips it to failed, and admits a
+            # duplicate of a period that is merely finishing up. Keep the
+            # checkpoint on failure - it is what a retry adopts.
+            run.status = "failed" if run_failed else "completed"
+            run.error = failure_error if run_failed else ""
+            run.completed_at = now_iso()
+            run.save()
             # RC#3: durably record the honest terminal status here, matching what
             # was emitted, with emit_confirmed tracking whether the POST landed.
             # This closes the crash window between this finally and the caller's

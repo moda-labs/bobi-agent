@@ -143,6 +143,9 @@ class TestWorkflowRunState:
         run = WorkflowRun.create("await-wf", {"type": "test", "data": {"run_key": "Y-2"}})
         run.status = "waiting"
         run.await_event = "pr.reviewed"
+        # The engine stamps the field at run creation; find_waiting matches on
+        # it, not on trigger-event payload (#1048).
+        run.run_key = "Y-2"
         run.save()
 
         found = WorkflowRun.find_waiting("pr.reviewed", run_key="Y-2")

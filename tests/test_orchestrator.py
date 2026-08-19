@@ -1770,6 +1770,9 @@ class TestAwaitStep:
         run = WorkflowRun.create("t", {"data": {"run_key": "42"}})
         run.status = "waiting"
         run.await_event = "approval"
+        # The engine stamps the run_key FIELD at run creation and find_waiting
+        # matches on it (#1048); the trigger-event copy is payload.
+        run.run_key = "42"
         run.save()
 
         assert WorkflowRun.find_waiting("approval", run_key="42") is not None
@@ -2262,6 +2265,428 @@ class TestSessionConstructionFailureIsTerminal:
 
 
 # ---------------------------------------------------------------------------
+# Workflow period (#1048)
+# ---------------------------------------------------------------------------
+
+class TestWorkflowPeriod:
+    def _load(self, tmp_path, body):
+        p = tmp_path / "wf.yaml"
+        p.write_text(textwrap.dedent(body))
+        return load_workflow(p)
+
+    def test_period_parses(self, tmp_path):
+        wf = self._load(tmp_path, """
+            name: standup
+            period: daily
+            steps:
+              - name: post
+                prompt: post the standup
+        """)
+        assert wf.period == "daily"
+
+    def test_period_defaults_empty(self, tmp_path):
+        wf = self._load(tmp_path, """
+            name: standup
+            steps:
+              - name: post
+                prompt: post
+        """)
+        assert wf.period == ""
+
+    def test_unknown_period_rejected_at_load(self, tmp_path):
+        with pytest.raises(ValueError, match="period 'fortnightly'"):
+            self._load(tmp_path, """
+                name: standup
+                period: fortnightly
+                steps:
+                  - name: post
+                    prompt: post
+            """)
+
+    @pytest.mark.parametrize("period,fmt", [
+        ("hourly", "%Y-%m-%dT%H"),
+        ("daily", "%Y-%m-%d"),
+        ("weekly", "%G-W%V"),
+        ("monthly", "%Y-%m"),
+    ])
+    def test_period_run_key_buckets(self, period, fmt):
+        wf = Workflow(name="standup", steps=[], period=period)
+        fixed = 1754838000.0
+        expected = "standup-" + time.strftime(fmt, time.localtime(fixed))
+        assert wf.period_run_key(fixed) == expected
+
+    def test_same_period_same_key_across_dispatchers(self):
+        # The whole point: two dispatch paths in one period derive ONE
+        # identity, so admission can dedupe them (#1016's shape).
+        wf = Workflow(name="standup", steps=[], period="daily")
+        t = 1754838000.0
+        assert wf.period_run_key(t) == wf.period_run_key(t + 3600)
+
+
+    def test_period_run_key_rejects_unknown_period(self):
+        wf = Workflow(name="standup", steps=[], period="fortnightly")
+        with pytest.raises(ValueError, match="fortnightly"):
+            wf.period_run_key(0.0)
+
+    def test_period_bucket_uses_local_time(self, monkeypatch):
+        # Deliberate decision (schema comment): buckets follow the host
+        # clock, not UTC. 2026-08-06 22:30 PDT is already 08-07 in UTC; a
+        # gmtime regression would bucket the standup into the wrong day for
+        # every non-UTC operator.
+        monkeypatch.setenv("TZ", "America/Los_Angeles")
+        time.tzset()
+        try:
+            wf = Workflow(name="standup", steps=[], period="daily")
+            # 2026-08-07T05:30:00Z == 2026-08-06 22:30 PDT
+            assert wf.period_run_key(1786080600.0) == "standup-2026-08-06"
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+
+    def test_steps_fingerprint_tracks_step_names(self):
+        a = Workflow(name="t", steps=[StepDef(name="s1"), StepDef(name="s2")])
+        b = Workflow(name="t", steps=[StepDef(name="s1"), StepDef(name="s2")])
+        c = Workflow(name="t", steps=[StepDef(name="s0"), StepDef(name="s1"),
+                                      StepDef(name="s2")])
+        assert a.steps_fingerprint() == b.steps_fingerprint()
+        assert a.steps_fingerprint() != c.steps_fingerprint()
+
+
+# ---------------------------------------------------------------------------
+# The run ledger (#1048) - every run gets a WorkflowRun entry
+# ---------------------------------------------------------------------------
+
+class RecordingBrain:
+    def __init__(self):
+        self.clients = []
+
+    def make_session(self, **_kwargs):
+        c = FakeBrainClient()
+        self.clients.append(c)
+        return c
+
+    def all_queries(self):
+        return [q for c in self.clients for q in c.queries]
+
+
+class TestRunLedger:
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        _bind_runtime_root(tmp_path, monkeypatch)
+
+    def _run(self, workflow, brain=None, **kwargs):
+        brain = brain or RecordingBrain()
+        kwargs.setdefault("task", "t")
+        kwargs.setdefault("repo", "r")
+        kwargs.setdefault("cwd", "/tmp")
+        emitted = []
+        with patch("bobi.brain.get_brain", return_value=brain), \
+             patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda t, *a, **k: emitted.append(t)), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(workflow, **kwargs)
+        return result, brain, emitted
+
+    def _resume(self, run, workflow, brain=None):
+        brain = brain or RecordingBrain()
+        emitted = []
+        with patch("bobi.brain.get_brain", return_value=brain), \
+             patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda t, *a, **k: emitted.append(t)), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = resume_workflow(run, workflow)
+        return result, brain, emitted
+
+    def test_completed_run_leaves_a_completed_entry(self):
+        wf = Workflow(name="t", steps=[StepDef(name="s1", prompt="do it")])
+        result, _, _ = self._run(wf, run_key="42")
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "completed"
+        assert runs[0].run_key == "42"
+        assert runs[0].workflow_name == "t"
+        assert runs[0].completed_at != ""
+
+    def test_failed_run_leaves_failed_entry_with_checkpoint(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it"),
+            StepDef(name="s2", prompt="handoff please",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        result, _, _ = self._run(wf, run_key="42")
+        assert result is False
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "failed"
+        # s1 completed, so the checkpoint points a retry at s2 (index 1).
+        assert runs[0].checkpoint_step == 1
+
+    def test_retry_resumes_from_checkpoint_not_step_zero(self):
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+        first = WorkflowRun.list_runs()[0]
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain, _ = self._run(fixed, run_key="42")
+        assert result is True
+        queries = brain.all_queries()
+        assert not any("unmistakable step one prompt" in q for q in queries), (
+            "retry replayed the completed step instead of resuming at the "
+            "checkpoint")
+        assert any("do step two" in q for q in queries)
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1, "retry minted a second ledger entry"
+        assert runs[0].run_id == first.run_id
+        assert runs[0].status == "completed"
+
+    def test_fresh_launch_ignores_the_checkpoint(self):
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain, _ = self._run(fixed, run_key="42", fresh=True)
+        assert result is True
+        assert any("unmistakable step one prompt" in q
+                   for q in brain.all_queries())
+
+    def test_suspend_is_a_state_of_the_same_entry(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it"),
+            StepDef(name="gate", await_event="pr.merged"),
+        ])
+        result, _, _ = self._run(wf, run_key="42")
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        # The old shape minted a SECOND record at suspension; the ledger keeps
+        # one entry per run (#1048).
+        assert len(runs) == 1
+        assert runs[0].status == "waiting"
+        assert runs[0].await_event == "pr.merged"
+        assert runs[0].suspended_at_step == 2
+        assert runs[0].run_key == "42"
+
+    def test_resume_that_suspends_again_stays_waiting(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+            StepDef(name="g2", await_event="e2"),
+            StepDef(name="s3", prompt="three"),
+        ])
+        self._run(wf, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "waiting"
+
+        result, _, _ = self._resume(run, wf)
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "waiting", (
+            "a resume that suspended again was closed as completed")
+        assert runs[0].await_event == "e2"
+
+        run = WorkflowRun.list_runs()[0]
+        result, _, _ = self._resume(run, wf)
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "completed"
+
+    def test_suspend_emits_no_completed_event(self):
+        # Parked is not finished: the suspended event is the truth, and a
+        # workflow.completed for a run waiting on a gate is a lie consumers
+        # would act on.
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it"),
+            StepDef(name="gate", await_event="pr.merged"),
+        ])
+        result, _, emitted = self._run(wf, run_key="42")
+        assert result is True
+        assert "agent/workflow.suspended" in emitted
+        assert "agent/workflow.completed" not in emitted
+
+    def test_resuspension_emits_no_completed_event(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+            StepDef(name="g2", await_event="e2"),
+        ])
+        self._run(wf, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        result, _, emitted = self._resume(run, wf)
+        assert result is True
+        assert "agent/workflow.suspended" in emitted
+        assert "agent/workflow.completed" not in emitted
+
+    def test_failed_run_records_error_and_completed_at(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        result, _, _ = self._run(wf, run_key="42")
+        assert result is False
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "failed"
+        assert "result" in run.error
+        assert run.completed_at != ""
+
+    def test_run_entry_titles_the_task(self):
+        wf = Workflow(name="t", steps=[StepDef(name="s1", prompt="do it")])
+        self._run(wf, run_key="42", task="Fix moda-labs/bobi-agent#42")
+        assert WorkflowRun.list_runs()[0].title == "Fix moda-labs/bobi-agent#42"
+
+    def test_step_zero_failure_retry_reuses_the_entry(self):
+        # A run that fails before any checkpoint must not mint a second
+        # ledger entry per attempt - the retry adopts and replays from 0.
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+        first = WorkflowRun.list_runs()[0]
+        assert first.checkpoint_step == -1
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+        ])
+        result, brain, _ = self._run(fixed, run_key="42")
+        assert result is True
+        assert any("unmistakable step one prompt" in q
+                   for q in brain.all_queries())
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].run_id == first.run_id
+        assert runs[0].status == "completed"
+
+    def test_fingerprint_mismatch_replays_from_step_zero(self):
+        # A checkpoint is a bare index; if the step list changed since the
+        # failure, the index points at the wrong step, so the retry replays.
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+        assert WorkflowRun.list_runs()[0].checkpoint_step == 1
+
+        edited = Workflow(name="t", steps=[
+            StepDef(name="s0", prompt="a newly inserted step"),
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain, _ = self._run(edited, run_key="42")
+        assert result is True
+        assert any("a newly inserted step" in q for q in brain.all_queries())
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+
+    def test_retry_carries_the_new_dispatch_task(self):
+        # An operator retrying with a corrected brief must not have it
+        # silently swallowed by the restored scopes.
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42", task="original brief")
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain, _ = self._run(fixed, run_key="42",
+                                     task="corrected brief use adapters")
+        assert result is True
+        assert any("corrected brief use adapters" in q
+                   for q in brain.all_queries())
+
+    def test_failed_resume_retries_after_the_gate_not_on_it(self):
+        # The gate's event already arrived once; a retry that lands back ON
+        # the await step re-arms an approval the human already gave and
+        # parks the run behind it forever.
+        wf_fail = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="unmistakable step two",
+                    handoff=HandoffContract(required=["result"])),
+            StepDef(name="s3", prompt="step three"),
+        ])
+        self._run(wf_fail, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "waiting"
+
+        result, _, _ = self._resume(run, wf_fail)
+        assert result is False
+        failed = WorkflowRun.list_runs()[0]
+        assert failed.status == "failed"
+
+        wf_fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="unmistakable step two"),
+            StepDef(name="s3", prompt="step three"),
+        ])
+        result, brain, _ = self._run(wf_fixed, run_key="42")
+        assert result is True
+        assert any("unmistakable step two" in q for q in brain.all_queries())
+        final = WorkflowRun.list_runs()[0]
+        assert final.status == "completed", (
+            "retry landed back on the await gate instead of the step after")
+
+    def test_resume_invalidates_checkpoint_when_workflow_changed(self):
+        # The workflow was edited while the run was parked: the stored index
+        # no longer means what it meant. Resume must invalidate the retry
+        # anchor, not launder it with the current fingerprint.
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+        ])
+        self._run(wf, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "waiting"
+        assert run.checkpoint_step == 2
+
+        edited = Workflow(name="t", steps=[
+            StepDef(name="s0", prompt="inserted"),
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+        ])
+        result, _, _ = self._resume(run, edited)
+        saved = WorkflowRun.list_runs()[0]
+        assert saved.checkpoint_step == -1 or saved.checkpoint_fingerprint == (
+            edited.steps_fingerprint()), (
+            "a stale checkpoint index was re-stamped with the edited "
+            "workflow's fingerprint")
+
+# ---------------------------------------------------------------------------
 # The gate's answer
 # ---------------------------------------------------------------------------
 
@@ -2400,13 +2825,14 @@ class TestGateVerdictRouting:
         assert not any(self.IMPL in q for q in asked), (
             "a rejection built the thing it rejected")
 
-        # Re-gated, not finished. The record that ran is superseded by the
-        # fresh waiting one - never stamped completed (F7).
-        assert WorkflowRun.load(run.run_id).status == "superseded"
+        # Re-gated, not finished - and the SAME ledger entry (#1048): one
+        # run, one record, so suspension is a state of it, never stamped
+        # completed (F7) and never a fresh file.
+        assert WorkflowRun.load(run.run_id).status == "waiting"
         waiting = [r for r in WorkflowRun.list_runs() if r.status == "waiting"]
         assert len(waiting) == 1, [(r.run_id, r.status)
                                    for r in WorkflowRun.list_runs()]
-        assert waiting[0].run_id != run.run_id
+        assert waiting[0].run_id == run.run_id
         assert waiting[0].session_name == run.session_name
         assert waiting[0].run_key == run.run_key
         assert waiting[0].await_event == "approval"
@@ -2451,7 +2877,7 @@ class TestGateVerdictRouting:
         assert not any(self.IMPL in q for q in asked), (
             f"{why} advanced the run into implement")
         assert any(self.SPEC in q for q in asked), asked
-        assert WorkflowRun.load(run.run_id).status == "superseded"
+        assert WorkflowRun.load(run.run_id).status == "waiting"
 
     def test_a_route_with_no_else_would_fall_through_to_implement(
             self, tmp_path, monkeypatch):

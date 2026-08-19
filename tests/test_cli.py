@@ -313,8 +313,9 @@ class TestWorkflowResume:
         run = self._waiting_run()
 
         def fake_resume(run, wf, **kwargs):
-            # What the orchestrator does when a later await step parks the run.
-            run.status = "superseded"
+            # What the orchestrator does when a later await step parks the
+            # run: the SAME ledger entry goes back to waiting (#1048).
+            run.status = "waiting"
             run.save()
             return True
 
