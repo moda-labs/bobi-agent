@@ -932,6 +932,18 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   Suite: **4616 passed / 1 skipped**, the `a7de3b8` baseline of **4604** plus exactly the 12 tests added. No test was deleted — verified by `--collect-only` on both sides (4605 → 4617), not by arithmetic alone. A thirteenth test of mine was written and then removed before landing: `test_the_three_prefixes_are_distinct` exercised only a test-local helper, asserting that an f-string beginning `check-` begins with `check`, and would have stayed green against any production code at all. `pyflakes` over `bobi/` is **26 → 26 with ZERO new**, both sides non-zero. Q029's packaging is proven by a wheel-content diff (213 entries both sides, differing in exactly the one moved entry name) and a live `dep_bootstrap` differential — identical dependency hash and rendered build script — whose probe was sanity-checked to confirm the two sides genuinely import different files.
 
 
+- **2026-08-18** (mcp-2.0 residue session, PR #1054): **Q108's deferred
+  registry.py one-liner is DONE.** The 2026-08-17 Q108 note recorded
+  "registry.py's one aware site deliberately untouched — #1037 (in flight)
+  edits the surrounding lines; one-line follow-up after both land." Both
+  landed 2026-08-18; PR #1054 converts `registry.py`'s `fetched_at` to
+  `timeutil.now_iso()` (and folds `_write_meta` onto
+  `fsutil.atomic_write_json` per the house durability rule). The same PR
+  closes the #1046 post-merge review's mcp-2.0 residue (an `mcp<2` bound,
+  both probe field renames read era-native-first, the transport shim's
+  entangled try-import) — never plan items; recorded so the Q108 trail ends
+  somewhere.
+
 ## Notes
 
 - **Deferred to a successor structural-refactor plan** (explicitly out of scope here; do not partially attempt): Q001/Q040 (cli.py command-tree rewiring), Q002 (subagent.py event-subscription extraction, ~370 lines + 10 test monkeypatch sites), Q003 (`_run_workflow_async` decomposition), Q103 (run_phase_blocking/spawn_adhoc skeleton unification), Q106 (events/server.py split), Q004 (local.ts route table), Q036 (core.ts god-file split), Q005/Q111/Q129 (shared integration-test harness). The appendix entries carry the verifier traces for when that plan is written.

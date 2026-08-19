@@ -104,6 +104,116 @@ class TestIsReadOnly:
         assert mcp_probe._is_read_only("a_b_c_get") is False
 
 
+class TestMcp20FieldRenames:
+    """mcp 2.0 renames ``Tool.inputSchema`` → ``input_schema`` and
+    ``CallToolResult.isError`` → ``is_error`` (camelCase survives only as the
+    wire alias). The probe must read both eras — and fail LOUD, never
+    silently-green, when neither spelling exists."""
+
+    @staticmethod
+    def _tool(name, schema, era):
+        attr = {"1x": "inputSchema", "20": "input_schema"}[era]
+        return type("T", (), {"name": name, attr: schema})
+
+    @pytest.mark.parametrize("era", ["1x", "20"])
+    def test_pick_safe_tool_reads_both_spellings(self, era):
+        t = self._tool("get_profile", {"type": "object"}, era)
+        assert mcp_probe._pick_safe_tool([t]) is t
+
+    @pytest.mark.parametrize("era", ["1x", "20"])
+    def test_required_args_disqualify_in_either_era(self, era):
+        t = self._tool("get_profile", {"required": ["id"]}, era)
+        assert mcp_probe._pick_safe_tool([t]) is None
+
+    def test_unreadable_schema_is_unknown_never_no_required_args(self):
+        # Neither spelling: the tool must not be proposed for a live call.
+        t = type("T", (), {"name": "get_profile"})
+        assert mcp_probe._pick_safe_tool([t]) is None
+
+    def test_call_errored_reads_both_spellings(self):
+        assert mcp_probe._call_errored(type("R", (), {"is_error": True})) is True
+        assert mcp_probe._call_errored(type("R", (), {"isError": True})) is True
+        assert mcp_probe._call_errored(type("R", (), {"is_error": False})) is False
+        assert mcp_probe._call_errored(type("R", (), {"isError": False})) is False
+
+    def test_call_errored_fails_loud_when_neither_spelling_exists(self):
+        with pytest.raises(AttributeError):
+            mcp_probe._call_errored(type("R", (), {}))
+
+    def test_shadowed_extra_field_never_wins_on_1x_shapes(self):
+        # mcp 1.x models are extra="allow": a server-supplied wire key with
+        # the 2.0 spelling lands as an attribute BESIDE the declared
+        # (camelCase) field. The declared field must win.
+        t = type("T", (), {"name": "get_profile",
+                           "inputSchema": {"required": ["id"]},
+                           "input_schema": {}})
+        assert mcp_probe._pick_safe_tool([t]) is None
+        out = type("R", (), {"isError": True, "is_error": False})
+        assert mcp_probe._call_errored(out) is True
+
+    def test_http_probe_touches_only_the_first_two_stream_slots(
+            self, tmp_path, monkeypatch):
+        # mcp 2.0's transport yields (read, write) — no session-id slot; a
+        # 3-unpack regression in _probe_http fails here.
+        import contextlib
+        from bobi import mcp_handshake
+
+        @contextlib.asynccontextmanager
+        async def _fake_open(url, headers=None):
+            yield ("r", "w")
+
+        seen = {}
+
+        async def _fake_handshake(read, write, call_name):
+            seen["streams"] = (read, write)
+            return {"ok": True}
+
+        monkeypatch.setattr(mcp_handshake, "open_streamable_http", _fake_open)
+        monkeypatch.setattr(mcp_probe, "_handshake", _fake_handshake)
+        res = anyio.run(mcp_probe._probe_http,
+                        {"url": "https://x/mcp"}, tmp_path, 5.0, None)
+        assert res == {"ok": True}
+        assert seen["streams"] == ("r", "w")
+
+    def test_errored_call_reports_live_failure_in_the_mcp20_shape(
+            self, monkeypatch):
+        # Through _handshake: a 2.0-shaped errored result must land as
+        # live_ok=False — not render the error text as successful output.
+        class _Content:
+            text = "boom: unauthorized"
+
+        class _Out:
+            is_error = True
+            content = [_Content()]
+
+        class _Tools:
+            tools = []
+
+        class _Session:
+            def __init__(self, r, w):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def initialize(self):
+                pass
+
+            async def list_tools(self):
+                return _Tools()
+
+            async def call_tool(self, name, args):
+                return _Out()
+
+        monkeypatch.setattr("mcp.ClientSession", _Session)
+        res = anyio.run(mcp_probe._handshake, "r", "w", "get_profile")
+        assert res["live_ok"] is False
+        assert "unauthorized" in res["live_error"]
+
+
 class TestMatchTestConfirmation:
     PENDING = {"key": "substack_mcp", "proposed": "substack_get_notes_feed",
                "tools": ["substack_get_notes_feed", "substack_get_profile",
