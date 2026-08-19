@@ -16,11 +16,12 @@ Three facts are pinned, and they are the three the design rests on:
    not a bug to route around - the terminal cannot reach those rows either -
    and the composer's other branch exists because of it. A future change that
    points the reply branch at gate rows fails here.
-3. **The continuation reaches the manager, and the parked run is untouched.**
-   An empty `subagent` means the team manager on both runtimes now, so the
-   relay is delivered rather than dropped. The run it names is then read back
-   byte for byte: nothing in this feature may advance a workflow, because a
-   suspended run resumes at the step AFTER its gate.
+3. **An unaddressed message reaches the manager.** An empty `subagent` means
+   the team manager on both runtimes, so a message with no target is delivered
+   rather than answered with "unknown agent ''". The composer no longer sends
+   one - a gate is answered by resuming its run - but the route documents
+   `subagent` as optional and the two runtimes have to agree on what that
+   means.
 
 One mechanism, two brains: the stub leg always runs, and the claude leg runs
 when the CLI is there. A turn taken by a live session through the inbox is
@@ -239,13 +240,13 @@ def test_a_suspended_gates_session_refuses_delivery_rather_than_swallowing_it(
 
 
 @pytest.mark.timeout(300)
-def test_the_continuation_relay_reaches_the_manager(bobi_env):
-    """The continuation branch, with the manager really listening.
+def test_an_unaddressed_message_reaches_the_manager(bobi_env):
+    """An empty `subagent` resolves to the manager on this runtime, matching
+    what the hosted one has always done and what the route documents.
 
-    An empty `subagent` resolves to the manager on this runtime now, matching
-    what the hosted one has always done. The test asserts DELIVERY, not the
-    spawn: starting a fresh session is the manager's judgement, and a spec
-    should not describe a delegated request as a guaranteed process.
+    Runtime parity, not a composer branch: the page addresses the session it
+    is open on, and answers a gate by resuming its run. This pins the two
+    runtimes to one reading of an omitted target.
     """
     root = bobi_env.project_path
     manager = service.manager_session_name(root)
@@ -256,58 +257,16 @@ def test_the_continuation_relay_reaches_the_manager(bobi_env):
             "manager session failed to start"
 
         client = _client()
-        relay = ("[bobi console] The operator typed this on a run whose "
-                 "session has ended.\n\n" + _reply_directive(bobi_env, "RELAY-OK"))
-        # An empty subagent, exactly as the page sends it.
+        text = ("[bobi console] A message with no target session.\n\n"
+                + _reply_directive(bobi_env, "MANAGER-OK"))
         job = _await_job(client, bobi_env.agent_name,
-                         _submit(client, bobi_env.agent_name, "", relay))
+                         _submit(client, bobi_env.agent_name, "", text))
         assert job["status"] == "done", job
-        assert "session has ended" in _said_by(root, manager, "user"), \
-            "the relay never reached the manager"
-        assert "RELAY-OK" in _said_by(root, manager, "agent"), \
+        assert "no target session" in _said_by(root, manager, "user"), \
+            "the message never reached the manager"
+        assert "MANAGER-OK" in _said_by(root, manager, "agent"), \
             "the manager never took the turn"
     finally:
         session.stop()
 
 
-@pytest.mark.timeout(300)
-def test_the_parked_run_is_byte_identical_afterwards(bobi_env):
-    """The anti-regression that would fail if this feature ever resumed.
-
-    `run.suspended_at_step` is the step AFTER the gate, so a resume starts the
-    next step - for `issue-lifecycle`, writing code against an unapproved
-    spec. Nothing in the composer's path may touch the run record, so the
-    record is read as raw bytes before and after a full send.
-    """
-    root = bobi_env.project_path
-    runs_dir = root / "state" / "workflow" / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    record = runs_dir / "11d31ce5.json"
-    record.write_text(json.dumps({
-        "run_id": "11d31ce5", "workflow_name": "issue-lifecycle",
-        "trigger_event": {"type": "github/issue.opened", "data": {}},
-        "started_at": "2026-08-12T14:00:00+00:00", "completed_at": "",
-        "status": "waiting", "suspended_at_step": 7,
-        "await_event": "approval",
-        "session_name": "wf-issue-lifecycle-test-repo-987",
-        "variable_scopes": {}, "repo": "bobi-agent", "cwd": "",
-        "run_key": "987", "resumed_at": "",
-    }))
-    before = record.read_bytes()
-
-    manager = service.manager_session_name(root)
-    session = Session(name=manager, cwd=str(root),
-                      system_prompt={"type": "preset", "preset": "claude_code"})
-    try:
-        assert session.start(startup_prompt=None, timeout=120), \
-            "manager session failed to start"
-        client = _client()
-        job = _await_job(client, bobi_env.agent_name,
-                         _submit(client, bobi_env.agent_name, "",
-                                 _reply_directive(bobi_env, "ACK")))
-        assert job["status"] == "done", job
-    finally:
-        session.stop()
-
-    assert record.read_bytes() == before, \
-        "the parked run record changed: something reached the resume path"

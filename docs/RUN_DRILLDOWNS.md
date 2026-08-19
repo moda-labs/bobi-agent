@@ -59,40 +59,45 @@ opened, which is worse than an empty column.
 ## The composer: replying from the transcript
 
 A transcript slab carries a reply box at its foot. It is the page's only
-typing surface besides the runs search, and it has **two branches**, chosen by
-`detail.live` ([RUNS_VIEW.md](RUNS_VIEW.md#detaillive-can-this-row-be-spoken-to-right-now))
+typing surface besides the runs search, and it has **three branches**, chosen
+by the read model
+([RUNS_VIEW.md](RUNS_VIEW.md#detaillive-can-this-row-be-spoken-to-right-now))
 rather than by the row's kind:
 
-| `detail.live` | What the box says | What sending does |
+| branch | when | what the control does |
 |---|---|---|
-| true | Send | `POST .../chat` with `subagent: <session_id>`. The text is delivered to that session through `inbox.deliver` - the same function `bobi agent <name> message` reaches from a terminal. |
-| false | Continue in a new session | `POST .../chat` with an empty `subagent`, which means the team manager. The text travels inside a relay naming the ended session and its run, as a request to carry the work forward in a FRESH session. |
+| live | `detail.live` | Send. `POST .../chat` with `subagent: <session_id>`. The text is delivered to that session through `inbox.deliver` - the same function `bobi agent <name> message` reaches from a terminal. |
+| gate | not live, `status == "awaiting_action"`, and the row has a `run_id` | Approve / Reject. `POST .../workflows/runs/<run_id>/resume` with `{"verdict", "reply"}`. The workflow's own route step reads the verdict back and takes the branch it names. |
+| ended | neither | Nothing to send. A sentence saying the session has ended, and no field. |
 
-Both use the endpoint pair that already existed; neither adds one.
+`detail.live` wins over the awaiting status: if a gate's session is somehow
+still live there is a process reading, and reaching whoever can act beats
+answering a form.
 
-**Why a finished row does not simply refuse.** A suspended gate has no process:
-the orchestrator disconnects its client and returns at the await step, so the
-session exits while its registry entry stays `waiting`. `deliver` refuses a
-dead pid, and a terminal cannot reach those rows either. The continuation
-branch is what the operator gets instead, and it is a request rather than a
-spawn - the manager is an agent, and it decides.
+**Why a parked gate is answered rather than chatted with.** A suspended gate
+has no process: the orchestrator disconnects its client and returns at the
+await step, so the session exits while its registry entry stays `waiting`.
+`deliver` refuses a dead pid, and a terminal cannot reach those rows either.
+What that row is waiting for is not a message - it is an answer, and the
+answer is delivered by resuming the run with it.
 
-**A reply re-reads the transcript; a continuation does not.** The slab is
-otherwise one-shot (the 4s timers refresh the table, not this), so the live
-branch re-fetches `/transcript` when the turn lands or the answer would be
-invisible until the run was reopened. The continuation's reply lands in the
-*manager's* transcript, not this dead session's, so re-rendering this one
-would read as the message having been swallowed. It reports where the message
-went instead, and the new run appears in the table on its own.
+**A reply re-reads the transcript; a verdict does not.** The slab is otherwise
+one-shot (the 4s timers refresh the table, not this), so the live branch
+re-fetches `/transcript` when the turn lands or the answer would be invisible
+until the run was reopened. A resume is `accepted`, not finished - the run
+takes as long as it takes - so the gate branch refreshes the runs table and
+says to watch it there.
 
-**Nothing here resumes a workflow run, by any route.** A suspended run records
-`suspended_at_step = step_idx + 1` - the step *after* its gate - and
-`resume_workflow` feeds that straight back as the starting step. Resuming a
-run parked on an approval therefore skips the approval and starts the next
-step. `agent.js` has no call to the resume route, gains none, and
-`tests/test_webapp_composer.py` fails if it ever does. The relay message says
-the same thing in words, because the manager *can* resume even though the page
-cannot.
+**Enter sends on the live branch only.** There is one thing Enter could mean
+in a chat box. At a gate there are two verdicts and no default, and a spec
+approved by a stray keystroke is the failure this design exists to remove.
+
+**What the verdict does after it leaves the page** is in
+[RUN_RESUME.md](RUN_RESUME.md): the resume carries it into the run's `event`
+scope, and a route step immediately after the await branches on it. An absent
+or unrecognised verdict never advances a run - the CLI refuses a word outside
+the vocabulary, and the workflow's route is written so its `else` is the safe
+branch.
 
 ## `GET .../runs/{run_id}/details`
 

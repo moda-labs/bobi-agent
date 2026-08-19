@@ -428,6 +428,46 @@ context, injects the triggering event under the `event` scope, and re-enters
 `_run_workflow_async` at `suspended_at_step`. Execution continues as if the await
 never paused.
 
+### Answering a gate
+
+`suspended_at_step` is the index of the step AFTER the await, so a resume runs
+whatever sits there. That slot is where a workflow reads its answer.
+
+`bobi agent <name> workflows resume <run_id> --verdict approve|reject
+--reply "<words>"` puts the answer into the `event` scope, and a **route step**
+placed immediately after the await branches on it:
+
+```yaml
+  - name: await_approval
+    await: approval
+
+  - name: approval_route
+    if: "${{event.verdict}} == 'approve'"
+    goto: implement
+    else: spec
+```
+
+Two rules make this safe, and both come from behaviour documented elsewhere on
+this page:
+
+1. **The condition tests for the verdict that ADVANCES.** A missing scope or a
+   missing key resolves to `""` with a log warning (see *Variables*), so an
+   unanswered resume - or one whose verdict was dropped in a hop - evaluates
+   false and takes the `else`. Whichever branch is the `else` is the branch an
+   unanswered gate gets, so it has to be the safe one.
+2. **`else` is written out.** A route whose branch is not taken and that has no
+   `else` falls through to `step_idx + 1`, which at this position is the step
+   the gate exists to hold back.
+
+The back edge to a rework step is bounded by the route's `max_iterations`
+(default `DEFAULT_ROUTE_LOOP_MAX_ITERATIONS`), so a gate that keeps being
+rejected exhausts the step rather than cycling forever.
+
+A resumed run that reaches another await step suspends again. A fresh waiting
+record owns the run from then on, and the record that just ran is stamped
+`superseded` - never `completed`, which would report a dormant run as finished.
+`workflows resume` says so on the way out and points at `workflows status`.
+
 ## Lifecycle events
 
 The engine emits structured events throughout a run (via `_emit_lifecycle_event`)

@@ -169,10 +169,30 @@ def test_resume_spawns_the_cli_and_returns_accepted(bobi_install, monkeypatch):
     out = run_actions.resume_run(bobi_install.repo_path, "run-r")
 
     assert out == {"ok": True, "accepted": True, "run_id": "run-r",
-                   "workflow": "triage", "await_event": "approval"}
+                   "workflow": "triage", "await_event": "approval",
+                   "verdict": ""}
     argv = spawned[0]
     assert argv[1:] == ["-m", "bobi.cli", "agent", bobi_install.agent_name,
                         "workflows", "resume", "run-r"]
+
+
+def test_resume_carries_the_gate_verdict_to_the_cli(bobi_install, monkeypatch):
+    """The hosted surface answers a gate through the same seam.
+
+    Both runtimes delegate to this module, so the verdict has to survive the
+    argv boundary here or the hosted console's Approve resumes with no answer -
+    which the workflow reads as "not an approval" and quietly reworks.
+    """
+    _waiting_run(bobi_install, run_id="run-r")
+    spawned = []
+    monkeypatch.setattr("subprocess.Popen",
+                        lambda *a, **k: spawned.append(a[0]))
+
+    out = run_actions.resume_run(bobi_install.repo_path, "run-r",
+                                 verdict="approve", reply="ship it")
+
+    assert out["verdict"] == "approve"
+    assert spawned[0][-4:] == ["--verdict", "approve", "--reply", "ship it"]
 
 
 def test_two_concurrent_resumes_do_not_double_run(bobi_install):

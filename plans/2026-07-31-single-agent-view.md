@@ -458,3 +458,21 @@ placeholder rather than replacing it. Last amended: **2026-08-01**.)*
   the step *after* its gate, so resuming one skips the approval it is
   waiting for. Contracts in `docs/RUN_DRILLDOWNS.md` and `docs/RUNS_VIEW.md`
   (the additive `detail.live` field the composer branches on).
+- **2026-08-19** (#987 / MOD-372, rework): **the composer's second branch is
+  now a verdict, and the page does resume.** Zach rejected the amendment
+  above's continuation branch - relaying the operator's words to the manager
+  so it could start a fresh session - as a shim: a parked session should be
+  resumed, not worked around. He approved the refactor.
+
+  What changes in this plan's terms: "Resume on a stalled run is the only
+  workflow action" now describes a real control. An awaiting-action row's
+  composer offers Approve / Reject, which resumes that run carrying the
+  verdict, and a route step in the workflow reads it back and takes the
+  branch it names. The reason the amendment above said the page "cannot"
+  resume - a suspended run records the step *after* its gate - is unchanged,
+  and is exactly what makes this work: that step is now the route. An
+  unanswered or unrecognised verdict never advances a run.
+
+  The manager relay is deleted rather than kept alongside. Contracts in
+  `docs/RUN_RESUME.md` (the verdict and the route-after-gate rule) and
+  `docs/RUN_DRILLDOWNS.md` (the composer's three branches).

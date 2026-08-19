@@ -6,6 +6,7 @@ import json
 import os
 import textwrap
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch, call
 from dataclasses import dataclass
@@ -2025,3 +2026,219 @@ class TestSessionConstructionFailureIsTerminal:
     def test_emits_a_terminal_lifecycle_event(self, monkeypatch, tmp_path):
         _, emitted = self._run(monkeypatch, MagicMock(), tmp_path)
         assert any("fail" in ev for ev in emitted), emitted
+
+
+# ---------------------------------------------------------------------------
+# The gate's answer
+# ---------------------------------------------------------------------------
+
+class TestGateVerdictRouting:
+    """What answering a human gate actually does (#987).
+
+    A suspended run records the step AFTER its await, so a resume lands on
+    whatever sits there and runs it. That is the whole mechanism: put a ROUTE
+    there, carry the human's verdict in as the ``event`` scope, and the resume
+    stops being a force-continue and becomes an answer.
+
+    Three answers have to be right, and the third is the one that bites: a
+    verdict that never arrives resolves to the empty string with nothing but a
+    log warning, so it takes whichever branch is the ``else``. These tests are
+    the reason the route is written with the ADVANCING branch as the
+    condition.
+    """
+
+    SPEC = "SPEC-STEP-MARKER"
+    IMPL = "IMPLEMENT-STEP-MARKER"
+
+    def _wf(self) -> Workflow:
+        """The issue-lifecycle gate, in miniature.
+
+        Same shape as the real one: the rework target sits before the await,
+        so rejecting is a back edge through the gate rather than a step that
+        has to be inserted after it.
+        """
+        return Workflow(name="gated", steps=[
+            StepDef(name="spec", prompt=self.SPEC),
+            StepDef(name="gate", await_event="approval"),
+            StepDef(name="approval_route",
+                    condition="${{event.verdict}} == 'approve'",
+                    goto="implement", else_goto="spec"),
+            StepDef(name="implement", prompt=self.IMPL),
+        ])
+
+    def _root(self, tmp_path, monkeypatch) -> Path:
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(
+            parents=True, exist_ok=True)
+        return root
+
+    @contextmanager
+    def _brain(self, prompts: list):
+        """Patch in a brain whose every client records what it was asked."""
+        def _client(_opts):
+            client = FakeClient()
+            prompts.append(client)
+            return client
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree",
+                   return_value="/tmp"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.claude.get_cli_path",
+                   return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=_client,
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            yield
+
+    @staticmethod
+    def _asked(clients) -> list[str]:
+        return [q for c in clients for q in c.queries]
+
+    def _park(self, tmp_path, monkeypatch):
+        """Run the workflow from the top until its gate parks it."""
+        self._root(tmp_path, monkeypatch)
+        clients: list = []
+        with self._brain(clients):
+            result = run_workflow(self._wf(), task="t", repo="r", cwd="/tmp",
+                                  run_key="987", interactive=False)
+        waiting = [r for r in WorkflowRun.list_runs() if r.status == "waiting"]
+        assert len(waiting) == 1, [(r.run_id, r.status)
+                                   for r in WorkflowRun.list_runs()]
+        return result, waiting[0], self._asked(clients)
+
+    def _answer(self, run, event):
+        """Resume the parked run with one answer, and report what ran."""
+        clients: list = []
+        with self._brain(clients):
+            success = resume_workflow(run, self._wf(), event=event)
+        return success, self._asked(clients)
+
+    def test_the_gate_parks_the_run_on_the_route_not_on_implement(
+            self, tmp_path, monkeypatch):
+        """The +1 the engine already writes is what puts the route in reach.
+
+        Nothing in the step loop changed for this. `suspended_at_step` has
+        always been "the step after the await"; the route is simply what now
+        occupies that slot, so the verdict is read before anything is built.
+        """
+        result, run, asked = self._park(tmp_path, monkeypatch)
+
+        assert result is True
+        assert run.suspended_at_step == 2
+        assert self._wf().steps[run.suspended_at_step].name == "approval_route"
+        assert any(self.SPEC in q for q in asked)
+        assert not any(self.IMPL in q for q in asked), (
+            "the gate let the run reach implement before anyone answered")
+
+    def test_an_approve_resumes_and_continues(self, tmp_path, monkeypatch):
+        _, run, _ = self._park(tmp_path, monkeypatch)
+
+        success, asked = self._answer(run, {"data": {"verdict": "approve"}})
+
+        assert success is True
+        assert any(self.IMPL in q for q in asked), asked
+        assert not any(self.SPEC in q for q in asked), (
+            "an approval sent the run back to rework")
+        assert WorkflowRun.load(run.run_id).status == "completed"
+
+    def test_a_reject_reworks_the_same_run_instead_of_implementing(
+            self, tmp_path, monkeypatch):
+        """The point of the whole change: a rejection is not a dead end and
+        not a fresh session. The SAME run, in the same session, with its
+        variable scopes intact, goes back to the rework step and re-gates."""
+        _, run, _ = self._park(tmp_path, monkeypatch)
+
+        success, asked = self._answer(
+            run, {"data": {"verdict": "reject", "reply": "not yet"}})
+
+        assert success is True
+        assert any(self.SPEC in q for q in asked), asked
+        assert not any(self.IMPL in q for q in asked), (
+            "a rejection built the thing it rejected")
+
+        # Re-gated, not finished. The record that ran is superseded by the
+        # fresh waiting one - never stamped completed (F7).
+        assert WorkflowRun.load(run.run_id).status == "superseded"
+        waiting = [r for r in WorkflowRun.list_runs() if r.status == "waiting"]
+        assert len(waiting) == 1, [(r.run_id, r.status)
+                                   for r in WorkflowRun.list_runs()]
+        assert waiting[0].run_id != run.run_id
+        assert waiting[0].session_name == run.session_name
+        assert waiting[0].run_key == run.run_key
+        assert waiting[0].await_event == "approval"
+
+    def test_the_rejection_reaches_the_rework_step_as_variables(
+            self, tmp_path, monkeypatch):
+        """The reason has to arrive with the work. A rework step that cannot
+        see why it was rejected can only guess at what to change."""
+        _, run, _ = self._park(tmp_path, monkeypatch)
+        wf = self._wf()
+        wf.steps[0].prompt = (
+            self.SPEC + " verdict=${{event.verdict}} reply=${{event.reply}}")
+
+        clients: list = []
+        with self._brain(clients):
+            resume_workflow(run, wf, event={
+                "data": {"verdict": "reject", "reply": "widen the scope"}})
+
+        asked = self._asked(clients)
+        assert any("verdict=reject" in q for q in asked), asked
+        assert any("reply=widen the scope" in q for q in asked), asked
+
+    @pytest.mark.parametrize("event, why", [
+        ({"data": {"verdict": "", "reply": ""}}, "an empty verdict"),
+        ({"data": {}}, "a verdict key that never arrived"),
+        (None, "no event scope at all"),
+        ({"data": {"verdict": "APPROVE"}}, "a differently-cased verdict"),
+        ({"data": {"verdict": "yes"}}, "a verdict outside the vocabulary"),
+        ({"data": {"verdict": ["approve"]}}, "a verdict of the wrong type"),
+    ])
+    def test_an_unanswered_or_malformed_verdict_never_advances(
+            self, tmp_path, monkeypatch, event, why):
+        """A missing scope resolves to "" with only a log warning, so the
+        branch an unanswered resume takes is whichever one is the `else`.
+        That is why the condition tests for the ONE verdict that advances:
+        everything else, however it is malformed, reworks."""
+        _, run, _ = self._park(tmp_path, monkeypatch)
+
+        success, asked = self._answer(run, event)
+
+        assert success is True
+        assert not any(self.IMPL in q for q in asked), (
+            f"{why} advanced the run into implement")
+        assert any(self.SPEC in q for q in asked), asked
+        assert WorkflowRun.load(run.run_id).status == "superseded"
+
+    def test_a_route_with_no_else_would_fall_through_to_implement(
+            self, tmp_path, monkeypatch):
+        """Why the workflow writes `else` out rather than leaving it implicit.
+
+        A route whose branch is not taken and that has no else falls through
+        to step_idx + 1 - which, at this position, is the step the gate exists
+        to hold back. This asserts the engine behaviour the workflow is
+        written around; it is not a defect, it is the default the author has
+        to answer for.
+        """
+        _, run, _ = self._park(tmp_path, monkeypatch)
+        wf = self._wf()
+        wf.steps[2].else_goto = ""
+
+        clients: list = []
+        with self._brain(clients):
+            resume_workflow(run, wf, event={"data": {"verdict": ""}})
+
+        assert any(self.IMPL in q for q in self._asked(clients)), (
+            "the fall-through this test documents has changed - the workflow's "
+            "explicit `else` may no longer be what stands between an "
+            "unanswered gate and the implement step")

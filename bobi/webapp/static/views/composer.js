@@ -1,61 +1,43 @@
-/* The run slab's composer: the one part of it that is pure text (#987).
+/* The run slab's composer: the one part of it that is pure decision (#987).
 
-   A module rather than a closure in agent.js, for the same reason
-   markdown.js is one: this string IS the contract with the team manager, and
-   it is only testable while it is importable. `tests/test_webapp_composer.py`
-   runs it under Node and reads back what it builds.
+   A module rather than a closure in agent.js, for the same reason markdown.js
+   is one: which branch a row gets, and what that branch posts, IS the
+   contract, and it is only testable while it is importable.
+   `tests/test_webapp_composer.py` runs it under Node and reads back what it
+   returns.
 
    Nothing here touches the DOM or the network. */
 
-/** The message the console relays to the team manager when the operator
-    types on a run whose session has ended.
+/** Which composer a row gets. Three outcomes, decided by data rather than by
+    the row's kind:
 
-    It is a request, not a spawn: the manager is an agent and it decides. So
-    the relay carries everything a fresh session needs to pick the work up -
-    which session ended, which run it belonged to, and the operator's own
-    words, verbatim and delimited so their prose cannot be read as the
-    console's own framing.
+      live    someone is behind this session right now, so the text is
+              delivered to it.
+      gate    the run is parked on a human approval step. There is no process
+              to talk to, and there does not need to be: the answer the gate
+              is waiting for is a verdict, and answering it resumes the run
+              into the branch that verdict chose.
+      ended   the session is over and there is no gate. Nothing can receive a
+              message, so the composer offers no way to send one.
 
-    It also names the one thing that must not happen. A suspended run records
-    the step AFTER its gate, so resuming one skips the approval it is parked
-    on and starts the next step instead. The page cannot resume - there is no
-    such call in any view, and a test pins that - and the instruction says so
-    out loud as well, because the manager can resume even though the page
-    cannot. */
-export function continuationRelay(row, text) {
+    `detail.live` decides the first. A gate needs BOTH the awaiting status and
+    a run id: the verdict is delivered by resuming that run, so a row without
+    one has nothing to answer. */
+export function composerMode(row) {
   const detail = (row && row.detail) || {};
-  const lines = [
-    "[bobi console] The operator typed this on a run whose session has ended.",
-    "",
-  ];
-  const field = (label, value) => {
-    if (value === "" || value == null) return;
-    lines.push(label.padEnd(19) + value);
-  };
-  field("target_session:", row.session_id);
-  field("workflow:", row.kind === "workflow" ? row.title : "");
-  field("run_key:", detail.run_key);
-  field("run_id:", row.run_id);
-  field("awaiting:", detail.await_event);
-  // -1 means "no step", and 0 is a real one, so this cannot test truthiness.
-  field("suspended_at_step:",
-        detail.suspended_at_step >= 0 ? detail.suspended_at_step : "");
+  if (detail.live) return "live";
+  if (row && row.status === "awaiting_action" && row.run_id) return "gate";
+  return "ended";
+}
 
-  lines.push("", "--- the operator's message, verbatim ---", text,
-             "--- end of message ---", "");
+/** What the gate branch POSTs to the resume route.
 
-  if (row.run_id) {
-    lines.push(
-      "Start a FRESH session to carry this forward, seeded with that run's " +
-      "durable context: the handoffs under `state/sessions/" +
-      (row.session_id || "<session>") + "/` and the run record's variable " +
-      "scopes. Do NOT resume run " + row.run_id + " - a suspended run " +
-      "records the step AFTER its gate, so resuming it skips the gate " +
-      "entirely and starts at the next step.");
-  } else {
-    lines.push(
-      "Start a FRESH session to carry this forward, seeded with whatever " +
-      "that session left on disk.");
-  }
-  return lines.join("\n");
+    The verdict is the answer; the reply is the human's own words, carried
+    beside it so the workflow can put them in front of the agent that has to
+    act on them. Both reach the run as its `event` scope.
+
+    The verdict is never inferred from the text: an operator who types
+    "looks fine to me" and clicks Reject has rejected it. */
+export function resumeBody(verdict, text) {
+  return { verdict, reply: (text || "").trim() };
 }

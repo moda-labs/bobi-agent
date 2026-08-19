@@ -1,9 +1,18 @@
 # 987 - A reply box on the run slab
 
-Status: **approved and built** (Gate 1 granted by Luke, 2026-08-18: ["Approved, let's go ahead and build this feature and test it"](https://github.com/moda-labs/bobi-agent/issues/987#issuecomment-5334520258)). Implemented in this PR; see §10 for how each reserved decision resolved and §11 for what shipped.
+Status: **approved and built** (Gate 1 granted by Luke, 2026-08-18: ["Approved, let's go ahead and build this feature and test it"](https://github.com/moda-labs/bobi-agent/issues/987#issuecomment-5334520258)). Reworked on Zach's review, 2026-08-19; see §12.
 Issue: [#987](https://github.com/moda-labs/bobi-agent/issues/987) · Linear MOD-372 (part of MOD-368)
-Author: engineer agent · **Revision 4, 2026-08-18** (Luke's condition, see §11)
-Base: `agent/987` @ `99f5e23`, cut from `main` @ `2c10d5a`
+Author: engineer agent · **Revision 5, 2026-08-19** (the gate is answered, see §12)
+Base: `agent/987` @ `c803436`, cut from `main` @ `4725c67`
+
+> **Revision 5 replaces §6.** Zach reviewed what revision 4 built and rejected
+> its continuation branch: relaying the operator's words to the team manager so
+> it could start a fresh session is a shim, and a parked session should be
+> resumed. He approved the refactor.
+> **§6 is superseded in full and §12 is the current design.** §6 is kept because
+> its findings are still true and still load the new one - above all §6.2, which
+> established that a suspended run records the step AFTER its gate. §12 does not
+> work around that fact; it uses it.
 
 > **Revision 4 adds one requirement.** Luke accepted revision 3's scope shift on a condition, in Slack on 2026-08-18:
 > *"I think that's okay, as long as the user's input on that modal can create a fresh session that picks up where the last one left off"*.
@@ -462,6 +471,13 @@ Unchanged either way: this is **never** a link to the resume path. Offering "app
 
 ## 6. Luke's condition: the continuation branch
 
+> **Superseded by §12 (revision 5, 2026-08-19).** The continuation branch
+> specified here was built, reviewed, and rejected: a parked run is resumed
+> now, not relayed around. Read this section for its findings - §6.2's sharp
+> edge in particular - not for its design. Everything it describes as shipping
+> has been deleted from the tree.
+
+
 > *"I think that's okay, as long as the user's input on that modal can create a fresh session that picks up where the last one left off"* - Luke, Slack, 2026-08-18.
 
 Everything below was verified first-hand in a worktree at `agent/987` @ `99f5e23`, and the live probes were executed with `bobi` imported from that worktree.
@@ -849,6 +865,22 @@ No code will be written until these are answered. **Luke's Slack message is a co
 
 ## 11. Revision record
 
+### Revision 5 - 2026-08-19, Zach's rejection
+
+Zach reviewed the built continuation branch and rejected it: parked sessions
+should be resumed. He approved the refactor, scoped to four changes with none
+in the orchestrator's step loop. §12 is the design; §6 is superseded but kept
+for its findings.
+
+The three sharp edges the investigation flagged
+(`state/sessions/wf-adhoc-eng-team-1016-resume-semantics`) were each handled
+rather than noted: the empty-verdict resolution decides the route's direction,
+the `else` is explicit, and the re-suspend bookkeeping is fixed because a
+rejection reaches it every time. §12.3 has the detail.
+
+**Not obtained:** a cross-model second opinion. `codex` is unauthenticated in
+these containers.
+
 ### Build - 2026-08-18, Gate 1 granted
 
 Luke approved revision 4 and asked for it to be tested. Built as specified;
@@ -931,3 +963,150 @@ Luke's [comment](https://github.com/moda-labs/bobi-agent/issues/987#issuecomment
 
 Specced reply-and-continue: the typed note carried as the resumed run's `event` payload. Withdrawn in full by revision 3, see §2 for what that deletes and why.
 Their verification work is not lost: the facts about the resume path (fire-and-forget spawn, the torn-claim orphan, the reminder string's false promise) remain true and are recorded as out of scope in §6 rather than carried as design.
+
+---
+
+## 12. Revision 5 - the gate is answered, not relayed
+
+Zach reviewed what revision 4 built and rejected its continuation branch:
+parked sessions should be resumed. He approved this refactor. What follows is
+the design as scoped, the three sharp edges it had to handle, and what was
+deleted.
+
+### 12.1 What was wrong with the relay
+
+Nothing in the relay was broken. It delivered, it was tested, and §6.5 was
+honest about what it could not promise. It was the wrong shape.
+
+An operator looking at an awaiting-action row is looking at a run that asked
+them a question. The relay answered by describing the question to a third
+agent and asking it to start over somewhere else - losing the transcript, the
+step position, and the run identity, and adding a hop that can decide not to
+act. The run stayed parked either way.
+
+§6.2 is why it was built that way: a resume starts the step AFTER the gate, so
+resuming `issue-lifecycle` at index 7 runs `implement` against an unapproved
+spec. Revision 4 treated that as a wall and routed around it. It is not a wall.
+It is where the answer goes.
+
+### 12.2 The design
+
+Four changes, none in the orchestrator's step loop.
+
+**A1. The verdict reaches the engine.** `workflows resume` takes `--verdict`
+(`approve` | `reject`) and `--reply`, and passes them as
+`resume_workflow(..., event=...)`. That parameter already existed and its
+`data` already becomes the run's `event` scope
+(`orchestrator.py`, `ctx.set_scope("event", ...)`); nothing about the inlet is
+new, it was simply never populated. The vocabulary is
+`bobi.workflow.schema.GATE_VERDICTS`, so the CLI's `click.Choice` and the
+webapp's validation cannot drift apart.
+
+**A2. The console carries it.** `run_actions.resume_run` takes `verdict` /
+`reply`, appends them to the command it spawns, and refuses a verdict outside
+the vocabulary before spawning - the child's output goes to `/dev/null`, so a
+refusal down there would look like an accepted resume that did nothing. Both
+runtimes and the supervisor's `resume_run` admin command carry the two args;
+they are additive, so an older console that sends only a `run_id` still
+resumes, with no verdict.
+
+**A3. The composer answers instead of relaying.** Its three branches are now
+live / gate / ended (`composerMode` in `composer.js`). A gate row gets Approve
+and Reject, which POST `{verdict, reply}` to the resume route. A row that is
+neither live nor a gate gets a sentence and no control, because there is
+nothing for a control to do.
+
+**A4. The workflow reads it.** `issue-lifecycle` gains one route step
+immediately after `await_approval`:
+
+```yaml
+  - name: approval_route
+    if: "${{event.verdict}} == 'approve'"
+    goto: implement
+    else: spec
+```
+
+The `+1` the engine already writes lands on this route, so an approve
+continues exactly as it did before, and a reject goes back to `spec` - which
+re-enters `plan_review` and the gate, on the same run and in the same session.
+The `spec` step's prompt now carries `${{event.verdict}}` and
+`${{event.reply}}`, so a rework can see what it is reworking.
+
+### 12.3 The three sharp edges
+
+**F1. A missing scope resolves to empty, quietly.** `variables.py` resolves an
+unknown scope or key to `""` with a log warning and nothing else, so an
+unpopulated verdict evaluates the condition false and takes the `else`.
+**The route therefore tests for the verdict that ADVANCES**, making `spec` -
+the safe outcome - the `else`. Written the other way round
+(`if reject → spec, else implement`), an empty verdict falls into `implement`,
+which is the exact failure this change exists to remove. Covered by
+`TestGateVerdictRouting::test_an_unanswered_or_malformed_verdict_never_advances`
+over six shapes of absent and malformed verdict, and by the shipped-workflow
+assertions in `TestApprovalGateRouting`.
+
+**F2. A route with no `else` falls through to `step_idx + 1`.** At this
+position that is `implement`. The `else` is written out, and
+`test_a_route_with_no_else_would_fall_through_to_implement` asserts the engine
+behaviour the workflow is written around - so a future reader who deletes the
+`else` as redundant has a failing test explaining what it was holding back.
+
+**F3. A re-suspend used to be stamped `completed`.** Every suspend mints a new
+`run_id`, and `resume_workflow` read `_run_workflow_async`'s bare `True` as
+"finished" - so a resumed run that parked on a later await was recorded as
+completed while a fresh record waited.
+
+This path is now reached on **every rejection**, so it could not be left
+alone: reject → rework → re-gate is a re-suspend by construction, and the
+first one would have reported the run finished. `_run_workflow_async` now
+returns an explicit outcome (`OUTCOME_COMPLETED` / `_FAILED` / `_SUSPENDED`),
+`run_workflow` emits no terminal event on a suspend, and `resume_workflow`
+stamps `superseded`.
+
+That is the orchestrator half of the fix. The CLI half is
+[399e0b0](https://github.com/moda-labs/bobi-agent/commit/399e0b0) from
+`agent/818-lane-a`, cherry-picked here, which stops `workflows resume` from
+printing "Workflow completed." for it. **399e0b0 alone would have been
+inert**: the `superseded` stamp it branches on lives in `d40e4b6` on that same
+branch, a nine-defect commit whose other eight fixes are unrelated to this
+work. Only the stamp came across; the rest stays where it is.
+
+### 12.4 What was deleted
+
+A migration deletes the path it replaces.
+
+- `composer.js`'s `continuationRelay` and every test of the relay message.
+- `TestNoResumeCall`'s three source-level guards, which asserted that no view
+  contains the string `/resume`.
+- `TestComposer::test_the_composer_never_reaches_the_resume_route`, the
+  behavioural version of the same guard.
+- `test_the_parked_run_is_byte_identical_afterwards`, which asserted that
+  nothing in this feature may reach the resume path.
+
+All four existed because resume could not be trusted. Trusting it is the
+change.
+
+One thing from revision 4 stays: the `runtime.py` line resolving an empty
+`subagent` to the manager. It is runtime parity - the route documents
+`subagent` as optional and `EventBusRuntime` has always read it that way - not
+part of the relay. Its integration test is renamed to say so.
+
+### 12.5 Verification
+
+| what | where |
+|---|---|
+| which step each verdict runs | `tests/test_orchestrator.py::TestGateVerdictRouting` - 11 tests over the real step loop, route evaluation and run records |
+| the same three endings through the real CLI subprocess | `tests/integration/test_gate_verdict_resume.py` - a real suspended run on the stub brain, resumed by the real command |
+| the verdict surviving every hop | `tests/test_webapp_resume.py::TestVerdictReachesTheSpawn`, `tests/test_cli.py::TestWorkflowResume`, `tests/test_hosted_single_agent_view.py` |
+| the branch and the payload | `tests/test_webapp_composer.py` under Node |
+| the page, in a real browser | `tests/e2e/test_webapp_ui.py::TestComposer` |
+| the shipped workflow's gate shape | `tests/test_eng_team_role_constraints.py::TestApprovalGateRouting` |
+
+Five mutants were run and each was killed by the test that claims the
+behaviour: flipping the shipped route to the unsafe direction; stamping a
+re-suspended run `completed`; dropping `--verdict` from the spawned command;
+dropping `event=` from the CLI's resume call; and making `composerMode` treat
+a gate as live.
+
+**Not obtained:** a cross-model second opinion. `codex` is unauthenticated in
+these containers; no cross-model result is invented here.

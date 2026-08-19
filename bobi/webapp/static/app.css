@@ -716,6 +716,14 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   transition: border-color var(--dur-fast) var(--ease),
               box-shadow var(--dur-fast) var(--ease);
 }
+/* A human gate is state, and state is violet: the rail says this row is
+   waiting on a person, and the note beside the buttons names what for. */
+.composer.gate {
+  border-left: 2px solid var(--slab-accent);
+  padding-left: 16px;
+}
+/* The ended branch is a sentence, not a form - no field, no buttons. */
+.composer.ended > .composer-note { margin: 0; }
 .composer textarea::placeholder { color: var(--slab-muted); }
 /* Focus is one of violet's four meanings, so the ring is the accent. */
 .composer textarea:focus {

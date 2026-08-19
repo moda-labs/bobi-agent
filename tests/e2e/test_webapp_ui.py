@@ -514,18 +514,19 @@ class TestWriteActions:
 class TestComposer:
     """The reply box at the foot of a transcript (#987).
 
-    Two branches, and the read model picks between them: a live session is
-    delivered to, a finished one is carried forward by asking the manager for
-    a fresh session. Both post to `/chat`, which is why what they post is the
-    assertion here - the payload is the entire contract, and a box that sends
-    the wrong thing looks exactly like a box that works.
+    Three branches, and the read model picks between them: a live session is
+    delivered to, a run parked on a human gate is ANSWERED, and a row that is
+    neither gets no control at all. What each branch posts is the assertion
+    here - the payload is the entire contract, and a box that sends the wrong
+    thing looks exactly like a box that works.
 
-    The chat endpoints are answered from the browser side, for the same
-    reason the `runsError` branch is: resolving one for real needs a live
+    The chat and resume endpoints are answered from the browser side, for the
+    same reason the `runsError` branch is: resolving one for real needs a live
     agent process to take a turn, which this test process does not have.
-    Delivery itself is proven against real sessions in
-    `tests/integration/test_webapp_chat_delivery.py`; what is proven here is
-    the front end, which that test cannot see.
+    Delivery is proven against real sessions in
+    `tests/integration/test_webapp_chat_delivery.py`, and what a verdict does
+    to a running workflow in `tests/test_orchestrator.py`; what is proven here
+    is the front end, which neither of those can see.
     """
 
     LIVE = "worker-live"
@@ -559,6 +560,24 @@ class TestComposer:
             status=200, content_type="application/json", body=json.dumps(job)))
         return posted
 
+    def _resume(self, page, *, accepted=True, error=""):
+        """Answer the resume route and hand back the POSTed bodies."""
+        posted = []
+
+        def submit(route, request):
+            posted.append(json.loads(request.post_data))
+            body = {"ok": True, "accepted": True, "run_id": "11d31ce5",
+                    "workflow": "issue-lifecycle", "await_event": "approval",
+                    "verdict": posted[-1].get("verdict", "")}
+            if not accepted:
+                body = {"error": error or "run wf-1 is 'completed'"}
+            route.fulfill(status=200 if accepted else 409,
+                          content_type="application/json",
+                          body=json.dumps(body))
+
+        page.route(RESUME_URL, submit)
+        return posted
+
     def _open(self, page, webapp, title):
         _agent(page, webapp)
         page.locator(".runs tbody tr", has_text=title).first.click()
@@ -572,16 +591,16 @@ class TestComposer:
         expect(composer.locator(".composer-note")).to_contain_text(
             "the same way the CLI delivers a message")
 
-    def test_a_finished_session_offers_a_continuation_instead(self, webapp,
-                                                              page):
-        # The honest label: nothing is behind this row, so "Send" would be a
-        # promise the page cannot keep.
+    def test_a_parked_gate_offers_a_verdict_instead(self, webapp, page):
+        # Nothing is behind this row, and nothing needs to be: what the gate
+        # is waiting for is an answer, not a message.
         self._seed(webapp.install)
         composer = self._open(page, webapp, "issue-lifecycle")
-        expect(composer.locator("button")).to_have_text(
-            "Continue in a new session")
+        expect(composer.locator("button")).to_have_text(["Reject", "Approve"])
         expect(composer.locator(".composer-note")).to_contain_text(
-            "This session has ended, so nothing here can answer")
+            "This run is awaiting approval")
+        # The gate is state, and state renders violet (design-system rule 2).
+        expect(composer).to_have_class(re.compile(r"\bgate\b"))
 
     def test_a_row_with_no_session_gets_no_composer(self, webapp, page):
         # The details branch. There is no session, so there is nothing to
@@ -618,47 +637,95 @@ class TestComposer:
         expect(composer.locator("textarea")).to_have_value("", timeout=10_000)
         assert len(reread) == 1, reread
 
-    def test_the_continuation_branch_addresses_the_manager(self, webapp, page):
-        """An empty `subagent` is the manager, on both runtimes. The
-        operator's words travel inside a relay that names the run they were
-        typed on, because a fresh session is otherwise starting blind."""
+    def test_approving_resumes_the_run_with_that_verdict(self, webapp, page):
+        """The verdict is the payload. The route step in the workflow reads it
+        back as `${{event.verdict}}`, so a button that posts the wrong word
+        sends the run down the wrong branch."""
         self._seed(webapp.install)
-        posted = self._chat(page)
+        posted = self._resume(page)
         composer = self._open(page, webapp, "issue-lifecycle")
 
-        composer.locator("textarea").fill("pick this back up please")
-        composer.locator("button").click()
-        expect(composer.locator(".composer-status")).to_be_visible(
-            timeout=10_000)
+        composer.locator("textarea").fill("looks right")
+        composer.get_by_role("button", name="Approve").click()
 
-        assert len(posted) == 1, posted
-        assert posted[0]["subagent"] == ""
-        relay = posted[0]["text"]
-        assert "pick this back up please" in relay
-        assert self.GATE in relay
-        assert "987" in relay
-        assert "11d31ce5" in relay
-        assert "Do NOT resume run 11d31ce5" in relay
+        expect(composer.locator(".composer-status")).to_contain_text(
+            "Approved", timeout=10_000)
+        assert posted == [{"verdict": "approve", "reply": "looks right"}]
 
-    def test_the_continuation_branch_says_what_it_did_and_does_not_re_read(
+    def test_rejecting_posts_the_other_verdict_and_the_reason(self, webapp,
+                                                              page):
+        """Same route, different answer. The typed text is the reason, not the
+        decision: it rides along so the rework step can see why."""
+        self._seed(webapp.install)
+        posted = self._resume(page)
+        composer = self._open(page, webapp, "issue-lifecycle")
+
+        composer.locator("textarea").fill("scope is too wide")
+        composer.get_by_role("button", name="Reject").click()
+
+        expect(composer.locator(".composer-status")).to_contain_text(
+            "Rejected", timeout=10_000)
+        assert posted == [{"verdict": "reject", "reply": "scope is too wide"}]
+
+    def test_a_verdict_needs_no_reason(self, webapp, page):
+        """An approval with nothing to add is the common case, and a control
+        that refuses to fire on an empty box would read as broken."""
+        self._seed(webapp.install)
+        posted = self._resume(page)
+        composer = self._open(page, webapp, "issue-lifecycle")
+
+        composer.get_by_role("button", name="Approve").click()
+
+        expect(composer.locator(".composer-status")).to_contain_text(
+            "Approved", timeout=10_000)
+        assert posted == [{"verdict": "approve", "reply": ""}]
+
+    def test_enter_does_not_answer_the_gate(self, webapp, page):
+        """The live branch sends on Enter, because there is one thing Enter
+        could mean. Here there are two verdicts and no default - a spec
+        approved by a stray keystroke is exactly the failure this design is
+        replacing."""
+        self._seed(webapp.install)
+        posted = self._resume(page)
+        composer = self._open(page, webapp, "issue-lifecycle")
+
+        composer.locator("textarea").fill("hmm")
+        composer.locator("textarea").press("Enter")
+        page.wait_for_timeout(300)
+        assert posted == []
+
+    def test_a_refused_verdict_is_reported_inline_and_the_box_recovers(
             self, webapp, page):
-        """The reply landed in the MANAGER's transcript, not this dead
-        session's. Re-rendering an unchanged transcript would read as the
-        message having gone nowhere, so the confirmation says where it went
-        and the slab is left alone."""
+        """A run the table still shows as waiting can already have moved. The
+        refusal has to be named in the modal being read, not swallowed."""
         self._seed(webapp.install)
-        self._chat(page)
+        self._resume(page, accepted=False,
+                     error="run 11d31ce5 is 'completed', not 'waiting'")
         composer = self._open(page, webapp, "issue-lifecycle")
 
-        reread = _record_requests(page, TRANSCRIPT_URL)
-        composer.locator("textarea").fill("carry on")
-        composer.locator("button").click()
+        composer.get_by_role("button", name="Approve").click()
 
         status = composer.locator(".composer-status")
-        expect(status).to_contain_text("Sent to the manager", timeout=10_000)
-        # Honest about what it cannot promise: the manager decides.
-        expect(status).to_contain_text("its")
-        assert not reread
+        expect(status).to_have_text(
+            "run 11d31ce5 is 'completed', not 'waiting'", timeout=10_000)
+        expect(status).to_have_class("composer-status bad")
+        expect(composer.get_by_role("button", name="Approve")).to_be_enabled()
+        expect(composer.get_by_role("button", name="Reject")).to_be_enabled()
+
+    def test_an_ended_session_with_no_gate_offers_nothing_to_send(
+            self, webapp, page):
+        """What replaced the manager relay. Nothing is behind this row and
+        there is no verdict to give, so there is no control - a box that
+        accepted typing here would be promising a delivery that cannot
+        happen."""
+        _seed_runs(webapp.install)
+        _agent(page, webapp)
+        page.locator(".runs tbody tr", has_text="Fix the flaky test").click()
+        composer = page.locator(".composer")
+        expect(composer).to_be_visible()
+        expect(composer).to_contain_text("This session has ended")
+        expect(composer.locator("textarea")).to_have_count(0)
+        expect(composer.locator("button")).to_have_count(0)
 
     def test_a_failed_delivery_is_reported_inline_and_the_box_recovers(
             self, webapp, page):
@@ -695,24 +762,6 @@ class TestComposer:
         expect(composer.locator("button")).to_be_disabled()
         expect(composer.locator("button")).to_have_text("Sending…")
         expect(composer.locator("textarea")).to_be_disabled()
-
-    def test_the_composer_never_reaches_the_resume_route(self, webapp, page):
-        """The sharp edge, asserted as behaviour rather than as source.
-
-        A suspended run records the step AFTER its gate, so resuming this one
-        would start `implement` against a spec nobody approved. Using the
-        composer on a parked gate must not go near that route.
-        """
-        self._seed(webapp.install)
-        self._chat(page)
-        resumes = _record_requests(page, RESUME_URL)
-        composer = self._open(page, webapp, "issue-lifecycle")
-
-        composer.locator("textarea").fill("continue this")
-        composer.locator("button").click()
-        expect(composer.locator(".composer-status")).to_be_visible(
-            timeout=10_000)
-        assert not resumes
 
     def test_closing_the_slab_takes_the_composer_with_it(self, webapp, page):
         self._seed(webapp.install)
