@@ -7,7 +7,6 @@ import logging
 import shutil
 import tarfile
 import tempfile
-from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
@@ -15,6 +14,7 @@ import httpx
 import yaml
 
 from bobi import paths
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ def _write_meta(name: str, version: str, source: str) -> None:
     meta = {
         "version": version,
         "source": source,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": now_iso(),
     }
     _meta_path(name).write_text(json.dumps(meta, indent=2))
 

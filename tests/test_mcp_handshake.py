@@ -170,44 +170,107 @@ def _fake_transport_module(**attrs):
 
 
 def test_open_streamable_http_new_spelling(monkeypatch):
-    """mcp >= 1.29 / 2.0: headers ride an SDK-built httpx client."""
+    """mcp >= 1.25 / 2.0: headers ride an SDK-built httpx client.
+
+    The transport module here deliberately does NOT carry the factory
+    re-export: the factory resolves from its real home
+    (mcp.shared._httpx_utils) and must never decide which transport branch
+    runs — bundling it into the branch `try` reproduced the #1045 breakage
+    shape (new spelling present, factory absent → legacy-branch ImportError
+    naming the wrong symbol).
+    """
     import sys
+    import types
     seen = {}
 
     @contextlib.asynccontextmanager
     async def _client(url, *, http_client=None, terminate_on_close=True):
         seen["url"], seen["http_client"] = url, http_client
-        yield ("r", "w", None)
+        yield ("r", "w")   # mcp 2.0 yields (read, write) — no session-id slot
 
     class _HttpClient:
+        def __init__(self):
+            self.closed = False
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *exc):
+            self.closed = True
             return False
 
     def _create(headers=None):
         seen["headers"] = headers
-        return _HttpClient()
+        seen["client"] = _HttpClient()
+        return seen["client"]
 
+    utils = types.ModuleType("mcp.shared._httpx_utils")
+    utils.create_mcp_http_client = _create
+    monkeypatch.setitem(sys.modules, "mcp.shared._httpx_utils", utils)
     monkeypatch.setitem(
         sys.modules, "mcp.client.streamable_http",
-        _fake_transport_module(
-            streamable_http_client=_client, create_mcp_http_client=_create))
+        _fake_transport_module(streamable_http_client=_client))
 
     async def _run():
         async with mcp_handshake.open_streamable_http(
                 "https://x/mcp", headers={"a": "b"}) as streams:
             return streams
 
-    assert asyncio.run(_run()) == ("r", "w", None)
+    assert asyncio.run(_run()) == ("r", "w")
     assert seen["url"] == "https://x/mcp"
     assert seen["headers"] == {"a": "b"}
-    assert isinstance(seen["http_client"], _HttpClient)
+    assert seen["http_client"] is seen["client"]
+    assert seen["client"].closed   # the SDK-built client is closed on exit
+
+
+def test_open_streamable_http_builds_its_own_client_without_the_factory(
+        monkeypatch):
+    """New spelling present but the private factory module gone: fall back to
+    a hand-built httpx client with the same MCP defaults — never the legacy
+    import branch."""
+    import sys
+    seen = {}
+
+    @contextlib.asynccontextmanager
+    async def _client(url, *, http_client=None, terminate_on_close=True):
+        seen["http_client"] = http_client
+        yield ("r", "w")
+
+    monkeypatch.setitem(
+        sys.modules, "mcp.client.streamable_http",
+        _fake_transport_module(streamable_http_client=_client))
+    monkeypatch.setitem(sys.modules, "mcp.shared._httpx_utils", None)
+
+    async def _run():
+        async with mcp_handshake.open_streamable_http(
+                "https://x/mcp", headers={"a": "b"}) as streams:
+            return streams
+
+    try:                       # the hand-built client matches the httpx
+        import httpx2 as httpx_lib  # generation the installed SDK's transport
+    except ImportError:        # takes (mcp 2.0 moved to httpx2)
+        import httpx as httpx_lib
+    assert asyncio.run(_run()) == ("r", "w")
+    client = seen["http_client"]
+    assert isinstance(client, httpx_lib.AsyncClient)
+    assert client.follow_redirects is True
+    assert client.timeout.read == 300.0
+    assert client.headers["a"] == "b"
+
+
+def test_real_installed_sdk_ships_the_symbols_the_shim_relies_on():
+    """Contract test against the ACTUAL installed mcp: the shim's branch
+    condition and both transports' imports must resolve. (The old string-patch
+    was a de-facto pin on the SDK's names; this replaces it.)"""
+    import mcp.client.streamable_http as transport
+    assert (hasattr(transport, "streamable_http_client")
+            or hasattr(transport, "streamablehttp_client"))
+    from mcp import ClientSession, StdioServerParameters  # noqa: F401
+    from mcp.client.stdio import stdio_client  # noqa: F401
 
 
 def test_open_streamable_http_legacy_spelling(monkeypatch):
-    """mcp < 1.29 ships only streamablehttp_client, which takes headers."""
+    """mcp < 1.25 ships only streamablehttp_client, which takes headers."""
     import sys
     seen = {}
 

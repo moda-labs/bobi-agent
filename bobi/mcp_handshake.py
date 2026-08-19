@@ -55,35 +55,64 @@ def preflight_timeout(default: float = PREFLIGHT_DEFAULT_TIMEOUT) -> float:
     return value if math.isfinite(value) and value > 0 else default
 
 
+def _mcp_http_client(headers: dict[str, str] | None):
+    """An ``httpx.AsyncClient`` carrying the MCP-recommended defaults
+    (``Timeout(30, read=300)``, ``follow_redirects=True``).
+
+    Prefers the SDK's own factory, imported from its real home
+    (``mcp.shared._httpx_utils`` — its re-export from
+    ``mcp.client.streamable_http`` is incidental and must never decide which
+    transport branch runs). If a future release moves the private module,
+    build the same client by hand — with ``httpx2`` when it is installed,
+    because mcp 2.0's transport takes an ``httpx2.AsyncClient`` and a
+    factory-less mcp is a future one.
+    """
+    try:
+        from mcp.shared._httpx_utils import create_mcp_http_client
+    except ImportError:
+        try:
+            import httpx2 as httpx_lib
+        except ImportError:
+            import httpx as httpx_lib
+        return httpx_lib.AsyncClient(
+            headers=headers,
+            timeout=httpx_lib.Timeout(30.0, read=300.0),
+            follow_redirects=True)
+    return create_mcp_http_client(headers=headers)
+
+
 @contextlib.asynccontextmanager
 async def open_streamable_http(url: str, headers: dict[str, str] | None = None):
     """Open one streamable-HTTP transport across the mcp 2.0 rename.
 
-    mcp 2.0 renamed ``streamablehttp_client`` → ``streamable_http_client`` and
-    moved header configuration onto a caller-supplied ``httpx.AsyncClient``
-    (built here with the SDK's own ``create_mcp_http_client`` so the
-    MCP-recommended timeouts survive); releases before 1.29 ship only the
-    legacy spelling, which takes ``headers`` directly. Both yield the same
-    ``(read, write, get_session_id)`` tuple. The dependency floor is
-    ``mcp>=1.23``, so both spellings stay reachable; imports stay lazy to keep
-    the SDK off the framework import path.
+    mcp 1.25 added ``streamable_http_client`` (2.0 removes the legacy
+    ``streamablehttp_client``), moving header configuration onto a
+    caller-supplied ``httpx.AsyncClient`` (see ``_mcp_http_client``); releases
+    before 1.25 ship only the legacy spelling, which takes ``headers``
+    directly. The legacy client yields ``(read, write, get_session_id)``;
+    mcp 2.0's yields ``(read, write)`` — callers must touch only
+    ``streams[0]``/``streams[1]``. The dependency floor is ``mcp>=1.23``, so
+    both spellings stay reachable; imports stay lazy to keep the SDK off the
+    framework import path.
+
+    The branch is gated on the transport spelling ALONE: bundling another
+    import into the ``try`` would send its ImportError down the legacy branch,
+    which then fails on a symbol newer releases don't ship — reproducing the
+    #1045 breakage with an error naming the wrong spelling.
 
     The one transport opener for every streamable-HTTP caller (this module's
     ``_probe_http`` and the setup wizard's) - the rename must not be handled
     twice.
     """
     try:
-        from mcp.client.streamable_http import (
-            create_mcp_http_client,
-            streamable_http_client,
-        )
-    except ImportError:  # mcp < 1.29: only the legacy spelling exists
+        from mcp.client.streamable_http import streamable_http_client
+    except ImportError:  # mcp < 1.25: only the legacy spelling exists
         from mcp.client.streamable_http import streamablehttp_client
 
         async with streamablehttp_client(url, headers=headers) as streams:
             yield streams
         return
-    async with create_mcp_http_client(headers=headers) as http_client:
+    async with _mcp_http_client(headers) as http_client:
         async with streamable_http_client(url, http_client=http_client) as streams:
             yield streams
 
