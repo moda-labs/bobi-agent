@@ -63,20 +63,17 @@ def _mcp_http_client(headers: dict[str, str] | None):
     (``mcp.shared._httpx_utils`` — its re-export from
     ``mcp.client.streamable_http`` is incidental and must never decide which
     transport branch runs). If a future release moves the private module,
-    build the same client by hand — with ``httpx2`` when it is installed,
-    because mcp 2.0's transport takes an ``httpx2.AsyncClient`` and a
-    factory-less mcp is a future one.
+    build the same client by hand — with plain ``httpx``, which is what every
+    mcp the ``<2`` pin permits types its transport against (mcp 2.0 moved to
+    ``httpx2``; the deliberate migration that lifts the pin revisits this).
     """
     try:
         from mcp.shared._httpx_utils import create_mcp_http_client
     except ImportError:
-        try:
-            import httpx2 as httpx_lib
-        except ImportError:
-            import httpx as httpx_lib
-        return httpx_lib.AsyncClient(
+        import httpx
+        return httpx.AsyncClient(
             headers=headers,
-            timeout=httpx_lib.Timeout(30.0, read=300.0),
+            timeout=httpx.Timeout(30.0, read=300.0),
             follow_redirects=True)
     return create_mcp_http_client(headers=headers)
 

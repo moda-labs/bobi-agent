@@ -140,6 +140,41 @@ class TestMcp20FieldRenames:
         with pytest.raises(AttributeError):
             mcp_probe._call_errored(type("R", (), {}))
 
+    def test_shadowed_extra_field_never_wins_on_1x_shapes(self):
+        # mcp 1.x models are extra="allow": a server-supplied wire key with
+        # the 2.0 spelling lands as an attribute BESIDE the declared
+        # (camelCase) field. The declared field must win.
+        t = type("T", (), {"name": "get_profile",
+                           "inputSchema": {"required": ["id"]},
+                           "input_schema": {}})
+        assert mcp_probe._pick_safe_tool([t]) is None
+        out = type("R", (), {"isError": True, "is_error": False})
+        assert mcp_probe._call_errored(out) is True
+
+    def test_http_probe_touches_only_the_first_two_stream_slots(
+            self, tmp_path, monkeypatch):
+        # mcp 2.0's transport yields (read, write) — no session-id slot; a
+        # 3-unpack regression in _probe_http fails here.
+        import contextlib
+        from bobi import mcp_handshake
+
+        @contextlib.asynccontextmanager
+        async def _fake_open(url, headers=None):
+            yield ("r", "w")
+
+        seen = {}
+
+        async def _fake_handshake(read, write, call_name):
+            seen["streams"] = (read, write)
+            return {"ok": True}
+
+        monkeypatch.setattr(mcp_handshake, "open_streamable_http", _fake_open)
+        monkeypatch.setattr(mcp_probe, "_handshake", _fake_handshake)
+        res = anyio.run(mcp_probe._probe_http,
+                        {"url": "https://x/mcp"}, tmp_path, 5.0, None)
+        assert res == {"ok": True}
+        assert seen["streams"] == ("r", "w")
+
     def test_errored_call_reports_live_failure_in_the_mcp20_shape(
             self, monkeypatch):
         # Through _handshake: a 2.0-shaped errored result must land as

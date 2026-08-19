@@ -122,8 +122,13 @@ def _input_schema(tool) -> dict | None:
     """The tool's input schema across the mcp 2.0 field rename
     (``inputSchema`` → ``input_schema``; camelCase survives only as the wire
     alias). ``None`` means neither spelling exists — the caller must treat the
-    schema as unknown, never as "no required arguments"."""
-    for attr in ("input_schema", "inputSchema"):
+    schema as unknown, never as "no required arguments".
+
+    camelCase is checked FIRST: on 1.x it is the declared field (always
+    present, so the snake spelling is never consulted), while 2.0 never
+    exposes it as an attribute. Snake-first would let a server-supplied extra
+    wire key shadow the real field — 1.x models are ``extra="allow"``."""
+    for attr in ("inputSchema", "input_schema"):
         if hasattr(tool, attr):
             return getattr(tool, attr) or {}
     return None
@@ -132,8 +137,9 @@ def _input_schema(tool) -> dict | None:
 def _call_errored(out) -> bool:
     """Whether a tool call reported an error, across the mcp 2.0 field rename
     (``isError`` → ``is_error``). Fails loud when neither spelling exists —
-    a silent default here reported an ERRORED call as live under mcp 2.0."""
-    for attr in ("is_error", "isError"):
+    a silent default here reported an ERRORED call as live under mcp 2.0.
+    camelCase first, for the same shadowing reason as ``_input_schema``."""
+    for attr in ("isError", "is_error"):
         if hasattr(out, attr):
             return bool(getattr(out, attr))
     raise AttributeError("tool result has neither is_error nor isError")

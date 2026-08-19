@@ -65,11 +65,13 @@ def test_probe_stdio_connected(monkeypatch):
 
 
 def test_probe_http_connected(monkeypatch):
+    # The transport yields mcp 2.0's 2-tuple: the caller may touch only
+    # streams[0]/streams[1], so a 3-unpack regression fails here.
     _patch_handshake(monkeypatch, tools=("t",))
 
     @contextlib.asynccontextmanager
     async def _fake_http(url, headers=None):
-        yield ("r", "w", None)
+        yield ("r", "w")
     monkeypatch.setattr(mcp_handshake, "open_streamable_http", _fake_http)
 
     out = asyncio.run(mcp_handshake.probe_server(
@@ -246,14 +248,15 @@ def test_open_streamable_http_builds_its_own_client_without_the_factory(
                 "https://x/mcp", headers={"a": "b"}) as streams:
             return streams
 
-    try:                       # the hand-built client matches the httpx
-        import httpx2 as httpx_lib  # generation the installed SDK's transport
-    except ImportError:        # takes (mcp 2.0 moved to httpx2)
-        import httpx as httpx_lib
+    # Plain httpx, deliberately: every mcp the <2 pin permits types its
+    # transport against httpx, so the fallback must never hand it an
+    # httpx2 client even when httpx2 happens to be installed.
+    import httpx
     assert asyncio.run(_run()) == ("r", "w")
     client = seen["http_client"]
-    assert isinstance(client, httpx_lib.AsyncClient)
+    assert isinstance(client, httpx.AsyncClient)
     assert client.follow_redirects is True
+    assert client.timeout.connect == 30.0
     assert client.timeout.read == 300.0
     assert client.headers["a"] == "b"
 
