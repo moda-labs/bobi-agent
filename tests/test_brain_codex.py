@@ -110,7 +110,8 @@ async def test_usage_limit_failure_is_classified_as_exhausted_credits():
     session = _CodexSession(
         cwd="/tmp/x", instructions="", runner=_runner_of(events)
     )
-    await session.connect("hello")
+    await session.connect()
+    await session.query("hello")
 
     result = (await _drain(session))[-1]
 
@@ -125,7 +126,8 @@ async def test_not_logged_in_failure_is_classified_as_authentication():
     session = _CodexSession(
         cwd="/tmp/x", instructions="", runner=_runner_of(events)
     )
-    await session.connect("hello")
+    await session.connect()
+    await session.query("hello")
 
     result = (await _drain(session))[-1]
 
@@ -143,7 +145,8 @@ async def test_generic_codex_rate_limit_is_not_credit_exhaustion():
     session = _CodexSession(
         cwd="/tmp/x", instructions="", runner=_runner_of(events)
     )
-    await session.connect("hello")
+    await session.connect()
+    await session.query("hello")
 
     result = (await _drain(session))[-1]
 
