@@ -310,7 +310,9 @@ async def _drain(client):
     """Drain one live brain turn; return (final_text, turn_result).
 
     Shared by the live-brain integration suites (cross-model resume, gateway,
-    effort selection) so the brain message protocol is consumed in one place.
+    effort selection). Deliberately raw: the PRODUCT drain is
+    ``bobi.brain.turns.drain_turn``; this helper consumes the protocol
+    without the bookkeeping so the suites observe the brain directly.
     """
     from bobi.brain import AssistantText, TurnResult
 

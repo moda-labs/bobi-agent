@@ -307,7 +307,8 @@ async def test_supervised_agent_prepares_runtime_before_provider_client(monkeypa
          patch("bobi.runtime_guard.prepare_brain_runtime", side_effect=prepare), \
          patch("bobi.subagent.load_resumable_session_id", return_value=""), \
          patch("bobi.subagent.save_session_id"), \
-         patch("bobi.subagent.log_activity"), \
+         patch("bobi.brain.turns.save_session_id"), \
+         patch("bobi.brain.turns.log_activity"), \
          patch("bobi.subagent.get_registry", return_value=MagicMock()):
         result = await _run_agent_supervised(
             prompt="check", cwd="/tmp", run_key="k", phase="check", timeout=5,
