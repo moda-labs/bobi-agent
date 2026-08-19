@@ -22,6 +22,39 @@ from bobi.config import positive_int
 
 DEFAULT_ROUTE_LOOP_MAX_ITERATIONS = 3
 
+# The vocabulary a human answers an await gate in. It rides the resume as the
+# ``event`` scope, so a route step after the await reads it as
+# ``${{event.verdict}}``.
+#
+# Two values and no more, because every consumer has to be able to enumerate
+# them: the CLI rejects anything else outright, and a workflow route treats
+# everything that is not the advancing verdict - including an absent one - as
+# not an approval.
+GATE_VERDICT_APPROVE = "approve"
+GATE_VERDICT_REJECT = "reject"
+GATE_VERDICTS = (GATE_VERDICT_APPROVE, GATE_VERDICT_REJECT)
+
+
+def reads_gate_verdict(workflow: "Workflow", step_idx: int) -> bool:
+    """True when the step a resume would land on branches on the verdict.
+
+    ``approve`` needs no such step: it means "continue", which is what a bare
+    resume does anyway. ``reject`` does. A workflow that suspends on ``await:``
+    and has an ordinary step next would take a rejection and run that step -
+    advancing the work the human just refused - so a caller offering Reject has
+    to be able to find out first whether the workflow can honour it.
+
+    A substring test on the condition, deliberately: the route's expression is
+    author-written text, and the only thing worth asserting is that it consults
+    the verdict at all. Which way it branches is the workflow author's call and
+    is covered by their own tests (see the shipped route in
+    ``agents/eng-team/workflows/issue-lifecycle.yaml``).
+    """
+    if step_idx < 0 or step_idx >= len(workflow.steps):
+        return False
+    step = workflow.steps[step_idx]
+    return bool(step.condition) and "event.verdict" in step.condition
+
 
 @dataclass
 class HandoffContract:

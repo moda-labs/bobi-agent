@@ -21,7 +21,11 @@ import time
 import threading
 
 from bobi.brain import AssistantText, TurnResult, get_brain
-from bobi.brain.base import ERROR_KIND_AUTHENTICATION
+from bobi.brain.base import (
+    ERROR_KIND_AUTHENTICATION,
+    ERROR_KIND_CREDITS_EXHAUSTED,
+)
+from bobi.brain_availability import observe_brain_turn
 from bobi.inbox import Inbox, Message
 from bobi.sdk import (
     save_session_id,
@@ -949,16 +953,25 @@ class Session:
                                 self.name, cost, provider=provider,
                             )
                     self._last_api_error_status = msg.api_error_status
+                    observe_brain_turn(
+                        msg,
+                        session=self.name,
+                        provider=getattr(self._client, "provider", "anthropic"),
+                    )
                     if msg.is_error:
-                        if msg.error_kind == ERROR_KIND_AUTHENTICATION:
+                        if msg.error_kind in (
+                            ERROR_KIND_AUTHENTICATION,
+                            ERROR_KIND_CREDITS_EXHAUSTED,
+                        ):
                             error = (
                                 msg.error_message
                                 or msg.result_text
-                                or "brain authentication failed"
+                                or "brain unavailable"
                             )
                             log.error(
-                                "Session '%s' brain authentication failed: %s",
+                                "Session '%s' brain unavailable (%s): %s",
                                 self.name,
+                                msg.error_kind,
                                 error[:200],
                             )
                             self._set_state("error")

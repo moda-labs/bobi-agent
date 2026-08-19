@@ -7,14 +7,14 @@ import logging
 import shutil
 import tarfile
 import tempfile
-from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
 import httpx
 import yaml
 
-from bobi import paths
+from bobi import fsutil, paths
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -125,9 +125,11 @@ def _write_meta(name: str, version: str, source: str) -> None:
     meta = {
         "version": version,
         "source": source,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": now_iso(),
     }
-    _meta_path(name).write_text(json.dumps(meta, indent=2))
+    # Atomic: _read_meta treats an unparseable file as {}, so a torn write
+    # would drop the whole record, not one field.
+    fsutil.atomic_write_json(_meta_path(name), meta)
 
 
 class RemoteVersionUnavailable(RuntimeError):

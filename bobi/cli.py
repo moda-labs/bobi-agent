@@ -22,6 +22,10 @@ from bobi.install import (
 )
 
 from .__version__ import __version__
+# Module level, not lazy: `workflows resume --verdict` builds its click.Choice
+# out of this at import time, so the CLI and the workflow engine cannot drift
+# on what a gate may be answered with.
+from .workflow.schema import GATE_VERDICTS
 
 _PACKAGE_DIR = Path(__file__).parent
 
@@ -2423,15 +2427,34 @@ def workflow_status():
 
 @workflows.command("resume")
 @click.argument("run_id")
+@click.option("--verdict", type=click.Choice(GATE_VERDICTS), default=None,
+              help="The gate's answer, carried to the workflow as "
+                   "${{event.verdict}}.")
+@click.option("--reply", default="",
+              help="The human's own words, carried as ${{event.reply}}.")
 @click.option("--timeout", default=3600, help="Max execution time in seconds")
-def workflow_resume(run_id, timeout):
+def workflow_resume(run_id, verdict, reply, timeout):
     """Resume a suspended workflow run.
 
     Picks up from the step after the await that suspended it.
 
+    ``--verdict`` and ``--reply`` are the answer the gate was waiting for.
+    They land as the ``event`` scope, so a route step placed after the await
+    reads them as ``${{event.verdict}}`` / ``${{event.reply}}`` and sends the
+    run down the branch the human chose.
+
+    Both are optional and the scope is always set, so a resume with no verdict
+    resolves ``${{event.verdict}}`` to the empty string rather than to a
+    missing scope. That is not an approval, and a workflow's route is written
+    so the non-approving branch is the safe one. An unknown verdict is
+    refused here rather than resolved to something a route might advance on.
+
     Usage:
-        bobi agent eng workflows resume abc123
+        bobi agent eng workflows resume abc123 --verdict approve
     """
+    # `default=None` on the Choice, because click validates a default too and
+    # "" is not one of the verdicts. Absent and empty mean the same thing here.
+    verdict = verdict or ""
     _detect_project_root()
     from .workflow.state import WorkflowRun
     from .workflow.triggers import WorkflowDispatcher
@@ -2447,6 +2470,31 @@ def workflow_resume(run_id, timeout):
         click.echo(f"Run {run_id} is '{run.status}', not 'waiting'.", err=True)
         sys.exit(1)
 
+    # Everything that can refuse resolves BEFORE the claim. `claim()` renames
+    # <id>.json to <id>.resuming.json and nothing renames it back, so exiting
+    # after claiming leaves the run findable-forever and resumable-never
+    # (state.py's D071). The workflow lookup used to sit on the wrong side of
+    # this line.
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    wf = dispatcher.find_workflow(run.workflow_name)
+    if not wf:
+        click.echo(f"Workflow '{run.workflow_name}' not found.", err=True)
+        sys.exit(1)
+
+    # The same refusal the console makes, for the same reason: without a route
+    # on the verdict, a rejection would run the next step - advancing the work
+    # the human just refused. Checked here too because this command is driven
+    # by hand as well as by the spawn the console detaches.
+    from .workflow.schema import GATE_VERDICT_REJECT, reads_gate_verdict
+    if verdict == GATE_VERDICT_REJECT and not reads_gate_verdict(
+            wf, run.suspended_at_step):
+        click.echo(
+            f"Workflow '{run.workflow_name}' has no route on the gate's "
+            f"verdict at step {run.suspended_at_step}, so a rejection cannot "
+            f"be honoured. Resuming would run that step.", err=True)
+        sys.exit(1)
+
     # Claim before resuming. The event-driven path has always done this; this
     # command never did, so two concurrent resumes of the same run both ran it.
     # That is now reachable from the web app, which spawns this command — and
@@ -2456,21 +2504,27 @@ def workflow_resume(run_id, timeout):
         click.echo(f"Run {run_id} was claimed by another process.", err=True)
         sys.exit(1)
 
-    dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
-    wf = dispatcher.find_workflow(run.workflow_name)
-    if not wf:
-        click.echo(f"Workflow '{run.workflow_name}' not found.", err=True)
-        sys.exit(1)
-
     click.echo(f"Resuming {run.workflow_name} for {run.run_key} "
-               f"from step {run.suspended_at_step}...")
-    success = resume_workflow(run, wf, timeout=timeout)
-    if success:
-        click.echo("Workflow completed.")
-    else:
+               f"from step {run.suspended_at_step}"
+               + (f" with verdict '{verdict}'" if verdict else "") + "...")
+    # Always an event, even with no verdict: the scope then exists and holds
+    # an empty verdict, which a route reads as "not an approval". Passing no
+    # event at all would leave the scope missing, which resolves the same way
+    # but only after a log warning about an unknown scope.
+    event = {"data": {"verdict": verdict, "reply": reply}}
+    if not resume_workflow(run, wf, event=event, timeout=timeout):
         click.echo("Workflow failed.", err=True)
         sys.exit(1)
+    # resume_workflow returns True for two different endings: the run finished,
+    # or it parked on a LATER await step. The second is dormant, not done - the
+    # run's own ledger entry is back to "waiting" (#1048: one run, one record)
+    # - so report it as such instead of claiming completion. A rejected gate
+    # that reworks and re-gates ends here every cycle.
+    if run.status == "waiting":
+        click.echo("Workflow suspended again on a later await step. "
+                   "Run `workflows status` for the waiting run.")
+    else:
+        click.echo("Workflow completed.")
 
 
 @workflows.command("validate")

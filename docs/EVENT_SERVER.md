@@ -304,6 +304,9 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 | `system/launch.blocked` | launch lineage guard refused a launch (`rule`: `depth` \| `recursion`) | |
 | `system/launch.depth.approaching` | chain one level below `max_launch_depth` | |
 | `system/launch.lineage.dropped` | an unparseable chain was tolerated as a root | |
+| `system/brain.auth.failed` | a brain account requires operator re-authentication; deduped until recovery | |
+| `system/brain.credits.exhausted` | a brain account exhausted credits/quota; deduped until recovery | |
+| `system/brain.recovered` | a successful turn cleared a persisted brain availability incident | |
 
 `github:`, `linear:`, `slack:`, `whatsapp:`, and `discord:` are **global** topics (cross-bubble, gated by
 resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle

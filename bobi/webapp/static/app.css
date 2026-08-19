@@ -688,49 +688,91 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 }
 @keyframes blink { to { visibility: hidden; } }
 
-/* composer (light chrome — author in daylight) */
+/* composer - the reply box at the foot of the run slab (#987).
+
+   It sits on the slab's dark terminal surface, so it takes the --slab-*
+   ramp rather than the page's daylight chrome. The typed message joins a
+   transcript rendered in mono, so the field is mono; the note and the
+   button are chrome, and stay sans. */
 .composer {
-  display: flex;
-  gap: 10px;
-  padding: 12px 14px;
-  border-top: 1px solid var(--border-hairline);
-  background: var(--surface-card);
   flex: none;
+  padding: 12px 18px 14px;
+  border-top: 1px solid var(--slab-border);
+  background: var(--slab-surface);
 }
 .composer textarea {
-  flex: 1;
-  resize: none;
-  font-family: var(--font-sans);
-  font-size: 15px;
-  color: var(--text-primary);
-  background: var(--surface-card);
-  border: 1px solid var(--border-strong);
+  display: block;
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--slab-text);
+  background: var(--slab-bg);
+  border: 1px solid var(--slab-border);
   border-radius: var(--radius-md);
   padding: 9px 12px;
-  max-height: 160px;
-  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+  max-height: 180px;
+  transition: border-color var(--dur-fast) var(--ease),
+              box-shadow var(--dur-fast) var(--ease);
 }
-.composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.composer button {
-  font-family: var(--font-sans);
-  font-size: 14.5px;
-  font-weight: var(--weight-medium);
-  letter-spacing: var(--track-button);
-  color: var(--bobi-paper);
-  background: var(--accent);
-  border: none;
-  border-radius: var(--radius-sm);
-  height: 38px;
-  padding: 0 20px;
-  align-self: flex-end;
-  white-space: nowrap;
-  flex: none;
-  cursor: pointer;
-  transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+/* A human gate is state, and state is violet: the rail says this row is
+   waiting on a person, and the note beside the buttons names what for. */
+.composer.gate {
+  border-left: 2px solid var(--slab-accent);
+  padding-left: 16px;
 }
-.composer button:hover:not(:disabled) { opacity: .9; }
-.composer button:active:not(:disabled) { transform: scale(.97); }
-.composer button:disabled { opacity: .45; cursor: default; }
+/* The ended branch is a sentence, not a form - no field, no buttons. */
+.composer.ended > .composer-note { margin: 0; }
+.composer textarea::placeholder { color: var(--slab-muted); }
+/* Focus is one of violet's four meanings, so the ring is the accent. */
+.composer textarea:focus {
+  outline: none;
+  border-color: var(--slab-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--slab-accent) 22%, transparent);
+}
+.composer textarea:disabled { opacity: .55; }
+.composer-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  margin-top: 10px;
+}
+.composer-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--slab-muted);
+}
+.composer .btn {
+  background: transparent;
+  border-color: var(--slab-border);
+  color: var(--slab-muted);
+}
+.composer .btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--slab-accent) 12%, transparent);
+  border-color: var(--slab-accent);
+}
+.composer .btn.primary {
+  color: var(--slab-bg);
+  background: var(--slab-accent);
+  border-color: var(--slab-accent);
+}
+.composer .btn.primary:hover:not(:disabled) {
+  opacity: .9;
+  background: var(--slab-accent);
+  border-color: var(--slab-accent);
+}
+.composer-status {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--slab-muted);
+}
+.composer-status.bad {
+  color: color-mix(in srgb, var(--status-failed) 55%, var(--bobi-paper));
+}
 
 @media (max-width: 620px) {
   .sidebar { width: 168px; }

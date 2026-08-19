@@ -1,8 +1,17 @@
-# Force-resuming a waiting run
+# Resuming a waiting run
 
-> The agent UI no longer exposes force-resume or remind. Close is the one write
-> action an awaiting-action row offers. The endpoints below remain available to
-> the CLI/framework and to the hosted admin protocol.
+A run parked on an `await:` step is waiting for an answer. Resuming it is how
+that answer is delivered: the verdict rides the resume, lands as the run's
+`event` scope, and a route step placed immediately after the await reads it
+back and sends the run down the branch the human chose.
+
+That last part is the whole design. The engine records
+`suspended_at_step = step_idx + 1`, so a resume has always started the step
+AFTER the gate. Putting a ROUTE in that slot is what turns "continue past the
+thing you are waiting on" into "act on what you were told".
+
+> The agent page offers Approve / Reject on an awaiting-action row's composer,
+> and Close in the table. Remind is CLI and hosted-admin only.
 
 ## Waiting actions
 
@@ -20,8 +29,14 @@ resume/event delivery for a still-waiting run. The winner closes the workflow as
 steps. Both endpoints return `409` if the run is no longer waiting.
 
 `POST /api/agents/{name}/workflows/runs/{run_id}/resume` — the runs table's one
-write action. Everything else on the agent page reads; this restarts a workflow
-run that suspended waiting for an event that never arrived.
+write action. Everything else on the agent page reads; this answers a gate and
+lets the run continue.
+
+Request body, both fields optional:
+
+```json
+{"verdict": "approve", "reply": "looks right to me"}
+```
 
 Resume applies to `waiting` runs only. A **failed** run has a different
 affordance since #1048: its ledger entry keeps a step checkpoint, and
@@ -31,8 +46,51 @@ steps - see `docs/WORKFLOW_ENGINE.md`.
 
 ```json
 {"ok": true, "accepted": true, "run_id": "wf-1",
- "workflow": "await-review", "await_event": "pr.merged"}
+ "workflow": "await-review", "await_event": "pr.merged",
+ "verdict": "approve"}
 ```
+
+`verdict` is one of `bobi.workflow.schema.GATE_VERDICTS` — `approve` or
+`reject`. Anything else is a `409` before anything is spawned. `reply` is the
+human's own words, carried so the step that acts on the verdict can see why.
+
+`reject` additionally requires that the workflow can honour it. `approve`
+means "continue", which is what a bare resume does anyway; `reject` means "do
+NOT run the next step", and without a route on the verdict in the slot the
+resume lands on, resuming would run exactly that step. So a rejection of a
+workflow whose gate has no verdict route is a `409` naming the workflow,
+rather than a resume that does the opposite of what it was told
+(`schema.reads_gate_verdict`).
+
+Both reach the run as its `event` scope, readable in any later step as
+`${{event.verdict}}` / `${{event.reply}}`.
+
+## An absent verdict is not an approval
+
+The body is optional, and a resume without one still resumes — with an empty
+verdict. That is deliberate, and so is what it means.
+
+A workflow variable that resolves to nothing does so quietly: a missing scope
+or a missing key becomes `""` with a log warning and nothing else
+(`bobi/workflow/variables.py`). So an unanswered resume evaluates the route's
+condition to false and takes its `else`. **A workflow with a human gate must
+therefore write its route so the `else` is the safe branch**, testing for the
+one verdict that advances rather than for the one that does not:
+
+```yaml
+  - name: await_approval
+    await: approval
+
+  - name: approval_route
+    if: "${{event.verdict}} == 'approve'"
+    goto: implement
+    else: spec          # written out: a route with no else falls through to
+                        # the next step, which here is `implement`
+```
+
+Written the other way round — `if reject, goto spec` with no else — an
+unanswered resume, a verdict lost in a hop, or a typo'd key all fall straight
+into `implement`. That is the failure the shape above exists to remove.
 
 ## `accepted`, not `resumed`
 
@@ -41,10 +99,9 @@ is under way, and the page watches the runs table for the status to move — the
 same submit-then-poll discipline chat uses. **No request is ever held open for a
 workflow run.**
 
-The payload names the workflow and the awaited event because the UI confirms
-before firing: `workflows resume` force-continues the suspended step, and on an
-`await: approval` gate that proceeds *as if approved*. The confirm has to say
-what is about to be waved through.
+The payload names the workflow and the awaited event because the composer
+names what it is answering: an operator approving something should be able to
+see which gate they are approving.
 
 ## It spawns a process. Not a thread.
 
@@ -61,8 +118,9 @@ The web app is a long-lived process too, so the same trap applies, one step
 worse: a resume threaded into it would stamp the *web app's* pid. It also binds
 no runtime root, and `resume_workflow` needs one.
 
-So the endpoint spawns `bobi agent <name> workflows resume <run_id>` in its own
-session, detached, and returns. Root binding, registry stamping, and the run's
+So the endpoint spawns
+`bobi agent <name> workflows resume <run_id> --verdict <v> --reply <text>` in
+its own session, detached, and returns. Root binding, registry stamping, and the run's
 lifetime all belong to that process.
 
 ## Hosted runs take the same path
@@ -111,4 +169,4 @@ guard; the check is the good error message.
 |---|---|
 | `200` | accepted; a resume process is starting |
 | `404` | no run with that id, or no such agent |
-| `409` | the run is not `waiting` (already running, completed, failed, or claimed) |
+| `409` | the run is not `waiting` (already running, completed, failed, or claimed), or the verdict is not one the gate vocabulary contains |

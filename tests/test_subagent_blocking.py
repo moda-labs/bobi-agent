@@ -232,6 +232,75 @@ class TestMakeDeferHook:
 
 class TestRunAgentSupervisedNormal:
     @pytest.mark.asyncio
+    async def test_scheduled_auth_incident_alerts_once(self, monkeypatch):
+        posts = []
+        monkeypatch.setenv("BOBI_BRAIN", "stub")
+        monkeypatch.setenv("BOBI_STUB_BRAIN", "1")
+        monkeypatch.setattr(
+            "bobi.events.publish.post_event",
+            lambda topic, payload, project_path=None: posts.append((topic, payload)),
+        )
+
+        for _ in range(2):
+            result = await _run_agent_supervised(
+                prompt="__stub__:auth",
+                cwd="/tmp/test",
+                run_key="MOD-360-auth",
+                phase="monitor",
+                timeout=60,
+                fresh=True,
+            )
+            assert result.success is False
+
+        assert [topic for topic, _ in posts] == ["system/brain.auth.failed"]
+        assert "login-bootstrap" in posts[0][1]["remedy"]
+
+    @pytest.mark.asyncio
+    async def test_scheduled_credit_incident_dedupes_and_recovers(
+        self, monkeypatch
+    ):
+        posts = []
+        monkeypatch.setenv("BOBI_BRAIN", "stub")
+        monkeypatch.setenv("BOBI_STUB_BRAIN", "1")
+        monkeypatch.setattr(
+            "bobi.events.publish.post_event",
+            lambda topic, payload, project_path=None: posts.append((topic, payload)),
+        )
+
+        first = await _run_agent_supervised(
+            prompt="__stub__:credits",
+            cwd="/tmp/test",
+            run_key="MOD-360",
+            phase="monitor",
+            timeout=60,
+            fresh=True,
+        )
+        second = await _run_agent_supervised(
+            prompt="__stub__:credits",
+            cwd="/tmp/test",
+            run_key="MOD-360",
+            phase="monitor",
+            timeout=60,
+            fresh=True,
+        )
+        recovered = await _run_agent_supervised(
+            prompt="__stub__:reply:healthy",
+            cwd="/tmp/test",
+            run_key="MOD-360",
+            phase="monitor",
+            timeout=60,
+            fresh=True,
+        )
+
+        assert first.success is False
+        assert second.success is False
+        assert recovered.success is True
+        assert [topic for topic, _ in posts] == [
+            "system/brain.credits.exhausted",
+            "system/brain.recovered",
+        ]
+
+    @pytest.mark.asyncio
     async def test_normal_completion(self):
         """Agent runs, produces messages, completes successfully."""
         messages = [

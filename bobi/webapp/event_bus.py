@@ -472,8 +472,12 @@ class EventBusRuntime(TeamRuntime):
     # actions, so they take the full command budget (see
     # DEFAULT_RUN_WRITE_COMMAND_TIMEOUT) - and `resume` returns `accepted`,
     # never holding the request open for the workflow itself.
-    def resume_run(self, name: str, run_id: str) -> dict:
-        return self._run_write(name, "resume_run", run_id)
+    def resume_run(self, name: str, run_id: str, *, verdict: str = "",
+                   reply: str = "") -> dict:
+        # The verdict rides the command args, so the box answers the gate with
+        # what the operator chose rather than force-continuing it.
+        extra = {k: v for k, v in (("verdict", verdict), ("reply", reply)) if v}
+        return self._run_write(name, "resume_run", run_id, **extra)
 
     def remind_run(self, name: str, run_id: str) -> dict:
         return self._run_write(name, "remind_run", run_id)
@@ -481,10 +485,10 @@ class EventBusRuntime(TeamRuntime):
     def close_run(self, name: str, run_id: str) -> dict:
         return self._run_write(name, "close_run", run_id)
 
-    def _run_write(self, name: str, command: str, run_id: str) -> dict:
+    def _run_write(self, name: str, command: str, run_id: str, **args) -> dict:
         fleet, instance = decode_name(name)
         result = self._view_command(
-            fleet, instance, command, {"run_id": run_id},
+            fleet, instance, command, {"run_id": run_id, **args},
             timeout=self._run_write_command_timeout)
         return dict(result or {})
 

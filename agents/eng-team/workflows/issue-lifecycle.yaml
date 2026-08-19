@@ -44,6 +44,14 @@ steps:
       plan artifact, and records the plan path in the handoff).
       Write the implementation spec, review it, publish to the issue.
       Do NOT proceed to implementation — stop after the spec is written.
+
+      This step is also where a rejected approval comes back to. If the
+      reviewer's answer below is non-empty, this is a REWORK: revise the spec
+      you already published to address it, rather than writing a new one, and
+      say in the issue what you changed.
+
+      Reviewer's answer: ${{event.verdict}}
+      Reviewer's words: ${{event.reply}}
     handoff:
       required: [spec_url]
       optional: [plan_path]
@@ -76,6 +84,29 @@ steps:
   - name: await_approval
     await: approval
     timeout: 86400
+
+  # The gate's answer, read. A suspended run records the step AFTER its await,
+  # so the resume lands here — and this step, not the resume, decides where
+  # the run goes next.
+  #
+  # The condition tests for the ONE verdict that advances, and everything else
+  # goes back to `spec`. That direction is deliberate: an unset verdict
+  # resolves to the empty string (a missing scope resolves that way too, with
+  # only a log warning), so whichever branch is the `else` is the branch an
+  # unanswered resume takes. Reworking a spec nobody approved is safe;
+  # implementing one is not.
+  #
+  # `else` is written out rather than left implicit: a route with no else
+  # falls through to the next step, which here would be `implement` — exactly
+  # the outcome this step exists to prevent.
+  #
+  # The back edge to `spec` is bounded by the route loop's default
+  # max_iterations, so a gate that keeps being rejected exhausts the step
+  # rather than cycling forever.
+  - name: approval_route
+    if: "${{event.verdict}} == 'approve'"
+    goto: implement
+    else: spec
 
   - name: implement
     agent: engineer

@@ -33,6 +33,7 @@ from bobi.brain.base import (
     DeferredTool,
     StreamDelta,
     TurnResult,
+    classify_brain_unavailability,
 )
 from bobi.brain.gateway import (
     GatewayAwareEngine,
@@ -233,6 +234,15 @@ def _result_to_turn(
         error_kind = assistant_error_kind
         error_message = assistant_error_message
 
+    result_text = getattr(msg, "result", "") or ""
+    unavailable_kind = classify_brain_unavailability(
+        error_kind,
+        error_message or result_text,
+    )
+    if unavailable_kind:
+        error_kind = unavailable_kind
+        error_message = error_message or result_text
+
     is_error = bool(getattr(msg, "is_error", False) or error_kind)
 
     return TurnResult(
@@ -246,7 +256,7 @@ def _result_to_turn(
         total_cost_usd=getattr(msg, "total_cost_usd", 0.0) or 0.0,
         duration_ms=getattr(msg, "duration_ms", 0) or 0,
         num_turns=getattr(msg, "num_turns", 0) or 0,
-        result_text=getattr(msg, "result", "") or "",
+        result_text=result_text,
         deferred_tool=deferred,
         costs=costs,
     )

@@ -456,8 +456,8 @@ Each appendix entry names the surviving implementation — move callers to it; n
 
 **Validation gate**
 
-- [ ] `pytest tests/ -q` (full suite) green
-- [ ] Spot e2e (stub brain, isolated `BOBI_HOME`): agent boots, one event round-trips — proves the moved plumbing still wires up
+- [x] `pytest tests/ -q` (full suite) green
+- [x] Spot e2e (stub brain, isolated `BOBI_HOME`): agent boots, one event round-trips — proves the moved plumbing still wires up
 
 ### Phase 7 — event-server TS + web UI (bugs, security, duplication)
 
@@ -931,6 +931,33 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
   Suite: **4616 passed / 1 skipped**, the `a7de3b8` baseline of **4604** plus exactly the 12 tests added. No test was deleted — verified by `--collect-only` on both sides (4605 → 4617), not by arithmetic alone. A thirteenth test of mine was written and then removed before landing: `test_the_three_prefixes_are_distinct` exercised only a test-local helper, asserting that an f-string beginning `check-` begins with `check`, and would have stayed green against any production code at all. `pyflakes` over `bobi/` is **26 → 26 with ZERO new**, both sides non-zero. Q029's packaging is proven by a wheel-content diff (213 entries both sides, differing in exactly the one moved entry name) and a live `dep_bootstrap` differential — identical dependency hash and rendered build script — whose probe was sanity-checked to confirm the two sides genuinely import different files.
 
+
+- **2026-08-18** (mcp-2.0 residue session, PR #1054): **Q108's deferred
+  registry.py one-liner is DONE.** The 2026-08-17 Q108 note recorded
+  "registry.py's one aware site deliberately untouched — #1037 (in flight)
+  edits the surrounding lines; one-line follow-up after both land." Both
+  landed 2026-08-18; PR #1054 converts `registry.py`'s `fetched_at` to
+  `timeutil.now_iso()` (and folds `_write_meta` onto
+  `fsutil.atomic_write_json` per the house durability rule). The same PR
+  closes the #1046 post-merge review's mcp-2.0 residue (an `mcp<2` bound,
+  both probe field renames read era-native-first, the transport shim's
+  entangled try-import) — never plan items; recorded so the Q108 trail ends
+  somewhere.
+
+- **2026-08-18** (same session): **Phase 6's validation gate EXECUTED, both
+  arms, on `main` @ `07e378a1`** (run in a worktree whose tree hash is
+  byte-identical to that merge commit's). Full `pytest tests/ -q` including
+  integration + e2e (Node 20, `npm ci`, real Claude CLI): **5357 passed /
+  52 skipped / 1 failed** — the one failure is the KNOWN parked
+  TZ-sensitive test (`tests/e2e/test_webapp_ui.py::TestRunModal::
+  test_a_row_with_a_session_opens_its_transcript`, fails under PDT, passes
+  under `TZ=UTC` — re-proven this run; reported to Zach 2026-08-13,
+  deliberately unfiled, not a Phase 6 regression; CI's Playwright job is
+  green on the same tree). Spot e2e: `tests/integration/
+  test_e2e_event_flow.py` 4/4 by name — `[stub]` AND `[claude]` legs of
+  webhook→manager injection and response logging, real manager processes,
+  isolated `BOBI_HOME`. Phase 6 closes; the phase's two gate boxes flip in
+  this PR.
 
 ## Notes
 

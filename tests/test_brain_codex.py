@@ -10,7 +10,11 @@ import sys
 
 import pytest
 
-from bobi.brain import get_brain
+from bobi.brain import (
+    ERROR_KIND_AUTHENTICATION,
+    ERROR_KIND_CREDITS_EXHAUSTED,
+    get_brain,
+)
 from bobi.brain.base import AssistantText, TurnResult
 from bobi.brain.codex import (
     CodexBrain,
@@ -92,6 +96,61 @@ async def test_turn_converts_messages_and_captures_thread():
     assert result.costs[0].input_tokens == 1002
     assert result.costs[0].cached_input_tokens == 1000
     assert s._thread_id == "th-1"
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_failure_is_classified_as_exhausted_credits():
+    events = [
+        {"type": "thread.started", "thread_id": "th-limit"},
+        {
+            "type": "turn.failed",
+            "error": {"message": "You've hit your usage limit"},
+        },
+    ]
+    session = _CodexSession(
+        cwd="/tmp/x", instructions="", runner=_runner_of(events)
+    )
+    await session.connect()
+    await session.query("hello")
+
+    result = (await _drain(session))[-1]
+
+    assert result.error_kind == ERROR_KIND_CREDITS_EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_not_logged_in_failure_is_classified_as_authentication():
+    events = [
+        {"type": "error", "message": "Not logged in"},
+    ]
+    session = _CodexSession(
+        cwd="/tmp/x", instructions="", runner=_runner_of(events)
+    )
+    await session.connect()
+    await session.query("hello")
+
+    result = (await _drain(session))[-1]
+
+    assert result.error_kind == ERROR_KIND_AUTHENTICATION
+
+
+@pytest.mark.asyncio
+async def test_generic_codex_rate_limit_is_not_credit_exhaustion():
+    events = [
+        {
+            "type": "turn.failed",
+            "error": {"message": "429 rate limit exceeded; retry later"},
+        },
+    ]
+    session = _CodexSession(
+        cwd="/tmp/x", instructions="", runner=_runner_of(events)
+    )
+    await session.connect()
+    await session.query("hello")
+
+    result = (await _drain(session))[-1]
+
+    assert result.error_kind == ""
 
 
 @pytest.mark.asyncio

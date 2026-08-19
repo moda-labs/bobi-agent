@@ -353,10 +353,18 @@ class TeamRuntime(ABC):
         """
 
     @abstractmethod
-    def resume_run(self, name: str, run_id: str) -> dict:
-        """Resume one suspended workflow run.
+    def resume_run(self, name: str, run_id: str, *, verdict: str = "",
+                   reply: str = "") -> dict:
+        """Resume one suspended workflow run, answering its gate.
 
-        Returns ``{"ok", "accepted", "run_id", "workflow", "await_event"}``.
+        ``verdict`` is one of ``bobi.workflow.schema.GATE_VERDICTS`` and
+        ``reply`` is the human's own words. Both reach the workflow as the
+        ``event`` scope, so a route step after the await takes the branch the
+        answer chose. An unrecognised verdict raises ``TeamLifecycleError``
+        (409) instead of resuming; an absent one is not an approval.
+
+        Returns
+        ``{"ok", "accepted", "run_id", "workflow", "await_event", "verdict"}``.
         ``accepted`` is the honest word: a workflow run takes as long as it
         takes, so this returns once the resume is under way and the caller
         watches ``runs`` for the status to move - the same submit-then-poll
@@ -695,7 +703,13 @@ class LocalRuntime(TeamRuntime):
             from bobi import service
 
             try:
-                service.ask(root, session, text,
+                # An empty session means the team manager. The route documents
+                # `subagent` as optional and the hosted runtime has always read
+                # it that way (supervisor/admin.py), so both runtimes resolve
+                # it identically rather than one answering `unknown agent ''`.
+                target = (session or "").strip() \
+                    or service.manager_session_name(root)
+                service.ask(root, target, text,
                             timeout=DEFAULT_CHAT_TIMEOUT)
                 outcome = {"team": name, "status": "done"}
             except Exception as e:  # noqa: BLE001 - job must resolve
@@ -875,8 +889,10 @@ class LocalRuntime(TeamRuntime):
     # supervisor's admin commands call too - one implementation, both
     # runtimes. Only the error vocabulary is mapped here: the shared module
     # raises its own exceptions so it can stay free of this one.
-    def resume_run(self, name: str, run_id: str) -> dict:
-        return self._run_action("resume_run", name, run_id)
+    def resume_run(self, name: str, run_id: str, *, verdict: str = "",
+                   reply: str = "") -> dict:
+        return self._run_action("resume_run", name, run_id,
+                                verdict=verdict, reply=reply)
 
     def remind_run(self, name: str, run_id: str) -> dict:
         return self._run_action("remind_run", name, run_id)
@@ -884,12 +900,12 @@ class LocalRuntime(TeamRuntime):
     def close_run(self, name: str, run_id: str) -> dict:
         return self._run_action("close_run", name, run_id)
 
-    def _run_action(self, action: str, name: str, run_id: str) -> dict:
+    def _run_action(self, action: str, name: str, run_id: str, **kw) -> dict:
         from bobi.webapp import run_actions
 
         root = self._resolve(name)
         try:
-            return getattr(run_actions, action)(root, run_id)
+            return getattr(run_actions, action)(root, run_id, **kw)
         except run_actions.UnknownRun:
             raise UnknownRun(run_id) from None
         except (run_actions.RunNotWaiting, run_actions.ActionFailed) as e:

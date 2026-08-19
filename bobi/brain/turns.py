@@ -22,6 +22,7 @@ import logging
 from dataclasses import dataclass
 
 from bobi.brain.base import AssistantText, TurnResult
+from bobi.brain_availability import observe_brain_turn
 # Safe only while bobi.sdk keeps its own bobi.brain imports function-local
 # (sdk.py does, deliberately) - hoisting those would close an import cycle
 # through this module.
@@ -72,10 +73,12 @@ async def drain_turn(client, session_name: str, *, model: str) -> TurnOutcome:
     On every non-empty assistant message: capture it as the turn's final
     text and write the ``response`` activity record. On the terminal
     ``TurnResult``: save the session id (recorded with *model* so the
-    store's model record stays in step with mid-run switches, #642) and
-    write the full-fact ``stop`` record (#845 - every terminal fact the
-    brain reported, so diagnosing a failure never needs the vendor CLI's
-    own transcript).
+    store's model record stays in step with mid-run switches, #642),
+    observe the turn for brain-availability alerting (MOD-360 - one call
+    here covers both spawn-style drivers, where the two drain copies each
+    carried their own), and write the full-fact ``stop`` record (#845 -
+    every terminal fact the brain reported, so diagnosing a failure never
+    needs the vendor CLI's own transcript).
 
     Cancellation passes through untouched: an outer ``asyncio.timeout``
     cancels this coroutine and converts at its own boundary, so a caller's
@@ -92,6 +95,11 @@ async def drain_turn(client, session_name: str, *, model: str) -> TurnOutcome:
                                  session=session_name)
             elif isinstance(msg, TurnResult):
                 save_session_id(session_name, msg.session_id, model=model)
+                observe_brain_turn(
+                    msg,
+                    session=session_name,
+                    provider=getattr(client, "provider", "anthropic"),
+                )
                 log_activity("stop", {
                     "session_id": msg.session_id,
                     "is_error": msg.is_error,

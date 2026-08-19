@@ -37,6 +37,7 @@ from bobi.brain.base import (
     BrainMessage,
     BrainSession,
     TurnResult,
+    classify_brain_unavailability,
 )
 from bobi.brain.gateway import GatewayAwareEngine, gateway_base_url
 
@@ -304,10 +305,12 @@ class _CodexSession:
             elif etype in ("turn.failed", "error"):
                 err = ev.get("error")
                 msg = err.get("message") if isinstance(err, dict) else None
+                detail = msg or ev.get("message") or "codex turn failed"
                 yield TurnResult(
                     session_id=self._thread_id or "",
                     is_error=True,
-                    result_text=msg or ev.get("message") or "codex turn failed",
+                    error_kind=classify_brain_unavailability("", detail),
+                    result_text=detail,
                 )
                 return
 

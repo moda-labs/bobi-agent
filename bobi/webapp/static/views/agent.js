@@ -16,6 +16,7 @@
    raw epochs and seconds because it does not know the viewer's timezone. */
 
 import { fmtUsd, fmtEst, fmtTok, EST_NOTE } from "../shell.js";
+import { composerMode, resumeBody } from "./composer.js";
 
 /* --- formatting ------------------------------------------------------ */
 
@@ -73,6 +74,16 @@ function mk(tag, cls, text) {
   if (text != null) n.textContent = text;
   return n;
 }
+
+/* --- the composer ---------------------------------------------------- */
+
+/** How long the reply poll waits before it stops claiming to be waiting.
+
+    The server owns the turn budget (`DEFAULT_CHAT_TIMEOUT`, 300s), so the
+    client has to outlive it - quit at 30s and a reply that arrives well
+    inside the budget reads as a failure that never happened. */
+const CHAT_WAIT_MS = 330000;
+const CHAT_POLL_MS = 1500;
 
 /* --- the view -------------------------------------------------------- */
 
@@ -156,6 +167,7 @@ export function mountAgent(el, { api, name }) {
           <button class="btn bobi-btn small" data-el="slabClose" type="button">Close</button>
         </div>
         <div class="transcript" data-el="slabBody"></div>
+        <div class="composer" data-el="slabComposer" hidden></div>
       </div>
     </div>`;
   el.appendChild(page);
@@ -663,7 +675,19 @@ export function mountAgent(el, { api, name }) {
 
   /* --- the dark slab ------------------------------------------------ */
 
-  function closeSlab() { els.backdrop.classList.remove("open"); }
+  // Bumped whenever the slab opens or closes. The composer's send outlives
+  // its own click (a submit, then a poll the server may hold for minutes),
+  // so every continuation checks the token it started under and drops out
+  // if the operator has moved on. Without it a reply lands in a slab now
+  // showing a different run.
+  let slabToken = 0;
+
+  function closeSlab() {
+    slabToken += 1;
+    els.backdrop.classList.remove("open");
+    els.slabComposer.hidden = true;
+    els.slabComposer.innerHTML = "";
+  }
   els.slabClose.addEventListener("click", closeSlab);
   els.backdrop.addEventListener("click", (e) => {
     if (e.target === els.backdrop) closeSlab();
@@ -672,11 +696,14 @@ export function mountAgent(el, { api, name }) {
   document.addEventListener("keydown", onKey);
 
   async function openSlab(row) {
+    const token = ++slabToken;
     els.backdrop.classList.add("open");
     els.slabTitle.textContent = row.title || "";
     els.slabMeta.textContent = "";
     els.slabBody.innerHTML = "";
     els.slabBody.appendChild(mk("div", "tr-empty", "Loading…"));
+    els.slabComposer.hidden = true;
+    els.slabComposer.innerHTML = "";
 
     // Rows with a session get a transcript; rows without get details.
     // That is the rule, and it is decided by data rather than by kind.
@@ -684,8 +711,12 @@ export function mountAgent(el, { api, name }) {
       els.slabKind.textContent = "transcript";
       const { ok, data } = await api(
         `${base}/subagents/${encodeURIComponent(row.session_id)}/transcript`);
+      // Open one row, then another, and the slower read must not paint over
+      // the row the operator is actually looking at.
+      if (token !== slabToken) return;
       if (!ok || !data) return slabError("Could not read that transcript.");
       renderTranscript(row, data);
+      renderComposer(row);
       return;
     }
 
@@ -742,6 +773,209 @@ export function mountAgent(el, { api, name }) {
       els.slabBody.appendChild(line);
     }
     els.slabBody.scrollTop = els.slabBody.scrollHeight;
+  }
+
+  /* --- the composer -------------------------------------------------- */
+
+  /** The reply box under a transcript. `composerMode` picks the branch from
+      the read model rather than from the row's kind; see composer.js.
+
+        live   the text is delivered to that session, through the same
+               `/chat` endpoint (and the same `inbox.deliver` underneath) that
+               `bobi agent <name> message` reaches from a terminal.
+        gate   the run is parked on a human approval. Approve or Reject
+               resumes it with that verdict, and the workflow's own route step
+               decides where the verdict sends it. The typed text rides along
+               as the reason.
+        ended  nothing is behind this row and there is no gate to answer, so
+               there is no control - a box that accepted typing here would be
+               promising a delivery that cannot happen. */
+  function renderComposer(row) {
+    const mode = composerMode(row);
+    const box = els.slabComposer;
+    box.innerHTML = "";
+    // Reset, never accumulate: one slab element is reused for every row.
+    box.className = "composer " + mode;
+    box.hidden = false;
+
+    if (mode === "ended") {
+      box.appendChild(mk("p", "composer-note",
+        "This session has ended and it is not waiting on anything, so there "
+        + "is nothing here to reply to."));
+      return;
+    }
+
+    const gate = mode === "gate";
+    const awaited = ((row.detail && row.detail.await_event) || "approval")
+      .replaceAll("_", " ");
+
+    const label = gate ? "Approve" : "Send";
+    const input = mk("textarea");
+    input.rows = 2;
+    input.placeholder = gate ? "Why? (optional, goes to the agent)"
+                             : "Reply to this session…";
+    input.setAttribute("aria-label",
+      gate ? "Reason for this decision" : "Reply to this session");
+
+    const foot = mk("div", "composer-foot");
+    foot.appendChild(mk("span", "composer-note", gate
+      ? `This run is awaiting ${awaited}. Approving resumes it into its next `
+        + "step; rejecting sends it back to rework in the same session."
+      : "Delivered to this session, the same way the CLI delivers a message."));
+
+    // Reject sits before Approve, and is the quiet one: the advancing action
+    // is the one that should take the deliberate click.
+    let reject = null;
+    if (gate) {
+      reject = mk("button", "btn bobi-btn small", "Reject");
+      reject.type = "button";
+      foot.appendChild(reject);
+    }
+    const send = mk("button", "btn bobi-btn small primary", label);
+    send.type = "button";
+    foot.appendChild(send);
+
+    const status = mk("p", "composer-status");
+    // The outcome arrives minutes later with no focus change, so a screen
+    // reader has to be told rather than left to notice.
+    status.setAttribute("role", "status");
+    status.hidden = true;
+
+    box.appendChild(input);
+    box.appendChild(foot);
+    box.appendChild(status);
+
+    const ui = { input, send, reject, status, gate, label };
+    if (gate) {
+      send.addEventListener("click", () => resumeGate(row, ui, "approve"));
+      reject.addEventListener("click", () => resumeGate(row, ui, "reject"));
+      return;
+    }
+    send.addEventListener("click", () => sendComposer(row, ui));
+    input.addEventListener("keydown", (e) => {
+      // Enter sends and Shift+Enter breaks the line: the chat idiom, and the
+      // reason the control is a textarea rather than an input.
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendComposer(row, ui);
+      }
+    });
+    // No Enter-to-send on the gate branch: there are two verdicts, so there
+    // is no default one, and guessing which is meant is how a spec gets
+    // approved by a stray keystroke.
+  }
+
+  /** Say something under the box. Inline, never a toast: this modal is what
+      the operator is reading, and a send's outcome belongs beside the box
+      that produced it rather than floating over the page. */
+  function composerSays(ui, text, bad) {
+    ui.status.textContent = text;
+    ui.status.className = "composer-status" + (bad ? " bad" : "");
+    ui.status.hidden = !text;
+  }
+
+  function composerBusy(ui, busy, verb) {
+    ui.input.disabled = busy;
+    ui.send.disabled = busy;
+    if (ui.reject) ui.reject.disabled = busy;
+    ui.send.textContent = busy ? (verb || "Sending…") : ui.label;
+  }
+
+  /** Answer a human gate. The verdict is the payload; the run's own route
+      step decides what it means, which is why this posts the same call for
+      both and never tries to work out where the workflow will go next. */
+  async function resumeGate(row, ui, verdict) {
+    if (ui.send.disabled) return;
+    const token = slabToken;
+    composerBusy(ui, true, verdict === "approve" ? "Approving…" : "Rejecting…");
+    composerSays(ui, "", false);
+
+    const { ok, data } = await api(
+      `${base}/workflows/runs/${encodeURIComponent(row.run_id)}/resume`,
+      { method: "POST",
+        body: JSON.stringify(resumeBody(verdict, ui.input.value)) });
+    if (token !== slabToken) return;
+    composerBusy(ui, false);
+    if (!ok || !data || !data.accepted) {
+      composerSays(ui, (data && data.error) || "The verdict was not accepted.",
+                   true);
+      return;
+    }
+
+    // Accepted, not finished: the resume is a spawn and the run takes as long
+    // as it takes. The table is where the status moves, so say that rather
+    // than implying this modal will show the result.
+    ui.input.value = "";
+    composerSays(ui, verdict === "approve"
+      ? "Approved. The run is resuming; watch the table for it to move."
+      : "Rejected. The work goes back to rework in the same session, and a "
+        + "new waiting row appears when it reaches the gate again.",
+      false);
+    pollRuns();
+  }
+
+  async function sendComposer(row, ui) {
+    const text = ui.input.value.trim();
+    if (!text || ui.send.disabled) return;
+    const token = slabToken;
+    composerBusy(ui, true);
+    composerSays(ui, "", false);
+
+    // Only the live branch reaches here: a gate is answered by resuming its
+    // run, and a row with neither gets no control at all.
+    const { ok, data } = await api(`${base}/chat`,
+      { method: "POST",
+        body: JSON.stringify({ subagent: row.session_id, text }) });
+    if (token !== slabToken) return;
+    if (!ok || !data || !data.message_id) {
+      composerBusy(ui, false);
+      composerSays(ui, (data && data.error) || "The message was not accepted.",
+                   true);
+      return;
+    }
+
+    const job = await awaitChatJob(data.message_id, token);
+    if (token !== slabToken) return;
+    composerBusy(ui, false);
+
+    if (!job) {
+      // Past the server's own budget. The turn may still land, so say that
+      // rather than calling it a failure we did not observe.
+      composerSays(ui, "Still waiting past the server's 5 minute budget. "
+        + "Reopen this run to see whether the reply arrived.", true);
+      return;
+    }
+    if (job.status === "error") {
+      composerSays(ui, job.error || "The message was not delivered.", true);
+      return;
+    }
+
+    ui.input.value = "";
+    // The slab is otherwise one-shot: the 4s timers refresh the table, not
+    // this. Without a re-fetch the answer is invisible until it is reopened.
+    const fresh = await api(
+      `${base}/subagents/${encodeURIComponent(row.session_id)}/transcript`);
+    if (token !== slabToken) return;
+    if (!fresh.ok || !fresh.data) {
+      composerSays(ui, "Delivered, but the transcript could not be re-read.",
+                   true);
+      return;
+    }
+    renderTranscript(row, fresh.data);
+  }
+
+  /** Poll a submitted chat job until it resolves. Null means it never did
+      inside the window, which is not the same thing as an error. */
+  async function awaitChatJob(messageId, token) {
+    const deadline = Date.now() + CHAT_WAIT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, CHAT_POLL_MS));
+      if (token !== slabToken) return null;
+      const { ok, data } = await api(
+        `${base}/chat/${encodeURIComponent(messageId)}`);
+      if (ok && data && data.status && data.status !== "pending") return data;
+    }
+    return null;
   }
 
   /** Details for a run whose story is entirely in its row — a workflow run

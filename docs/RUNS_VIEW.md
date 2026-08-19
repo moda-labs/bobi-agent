@@ -30,7 +30,8 @@ text search), `offset=`, and `limit=` (default 100).
     "error": "",
     "session_id": "", "run_id": "wf-71",
     "detail": {"await_event": "pr.merged", "suspended_at_step": 3,
-               "run_key": "", "repo": "", "resumable": true}}],
+               "run_key": "", "repo": "", "resumable": true,
+               "live": false}}],
  "counts": {"all": 14, "running": 1, "awaiting_action": 2, "failed": 2},
  "total": 14, "offset": 0, "limit": 100, "query": "",
  "truncated": false}
@@ -59,6 +60,26 @@ The clock runs from the last resume, not from first suspension.
 
 **`status=failed` is the terminal-failure tab.** It returns `failed` and
 `crashed`. Human approval and clarification gates use `status=awaiting_action`.
+
+## `detail.live`: can this row be spoken to right now
+
+`detail.live` is on **every** row, whatever its kind, and it answers one
+question: is the session behind this row addressable at this moment. It is
+true exactly when the row's `session_id` is in
+`SessionRegistry.list_active()` - the same membership guard `service.ask`
+applies before it delivers - and it is stamped from the same registry read the
+rest of the fold already does, which reaps an active status with a dead pid on
+the way through.
+
+It exists because `status` cannot answer the question. `idle` is a live
+manager waiting for work *and* a workflow that just suspended onto a gate,
+whose process has already exited (`_session_status` and `_workflow_status`
+both map onto it). A caller that guesses from `status` guesses wrong in the
+permissive direction: it offers to send a message nobody will receive.
+
+The run modal's composer branches on it ([RUN_DRILLDOWNS.md](RUN_DRILLDOWNS.md)).
+Deriving it client-side would mean re-deriving four separate server-side
+invariants in the browser, so the server answers what it already knows.
 
 `status` and `query` filter before `offset` and `limit` select a page. Search
 matches the visible row fields, identifiers, and the kind-specific `detail`
