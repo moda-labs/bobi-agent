@@ -47,8 +47,10 @@ Two things hold across the entire run:
 Workflows are YAML files. They ship inside an agent team package under
 `workflows/` and resolve at runtime exclusively from the installed pack image at
 `$BOBI_HOME/agents/<name>/run/package/workflows/` (see `triggers.py`). A
-workflow has a name, a human-readable `trigger`, an optional `description`, and
-an ordered list of `steps`:
+workflow has a name, a human-readable `trigger`, an optional `description`, an
+optional `period` (`hourly` / `daily` / `weekly` / `monthly` - one run per
+period across every dispatch path, see **Execution model**), and an ordered
+list of `steps`:
 
 ```yaml
 name: issue-lifecycle
@@ -365,17 +367,39 @@ the step's output scope and feed downstream routing and templating.
    caller opts into (#850). A derived key also starts a fresh transcript, and
    refuses to take over a suspended (`waiting`) run; `--id-random` opts out of
    the derivation entirely for deliberate parallel fan-out.
+
+   A workflow that declares `period:` (`hourly` / `daily` / `weekly` /
+   `monthly`) owns its run key outright (#1048). Admission derives the key
+   from the workflow name and the current period bucket -
+   `daily-standup-2026-08-10` - and **overrides** any caller `--id`, so a
+   scheduled tick, a manual catch-up, and an event reaction all land on ONE
+   run identity per period. The run ledger (below) is then consulted: a
+   completed entry for the period refuses a relaunch, a suspended one names
+   its awaited event, and a `running` entry blocks only while a live process
+   actually holds the session - a run that died without a terminal status is
+   closed and its ledger entry flipped to `failed`, so a stale entry can
+   never block the period. `--id-random` is refused for a periodic workflow.
 2. **Seed context.** Build the `VariableContext` with the `input`,
    `requested_by`, and (if used) `worktree` scopes.
-3. **Run the step loop** in `_run_workflow_async`. Walk steps by index.
+3. **Open the run's ledger entry.** Every run gets a `WorkflowRun` record
+   (`bobi/workflow/state.py`) at start, not only the ones that later suspend
+   (#1048). If the previous run under this key **failed** at a checkpoint, the
+   entry is adopted instead: the persisted scopes are restored and the step
+   loop starts at `checkpoint_step`, so a retry resumes where the failure
+   happened rather than replaying completed steps (`fresh` opts out, exactly
+   as it does for the transcript).
+4. **Run the step loop** in `_run_workflow_async`. Walk steps by index.
    Route/action/notify steps execute inline and advance. Prompt steps inject,
-   drain the response, validate the handoff, and capture outputs. Await steps
-   persist and return.
-4. **Terminate honestly.** A `finally` block emits the truthful terminal event,
+   drain the response, validate the handoff, and capture outputs. After each
+   completed prompt/action/notify step the ledger entry is checkpointed - the
+   next step index plus the full variable scopes. Await steps flip the same
+   entry to `waiting` and return.
+5. **Terminate honestly.** A `finally` block emits the truthful terminal event,
    `agent/session.completed` on success or `agent/session.failed` (carrying the
    error) on any failure path, and durably records the matching terminal status
-   in the registry. A suspended run is *not* terminal: it skips this entirely
-   and stays `waiting`.
+   in the registry. The ledger entry is closed the same way - `completed`, or
+   `failed` with its checkpoint kept for the next retry. A suspended run is
+   *not* terminal: it skips this entirely and stays `waiting`.
 
 The brain session opens **lazily, at the first prompt step that executes**, and
 is then reused across all prompt steps, so the agent keeps full context. The
@@ -410,12 +434,14 @@ launch pipeline, alongside `max_concurrent_agents` and `spend_cap`.
 Await steps make workflows durable across long waits (a human approval, a CI
 build, a downstream PR event) without holding a live process.
 
-**On suspend**, the engine writes a `WorkflowRun` record
-(`bobi/workflow/state.py`) to `$BOBI_HOME/state/workflow/runs/<run_id>.json`. It
-captures everything needed to continue: `workflow_name`, `suspended_at_step`
-(the index of the *next* step), `await_event`, `session_name`, the full
-`variable_scopes`, `repo`, `cwd`, and `run_key`. Writes are atomic (temp file
-then rename) so a process killed mid-write cannot leave a truncated record.
+**On suspend**, the engine flips the run's own ledger entry - the
+`WorkflowRun` record opened at launch (#1048) - to `waiting` at
+`$BOBI_HOME/state/workflow/runs/<run_id>.json`. Suspension is a state of the
+run, not a second record. The entry captures everything needed to continue:
+`workflow_name`, `suspended_at_step` (the index of the *next* step),
+`await_event`, `session_name`, the full `variable_scopes`, `repo`, `cwd`, and
+`run_key`. Writes are atomic (temp file then rename) so a process killed
+mid-write cannot leave a truncated record.
 
 **On resume**, a suspended run is picked up by
 `bobi agent <name> workflows resume <run_id>`. Resume is **manual today**: the

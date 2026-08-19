@@ -5,8 +5,10 @@ failed. The second is answered by a single table, so the three places an
 agent's work is recorded have to become one shape.
 
 - **sessions** — `SessionRegistry`: the manager and every subagent it ran
-- **workflow runs** — `run/state/workflow/runs/*.json`, including the ones
-  suspended waiting for a human approval or clarification
+- **workflow runs** — `run/state/workflow/runs/*.json`. Every workflow run
+  leaves one (#1048), including the ones suspended waiting for a human
+  approval or clarification - suspension is a state of the run's own record,
+  not a separate one
 - **monitor runs** — `run/state/monitor_runs/*.json`, one record per firing,
   plus one per completed retry-park recovery ([MONITORS.md](MONITORS.md))
 

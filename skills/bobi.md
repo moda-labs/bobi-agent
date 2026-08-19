@@ -177,6 +177,10 @@ not.
 - `--id-random` mints a random key, for deliberately running N copies of an
   identical task at once. It cannot be combined with `--id`, and its keys are
   prefixed `rand-` so `subagents list` shows which runs opted out.
+- A workflow that declares `period:` overrides all of the above: the key is
+  always `<workflow>-<period bucket>` (e.g. `daily-standup-2026-08-10`), one
+  run per period across every dispatch path. `--id` is overridden, a completed
+  period refuses relaunch, and `--id-random` is refused outright.
 
 A derived key also implies `--fresh`: it is an inference about the launch, not a
 caller pointing at a run to continue. It additionally refuses to land on a
