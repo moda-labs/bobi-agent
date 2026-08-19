@@ -735,6 +735,24 @@ def derive_run_key(workflow_name: str, task: str, *, project: str = "",
     return f"adhoc-{hashlib.sha256(dials.encode()).hexdigest()[:12]}"
 
 
+def _workflow_period_key(workflow_name: str) -> str:
+    """The period run key for *workflow_name*, or "" when it is not periodic.
+
+    Derived HERE, at launch admission, and nowhere later (#1048): the launcher
+    and its detached child can straddle a period boundary, and two derivations
+    would mint two identities for one dispatch. A workflow that cannot be
+    found resolves to "" - the child reports the missing workflow itself.
+    """
+    from bobi.workflow.triggers import WorkflowDispatcher
+
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    workflow = dispatcher.find_workflow(workflow_name)
+    if workflow is None or not workflow.period:
+        return ""
+    return workflow.period_run_key()
+
+
 def _resolve_run_key(workflow_name: str, task: str, run_key: str | None,
                      random_key: bool, *, project: str = "", role: str = "",
                      model: str = "", effort: str = "") -> tuple[str, bool]:
@@ -1191,10 +1209,30 @@ def launch_agent(
     instead of the workflow orchestrator.
     """
     project = _resolve_project_name(cwd)
-    run_key, derived_key = _resolve_run_key(workflow_name, task, run_key,
-                                            random_key, project=project,
-                                            role=role, model=model,
-                                            effort=effort)
+    period_key = "" if persistent else _workflow_period_key(workflow_name)
+    if period_key:
+        # The workflow field owns the period (#1048): every dispatch path -
+        # scheduled tick, manual catch-up, event reaction - lands on the same
+        # run identity, so the admission below can dedupe them. A caller's key
+        # is deliberately overridden, not honored: honoring it is exactly the
+        # two-identities-one-period shape behind the #1016 double-publish.
+        if random_key:
+            raise ValueError(
+                f"Workflow {workflow_name} declares a period; --id-random "
+                "would run the same period twice, which the period exists to "
+                "prevent."
+            )
+        if run_key and run_key != period_key:
+            log.info(
+                "Workflow %s declares a period; overriding run key %r with "
+                "the period key %s", workflow_name, run_key, period_key,
+            )
+        run_key, derived_key = period_key, False
+    else:
+        run_key, derived_key = _resolve_run_key(workflow_name, task, run_key,
+                                                random_key, project=project,
+                                                role=role, model=model,
+                                                effort=effort)
     fresh = fresh or derived_key
 
     if persistent:
@@ -1289,12 +1327,53 @@ def launch_agent(
             # the entry wholesale a few lines down.
             existing, _ = close_dead_run(existing, registry)
 
+        # The run ledger (#1048): a periodic workflow admits ONE run per
+        # period, across every dispatch path. The registry only remembers the
+        # latest holder of a session name, so "this period already completed"
+        # must be answered by the durable run record instead. Consulted after
+        # the dead-run reap above so a run that died without a terminal
+        # status has already been closed - its ledger entry is then flipped
+        # to failed rather than left "running" to block the period forever
+        # (the liveness check the naive period-key design lacked).
+        if period_key:
+            from bobi.workflow.state import WorkflowRun
+            prior_run = WorkflowRun.find_by_run_key(workflow_name, run_key)
+            if prior_run and prior_run.status == "completed":
+                raise DuplicateRunError(
+                    f"This period already ran: {run_key} completed at "
+                    f"{prior_run.completed_at}. The next period admits the "
+                    f"next run.",
+                    session_name=session_name, status="completed",
+                    derived_key=False,
+                )
+            if prior_run and prior_run.status in ("waiting", "resuming"):
+                raise DuplicateRunError(
+                    f"This period's run is suspended: {run_key} is awaiting "
+                    f"{prior_run.await_event or 'an event'} and resumes on "
+                    f"it (or from the console runs view).",
+                    session_name=session_name, status=prior_run.status,
+                    derived_key=False,
+                )
+            if (prior_run and prior_run.status == "running"
+                    and not (existing and existing.status in ACTIVE_STATUSES)):
+                # The ledger says running but no live process holds the
+                # session (reaped above, or the registry entry is gone).
+                # Close the entry honestly; the relaunch below adopts its
+                # checkpoint. A LIVE run falls through to the active-run
+                # refusal below.
+                prior_run.status = "failed"
+                prior_run.save()
+
         # A DERIVED key also refuses a suspended run. "waiting" is dormant, not
         # free: the process exited and an await event resumes it. An explicit
         # --id may legitimately re-dispatch onto that name; a launch that only
         # matched by task text cannot mean that, and would take over the
-        # suspended run's session, worktree branch and registry entry.
-        blocking = ACTIVE_STATUSES + (("waiting",) if derived_key else ())
+        # suspended run's session, worktree branch and registry entry. A
+        # PERIOD key refuses one too: the period is in flight at a gate, and
+        # its ledger refusal above already said so - this is the registry's
+        # matching backstop.
+        blocking = ACTIVE_STATUSES + (
+            ("waiting",) if (derived_key or period_key) else ())
         if existing and existing.status in blocking:
             # A caller that never chose this key cannot act on the session name
             # alone - it has to be told the key came from its own task text,
@@ -1318,11 +1397,22 @@ def launch_agent(
                 # status it is shown says otherwise invites it to disbelieve
                 # the whole refusal.
                 lead = "A suspended run already holds this name"
-                remedy = (
-                    f"It is awaiting an event, so it will not finish on its "
-                    f"own and cannot be cancelled; re-dispatch onto it with "
-                    f"--id {existing.run_key!r} if that is what you mean."
-                )
+                if period_key:
+                    # --id cannot be the remedy here: a period key overrides
+                    # any caller key, so that re-dispatch lands right back on
+                    # this refusal.
+                    remedy = (
+                        "It is this period's run, parked at an await step; "
+                        "it resumes when its event arrives (or from the "
+                        "console runs view)."
+                    )
+                else:
+                    remedy = (
+                        f"It is awaiting an event, so it will not finish on "
+                        f"its own and cannot be cancelled; re-dispatch onto "
+                        f"it with --id {existing.run_key!r} if that is what "
+                        f"you mean."
+                    )
             else:
                 lead = "A run is already active"
                 remedy = "Cancel it first or wait for it to complete."

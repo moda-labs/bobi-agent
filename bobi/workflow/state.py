@@ -41,6 +41,10 @@ class WorkflowRun:
     cwd: str = ""
     run_key: str = ""
     resumed_at: str = ""
+    # Step checkpoint: the index the run's NEXT step would have been, persisted
+    # after each completed step. A retry of a failed run starts here instead of
+    # replaying from step 0 (#1048). -1 = no step has completed yet.
+    checkpoint_step: int = -1
 
     def save(self, root: Path | None = None):
         path = _runs_dir(root) / f"{self.run_id}.json"
@@ -70,6 +74,7 @@ class WorkflowRun:
             cwd=data.get("cwd", ""),
             run_key=data.get("run_key", ""),
             resumed_at=data.get("resumed_at", ""),
+            checkpoint_step=data.get("checkpoint_step", -1),
         )
 
     @classmethod
@@ -175,15 +180,28 @@ class WorkflowRun:
                     continue
                 if data.get("await_event") != await_event:
                     continue
-                if run_key:
-                    trigger_data = data.get("trigger_event", {}).get("data", {})
-                    if trigger_data.get("run_key") != run_key:
-                        continue
+                if run_key and data.get("run_key") != run_key:
+                    continue
                 if repo and data.get("repo", "") != repo:
                     continue
                 return cls.from_dict(data)
             except (json.JSONDecodeError, KeyError):
                 continue
+        return None
+
+    @classmethod
+    def find_by_run_key(cls, workflow_name: str, run_key: str,
+                        root: Path | None = None) -> WorkflowRun | None:
+        """The most recent run of *workflow_name* under *run_key*, if any.
+
+        This is the ledger read behind launch admission (#1048): a periodic
+        workflow's period key answers "did this period already run?" here,
+        across every dispatch path. Most recent by file mtime, so a retried
+        period reflects the retry's outcome, not the first attempt's.
+        """
+        for run in cls.list_runs(root=root):
+            if run.workflow_name == workflow_name and run.run_key == run_key:
+                return run
         return None
 
     @classmethod

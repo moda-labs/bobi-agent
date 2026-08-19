@@ -2224,3 +2224,224 @@ class TestSessionConstructionFailureIsTerminal:
     def test_emits_a_terminal_lifecycle_event(self, monkeypatch, tmp_path):
         _, emitted = self._run(monkeypatch, MagicMock(), tmp_path)
         assert any("fail" in ev for ev in emitted), emitted
+
+
+# ---------------------------------------------------------------------------
+# Workflow period (#1048)
+# ---------------------------------------------------------------------------
+
+class TestWorkflowPeriod:
+    def _load(self, tmp_path, body):
+        p = tmp_path / "wf.yaml"
+        p.write_text(textwrap.dedent(body))
+        return load_workflow(p)
+
+    def test_period_parses(self, tmp_path):
+        wf = self._load(tmp_path, """
+            name: standup
+            period: daily
+            steps:
+              - name: post
+                prompt: post the standup
+        """)
+        assert wf.period == "daily"
+
+    def test_period_defaults_empty(self, tmp_path):
+        wf = self._load(tmp_path, """
+            name: standup
+            steps:
+              - name: post
+                prompt: post
+        """)
+        assert wf.period == ""
+
+    def test_unknown_period_rejected_at_load(self, tmp_path):
+        with pytest.raises(ValueError, match="period 'fortnightly'"):
+            self._load(tmp_path, """
+                name: standup
+                period: fortnightly
+                steps:
+                  - name: post
+                    prompt: post
+            """)
+
+    @pytest.mark.parametrize("period,fmt", [
+        ("hourly", "%Y-%m-%dT%H"),
+        ("daily", "%Y-%m-%d"),
+        ("weekly", "%G-W%V"),
+        ("monthly", "%Y-%m"),
+    ])
+    def test_period_run_key_buckets(self, period, fmt):
+        wf = Workflow(name="standup", steps=[], period=period)
+        fixed = 1754838000.0
+        expected = "standup-" + time.strftime(fmt, time.localtime(fixed))
+        assert wf.period_run_key(fixed) == expected
+
+    def test_same_period_same_key_across_dispatchers(self):
+        # The whole point: two dispatch paths in one period derive ONE
+        # identity, so admission can dedupe them (#1016's shape).
+        wf = Workflow(name="standup", steps=[], period="daily")
+        t = 1754838000.0
+        assert wf.period_run_key(t) == wf.period_run_key(t + 3600)
+
+
+# ---------------------------------------------------------------------------
+# The run ledger (#1048) - every run gets a WorkflowRun entry
+# ---------------------------------------------------------------------------
+
+class RecordingBrain:
+    def __init__(self):
+        self.clients = []
+
+    def make_session(self, **_kwargs):
+        c = FakeBrainClient()
+        self.clients.append(c)
+        return c
+
+    def all_queries(self):
+        return [q for c in self.clients for q in c.queries]
+
+
+class TestRunLedger:
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        _bind_runtime_root(tmp_path, monkeypatch)
+
+    def _run(self, workflow, brain=None, **kwargs):
+        brain = brain or RecordingBrain()
+        kwargs.setdefault("task", "t")
+        kwargs.setdefault("repo", "r")
+        kwargs.setdefault("cwd", "/tmp")
+        with patch("bobi.brain.get_brain", return_value=brain), \
+             patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(workflow, **kwargs)
+        return result, brain
+
+    def _resume(self, run, workflow, brain=None):
+        brain = brain or RecordingBrain()
+        with patch("bobi.brain.get_brain", return_value=brain), \
+             patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = resume_workflow(run, workflow)
+        return result, brain
+
+    def test_completed_run_leaves_a_completed_entry(self):
+        wf = Workflow(name="t", steps=[StepDef(name="s1", prompt="do it")])
+        result, _ = self._run(wf, run_key="42")
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "completed"
+        assert runs[0].run_key == "42"
+        assert runs[0].workflow_name == "t"
+        assert runs[0].completed_at != ""
+
+    def test_failed_run_leaves_failed_entry_with_checkpoint(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it"),
+            StepDef(name="s2", prompt="handoff please",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        result, _ = self._run(wf, run_key="42")
+        assert result is False
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "failed"
+        # s1 completed, so the checkpoint points a retry at s2 (index 1).
+        assert runs[0].checkpoint_step == 1
+
+    def test_retry_resumes_from_checkpoint_not_step_zero(self):
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+        first = WorkflowRun.list_runs()[0]
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain = self._run(fixed, run_key="42")
+        assert result is True
+        queries = brain.all_queries()
+        assert not any("unmistakable step one prompt" in q for q in queries), (
+            "retry replayed the completed step instead of resuming at the "
+            "checkpoint")
+        assert any("do step two" in q for q in queries)
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1, "retry minted a second ledger entry"
+        assert runs[0].run_id == first.run_id
+        assert runs[0].status == "completed"
+
+    def test_fresh_launch_ignores_the_checkpoint(self):
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain = self._run(fixed, run_key="42", fresh=True)
+        assert result is True
+        assert any("unmistakable step one prompt" in q
+                   for q in brain.all_queries())
+
+    def test_suspend_is_a_state_of_the_same_entry(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it"),
+            StepDef(name="gate", await_event="pr.merged"),
+        ])
+        result, _ = self._run(wf, run_key="42")
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        # The old shape minted a SECOND record at suspension; the ledger keeps
+        # one entry per run (#1048).
+        assert len(runs) == 1
+        assert runs[0].status == "waiting"
+        assert runs[0].await_event == "pr.merged"
+        assert runs[0].suspended_at_step == 2
+        assert runs[0].run_key == "42"
+
+    def test_resume_that_suspends_again_stays_waiting(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+            StepDef(name="g2", await_event="e2"),
+            StepDef(name="s3", prompt="three"),
+        ])
+        self._run(wf, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "waiting"
+
+        result, _ = self._resume(run, wf)
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "waiting", (
+            "a resume that suspended again was closed as completed")
+        assert runs[0].await_event == "e2"
+
+        run = WorkflowRun.list_runs()[0]
+        result, _ = self._resume(run, wf)
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "completed"
