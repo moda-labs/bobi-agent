@@ -310,7 +310,9 @@ async def _drain(client):
     """Drain one live brain turn; return (final_text, turn_result).
 
     Shared by the live-brain integration suites (cross-model resume, gateway,
-    effort selection) so the brain message protocol is consumed in one place.
+    effort selection). Deliberately raw: the PRODUCT drain is
+    ``bobi.brain.turns.drain_turn``; this helper consumes the protocol
+    without the bookkeeping so the suites observe the brain directly.
     """
     from bobi.brain import AssistantText, TurnResult
 
@@ -393,26 +395,48 @@ def dual_brain_cli_run(dual_brain_env):
     return _make_cli_run(dual_brain_env)
 
 
-@pytest.fixture
-def clean_session(bobi_env):
-    """Clean up a named session from the registry."""
+def _drop_session(name):
+    """Retire *name* from whichever install this process is bound to.
+
+    The registry is resolved per call, never cached: the bound root is pinned
+    per test, so a registry captured at fixture setup would outlive its env.
+    """
+    from bobi.sdk import get_registry
+    registry = get_registry()
+    registry.mark_done(name)
+    session_dir = registry.session_dir(name)
+    if session_dir.exists():
+        shutil.rmtree(session_dir)
+
+
+def _clean_session():
+    """Shared body for the `clean_session` fixtures - clean on both ends."""
     names = []
 
     def _register(name):
         names.append(name)
-        from bobi.sdk import get_registry, SessionRegistry
-        registry = get_registry()
-        registry.mark_done(name)
-        session_dir = registry.session_dir(name)
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
+        _drop_session(name)
 
     yield _register
 
     for name in names:
-        from bobi.sdk import get_registry, SessionRegistry
-        registry = get_registry()
-        registry.mark_done(name)
-        session_dir = registry.session_dir(name)
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
+        _drop_session(name)
+
+
+@pytest.fixture
+def clean_session(bobi_env):
+    """Clean up a named session from the registry."""
+    yield from _clean_session()
+
+
+@pytest.fixture
+def stub_clean_session(stub_bobi_env):
+    """`clean_session` for the stub-only lane.
+
+    Same body; the DEPENDENCY is the whole point. The autouse root binder
+    prefers `bobi_env` wherever it appears in a test's fixture graph, so a
+    stub-only test that reached for `clean_session` would pin this process to
+    the claude install while its CLI subprocess wrote to the stub one - and
+    then clean, and read back, the wrong registry.
+    """
+    yield from _clean_session()

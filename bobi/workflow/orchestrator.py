@@ -27,13 +27,9 @@ from bobi.sdk import (
     log_activity, SessionEntry, session_handoff_path,
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
-from bobi.subagent import (
-    _emit_lifecycle_event,
-    _network_drop_error,
-    _timeout_error,
-    _tool_crash_error,
-)
-from bobi.brain_availability import observe_brain_turn
+from bobi.brain.turns import drain_turn
+from bobi.subagent import _emit_lifecycle_event
+from bobi.timeutil import now_iso
 from bobi.workflow.schema import Workflow, StepDef
 from bobi.workflow.state import WorkflowRun
 from bobi.workflow.variables import VariableContext
@@ -413,7 +409,7 @@ def resume_workflow(
     run.status = "running"
     run.await_event = ""
     run.suspended_at_step = -1
-    run.resumed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+    run.resumed_at = now_iso()
     run.save()
 
     _emit_lifecycle_event("agent/workflow.resumed", {
@@ -447,7 +443,7 @@ def resume_workflow(
     duration = time.time() - started_at
     if success:
         run.status = "completed"
-        run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        run.completed_at = now_iso()
         _emit_lifecycle_event("agent/workflow.completed", {
             "run_key": run_key,
             "workflow": workflow.name,
@@ -551,19 +547,27 @@ async def _run_workflow_async(
                 return candidate
         return None
 
-    def _continuation_prompt(step: StepDef) -> str:
+    def _context_prefix() -> str:
+        """The run's context as a labelled block prepended to a step prompt.
+
+        This is the ONLY delivery of the launch task and persisted scopes
+        (#1016): it rides the first step prompt of a fresh transcript instead
+        of draining a turn of its own, so nothing in the dispatch text can
+        execute before a step's instruction frames it. ``input.task`` travels
+        inside the block as a scope value like every other variable.
+        """
         scopes = {
             name: data for name, data in ctx.scopes.items()
             if name != "_runtime"
         }
         context_yaml = yaml.safe_dump(scopes, sort_keys=True).strip()
         return (
-            f"Continue workflow `{workflow.name}` for issue #{run_key}. "
-            f"The next step is `{step.name}`. Use this workflow context from "
-            "the original input and prior handoffs:\n\n"
+            f"Workflow `{workflow.name}` context for issue #{run_key} — the "
+            "original input and prior handoffs, as reference for the "
+            "instruction that follows:\n\n"
             "```yaml\n"
             f"{context_yaml}\n"
-            "```"
+            "```\n\n"
         )
 
     def _make_session(resume_id=None, agent_name="", model="", effort="", *,
@@ -688,65 +692,51 @@ async def _run_workflow_async(
     # terminal in the registry (the reconciler leaves "waiting" alone).
     suspended = False
 
-    # Try resume, fall back to fresh session
-    for attempt in range(2):
-        resume_id = (saved_id or None) if attempt == 0 else None
-        client = None
-        try:
-            # Inside the try, not before it (D029). Session construction
-            # itself can raise — prepare_brain_runtime hitting the
-            # runtime-guard EPERM class, or an unresolvable agent prompt —
-            # and out here that exception escaped BOTH this retry and the
-            # terminal-honesty try/finally below, so the run emitted no
-            # session.failed, no workflow.failed, and left its registry entry
-            # stuck "running" until the dead-man reconciler mis-reported it.
-            client = _make_session(
+    # The brain session is opened lazily, at the first prompt step that
+    # actually executes (#1016): connect() is never a turn, no text is
+    # delivered at open, and a workflow whose reachable steps are all
+    # deterministic (route/action/notify/await) opens no session at all.
+    client = None
+    # True while the run's context (launch input, persisted scopes) still has
+    # to reach the agent — consumed by prepending _context_prefix() to the
+    # next step prompt. Set at session open and on any fresh mid-run rebuild.
+    context_pending = False
+
+    async def _open_session() -> bool:
+        """Open the run's session: native resume when the saved transcript is
+        usable, else fresh. Returns True when the transcript was resumed.
+
+        Raises on a fresh-connect failure; the step loop's except path emits
+        the honest terminal events (D029's concern lives inside the big try
+        now, so a construction failure cannot escape the terminal-honesty
+        finally).
+        """
+        nonlocal client, saved_id
+        for attempt in range(2):
+            resume_id = (saved_id or None) if attempt == 0 else None
+            c = _make_session(
                 resume_id, agent_name=current_agent, model=current_model,
                 effort=current_effort, max_turns=current_max_turns,
             )
-            if resume_id:
-                initial_prompt = None
-            elif start_step > 0 and first_prompt_step is not None:
-                # Any fresh session on a RESUMED run (model guard, cleared
-                # session id, or a stale-resume retry) re-injects the
-                # persisted scopes rather than starting with the bare
-                # "Resuming workflow" task.
-                initial_prompt = _continuation_prompt(first_prompt_step)
-            else:
-                initial_prompt = task
-            await client.connect(initial_prompt)
-            if resume_id:
-                await client.query(task)
-            drain = await _drain_response(
-                client, session_name, run_key, model=current_model,
-            )
-            if drain.error:
-                raise RuntimeError(drain.error)
-            break
-        except Exception as e:
-            if resume_id and attempt == 0:
-                log.warning(f"Resume failed (stale session?), retrying fresh: {e}")
-                save_session_id(session_name, "")
-                try:
-                    # May be None: _make_session itself can be what raised.
-                    if client is not None:
-                        await client.disconnect()
-                except Exception:
-                    pass
-                continue
-            # An empty failure_error is what surfaces to an operator as
-            # "unknown error" - always name at least the exception type (#845).
-            run_failed = True
-            failure_error = _named_exception(e)
-            break
+            try:
+                await c.connect()
+            except Exception as e:
+                if resume_id:
+                    log.warning(
+                        f"Resume failed (stale session?), retrying fresh: {e}")
+                    save_session_id(session_name, "")
+                    saved_id = ""
+                    try:
+                        await c.disconnect()
+                    except Exception:
+                        pass
+                    continue
+                raise
+            client = c
+            return bool(resume_id)
+        raise RuntimeError("session open fell through both attempts")
 
     try:
-        if run_failed:
-            return False
-
-        # save_session_id inside the drain already recorded the session id
-        # the run actually got (resume mints a fresh id; a retry-fresh start
-        # replaces the stale one) - do not write the pre-resume id back.
         registry.update(session_name, status="running")
 
         step_idx = start_step
@@ -890,15 +880,29 @@ async def _run_workflow_async(
                 })
 
                 suspended = True
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
                 return True
 
             # Prompt step — inject into the persistent session
             step_start = time.time()
             registry.update(session_name, phase=step.name)
+
+            if client is None:
+                # First prompt turn of this process. Open under the launch
+                # dials (computed for first_prompt_step, with the saved-id
+                # model guard already applied); the switch branch below
+                # corrects to this step's own dials exactly as it would
+                # mid-run. The context block is owed whenever the transcript
+                # does not already carry THIS dispatch's input: always on a
+                # fresh run's first prompt turn (a resumed transcript holds
+                # the previous dispatch, not this task), and on any fresh
+                # transcript for a resumed run.
+                resumed = await _open_session()
+                context_pending = (start_step == 0) or not resumed
 
             step_model = _effective_step_model(step)
             step_effort = _effective_step_effort(step)
@@ -972,7 +976,7 @@ async def _run_workflow_async(
                         max_turns=current_max_turns,
                     )
                     try:
-                        await client.connect(None)
+                        await client.connect()
                     except Exception as e:
                         # Stale/unresumable session: fall back to the fresh
                         # path below instead of failing the whole run.
@@ -992,16 +996,11 @@ async def _run_workflow_async(
                         model=current_model, effort=current_effort,
                         max_turns=current_max_turns,
                     )
-                    await client.connect(_continuation_prompt(step))
-                    drain = await _drain_response(
-                        client, session_name, run_key, model=current_model,
-                    )
-                    if drain.error:
-                        run_failed, failure_error = True, drain.error
-                        _emit_step_failed(
-                            run_key, workflow.name, step.name, drain.error,
-                        )
-                        return False
+                    await client.connect()
+                    # The re-injected scopes ride this step's prompt (#1016)
+                    # instead of draining a context-only turn: a fresh
+                    # transcript's first turn is the step turn.
+                    context_pending = True
 
             _emit_lifecycle_event("agent/step.started", {
                 "run_key": run_key,
@@ -1012,11 +1011,14 @@ async def _run_workflow_async(
             })
 
             prompt = _build_step_prompt(step, ctx, session_name, step.name)
+            if context_pending:
+                prompt = _context_prefix() + prompt
+                context_pending = False
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
             drain = await _drain_response(
-                client, session_name, run_key, model=current_model,
+                client, session_name, model=current_model,
             )
 
             # A turn-cap kill is recoverable, not terminal (#845): the harness
@@ -1064,7 +1066,7 @@ async def _run_workflow_async(
                     max_turns=current_max_turns,
                 )
                 try:
-                    await client.connect(None)
+                    await client.connect()
                     await client.query(
                         _turn_budget_resume_prompt(step, final_try)
                     )
@@ -1081,7 +1083,7 @@ async def _run_workflow_async(
                     )
                     break
                 drain = await _drain_response(
-                    client, session_name, run_key, model=current_model,
+                    client, session_name, model=current_model,
                 )
 
             if drain.final_text is None:
@@ -1103,7 +1105,7 @@ async def _run_workflow_async(
                     f"Please update your handoff file with these fields and confirm."
                 )
                 await client.query(fix_prompt)
-                await _drain_response(client, session_name, run_key,
+                await _drain_response(client, session_name,
                                       model=current_model)
                 handoff = _read_handoff(session_name, step.name)
                 missing = _validate_handoff(step, handoff)
@@ -1134,6 +1136,26 @@ async def _run_workflow_async(
             log.info(f"Step {step.name} completed ({duration:.0f}s): {outputs}")
 
             step_idx += 1
+
+        if client is None and start_step == 0 and task:
+            # No prompt step executed, so the launch brief was delivered to no
+            # agent turn — deterministic steps did all the work. Complete
+            # honestly, but say so: a brief that silently vanishes is how a
+            # workflow whose only prompt step sits behind an untaken route
+            # hides its own inaction (#1016 §5.2).
+            log.info(
+                "Workflow %s completed without a prompt step; the launch "
+                "task was not delivered to any agent turn.", workflow.name,
+            )
+            _emit_lifecycle_event("agent/workflow.brief_undelivered", {
+                "run_key": run_key,
+                "workflow": workflow.name,
+                "task": task[:500],
+                "text": (
+                    f"Workflow {workflow.name} ran no agent turn; launch "
+                    "task not delivered"
+                ),
+            })
 
         return True
 
@@ -1190,71 +1212,38 @@ async def _run_workflow_async(
                 error=failure_error if run_failed else "",
                 emit_confirmed=bool(landed),
             )
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
 
 async def _drain_response(
-    client, session_name: str, run_key: str, *, model: str,
+    client, session_name: str, *, model: str,
 ) -> DrainResult:
-    """Drain one turn. Returns ``(final_text, error, error_kind)``.
+    """Adapt one drained turn into the step loop's flat shape.
 
     ``final_text`` is None exactly when the turn failed; ``error`` is then
     always non-empty and ``error_kind`` carries the brain's classification
     (e.g. ``max_turns_reached``) so callers can act on the failure MODE
     without pattern-matching prose.
 
-    ``model`` is required: it is the model the session currently runs under,
-    and every save must record it so the store's model record stays in step
-    with mid-run switches (#642).
+    The drain itself (text capture, the model-stamped session-id save,
+    activity records, stream-failure normalization) is
+    ``bobi.brain.turns.drain_turn``; this adapter only folds the brain's own
+    turn verdict into that flat shape.
     """
-    from bobi.brain import AssistantText, TurnResult
-
-    final_text = ""
-    try:
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantText):
-                if msg.text:
-                    final_text = msg.text
-                    log_activity("response", {"text": final_text[:500]},
-                                 session=session_name)
-            elif isinstance(msg, TurnResult):
-                save_session_id(session_name, msg.session_id, model=model)
-                observe_brain_turn(
-                    msg,
-                    session=session_name,
-                    provider=getattr(client, "provider", "anthropic"),
-                )
-                # Every terminal fact the brain reported, in the session log
-                # (#845). A bare `stop` record is why diagnosing a turn-cap
-                # kill used to require the vendor CLI's own transcript: the
-                # error was in hand right here and none of it was written down.
-                log_activity("stop", {
-                    "session_id": msg.session_id,
-                    "is_error": msg.is_error,
-                    "error_kind": msg.error_kind,
-                    "error_message": msg.error_message,
-                    "api_error_status": msg.api_error_status,
-                    "num_turns": msg.num_turns,
-                    "duration_ms": msg.duration_ms,
-                }, session=session_name)
-                if msg.is_error:
-                    # Prefer the brain's own diagnosis. result_text is EMPTY on
-                    # a turn-cap kill, which is how "turn failed" - a literal
-                    # fallback - reached operators as the whole story (#845).
-                    return DrainResult(None, msg.error_text(), msg.error_kind)
-                return DrainResult(final_text, "", "")
-    except asyncio.TimeoutError:
-        error = _timeout_error()
-        log.error(f"Drain timeout: {error}")
-        return DrainResult(None, error, "timeout")
-    except Exception as e:
-        error = _tool_crash_error(e)
-        log.error(f"Drain error: {error}")
-        return DrainResult(None, error, "tool_crash")
-    return DrainResult(None, _network_drop_error(), "network_drop")
+    outcome = await drain_turn(client, session_name, model=model)
+    msg = outcome.result
+    if msg is None:
+        return DrainResult(None, outcome.failure, outcome.failure_kind)
+    if msg.is_error:
+        # Prefer the brain's own diagnosis. result_text is EMPTY on a
+        # turn-cap kill, which is how "turn failed" - a literal fallback -
+        # reached operators as the whole story (#845).
+        return DrainResult(None, msg.error_text(), msg.error_kind)
+    return DrainResult(outcome.final_text, "", "")
 
 
 def _emit_step_failed(run_key, workflow_name, step_name, error):
@@ -1315,6 +1304,19 @@ def _resolve_repo_root(ctx: VariableContext) -> str | None:
     candidate = root / repo_name
     if candidate.is_dir() and (candidate / ".git").exists():
         return str(candidate)
+
+    # Deployed-team layout: checkouts live under <root>/checkouts/<name>
+    # (#1016 §5.2). Before this branch existed, every pr-closed run on a
+    # deployed team resolved to None, the gated cleanup action was inert on
+    # arrival, and the un-stepped launch turn did the deletions instead. The
+    # remote must corroborate the slug: a checkouts dir can hold a same-named
+    # repo from another org, and git ops against it would be the wrong repo.
+    candidate = root / "checkouts" / repo_name
+    if candidate.is_dir() and (candidate / ".git").exists():
+        from bobi.gitutil import origin_url
+
+        if _remote_matches_slug(origin_url(candidate), repo_slug):
+            return str(candidate)
 
     # Single-repo: the installation root IS the repo — but only if the
     # remote URL contains the slug so we don't run git ops against the

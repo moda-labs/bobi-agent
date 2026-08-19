@@ -54,7 +54,7 @@ class TestManagerSDKDirect:
             ClaudeSDKClient,
             ResultMessage,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -65,7 +65,7 @@ class TestManagerSDKDirect:
 
         client = ClaudeSDKClient(options)
         try:
-            await client.connect(None)
+            await client.connect()
             stream = client.receive_response()
             deadline = time.monotonic() + 3.0
             while time.monotonic() < deadline:
@@ -88,7 +88,7 @@ class TestManagerSDKDirect:
             ResultMessage,
             TextBlock,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -99,7 +99,8 @@ class TestManagerSDKDirect:
 
         client = ClaudeSDKClient(options)
         try:
-            await client.connect("Reply with just: MANAGER_OK")
+            await client.connect()
+            await client.query("Reply with just: MANAGER_OK")
 
             got_text = False
             got_result = False
@@ -127,7 +128,7 @@ class TestManagerSDKDirect:
             ResultMessage,
             TextBlock,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -138,7 +139,8 @@ class TestManagerSDKDirect:
 
         client = ClaudeSDKClient(options)
         try:
-            await client.connect("Remember the code word: BANANA")
+            await client.connect()
+            await client.query("Remember the code word: BANANA")
 
             # Wait for first response
             async for msg in client.receive_response():
@@ -167,7 +169,7 @@ class TestManagerSDKDirect:
             ClaudeSDKClient,
             ResultMessage,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -178,7 +180,8 @@ class TestManagerSDKDirect:
 
         client = ClaudeSDKClient(options)
         try:
-            await client.connect("Say hello.")
+            await client.connect()
+            await client.query("Say hello.")
 
             session_id = ""
             async for msg in client.receive_response():
@@ -210,7 +213,7 @@ class TestManagerSessionModule:
             ResultMessage,
             TextBlock,
         )
-        from bobi.sdk import get_cli_path
+        from bobi.brain.claude import get_cli_path
 
         options = ClaudeAgentOptions(
             cwd="/tmp",
@@ -224,7 +227,8 @@ class TestManagerSessionModule:
 
         client = ClaudeSDKClient(options)
         try:
-            await client.connect("You are online. Say: READY")
+            await client.connect()
+            await client.query("You are online. Say: READY")
 
             # Wait for startup
             async for msg in client.receive_response():

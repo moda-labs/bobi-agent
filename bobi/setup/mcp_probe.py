@@ -213,7 +213,7 @@ async def _probe_stdio(entry: dict, project: Path, timeout: float,
 
 async def _probe_http(entry: dict, project: Path, timeout: float,
                       call_name) -> dict:
-    from mcp.client.streamable_http import streamablehttp_client
+    from bobi.mcp_handshake import open_streamable_http
     from bobi.setup.actions import env_value
     url = (entry.get("url") or "").strip()
     headers: dict = {}
@@ -223,7 +223,7 @@ async def _probe_http(entry: dict, project: Path, timeout: float,
             headers["Authorization"] = f"Bearer {v}"
     try:
         with anyio.fail_after(timeout):
-            async with streamablehttp_client(url, headers=headers) as streams:
+            async with open_streamable_http(url, headers=headers) as streams:
                 return await _handshake(streams[0], streams[1], call_name)
     except TimeoutError:
         return {"ok": False, "error": f"timed out after {int(timeout)}s."}

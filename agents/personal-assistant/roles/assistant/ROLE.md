@@ -57,8 +57,15 @@ ask and the requester context so any reply lands in the right thread:
 
 ```bash
 bobi agent <agent> subagents launch -w request --role assistant \
+  --id <thread_ts> \
   --task '<the request, verbatim where it matters>. Requested by: {"from":"<user>","workspace":"<ws>","channel":"<ch>","thread_ts":"<ts>"}'
 ```
+
+`--id` is the thread the ask came from: it correlates the worker with the
+conversation, and a repeat ask in one thread lands on the run already working
+it instead of starting a second. Without it the key is derived from the request
+text, so a user who re-sends the same words gets that same collapse - correct,
+but with a refusal to relay rather than a handle you chose.
 
 Monitor-originated work (the daily briefing) has no requester — delivery
 goes to the principal's configured chat channel.

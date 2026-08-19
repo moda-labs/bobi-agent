@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from bobi import paths
+from bobi import launch_stamp, paths
 from bobi.__version__ import __version__
 from bobi.fsutil import atomic_write_text
 from bobi.sdk import SessionEntry
@@ -146,7 +146,7 @@ def clear_manager_session(project_path: Path) -> None:
     """Clear persisted manager conversation and event-server bubble state."""
     import shutil
 
-    from bobi.config import clear_bubble_state
+    from bobi.events.state import clear_bubble_state
     from bobi.sdk import save_session_id
 
     save_session_id(manager_session_name(project_path), "", root=project_path)
@@ -320,7 +320,7 @@ def _wait_for_manager_transport(
     manager_name: str,
     timeout: float,
 ) -> None:
-    from bobi.config import load_bubble_state, load_deployment_state
+    from bobi.events.state import load_bubble_state, load_deployment_state
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -373,7 +373,7 @@ def spawn_team(
             manager_session_name(project_path), project_path
         )
 
-    log_file = paths.state_dir(project_path) / "manager.log"
+    log_file = paths.manager_log_path(project_path)
     from bobi.env import child_agent_env
     env = child_agent_env(project_path)
     venv_bin = str(Path(sys.executable).parent)
@@ -557,15 +557,20 @@ def run_manager_from_config(
     ensure_state_version(project_path)
 
     pid_str = str(os.getpid())
-    atomic_write_text(state_dir / "manager.pid", pid_str)
+    pid_path = paths.manager_pid_path(project_path)
+    atomic_write_text(pid_path, pid_str)
+    # Record which bobi this manager is running, so an in-place upgrade that
+    # replaces the framework underneath it is visible to doctor (#928).
+    launch_stamp.record_launch(project_path, launch_stamp.MANAGER, os.getpid())
 
     def _cleanup():
-        pid_file = state_dir / "manager.pid"
         try:
-            if pid_file.exists() and pid_file.read_text().strip() == pid_str:
-                pid_file.unlink(missing_ok=True)
+            if pid_path.exists() and pid_path.read_text().strip() == pid_str:
+                pid_path.unlink(missing_ok=True)
         except OSError:
             pass
+        launch_stamp.clear_launch(project_path, launch_stamp.MANAGER,
+                                  pid=os.getpid())
         from bobi import http as pooled_http
         from bobi import manager_health
 

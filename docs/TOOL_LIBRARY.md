@@ -18,7 +18,7 @@ optional:
 | `install` | no | Explicit **pinned** steps (`apt`/`npm`/`run_root`/`run`) - "do exactly this". |
 | `host` | no | A host capability the container cannot grant itself (a kernel sysctl, a device). Runtime wiring, never baked. |
 | `mcp` | no | An MCP server's connection spec (the SDK-native `{name: spec}` shape), rendered into each brain's config and verified by an `initialize` handshake. |
-| `why` / `fix` | no | Documentation + a runtime repair hint carried to the `requires:` doctor surface. |
+| `why` / `fix` | no | Documentation + a runtime repair hint carried to the `requires:` doctor surface. Standing context, shown *alongside* what a check reported, never instead of it. |
 
 ## Declaring a dependency on a team
 
@@ -117,7 +117,14 @@ inline (an explicit team `requires:` / `build:` / `host:` wins).
 
 - **`requires:`** - a `{name, why, check: success, fix}` entry (unless the team
   already declares that name), so the runtime dispatch gate and `bobi agent
-  <name> doctor` verify it.
+  <name> doctor` verify it. A failed check blocks the launch and is reported
+  three ways, all carrying the check's own detail (a timeout, a missing
+  command, its stderr): the raised error names each failing entry with that
+  detail, every failure is logged at ERROR with its `why` and `fix`, and a
+  Slack alert fires when the team has a `channels:`-configured slack service.
+  Alerting is a bonus, never the record - `channels:` also scopes event
+  subscription, so it is not a field an operator can flip just for
+  diagnosability.
 - **`build:`** - `install` steps accreted + de-duped via the one build merge.
 - **`tools/<name>.md`** - the guide, unless a team layer ships that file in
   this compose run. "Ships it" is read from compose's provenance, not from the

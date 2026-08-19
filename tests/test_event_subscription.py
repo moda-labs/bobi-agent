@@ -165,7 +165,7 @@ def test_register_exhausted_raises_clean_error(mock_register, _client, _drain,
 
 def _create_bubble(project):
     """Create a bubble.json so the PUT path is taken (post-bubble state)."""
-    from bobi.config import bubble_state_path
+    from bobi.events.state import bubble_state_path
     bp = bubble_state_path(project)
     bp.parent.mkdir(parents=True, exist_ok=True)
     bp.write_text(json.dumps({"bubble_id": "bub_test", "bubble_key": "bkey_test"}))
@@ -552,7 +552,7 @@ def test_pre_bubble_upgrade_reregisters(mock_register,
     # Intentionally NO _create_bubble(project) — simulates pre-bubble state.
 
     # Plant a stale cursor that should be cleared on re-register.
-    from bobi.config import session_cursor_path
+    from bobi.events.state import session_cursor_path
     cursor = session_cursor_path(project, "sess")
     cursor.parent.mkdir(parents=True, exist_ok=True)
     cursor.write_text(json.dumps({"last_seen": 42}))
@@ -622,7 +622,7 @@ def test_fresh_register_resets_session_cursor(mock_register,
                                               _client, _drain, project):
     """A new deployment starts a new seq space — a leftover cursor from a
     previous deployment must not survive registration."""
-    from bobi.config import session_cursor_path
+    from bobi.events.state import session_cursor_path
     cursor = session_cursor_path(project, "sess")
     cursor.parent.mkdir(parents=True)
     cursor.write_text(json.dumps({"last_seen": 37}))

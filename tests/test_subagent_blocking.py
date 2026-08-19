@@ -200,6 +200,7 @@ def _make_fake_session_class(**kwargs):
 # ---------------------------------------------------------------------------
 
 SDK_PATCH = "bobi.subagent"
+TURNS_PATCH = "bobi.brain.turns"
 SESSION_PATCH = "bobi.session.Session"
 
 
@@ -318,9 +319,10 @@ class TestRunAgentSupervisedNormal:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -359,9 +361,10 @@ class TestRunAgentSupervisedNormal:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -399,9 +402,10 @@ class TestRunAgentSupervisedNormal:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -440,9 +444,10 @@ class TestRunAgentSupervisedNormal:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -471,9 +476,10 @@ class TestRunAgentSupervisedNormal:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -486,8 +492,7 @@ class TestRunAgentSupervisedNormal:
 
         assert result.success is False
         assert result.error == (
-            "network drop: response stream ended before turn result "
-            "(no ResultMessage)"
+            "network drop: response stream ended before turn result"
         )
 
 
@@ -533,9 +538,10 @@ class TestRunAgentSupervisedDeferral:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -551,7 +557,8 @@ class TestRunAgentSupervisedDeferral:
         assert result.duration_ms == 4000  # 1000 + 3000
         assert result.total_cost_usd == pytest.approx(0.25)
         assert result.num_turns == 7  # 2 + 5
-        assert client.queries == ["Use Postgres"]
+        # The prompt is turn 1's explicit query (#1016), then the answer.
+        assert client.queries == ["Build the feature", "Use Postgres"]
 
     @pytest.mark.asyncio
     async def test_multiple_deferrals(self):
@@ -599,9 +606,10 @@ class TestRunAgentSupervisedDeferral:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -618,7 +626,8 @@ class TestRunAgentSupervisedDeferral:
         assert result.total_cost_usd == pytest.approx(0.14)
         assert result.num_turns == 6
         assert answers == ["Framework?", "ORM?"]
-        assert client.queries == ["FastAPI", "SQLAlchemy"]
+        # The prompt is turn 1's explicit query (#1016), then both answers.
+        assert client.queries == ["Build it", "FastAPI", "SQLAlchemy"]
 
     @pytest.mark.asyncio
     async def test_deferral_without_handler_ignored(self):
@@ -644,9 +653,10 @@ class TestRunAgentSupervisedDeferral:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -687,9 +697,10 @@ class TestRunAgentSupervisedResume:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value="old-sess-id"), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -727,7 +738,8 @@ class TestRunAgentSupervisedResume:
              patch(f"{SDK_PATCH}.load_resumable_session_id",
                    return_value="old-sess-id") as load_mock, \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             result = await _run_agent_supervised(
                 prompt="Check current state",
@@ -741,8 +753,10 @@ class TestRunAgentSupervisedResume:
         assert result.success is True
         load_mock.assert_not_called()
         assert captured["session_kwargs"]["resume"] is None
-        assert captured["connect_prompt"] == "Check current state"
-        assert captured.get("queries", []) == []
+        # connect is never a turn (#1016): fresh and resumed sessions both
+        # deliver the prompt as an explicit query.
+        assert captured["connect_prompt"] is None
+        assert captured.get("queries", []) == ["Check current state"]
 
 
 # ---------------------------------------------------------------------------
@@ -767,9 +781,10 @@ class TestRunAgentSupervisedExceptions:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -802,9 +817,10 @@ class TestRunAgentSupervisedExceptions:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -854,9 +870,10 @@ class TestRunAgentSupervisedExceptions:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=registry), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             # The outer wait_for mirrors the sole caller, with the generous
@@ -910,9 +927,10 @@ class TestRunAgentSupervisedExceptions:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -951,10 +969,11 @@ class TestRunAgentSupervisedTracking:
         mock_module.TextBlock = FakeTextBlock
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
-             patch(f"{SDK_PATCH}.save_session_id") as mock_save, \
-             patch(f"{SDK_PATCH}.log_activity") as mock_log, \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.save_session_id") as mock_save, \
+             patch(f"{TURNS_PATCH}.log_activity") as mock_log, \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             result = await _run_agent_supervised(
@@ -977,11 +996,21 @@ class TestRunAgentSupervisedTracking:
         # Session ID saved
         mock_save.assert_called_with("agent-test-t1-spec", "sess-track", model="")
 
-        # Activity logged (now carries the terminal status)
-        mock_log.assert_any_call(
-            "stop", {"session_id": "sess-track", "status": "completed"},
-            session="agent-test-t1-spec",
-        )
+        # Activity logged: the drain primitive writes the full-fact stop
+        # record (#845/#1048); the terminal status itself lives in the
+        # registry's mark_terminal, asserted above.
+        stop_calls = [c for c in mock_log.call_args_list
+                      if c.args and c.args[0] == "stop"]
+        assert len(stop_calls) == 1
+        payload = stop_calls[0].args[1]
+        assert payload["session_id"] == "sess-track"
+        assert payload["is_error"] is False
+        # Every #845 fact rides the record - drift in the payload shape is a
+        # regression, not a detail.
+        assert set(payload) == {
+            "session_id", "is_error", "error_kind", "error_message",
+            "api_error_status", "num_turns", "duration_ms",
+        }
 
     @pytest.mark.asyncio
     async def test_registry_updated_on_error(self):
@@ -1002,9 +1031,10 @@ class TestRunAgentSupervisedTracking:
 
         with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=mock_registry), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": mock_module}):
 
             await _run_agent_supervised(
@@ -1777,7 +1807,8 @@ class TestLaunchModelResolution:
         with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
              patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             result = await _run_agent_supervised(
                 prompt="check", cwd="/tmp", run_key="k", phase="check",
@@ -1850,7 +1881,8 @@ class TestLaunchEffortResolution:
         with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
              patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             result = await _run_agent_supervised(
                 prompt="check", cwd="/tmp", run_key="k", phase="check",
@@ -1943,7 +1975,8 @@ class TestLaunchMaxTurnsResolution:
         with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
              patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             result = await _run_agent_supervised(
                 prompt="check", cwd="/tmp", run_key="k", phase="check",
@@ -1972,7 +2005,8 @@ class TestLaunchMaxTurnsResolution:
         with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
              patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             result = await _run_agent_supervised(
                 prompt="check", cwd="/tmp", run_key="k", phase="check",
@@ -2075,7 +2109,8 @@ class TestModelAwareSessionResume:
              patch(f"{SDK_PATCH}.load_resumable_session_id",
                    return_value="stale-id"), \
              patch(f"{SDK_PATCH}.save_session_id") as save_mock, \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             result = await _run_agent_supervised(
                 prompt="check", cwd="/tmp", run_key="k", phase="check",
@@ -2121,7 +2156,8 @@ class TestModelAwareSessionResume:
 
         with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
              patch(f"{SDK_PATCH}.save_session_id"), \
-             patch(f"{SDK_PATCH}.log_activity"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             result = await _run_agent_supervised(
                 prompt="check", cwd="/tmp", run_key="k", phase="check",

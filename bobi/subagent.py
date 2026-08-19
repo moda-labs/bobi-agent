@@ -21,13 +21,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bobi.sdk import (
-    save_session_id, load_resumable_session_id, log_activity,
+    save_session_id, load_resumable_session_id,
     session_handoff_path, session_log_path,
-    get_registry, SessionEntry,
+    get_registry, SessionEntry, ACTIVE_STATUSES,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
-from bobi.brain_availability import observe_brain_turn
+from bobi.brain.turns import drain_turn, timeout_error, tool_crash_error
 from bobi.transient import is_transient_api_error
 from bobi.env import (
     agent_spawn_env,
@@ -40,6 +40,29 @@ InputHandler = Callable[[str, dict[str, Any]], str]
 log = logging.getLogger(__name__)
 
 _LAUNCH_ADMISSION_LOCK = threading.Lock()
+
+# Derivation namespace for :func:`spawn_adhoc`, whose derived key IS the session
+# name - as is a persistent :func:`launch_agent`'s. Sharing ``adhoc`` with the
+# latter would collide the two on one task; see resolve_adhoc_session_name.
+ADHOC_SPAWN_WORKFLOW = "adhoc:spawn"
+
+
+class DuplicateRunError(RuntimeError):
+    """A launch was refused because an identical run is already in flight.
+
+    Distinct from the other RuntimeErrors ``launch_agent`` raises (a failed
+    requires preflight, the spend governor, a semaphore timeout) so callers can
+    tell "this work is already happening" from "the launch could not proceed".
+    Since #850 made un-keyed launches collide by default, this is a routine
+    outcome rather than an error, and rendering it as one misleads.
+    """
+
+    def __init__(self, message: str, *, session_name: str, status: str,
+                 derived_key: bool):
+        super().__init__(message)
+        self.session_name = session_name
+        self.status = status
+        self.derived_key = derived_key
 
 PHASE_TIMEOUT = {
     "pickup": 1800,
@@ -71,24 +94,6 @@ class AgentResult:
     # persistent session agree on "transient" — the launcher's re-dispatch
     # decision can consult it. Survival/retry stays at the #444 layer (§4.3).
     transient: bool = False
-
-
-def _network_drop_error(detail: str = "") -> str:
-    base = "network drop: response stream ended before turn result"
-    return f"{base} ({detail})" if detail else base
-
-
-def _timeout_error(timeout: int | None = None) -> str:
-    if timeout is None:
-        return "subprocess timeout while draining response"
-    return f"subprocess timeout after {timeout}s"
-
-
-def _tool_crash_error(error: BaseException | str) -> str:
-    message = str(error).strip() or error.__class__.__name__
-    if message.startswith("tool crash:"):
-        return message
-    return f"tool crash: {message}"
 
 
 def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -> str:
@@ -402,7 +407,7 @@ async def _run_agent_supervised(
     agents that no one needs to message mid-run. Any agent that must be
     reachable goes through ``Session`` instead.
     """
-    from bobi.brain import AssistantText, TurnResult, get_brain
+    from bobi.brain import get_brain
 
     name = _session_name(run_key, role=role, phase=phase)
     _cfg = _load_team_config()
@@ -456,10 +461,7 @@ async def _run_agent_supervised(
         # `except asyncio.TimeoutError` (until now unreachable) and is recorded.
         async with asyncio.timeout(timeout if timeout and timeout > 0 else None):
             try:
-                connect_prompt = prompt if not saved_id else None
-                await client.connect(connect_prompt)
-                if saved_id:
-                    await client.query(prompt)
+                await client.connect()
             except Exception as e:
                 if not saved_id:
                     raise
@@ -477,32 +479,29 @@ async def _run_agent_supervised(
                 except Exception:
                     pass
                 client = _build_client("")
-                await client.connect(prompt)
+                await client.connect()
+            # The task is turn 1, explicitly — connect() is never a turn
+            # (#1016). Fresh and resumed sessions now take one identical path.
+            await client.query(prompt)
 
             while True:
-                result_msg = None
-                async for msg in client.receive_response():
-                    if isinstance(msg, AssistantText):
-                        if msg.text:
-                            result.final_text = msg.text
-                            log_activity("response", {
-                                "text": msg.text[:500],
-                            }, session=name)
-                    elif isinstance(msg, TurnResult):
-                        result_msg = msg
+                outcome = await drain_turn(client, name, model=model)
+                if outcome.final_text:
+                    result.final_text = outcome.final_text
+                result_msg = outcome.result
 
                 if result_msg is None:
-                    result.error = _network_drop_error("no ResultMessage")
-                    _persist_terminal(registry, name, TERMINAL_FAILED,
+                    # The drain itself died. A crash mid-stream is a crash
+                    # here exactly as it was when the exception reached the
+                    # outer handler; a broken/silent stream is a failed run.
+                    result.error = outcome.failure
+                    terminal = (TERMINAL_CRASHED
+                                if outcome.failure_kind == "tool_crash"
+                                else TERMINAL_FAILED)
+                    _persist_terminal(registry, name, terminal,
                                       error=result.error, phase=phase)
                     return result
 
-                save_session_id(name, result_msg.session_id, model=model)
-                observe_brain_turn(
-                    result_msg,
-                    session=name,
-                    provider=getattr(client, "provider", "anthropic"),
-                )
                 result.session_id = result_msg.session_id
                 result.duration_ms += result_msg.duration_ms
                 result.total_cost_usd += result_msg.total_cost_usd or 0.0
@@ -544,16 +543,14 @@ async def _run_agent_supervised(
                 terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
                 _persist_terminal(registry, name, terminal, error=result.error,
                                   session_id=result_msg.session_id, phase=phase)
-                log_activity("stop", {"session_id": result_msg.session_id,
-                                      "status": terminal}, session=name)
                 return result
 
     except asyncio.TimeoutError:
-        result.error = _timeout_error(timeout)
+        result.error = timeout_error(timeout)
         _persist_terminal(registry, name, TERMINAL_FAILED, error=result.error,
                           phase=phase)
     except Exception as e:
-        result.error = _tool_crash_error(e)
+        result.error = tool_crash_error(e)
         # An unhandled executor exception is a crash, not a clean failure.
         _persist_terminal(registry, name, TERMINAL_CRASHED, error=result.error,
                           phase=phase)
@@ -698,18 +695,96 @@ def _load_long_term_memory_prompt() -> str:
         return ""
 
 
-def adhoc_session_name(task: str, name: str | None = None) -> str:
-    """The session name :func:`spawn_adhoc` will use for this task.
+def derive_run_key(workflow_name: str, task: str, *, project: str = "",
+                   role: str = "", model: str = "", effort: str = "") -> str:
+    """The default run key for a launch that carries no explicit one (#850).
+
+    Duplicate-run suppression keys off the session name, and the session name
+    keys off the run key - so two launches only collide if they agree on it.
+    When the key was random, they never agreed, the guard was dead code, and
+    nothing said so: a role file that documented the launch command without
+    ``--id`` turned one trigger into 50 runs against the spend cap. Deriving
+    the key makes the safe path the default rather than the remembered one.
+
+    EVERY dial that decides what the launch is takes part, not just the task.
+    One task handed to an engineer and to a reviewer is two runs, and
+    ``skills/bobi.md`` documents varying model and effort per delegation the
+    same way - deriving from task text alone would refuse the second as a
+    duplicate of the first. The dials are the values as PASSED: two launches
+    that both omit ``--model`` agree on ``""`` and still collide, while an
+    explicit override that happens to equal the role default reads as
+    different. That errs toward launching, and a false refusal is the worse
+    failure.
+
+    Whitespace in the task is normalized, so a task re-emitted with different
+    wrapping is still the same task. Nothing else is: folding case or stripping
+    punctuation would let a genuinely different task be refused. 48 bits of
+    digest keeps an accidental collision negligible, and the ``adhoc-`` prefix
+    is what makes an un-keyed run recognizable at a glance in
+    ``subagents list``.
+
+    ``project`` is in there because a persistent launch uses the key AS the
+    session name, with no ``wf-<workflow>-<project>-`` wrapper to scope it. Two
+    working dirs under one installation running the same task would otherwise
+    land on one session - a worse outcome than a duplicate refusal, since the
+    second silently takes over the first. The key and the name agree about what
+    identifies a run.
+    """
+    dials = "\n".join([workflow_name, project, role, model, effort,
+                       " ".join(task.split())])
+    return f"adhoc-{hashlib.sha256(dials.encode()).hexdigest()[:12]}"
+
+
+def _resolve_run_key(workflow_name: str, task: str, run_key: str | None,
+                     random_key: bool, *, project: str = "", role: str = "",
+                     model: str = "", effort: str = "") -> tuple[str, bool]:
+    """Resolve a launch's run key. Returns ``(run_key, derived)``.
+
+    ``derived`` tells the caller the key was inferred rather than chosen, which
+    changes three things: the transcript starts clean (a derived key names a
+    slot for collision detection, not a conversation to continue), a suspended
+    run under that name is not taken over, and a rejection can name the opt-out.
+    """
+    if random_key:
+        if run_key:
+            raise ValueError(
+                "random_key cannot be combined with an explicit run key - "
+                "an explicit key already opts out of task-derived dedup"
+            )
+        # `rand-`, not `adhoc-`: a screen of dedup-disabled runs in
+        # `subagents list` should be greppable, not a hash-length comparison.
+        import uuid
+        return f"rand-{uuid.uuid4().hex[:8]}", False
+    if run_key:
+        return run_key, False
+    return derive_run_key(workflow_name, task, project=project, role=role,
+                          model=model, effort=effort), True
+
+
+def resolve_adhoc_session_name(task: str, name: str | None = None,
+                               random_key: bool = False, *, project: str = "",
+                               role: str = "", model: str = "",
+                               effort: str = "") -> tuple[str, bool]:
+    """The session name :func:`spawn_adhoc` will use, and whether it derived it.
 
     Extracted so a caller that must know the name BEFORE spawning - the
     ``--wait`` path, which stamps the launch chain into its own environment -
     shares one derivation with ``spawn_adhoc`` instead of recomputing it. A
     recomputed name that drifts would stamp a link naming a session that never
     exists, which is the lineage invariant (see ``bobi/launch_lineage.py``).
+    ``random_key`` is why the caller resolves the name and passes it back in as
+    ``name`` rather than letting ``spawn_adhoc`` derive it a second time: a
+    random key cannot be derived twice.
+
+    The namespace is :data:`ADHOC_SPAWN_WORKFLOW`, not ``adhoc``, because this
+    name IS the session name - and so is a persistent :func:`launch_agent`'s.
+    Sharing the derivation namespace would give an un-keyed ``--wait`` run and
+    an un-keyed ``--persistent`` agent on one task the same session: one inbox,
+    one registry pid, one saved transcript, two live processes.
     """
-    if name:
-        return name
-    return f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
+    return _resolve_run_key(ADHOC_SPAWN_WORKFLOW, task, name, random_key,
+                            project=project, role=role, model=model,
+                            effort=effort)
 
 
 def spawn_adhoc(
@@ -725,6 +800,7 @@ def spawn_adhoc(
     model: str = "",
     effort: str = "",
     fresh: bool = False,
+    random_key: bool = False,
 ) -> AgentResult:
     """Spawn an agent with a freeform task prompt.
 
@@ -741,17 +817,30 @@ def spawn_adhoc(
     task completes, accepting messages via its inbox until explicitly
     stopped. The caller blocks for the lifetime of the session.
 
+    Without ``name`` the session name is derived from the task
+    (:func:`derive_run_key`), so dispatching the SAME task text twice collides
+    by construction. That collision used to mean the second run silently
+    continued the first's dead session, along with its spent turn budget, so a
+    derived name now implies ``fresh``. ``random_key=True`` opts out of the
+    derivation entirely for genuinely parallel fan-out.
+
     ``fresh=True`` starts a new transcript instead of resuming this name's
-    saved one. It matters here more than anywhere else: the default
-    ``run_key`` is ``adhoc-<sha256(task)[:8]>``, so dispatching the SAME task
-    text twice collides by construction and the second run would silently
-    continue the first's dead session. A re-dispatched worker that re-orients
-    from durable state (a committed checklist, the branch's commits) wants the
-    stable name and a clean transcript, which is exactly this flag.
+    saved one. Pass it on every RE-dispatch under an explicit ``name``: the
+    name is stable on purpose, and a worker that re-orients from durable state
+    (a committed checklist, the branch's commits) wants that stable name with
+    a clean transcript.
+
+    NOTE: unlike :func:`launch_agent`, this path has no active-run guard, no
+    concurrency semaphore and no spend-governor accounting - a derived name
+    here prevents a stale-transcript resume, not a duplicate run. See #874.
     """
     from bobi.session import Session
 
-    run_key = adhoc_session_name(task, name)
+    run_key, derived_key = resolve_adhoc_session_name(
+        task, name, random_key, role=role, model=model, effort=effort)
+    # A derived name is an inference, not an assertion that this continues an
+    # earlier conversation - so it never resumes one.
+    fresh = fresh or derived_key
     project = _resolve_project_name(cwd)
     requested_by = requested_by or {}
 
@@ -914,31 +1003,60 @@ def check_requires(project_path: Path) -> list[tuple]:
     return results
 
 
+_REQUIRES_DETAIL_MAX = 160
+
+
+def _log_requires_failure(failures: list[tuple]) -> None:
+    """Record every failed requires check at ERROR, with its full detail.
+
+    This is the report that always happens. The Slack alert needs a
+    configured channel and the raised error is truncated for readability;
+    without this line a preflight failure is unattributable (#771) - a
+    timeout, a missing command, and an auth error all read identically.
+    """
+    from bobi.config import requires_detail
+    for entry, detail in failures:
+        line = f"Requires check failed: {entry.name}: {requires_detail(detail)}"
+        if entry.why:
+            line += f" | why: {entry.why}"
+        if entry.fix:
+            line += f" | fix: {entry.fix}"
+        log.error(line)
+
+
 def _alert_requires_failure(
     project_path: Path,
     failures: list[tuple],
 ) -> None:
-    """Post a Slack alert about failed requires checks. Best-effort."""
+    """Post a Slack alert about failed requires checks. Best-effort.
+
+    Alerting is a bonus surface, not the record: callers log the same
+    failures at ERROR first, so a team without `channels:` still gets the
+    detail. `channels:` also scopes event subscription, so it is not a
+    field an operator can set just to turn alerting on.
+    """
     try:
-        from bobi.config import Config
+        from bobi.config import Config, requires_detail
         cfg = Config.load(project_path)
         slack_svc = next(
             (s for s in cfg.services if s.name == "slack" and s.channels),
             None,
         )
         if not slack_svc:
-            log.warning("No Slack service with channels configured — "
-                        "cannot alert on requires failure")
+            log.warning("No Slack service with channels configured; "
+                        "requires failure reported to the log only")
             return
         token = slack_svc.credentials.get("bot_token", "")
         if not token:
-            log.warning("Slack bot_token not configured — "
-                        "cannot alert on requires failure")
+            log.warning("Slack bot_token not configured; "
+                        "requires failure reported to the log only")
             return
         channel = slack_svc.channels[0]
         lines = []
         for entry, detail in failures:
-            line = f"*{entry.name}*: {entry.why or detail}"
+            line = f"*{entry.name}*: {requires_detail(detail)}"
+            if entry.why:
+                line += f"\nWhy: {entry.why}"
             if entry.fix:
                 line += f"\nFix: `{entry.fix}`"
             lines.append(line)
@@ -1043,6 +1161,7 @@ def launch_agent(
     model: str = "",
     effort: str = "",
     fresh: bool = False,
+    random_key: bool = False,
 ) -> str:
     """Launch an agent as a detached subprocess and return immediately.
 
@@ -1051,25 +1170,46 @@ def launch_agent(
     - If a failed/stale run exists → resume (same session ID)
     - If completed or new → fresh start
 
+    Without ``run_key`` the key is DERIVED from the workflow and task
+    (:func:`derive_run_key`), so an identical launch collides with the one
+    already in flight and is rejected by the first rule. It used to be random,
+    which made that rule unreachable and duplicate suppression contingent on
+    every caller remembering to pass a key (#850). ``random_key=True`` restores
+    a random key for genuinely parallel fan-out of identical work.
+
     ``fresh=True`` overrides the second rule for this launch only: the run
     keeps its deterministic name (so the worktree branch, the admission
     dedupe and the registry entry are unchanged) but starts a NEW transcript
     rather than continuing the failed run's. The default stays resume —
-    that is the engine's retry contract and callers depend on it.
+    that is the engine's retry contract and callers depend on it. A DERIVED
+    key implies ``fresh``: it is an inference about task text, not a caller
+    asserting "this is that run again", and before #850 such a launch always
+    got a brand-new name and so a clean transcript.
 
     With ``persistent=True``, the agent stays alive after its initial
     task, accepting messages via its inbox. Uses spawn_adhoc() directly
     instead of the workflow orchestrator.
     """
-    import uuid
-    run_key = run_key or f"adhoc-{uuid.uuid4().hex[:8]}"
     project = _resolve_project_name(cwd)
+    run_key, derived_key = _resolve_run_key(workflow_name, task, run_key,
+                                            random_key, project=project,
+                                            role=role, model=model,
+                                            effort=effort)
+    fresh = fresh or derived_key
 
     if persistent:
         session_name = run_key
     else:
         from bobi.workflow.orchestrator import make_session_name
         session_name = make_session_name(workflow_name, project, run_key)
+
+    if derived_key:
+        # The un-keyed launch that used to be invisible. Saying so at launch is
+        # what turns "50 runs of one task" from a spend-cap surprise into a
+        # readable log (#850).
+        log.info("No run key given - derived %s from the launch; an "
+                 "identical launch will be refused while this one runs",
+                 run_key)
 
     registry = get_registry()
 
@@ -1086,10 +1226,17 @@ def launch_agent(
     req_results = check_requires(root)
     req_failures = [(entry, detail) for entry, ok, detail in req_results if not ok]
     if req_failures:
+        # Log before alerting: the log is the one surface that is always
+        # there, and the alert is best-effort by design.
+        _log_requires_failure(req_failures)
         _alert_requires_failure(root, req_failures)
-        names = ", ".join(e.name for e, _ in req_failures)
+        from bobi.config import requires_detail
+        summary = "; ".join(
+            f"{e.name}: {requires_detail(d, _REQUIRES_DETAIL_MAX)}"
+            for e, d in req_failures
+        )
         raise RuntimeError(
-            f"Required dependency check failed: {names}. "
+            f"Required dependency check failed: {summary}. "
             f"Run `bobi agent <name> doctor` for details and fix commands."
         )
 
@@ -1130,12 +1277,61 @@ def launch_agent(
     )
 
     with _LAUNCH_ADMISSION_LOCK:
+        from bobi.reconcile import close_dead_run, is_dead_run
         existing = registry.get(session_name)
-        if existing and existing.status in ("starting", "running", "idle"):
-            raise RuntimeError(
-                f"A run is already active: {session_name} "
-                f"(status={existing.status}). Cancel it first or wait for it "
-                "to complete."
+        if existing and is_dead_run(existing):
+            # A run killed without reporting a terminal status leaves an
+            # active-looking entry behind. That was harmless while un-keyed
+            # launches minted a new name every time; now they land on the same
+            # one, so an unreaped corpse would refuse its own relaunch until
+            # the next manager start (#850). Closing it HERE, not in a later
+            # sweep, is also the only chance to emit: register() below replaces
+            # the entry wholesale a few lines down.
+            existing, _ = close_dead_run(existing, registry)
+
+        # A DERIVED key also refuses a suspended run. "waiting" is dormant, not
+        # free: the process exited and an await event resumes it. An explicit
+        # --id may legitimately re-dispatch onto that name; a launch that only
+        # matched by task text cannot mean that, and would take over the
+        # suspended run's session, worktree branch and registry entry.
+        blocking = ACTIVE_STATUSES + (("waiting",) if derived_key else ())
+        if existing and existing.status in blocking:
+            # A caller that never chose this key cannot act on the session name
+            # alone - it has to be told the key came from its own task text,
+            # and how to launch both on purpose.
+            hint = (
+                " Its run key was derived from the launch, so this is a repeat "
+                "of one already in flight; pass --id-random to run both."
+                if derived_key else ""
+            )
+            # The remedy has to be one that WORKS for this status. A suspended
+            # run will not finish on its own - it is parked until its await
+            # event arrives - and `subagents cancel` refuses it outright
+            # (cancel_agent only touches ACTIVE_STATUSES). Naming a remedy that
+            # does nothing would leave --id-random as the only move with an
+            # effect, i.e. duplicate the parked work, which is the storm this
+            # guard exists to stop. Re-dispatching onto it under its own key is
+            # both permitted and what the caller most likely meant.
+            if existing.status == "waiting":
+                # Not "already active": `waiting` is deliberately outside
+                # ACTIVE_STATUSES, and telling an LLM a run is active when the
+                # status it is shown says otherwise invites it to disbelieve
+                # the whole refusal.
+                lead = "A suspended run already holds this name"
+                remedy = (
+                    f"It is awaiting an event, so it will not finish on its "
+                    f"own and cannot be cancelled; re-dispatch onto it with "
+                    f"--id {existing.run_key!r} if that is what you mean."
+                )
+            else:
+                lead = "A run is already active"
+                remedy = "Cancel it first or wait for it to complete."
+            raise DuplicateRunError(
+                f"{lead}: {session_name} "
+                f"(status={existing.status}, task: {existing.title!r}). "
+                f"{remedy}{hint}",
+                session_name=session_name, status=existing.status,
+                derived_key=derived_key,
             )
 
         # Preflight: concurrency semaphore — queue if too many agents running
@@ -1159,23 +1355,32 @@ def launch_agent(
             timeout=timeout,
         ))
 
-    log_file = session_log_path(session_name)
-    # child_agent_env() is the single parent-to-child propagation contract:
-    # identity, brain selection, tool PATH, and credential material all flow
-    # through one helper instead of one-off launch-site patches. It strips the
-    # launch chain (see its docstring); this launch site - the only caller that
-    # is an agent launch - stamps the child's own chain back in.
-    child_env = child_agent_env(root)
-    from bobi.launch_lineage import stamp as stamp_launch_lineage
-    stamp_launch_lineage(child_env, child_lineage)
+    # Everything from here to the pid write is inside the try: the entry is
+    # already registered `starting` with pid 0, and `is_dead_run` cannot tell
+    # that corpse from a launch that is merely a few milliseconds from having a
+    # pid - so nothing reaps it. That was survivable while un-keyed launches
+    # minted a new name every time; now the relaunch lands on the same name and
+    # would be refused until the reconciler's deadline branch fires at the next
+    # manager start, `timeout + grace` later (#850). Reading the team env and
+    # stamping the chain both raise on real misconfiguration, so they belong
+    # under the same handler as the spawn.
     try:
+        log_file = session_log_path(session_name)
+        # child_agent_env() is the single parent-to-child propagation contract:
+        # identity, brain selection, tool PATH, and credential material all flow
+        # through one helper instead of one-off launch-site patches. It strips
+        # the launch chain (see its docstring); this launch site - the only
+        # caller that is an agent launch - stamps the child's own chain back in.
+        child_env = child_agent_env(root)
+        from bobi.launch_lineage import stamp as stamp_launch_lineage
+        stamp_launch_lineage(child_env, child_lineage)
         pid = _launch_detached(script, [args_json], log_file, env=child_env)
     except Exception as exc:
         try:
             registry.mark_terminal(
                 session_name,
                 TERMINAL_CRASHED,
-                error=f"failed to launch detached agent process: {exc}",
+                error=f"failed to launch detached agent: {exc}",
             )
         except Exception:
             log.warning("Failed to mark launch failure for %s", session_name,
@@ -1225,9 +1430,8 @@ def _resolve_self_github_login() -> str | None:
     """Best-effort lookup of the bot's own GitHub login via ``gh api user``.
 
     Cached for the process lifetime. Returns None when ``gh`` is unavailable or
-    unauthenticated — the reactor's self-author guard then stays inactive
-    (fail open) rather than dropping events. Used to skip auto-dispatching
-    pr-feedback on the bot's own comments (issue #411).
+    unauthenticated. The self-author guard then stays inactive (fail open),
+    while rules that explicitly match ``$self`` fail closed.
     """
     global _self_github_login, _self_github_login_resolved
     if _self_github_login_resolved:
@@ -1246,6 +1450,15 @@ def _resolve_self_github_login() -> str | None:
     except (OSError, sp.SubprocessError) as e:
         log.info("Could not resolve bot GitHub login (self-author guard off): %s", e)
     return _self_github_login
+
+
+def _auto_dispatch_needs_self_login(rules: list[dict]) -> bool:
+    """Return whether dispatch matching or hygiene needs the GitHub identity."""
+    return any(
+        not rule.get("allow_self_authored")
+        or "$self" in (rule.get("match") or {}).values()
+        for rule in rules
+    )
 
 
 def _start_event_subscription(session_name: str, subscribe: list[str],
@@ -1268,8 +1481,9 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     where every project lead received and answered the user's Slack DMs
     to the director).
     """
-    from bobi.config import (
-        Config, load_deployment_state, save_deployment_state,
+    from bobi.config import Config
+    from bobi.events.state import (
+        load_deployment_state, save_deployment_state,
         session_cursor_path, bubble_state_path,
     )
     from bobi.events.client import EventServerClient
@@ -1513,12 +1727,9 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     reactor = None
     if has_external and cfg.auto_dispatch:
         from bobi.events.reactor import EventReactor
-        # Resolve the bot's own GitHub login so the reactor can skip
-        # auto-dispatching on the bot's own events (issue #411). Self-author
-        # skip is the default, so we need the login unless EVERY rule opts back
-        # in via allow_self_authored.
+        # Resolve identity for both self-author hygiene and `$self` match values.
         self_login = None
-        if any(not r.get("allow_self_authored") for r in cfg.auto_dispatch):
+        if _auto_dispatch_needs_self_login(cfg.auto_dispatch):
             self_login = _resolve_self_github_login()
         reactor = EventReactor.from_config(
             cfg.auto_dispatch, cwd=str(project_path), self_login=self_login)

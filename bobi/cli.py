@@ -14,7 +14,7 @@ truststore.inject_into_ssl()
 
 import click
 
-from bobi import paths
+from bobi import logs, paths
 from bobi.install import (
     install_pack as _install_pack,
     resolve_agent_pack as _resolve_agent_pack,
@@ -140,15 +140,19 @@ def _pin_team_brain(root: Path) -> None:
 
 
 def _attach_runtime_log(root: Path) -> None:
-    state = _project_state_dir(root)
-    log_path = state / "manager.log"
-    logger = logging.getLogger()
-    if not any(
-        isinstance(h, logging.FileHandler)
-        and getattr(h, "baseFilename", "") == str(log_path)
-        for h in logger.handlers
-    ):
-        logger.addHandler(logging.FileHandler(log_path))
+    """Also send this process's logs to the runtime's manager.log.
+
+    Stands down when the root logger already reaches that file - either
+    because an earlier call attached this same handler, or because Bobi
+    spawned this process with its stderr redirected into manager.log, which
+    is how the manager and every monitor check are launched. A second writer
+    would put each record on disk twice, and a duplicated line inflates the
+    counts an operator reads back out of an incident (#851).
+    """
+    log_path = paths.manager_log_path(root)
+    if logs.root_writes_to(log_path):
+        return
+    logging.getLogger().addHandler(logs.file_handler(log_path))
 
 
 
@@ -211,12 +215,7 @@ class _PluginGroup(click.Group):
 @click.pass_context
 def main(ctx):
     """Bobi — build teams of event-driven AI agents."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler()],
-    )
+    logs.configure_root()
     # httpx logs every request at INFO, which the root level above would put
     # in front of the user's actual output — and `bobi app start` polls
     # /api/ping every 0.2s while the daemon comes up, so a slow start would
@@ -572,7 +571,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         from bobi.registry import fetch_from_url
         try:
             click.echo(f"'{pack}' is a URL, fetching team archive...")
-            pack_dir, _ = fetch_from_url(project_path, pack_str)
+            pack_dir, _ = fetch_from_url(pack_str)
         except Exception as e:
             click.echo(f"Failed to fetch '{pack}': {e}", err=True)
             raise SystemExit(1)
@@ -583,7 +582,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         from bobi.registry import fetch_from_archive
         try:
             click.echo(f"'{pack}' is a local archive, extracting team...")
-            pack_dir, _ = fetch_from_archive(project_path, Path(pack).resolve())
+            pack_dir, _ = fetch_from_archive(Path(pack).resolve())
         except Exception as e:
             click.echo(f"Failed to install '{pack}': {e}", err=True)
             raise SystemExit(1)
@@ -600,7 +599,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
             label = f"{name}@{version}" if version else name
             click.echo(f"'{pack}' is not a local team directory, fetching "
                        f"{label} from remote...")
-            fetch(project_path, name, version=version)
+            fetch(name, version=version)
             resolved = _resolve_agent_pack(name, project_path)
             if not resolved:
                 click.echo(f"Failed to fetch '{pack}' from remote registries.", err=True)
@@ -721,6 +720,19 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         click.echo(f"\nSource of truth: {pack_dir}/")
 
     click.echo(f"Run `bobi agent {agent_name} start` to launch.")
+
+    # An in-place bobi upgrade replaces the framework underneath whatever is
+    # already running, and a team reinstall does not restart it (#928). Say so
+    # here, where the operator is, instead of leaving it for doctor to be asked.
+    from bobi.launch_stamp import stale_processes
+
+    stale = stale_processes(project_path)
+    if stale:
+        click.echo("\nStill running the code this install replaced:")
+        for process in stale:
+            click.echo(f"  {process.name}: {process.detail}")
+        click.echo("Restart to pick it up: "
+                   + ", ".join(f"`{p.remedy}`" for p in stale))
 
 
 @main.command()
@@ -948,7 +960,7 @@ def restart(fresh):
             capture_output=True, text=True, timeout=5,
         )
         pid = result.stdout.strip()
-        log_path = _project_state_dir(project_path) / "manager.log"
+        log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
 
@@ -2096,7 +2108,11 @@ def _show_events(tail: int, decisions_only: bool) -> None:
         click.echo("No events yet.")
         return
 
-    entries.sort(key=lambda e: e[0])
+    # Sort by instant, not by string: a log can span the aware-UTC timestamp
+    # convention change, and pre-upgrade naive-LOCAL strings do not order
+    # lexicographically against aware-UTC ones.
+    from bobi.timeutil import epoch_seconds
+    entries.sort(key=lambda e: epoch_seconds(e[0]))
     for _, text in entries[-tail:]:
         click.echo(text)
 
@@ -2897,10 +2913,12 @@ def event_server_start(foreground, port):
 def event_server_stop():
     """Stop the local event server."""
     import signal
+
+    from bobi import launch_stamp
     from bobi.events.server import local_port_file
 
     project_path = _detect_project_root()
-    pid_file = _project_state_dir(project_path) / "event-server.pid"
+    pid_file = paths.event_server_pid_path(project_path)
     port_file = local_port_file(project_path)
     if not pid_file.exists():
         click.echo("Event server is not running")
@@ -2931,6 +2949,7 @@ def event_server_stop():
             click.echo(f"Could not signal pid {pid}: {e}", err=True)
     pid_file.unlink(missing_ok=True)
     port_file.unlink(missing_ok=True)
+    launch_stamp.clear_launch(project_path, launch_stamp.EVENT_SERVER)
 
 
 @event_server_cmd.command("restart")
@@ -2974,7 +2993,21 @@ main.add_command(event_server_cmd)
 @subagents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
 @click.option("--role", required=True, help="Agent role (see 'bobi agent <name> roles list')")
-@click.option("--id", "run_key", default=None, help="Explicit run key for correlation (e.g. issue number)")
+@click.option("--id", "run_key", default=None,
+              help="Explicit run key for correlation (e.g. an issue number). "
+                   "Relaunching the same key resumes that run. Default: a key "
+                   "derived from the launch itself - workflow, role, model, "
+                   "effort, task text - so an identical launch collides with "
+                   "the run already in flight instead of starting a second "
+                   "one.")
+@click.option("--id-random", "random_key", is_flag=True,
+              help="Mint a random run key instead of deriving one from the "
+                   "launch. Without it, an un-keyed launch derives its key "
+                   "from the workflow, role, model, effort and task text, so "
+                   "relaunching the same one while the first run is still "
+                   "going is refused as a duplicate. Use this to fan out N "
+                   "copies of an IDENTICAL launch on purpose. Cannot be "
+                   "combined with --id.")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True,
@@ -3008,10 +3041,11 @@ main.add_command(event_server_cmd)
                    "every RE-dispatch of a worker that re-orients from durable "
                    "state — a committed checklist, the branch's commits — "
                    "since re-running the same --task otherwise resumes the "
-                   "dead session.")
-def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
-                     post_event, requested_by, non_interactive, persistent,
-                     subscribe, model, effort, fresh):
+                   "dead session. Implied when the run key is derived (no "
+                   "--id), where there is no run the caller meant to continue.")
+def subagents_launch(workflow, role, run_key, random_key, task, timeout, wait,
+                     as_check, post_event, requested_by, non_interactive,
+                     persistent, subscribe, model, effort, fresh):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -3024,6 +3058,7 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
     if subscribe:
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
+                    random_key=random_key,
                     timeout=timeout, wait=wait, as_check=as_check,
                     post_event=post_event, requested_by=requested_by,
                     interactive=not non_interactive,
@@ -3052,7 +3087,8 @@ def _parse_requested_by(requested_by: str | None) -> dict:
     return parsed
 
 
-def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
+def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
+                    timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
                     model="", effort="", fresh=False):
@@ -3080,6 +3116,10 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     if post_event and not as_check:
         click.echo("--post-event requires --as-check", err=True)
         raise SystemExit(1)
+    if run_key and random_key:
+        click.echo("--id-random cannot be combined with --id (an explicit run "
+                   "key already opts out of task-derived dedup)", err=True)
+        raise SystemExit(1)
 
     if as_check:
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
@@ -3094,9 +3134,10 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         raise SystemExit(1)
 
     if wait:
-        with _launch_refusal_is_readable():
+        with _launch_refusal_is_readable(project_path):
             _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
-                            run_key=run_key, timeout=timeout,
+                            run_key=run_key, random_key=random_key,
+                            timeout=timeout,
                             requested_by=requested_by, interactive=interactive,
                             persistent=persistent, subscribe=subscribe or [],
                             model=model, effort=effort, fresh=fresh)
@@ -3105,7 +3146,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     requester = _parse_requested_by(requested_by)
 
     from .subagent import launch_agent
-    with _launch_refusal_is_readable():
+    with _launch_refusal_is_readable(project_path):
         session_name = launch_agent(
             task=task, cwd=cwd, workflow_name=workflow,
             timeout=timeout, requested_by=requester,
@@ -3114,6 +3155,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
             persistent=persistent,
             subscribe=subscribe or [],
             run_key=run_key,
+            random_key=random_key,
             model=model,
             effort=effort,
             fresh=fresh,
@@ -3122,21 +3164,44 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
 
 
 @contextmanager
-def _launch_refusal_is_readable():
-    """Surface a blocked launch as one line on stderr, never a traceback.
+def _launch_refusal_is_readable(project_path: Path):
+    """Surface a refused launch as one line on stderr, never a traceback.
 
-    The highest-stakes surface in the lineage guard, because the reader is an
+    The highest-stakes surface in either launch guard, because the reader is an
     LLM. A raw traceback reads as a transient crash, and the natural recovery
     is to retry with a fresh run key or ``-w adhoc`` - turning one refusal into
-    the launch storm the guard exists to stop. The message itself (built in
-    ``bobi/launch_lineage.py``) says the block is deterministic and names each
-    retry vector; all this does is make sure the agent sees it and nothing else.
+    the launch storm the guards exist to stop. Both refusals land here so that
+    property holds once rather than per call site:
+
+    - ``LaunchBlockedError`` (lineage, #849) carries its own message, built in
+      ``bobi/launch_lineage.py``, which says the block is deterministic and
+      names each retry vector.
+    - ``DuplicateRunError`` (derived run key, #850) needs the remediation
+      spelled out here, where the agent name is resolvable.
     """
     from .launch_lineage import LaunchBlockedError
+    from .sdk import ACTIVE_STATUSES
+    from .subagent import DuplicateRunError
     try:
         yield
     except LaunchBlockedError as exc:
         click.echo(str(exc), err=True)
+        raise SystemExit(1) from None
+    except DuplicateRunError as exc:
+        # Render the real agent name: an LLM pastes a `<name>` placeholder
+        # verbatim and the remediation fails.
+        agent_name = paths.agent_name_for_root(project_path)
+        click.echo(f"Launch refused: {exc}", err=True)
+        click.echo(f"  Watch it:  bobi agent {agent_name} subagents show "
+                   f"{exc.session_name}", err=True)
+        # Only offer the cancel when it would do something. `cancel_agent`
+        # ignores anything outside ACTIVE_STATUSES, so printing it for a
+        # suspended run sends the reader to a command that reports "no running
+        # sub-agent" and teaches them the refusal is bogus. The exception's own
+        # message carries the remedy that fits that case.
+        if exc.status in ACTIVE_STATUSES:
+            click.echo(f"  Cancel it: bobi agent {agent_name} subagents cancel "
+                       f"{exc.session_name}", err=True)
         raise SystemExit(1) from None
 
 
@@ -3145,7 +3210,7 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
                     interactive: bool, persistent: bool, subscribe: list[str],
                     model: str = "", effort: str = "",
-                    fresh: bool = False) -> None:
+                    fresh: bool = False, random_key: bool = False) -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
         # Deliberate limit, not an oversight: --wait blocks by running the task
@@ -3174,17 +3239,26 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
     # and `-w adhoc --wait` is the delegation idiom the role prompts teach, so
     # it is the shape most likely to run away.
     from .launch_lineage import ADHOC_WORKFLOW, admit, stamp
-    from .subagent import adhoc_session_name, spawn_adhoc
-    session_name = adhoc_session_name(task, run_key)
+    from .subagent import (_resolve_project_name, resolve_adhoc_session_name,
+                           spawn_adhoc)
+    # Resolved ONCE and handed to spawn_adhoc as the name: with --id-random
+    # there is no derivation to repeat, and a stamped link naming a session
+    # that never registers makes every chain through it unreadable.
+    session_name, derived_key = resolve_adhoc_session_name(
+        task, run_key, random_key, project=_resolve_project_name(cwd),
+        role=role, model=model, effort=effort)
     stamp(os.environ, admit(
         _detect_project_root(), session=session_name,
         workflow=ADHOC_WORKFLOW, run_key=session_name,
     ))
 
     result = spawn_adhoc(
-        cwd=cwd, task=task, timeout=timeout, name=run_key,
+        cwd=cwd, task=task, timeout=timeout, name=session_name,
         requested_by=requester, persistent=False, role=role,
-        subscribe=subscribe, model=model, effort=effort, fresh=fresh,
+        subscribe=subscribe, model=model, effort=effort,
+        # spawn_adhoc forces fresh on a name it derived itself; this one was
+        # derived a frame earlier, so the caller carries the same implication.
+        fresh=fresh or derived_key,
     )
     if result.final_text:
         click.echo(result.final_text)
@@ -3248,24 +3322,22 @@ def agents_update(name):
     from bobi.registry import (fetch, list_cached, check_update,
                                     split_team_ref, _read_local_version)
 
-    project_path = paths.home_dir()
-
     if name:
         pkg_name, version = split_team_ref(name)  # D-6: split on the last `@`
         try:
             if version:
                 # A pin targets an immutable asset — fetch directly (idempotent),
                 # no latest-vs-local short-circuit.
-                fetch(project_path, pkg_name, version=version)
-                new_v = _read_local_version(project_path, pkg_name) or version
+                fetch(pkg_name, version=version)
+                new_v = _read_local_version(pkg_name) or version
                 click.echo(f"Pinned {pkg_name} to v{new_v}")
                 return
-            local_v, remote_v = check_update(project_path, pkg_name)
+            local_v, remote_v = check_update(pkg_name)
             if local_v and remote_v and remote_v == local_v:
                 click.echo(f"{pkg_name} v{local_v} is already up to date.")
                 return
-            path = fetch(project_path, pkg_name)
-            new_v = _read_local_version(project_path, pkg_name) or "unknown"
+            path = fetch(pkg_name)
+            new_v = _read_local_version(pkg_name) or "unknown"
             if local_v:
                 click.echo(f"Updated {pkg_name}: v{local_v} → v{new_v}")
             else:
@@ -3274,18 +3346,18 @@ def agents_update(name):
             click.echo(f"Failed: {e}", err=True)
             raise SystemExit(1)
     else:
-        cached = list_cached(project_path)
+        cached = list_cached()
         if not cached:
             click.echo("No cached agent teams to update.")
             return
         failed = 0
         for pack in cached:
             try:
-                local_v, remote_v = check_update(project_path, pack["name"])
+                local_v, remote_v = check_update(pack["name"])
                 if local_v and remote_v and remote_v == local_v:
                     click.echo(f"  {pack['name']} v{local_v} — up to date")
                 elif remote_v:
-                    fetch(project_path, pack["name"])
+                    fetch(pack["name"])
                     click.echo(f"  {pack['name']} v{local_v} → v{remote_v}")
                 else:
                     click.echo(f"  {pack['name']} v{local_v} — could not check remote")
@@ -3364,13 +3436,12 @@ def agents_browse():
     """
     from bobi.registry import list_remote, list_cached, DEFAULT_REPO
 
-    project_path = paths.home_dir()
-    remote = list_remote(project_path)
+    remote = list_remote()
     if not remote:
         click.echo("Could not fetch remote registry.", err=True)
         raise SystemExit(1)
 
-    cached_packs = list_cached(project_path)
+    cached_packs = list_cached()
     cached = {p["name"]: str(p["version"]) for p in cached_packs}
 
     click.echo("Available agent teams:\n")

@@ -25,6 +25,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The both-era timestamp reader: aware values (the current convention) read
+# as written; naive values are legacy files written in the host's LOCAL time.
+from bobi.timeutil import epoch_seconds as _epoch
+
 # Status vocabulary. `awaiting_action` is derived for a workflow gate that has
 # waited long enough to require renewed human attention.
 RUNNING = "running"
@@ -57,24 +61,6 @@ def _iso(epoch: float | None) -> str:
     if not epoch:
         return ""
     return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
-
-
-def _epoch(iso: str) -> float:
-    """Epoch seconds from an ISO timestamp, 0.0 when unparseable.
-
-    Workflow runs record naive local timestamps (`time.strftime`) and monitor
-    records record aware UTC ones; a naive value is read as local time, which
-    is what its writer meant.
-    """
-    if not iso:
-        return 0.0
-    try:
-        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-    except ValueError:
-        return 0.0
-    if dt.tzinfo is None:
-        dt = dt.astimezone()
-    return dt.timestamp()
 
 
 def _duration(start: float, end: float) -> float | None:

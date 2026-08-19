@@ -11,8 +11,9 @@ so the index covers the same transcripts the replay path reads.
 
 import json
 import sqlite3
-import time
 from pathlib import Path
+
+from bobi.timeutil import now_iso
 
 
 def _projects_dirs() -> list[Path]:
@@ -248,7 +249,7 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
         conn.execute("""
             INSERT OR REPLACE INTO index_state (file_path, lines_read, last_indexed)
             VALUES (?, ?, ?)
-        """, (str(file_path), len(lines), time.strftime("%Y-%m-%dT%H:%M:%S")))
+        """, (str(file_path), len(lines), now_iso()))
         return 0
 
     if len(lines) <= skip:
@@ -313,7 +314,7 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
         INSERT OR REPLACE INTO index_state (file_path, lines_read, last_indexed)
         VALUES (?, ?, ?)
     """, (str(file_path), _lines_consumed(lines),
-          time.strftime("%Y-%m-%dT%H:%M:%S")))
+          now_iso()))
 
     conn.execute("""
         UPDATE conversations SET message_count = (

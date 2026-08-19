@@ -521,7 +521,7 @@ async def test_stream_once_sets_generous_max_buffer_size(monkeypatch):
     from bobi.brain.claude import DEFAULT_MAX_BUFFER_SIZE
 
     monkeypatch.delenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", raising=False)
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     captured = {}
 
     def _options(**kwargs):
@@ -1074,7 +1074,7 @@ async def test_claude_stream_once_sets_default_initialize_timeout(monkeypatch):
         yield _result(result="ok")
 
     monkeypatch.setattr("claude_agent_sdk.query", _query)
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     monkeypatch.delenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", raising=False)
     monkeypatch.delenv("BOBI_CLAUDE_INITIALIZE_TIMEOUT_MS", raising=False)
 
@@ -1132,7 +1132,7 @@ async def test_claude_stream_once_retries_initialize_timeout_before_output(
         yield _result(result="ok")
 
     monkeypatch.setattr("claude_agent_sdk.query", _query)
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     monkeypatch.setenv("BOBI_CLAUDE_CONNECT_ATTEMPTS", "2")
     monkeypatch.setenv("BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS", "0")
 

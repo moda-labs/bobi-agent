@@ -108,8 +108,14 @@ auto_dispatch:
   - event: github.issues           # NOT github.issues.assigned
     match:
       action: assigned             # the action is a FIELD, not part of the type
+      assignee: $self              # this deployment's resolved GitHub login
     workflow: issue-lifecycle
 ```
+
+`$self` is a reserved match value resolved from the deployment's own GitHub
+login. For `assignee`, it checks both the single assignee field and membership
+in the adapter's comma-separated `assignees` field. If the login cannot be
+resolved, the rule does not match; it must not dispatch someone else's issue.
 
 The distinction is per source and there is no universal rule: GitHub emits
 `github.<webhook-event>` and carries the action in `fields.action`, while

@@ -68,9 +68,22 @@ conversation's history, use
 ### Launch agents
 
 ```bash
-bobi agent <agent> subagents launch -w <workflow> --role <role> --task "context"
+bobi agent <agent> subagents launch -w <workflow> --role <role> --id <key> --task "context"
 bobi agent <agent> subagents launch -w adhoc --role engineer --wait --task "Investigate X"
 ```
+
+Pass `--id` whenever the run has a natural identity - an issue number, a unit
+name. It correlates the run, and re-launching that id resumes it.
+
+Without `--id` the run key is derived from the launch itself - workflow,
+project, role, model, effort, task text - so re-launching the same one while the
+first is still going is **refused as a duplicate**. That is the guardrail
+against a chain that keeps launching itself; do not route around it by rewording
+the task. Fanning out? Give each unit its own task string. Genuinely need N
+copies of an identical task at once? Pass `--id-random`.
+
+`--wait` is the exception: it derives its key from the same dials but has no
+duplicate guard, so identical `--wait` launches still run side by side.
 
 ### Communicate with other agents
 

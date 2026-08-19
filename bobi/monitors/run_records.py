@@ -31,8 +31,9 @@ import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
+
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -77,28 +78,6 @@ def _safe_name(monitor_name: str) -> str:
     nothing reads one subsystem's stems with the other's rule.
     """
     return re.sub(r"[^A-Za-z0-9_.-]", "_", monitor_name) or "monitor"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    """Read back a timestamp written in this package, defaulting naive to UTC.
-
-    The reader lives next to :func:`_now_iso`, the writer, so the accepted
-    format has one definition. Anything unparseable reads as absent — including
-    a non-string pulled out of a JSON state document, which is why
-    ``AttributeError`` is caught alongside ``ValueError``: state files in this
-    package are treated as empty when they do not parse, never as fatal.
-    """
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 @dataclass
@@ -223,7 +202,7 @@ class RunTracker:
     """
 
     def __init__(self, monitor_name: str, flavor: str = "", *, now=None):
-        self._now = now or _now_iso
+        self._now = now or now_iso
         self.run = MonitorRun(
             run_id=new_run_id(monitor_name),
             monitor=monitor_name,
