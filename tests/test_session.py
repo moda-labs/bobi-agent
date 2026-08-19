@@ -13,6 +13,7 @@ import pytest
 
 from bobi.brain import BrainCost, TurnResult
 from bobi.inbox import Message
+from bobi.sdk import SessionEntry, get_registry
 from bobi.session import Session
 from bobi.subagent import (
     _start_event_subscription as real_start_event_subscription,
@@ -610,6 +611,47 @@ class TestMessageAck:
         assert session.detect_state() == "waiting_input"
         assert client.queries == ["hello", "hello"]
         assert acked == [], "error turn acked - restart would lose the event"
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_is_terminal_persisted_and_not_acked(
+        self, session
+    ):
+        session._set_state("waiting_input")
+        registry = get_registry()
+        registry.register(SessionEntry(
+            name=session.name,
+            role="manager",
+            status="idle",
+        ))
+
+        class AuthFailureClient:
+            provider = "anthropic"
+
+            async def query(self, text):
+                pass
+
+            async def receive_response(self):
+                yield TurnResult(
+                    session_id="auth-turn",
+                    is_error=True,
+                    error_kind="authentication_failed",
+                    error_message="brain authentication failed",
+                    result_text="Not logged in - Please run /login",
+                )
+
+        session._client = AuthFailureClient()
+        acked = []
+        msg = _make_msg(wait=False)
+        msg.on_done = lambda: acked.append(True)
+
+        await session._process_message(msg)
+
+        entry = registry.get(session.name)
+        assert session.detect_state() == "error"
+        assert entry.status == "error"
+        assert entry.error == "brain authentication failed"
+        assert entry.terminal_at > 0
+        assert acked == []
 
     @pytest.mark.asyncio
     async def test_compact_sentinel_acks(self, session):
