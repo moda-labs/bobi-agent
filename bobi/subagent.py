@@ -743,11 +743,9 @@ def _workflow_period_key(workflow_name: str) -> str:
     would mint two identities for one dispatch. A workflow that cannot be
     found resolves to "" - the child reports the missing workflow itself.
     """
-    from bobi.workflow.triggers import WorkflowDispatcher
+    from bobi.workflow.triggers import find_installed_workflow
 
-    dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
-    workflow = dispatcher.find_workflow(workflow_name)
+    workflow = find_installed_workflow(workflow_name)
     if workflow is None or not workflow.period:
         return ""
     return workflow.period_run_key()
@@ -1213,19 +1211,21 @@ def launch_agent(
     if period_key:
         # The workflow field owns the period (#1048): every dispatch path -
         # scheduled tick, manual catch-up, event reaction - lands on the same
-        # run identity, so the admission below can dedupe them. A caller's key
-        # is deliberately overridden, not honored: honoring it is exactly the
-        # two-identities-one-period shape behind the #1016 double-publish.
-        if random_key:
-            raise ValueError(
-                f"Workflow {workflow_name} declares a period; --id-random "
-                "would run the same period twice, which the period exists to "
-                "prevent."
-            )
+        # run identity, so the admission below can dedupe them. A caller's
+        # key AND --id-random are deliberately overridden, not refused:
+        # honoring either is exactly the two-identities-one-period shape
+        # behind the #1016 double-publish, and refusing would break the
+        # reactor, which passes random_key for every id-less event.
         if run_key and run_key != period_key:
             log.info(
                 "Workflow %s declares a period; overriding run key %r with "
                 "the period key %s", workflow_name, run_key, period_key,
+            )
+        elif random_key:
+            log.info(
+                "Workflow %s declares a period; a random key would run the "
+                "same period twice, using the period key %s",
+                workflow_name, period_key,
             )
         run_key, derived_key = period_key, False
     else:
@@ -1314,7 +1314,14 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
-    with _LAUNCH_ADMISSION_LOCK:
+    from bobi.workflow.state import WorkflowRun, ledger_lock
+
+    # Two locks: the thread lock serializes this process's dispatch threads;
+    # the ledger file lock additionally serializes admission ACROSS processes
+    # (a monitor tick and a manual CLI catch-up are different processes), so
+    # the registry get/register pair and the ledger read-modify-write below
+    # cannot interleave with another launcher's.
+    with _LAUNCH_ADMISSION_LOCK, ledger_lock():
         from bobi.reconcile import close_dead_run, is_dead_run
         existing = registry.get(session_name)
         if existing and is_dead_run(existing):
@@ -1336,31 +1343,39 @@ def launch_agent(
         # to failed rather than left "running" to block the period forever
         # (the liveness check the naive period-key design lacked).
         if period_key:
-            from bobi.workflow.state import WorkflowRun
-            prior_run = WorkflowRun.find_by_run_key(workflow_name, run_key)
-            if prior_run and prior_run.status == "completed":
+            prior_run = WorkflowRun.find_by_run_key(workflow_name, run_key,
+                                                    repo=project)
+            if prior_run and prior_run.status == "completed" and not fresh:
+                # ``fresh`` is the deliberate escape hatch: an operator who
+                # KNOWS the completed run did nothing useful re-runs the
+                # period explicitly. Automatic dispatchers never pass it.
                 raise DuplicateRunError(
                     f"This period already ran: {run_key} completed at "
                     f"{prior_run.completed_at}. The next period admits the "
-                    f"next run.",
+                    f"next run; pass --fresh to deliberately run it again.",
                     session_name=session_name, status="completed",
                     derived_key=False,
                 )
-            if prior_run and prior_run.status in ("waiting", "resuming"):
+            if prior_run and prior_run.status == "waiting":
                 raise DuplicateRunError(
                     f"This period's run is suspended: {run_key} is awaiting "
-                    f"{prior_run.await_event or 'an event'} and resumes on "
-                    f"it (or from the console runs view).",
+                    f"{prior_run.await_event or 'an event'}. It resumes on "
+                    f"that event; to release the period instead, close the "
+                    f"run from the console runs view.",
                     session_name=session_name, status=prior_run.status,
                     derived_key=False,
                 )
-            if (prior_run and prior_run.status == "running"
+            if (prior_run and prior_run.status in ("running", "resuming")
                     and not (existing and existing.status in ACTIVE_STATUSES)):
-                # The ledger says running but no live process holds the
-                # session (reaped above, or the registry entry is gone).
-                # Close the entry honestly; the relaunch below adopts its
-                # checkpoint. A LIVE run falls through to the active-run
-                # refusal below.
+                # The ledger says running (or stuck mid-claim at "resuming",
+                # the D071 orphan) but no live process holds the session -
+                # reaped above, or the registry entry is gone. Registry-gone
+                # is ambiguous (a state-dir restore could orphan a live
+                # process), but refusing on it would let a wiped registry
+                # block the period forever, which is the exact failure the
+                # liveness check exists to prevent. Close the entry honestly;
+                # the relaunch below adopts its checkpoint. A LIVE run falls
+                # through to the active-run refusal below.
                 prior_run.status = "failed"
                 prior_run.save()
 
@@ -1911,11 +1926,9 @@ def _run_agent_entry(args: dict) -> None:
         return
 
     from bobi.workflow.orchestrator import run_workflow
-    from bobi.workflow.triggers import WorkflowDispatcher
+    from bobi.workflow.triggers import find_installed_workflow
 
-    dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
-    workflow = dispatcher.find_workflow(workflow_name)
+    workflow = find_installed_workflow(workflow_name)
     if not workflow:
         print(f"Workflow '{workflow_name}' not found")
         return

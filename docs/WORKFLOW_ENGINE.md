@@ -371,14 +371,23 @@ the step's output scope and feed downstream routing and templating.
    A workflow that declares `period:` (`hourly` / `daily` / `weekly` /
    `monthly`) owns its run key outright (#1048). Admission derives the key
    from the workflow name and the current period bucket -
-   `daily-standup-2026-08-10` - and **overrides** any caller `--id`, so a
-   scheduled tick, a manual catch-up, and an event reaction all land on ONE
-   run identity per period. The run ledger (below) is then consulted: a
-   completed entry for the period refuses a relaunch, a suspended one names
-   its awaited event, and a `running` entry blocks only while a live process
-   actually holds the session - a run that died without a terminal status is
-   closed and its ledger entry flipped to `failed`, so a stale entry can
-   never block the period. `--id-random` is refused for a periodic workflow.
+   `daily-standup-2026-08-10` - and **overrides** any caller `--id` or
+   `--id-random`, so a scheduled tick, a manual catch-up, and an event
+   reaction all land on ONE run identity per period. Buckets use the host's
+   local time, deliberately (monitor `at:` schedules are local); every
+   dispatcher is assumed to share the host clock. The period is scoped per
+   repo, like the session name: two repos served by one installation each
+   get their own run per period.
+
+   The run ledger (below) is then consulted, under a cross-process file
+   lock: a completed entry for the period refuses a relaunch (`--fresh` is
+   the deliberate operator escape hatch to run a period again); a `running`
+   or torn-`resuming` entry blocks only while a live process actually holds
+   the session - a run that died without a terminal status is closed and
+   its entry flipped to `failed`, so a dead run can never block the period.
+   A `waiting` entry DOES hold the period: it is a healthy parked gate, and
+   the refusal says so - it resumes on its event, or the operator closes
+   the run from the console runs view to release the period.
 2. **Seed context.** Build the `VariableContext` with the `input`,
    `requested_by`, and (if used) `worktree` scopes.
 3. **Open the run's ledger entry.** Every run gets a `WorkflowRun` record

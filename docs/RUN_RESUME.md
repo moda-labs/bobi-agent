@@ -23,6 +23,12 @@ steps. Both endpoints return `409` if the run is no longer waiting.
 write action. Everything else on the agent page reads; this restarts a workflow
 run that suspended waiting for an event that never arrived.
 
+Resume applies to `waiting` runs only. A **failed** run has a different
+affordance since #1048: its ledger entry keeps a step checkpoint, and
+relaunching the same run key from the CLI (`subagents launch -w <workflow>
+--id <key>`) resumes at that checkpoint instead of replaying completed
+steps - see `docs/WORKFLOW_ENGINE.md`.
+
 ```json
 {"ok": true, "accepted": true, "run_id": "wf-1",
  "workflow": "await-review", "await_event": "pr.merged"}

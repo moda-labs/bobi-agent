@@ -2408,8 +2408,10 @@ def workflow_status():
         click.echo("No workflow runs found.")
         return
     for run in runs[:20]:
+        # The run_key FIELD is authoritative (#1048); the trigger-event copy
+        # is display fallback for records written before the field existed.
         event_data = run.trigger_event.get("data", {})
-        issue = event_data.get("run_key", run.run_key or "?")
+        issue = run.run_key or event_data.get("run_key", "?")
         suffix = ""
         if run.suspended_at_step >= 0:
             suffix = f"  step={run.suspended_at_step}"

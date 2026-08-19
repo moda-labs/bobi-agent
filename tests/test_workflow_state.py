@@ -52,7 +52,9 @@ class TestWorkflowRunCreate:
         assert run.trigger_event == event
         assert run.status == "running"
         assert run.started_at != ""
-        assert len(run.run_id) == 8
+        # 64 bits: the ledger holds one entry per run now, and an 8-char id
+        # makes a silent same-id overwrite plausible at real volumes (#1048).
+        assert len(run.run_id) == 16
 
     def test_create_writes_aware_utc_started_at(self):
         # The one wall-clock convention (bobi.timeutil): timestamps persist
@@ -391,3 +393,17 @@ class TestFindWaitingMatchesField:
         found = WorkflowRun.find_waiting("pr.merged", run_key="42-comment-7")
         assert found is not None
         assert found.run_id == "w1"
+
+
+class TestFindByRunKeyRepoScope:
+    def test_filters_by_repo(self, runs_dir):
+        _make_run(runs_dir, run_id="a1", workflow_name="standup",
+                  run_key="k", repo="repo-a", status="completed")
+        assert WorkflowRun.find_by_run_key("standup", "k", repo="repo-b") is None
+        found = WorkflowRun.find_by_run_key("standup", "k", repo="repo-a")
+        assert found is not None and found.run_id == "a1"
+
+    def test_empty_repo_matches_all(self, runs_dir):
+        _make_run(runs_dir, run_id="a1", workflow_name="standup",
+                  run_key="k", repo="repo-a")
+        assert WorkflowRun.find_by_run_key("standup", "k") is not None

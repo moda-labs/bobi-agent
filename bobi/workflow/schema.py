@@ -95,9 +95,29 @@ class Workflow:
         (at launch admission) and pass the result along; deriving again later
         can straddle a period boundary and mint a second identity.
         """
+        if self.period not in PERIOD_FORMATS:
+            # load_workflow validates this for YAML-born workflows; a
+            # programmatically built one gets the same readable error here
+            # instead of a bare KeyError three frames from anything named.
+            raise ValueError(
+                f"Workflow {self.name}: period {self.period!r} must be one "
+                f"of {sorted(PERIOD_FORMATS)}"
+            )
         fmt = PERIOD_FORMATS[self.period]
         bucket = time.strftime(fmt, time.localtime(now))
         return f"{self.name}-{bucket}"
+
+    def steps_fingerprint(self) -> str:
+        """A short digest of the ordered step-name list.
+
+        Stamped onto a run's checkpoint so a retry can tell whether
+        ``checkpoint_step`` still indexes the workflow it was recorded
+        against - a bare index into an edited step list resumes at the wrong
+        step.
+        """
+        import hashlib
+        names = "\n".join(s.name for s in self.steps)
+        return hashlib.sha256(names.encode()).hexdigest()[:12]
 
     def step_by_name(self, name: str) -> StepDef | None:
         for s in self.steps:

@@ -186,20 +186,32 @@ def _workflow_rows(root: Path, *, now: float,
     from bobi.workflow.state import WorkflowRun
 
     rows = []
+    # One session's usage lands on ONE row. Retries reuse their entry, but a
+    # --fresh relaunch mints a second entry on the same session name; giving
+    # each the session's tokens would double-count spend in a column read as
+    # a running total. list_runs is newest-first, so the newest row wins.
+    usage_claimed: set[str] = set()
     for run in WorkflowRun.list_runs(root=root):
         status = _workflow_status(run, now=now)
         trigger = (run.trigger_event or {}).get("type", "")
         started = _epoch(run.started_at)
-        usage = usage_by_session.get(run.session_name) or {}
+        usage = {}
+        if run.session_name and run.session_name not in usage_claimed:
+            usage_claimed.add(run.session_name)
+            usage = usage_by_session.get(run.session_name) or {}
         rows.append(_row(
             run_kind="workflow",
             key=f"workflow:{run.run_id}",
             status=status,
-            title=run.workflow_name,
+            # Every run has a ledger entry now (#1048), so this row replaces
+            # the session row for ordinary runs too - it must carry what the
+            # operator actually asked for and why it failed, not only the
+            # workflow's name.
+            title=run.title or run.workflow_name,
             origin=(f"workflow · on {trigger}" if trigger else "workflow"),
             started_at=started,
             duration=_duration(started, _epoch(run.completed_at)),
-            error="",
+            error=run.error,
             session_id=run.session_name,
             run_id=run.run_id,
             tokens=usage.get("total_tokens", 0),
@@ -208,6 +220,7 @@ def _workflow_rows(root: Path, *, now: float,
             detail={"await_event": run.await_event,
                     "suspended_at_step": run.suspended_at_step,
                     "run_key": run.run_key, "repo": run.repo,
+                    "workflow": run.workflow_name,
                     "awaiting_action": status == AWAITING_ACTION,
                     "resumable": run.status == "waiting"},
         ))

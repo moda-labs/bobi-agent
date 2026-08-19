@@ -437,3 +437,58 @@ class TestEndpoint:
         _monitor(bobi_install)
         body = _get(client, f"/api/agents/{bobi_install.agent_name}/runs")
         json.dumps(body.json())
+
+
+class TestLedgerRowContent:
+    """Every run leaves a ledger entry now (#1048): the workflow row replaces
+    the session row for ordinary runs, so it must carry the task and the
+    failure reason, and must not double-count a session's spend."""
+
+    def _ledger(self, install, run_id, **extra):
+        runs_dir = install.state_dir / "workflow" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        base = {
+            "run_id": run_id, "workflow_name": "triage",
+            "trigger_event": {}, "started_at": _iso(NOW - 1800),
+            "completed_at": _iso(NOW - 1500), "status": "completed",
+            "suspended_at_step": -1, "await_event": "",
+            "session_name": "", "variable_scopes": {}, "repo": "",
+            "cwd": "", "run_key": "", "resumed_at": "",
+        }
+        base.update(extra)
+        (runs_dir / f"{run_id}.json").write_text(json.dumps(base))
+
+    def test_row_titles_the_task_and_carries_the_error(self, bobi_install):
+        self._ledger(bobi_install, "wf-1", status="failed",
+                     title="Fix moda-labs/bobi-agent#42",
+                     error="Handoff missing required fields: ['pr_url']")
+        row = _by_key(_rows(bobi_install))["workflow:wf-1"]
+        assert row["title"] == "Fix moda-labs/bobi-agent#42"
+        assert "pr_url" in row["error"]
+
+    def test_row_without_title_falls_back_to_workflow_name(self, bobi_install):
+        self._ledger(bobi_install, "wf-2")
+        row = _by_key(_rows(bobi_install))["workflow:wf-2"]
+        assert row["title"] == "triage"
+
+    def test_two_entries_one_session_count_usage_once(self, bobi_install):
+        # A --fresh relaunch mints a second entry on the same session name;
+        # both rows citing the session's tokens would double a column the
+        # reader totals by eye.
+        _session(bobi_install, "wf-triage-r-42", status="completed",
+                 model_usage={"anthropic:sonnet-5": {
+                     "cost_usd": 1.0, "input_tokens": 500,
+                     "output_tokens": 500, "cached_input_tokens": 0}},
+                 total_cost_usd=1.0)
+        self._ledger(bobi_install, "wf-old", status="failed",
+                     session_name="wf-triage-r-42",
+                     started_at=_iso(NOW - 3600))
+        self._ledger(bobi_install, "wf-new", status="completed",
+                     session_name="wf-triage-r-42")
+        payload = _rows(bobi_install)
+        rows = [r for r in payload["runs"]
+                if r["key"] in ("workflow:wf-old", "workflow:wf-new")]
+        assert len(rows) == 2
+        assert sum(1 for r in rows if r["tokens"] > 0) <= 1
+        total = sum(r["tokens"] for r in rows)
+        assert total <= 1000, "the session's tokens were counted twice"

@@ -45,6 +45,16 @@ class WorkflowRun:
     # after each completed step. A retry of a failed run starts here instead of
     # replaying from step 0 (#1048). -1 = no step has completed yet.
     checkpoint_step: int = -1
+    # Fingerprint of the workflow's step-name list when the checkpoint was
+    # written. A retry only trusts checkpoint_step when the fingerprint still
+    # matches - a bare index into an edited workflow lands on the wrong step.
+    checkpoint_fingerprint: str = ""
+    # The launch task (truncated), so the runs view can title a workflow row
+    # by what it worked on rather than only the workflow's name.
+    title: str = ""
+    # Terminal failure message; "" on success or while running. The runs view
+    # row for a failed workflow run answers "what failed" from here.
+    error: str = ""
 
     def save(self, root: Path | None = None):
         path = _runs_dir(root) / f"{self.run_id}.json"
@@ -75,6 +85,9 @@ class WorkflowRun:
             run_key=data.get("run_key", ""),
             resumed_at=data.get("resumed_at", ""),
             checkpoint_step=data.get("checkpoint_step", -1),
+            checkpoint_fingerprint=data.get("checkpoint_fingerprint", ""),
+            title=data.get("title", ""),
+            error=data.get("error", ""),
         )
 
     @classmethod
@@ -191,6 +204,7 @@ class WorkflowRun:
 
     @classmethod
     def find_by_run_key(cls, workflow_name: str, run_key: str,
+                        repo: str = "",
                         root: Path | None = None) -> WorkflowRun | None:
         """The most recent run of *workflow_name* under *run_key*, if any.
 
@@ -198,10 +212,18 @@ class WorkflowRun:
         workflow's period key answers "did this period already run?" here,
         across every dispatch path. Most recent by file mtime, so a retried
         period reflects the retry's outcome, not the first attempt's.
+
+        When *repo* is non-empty only runs whose ``repo`` field matches are
+        returned - same rule as :meth:`find_waiting`, and for the same reason:
+        one installation can run a workflow against several repos, and repo
+        A's period run must neither block nor be adopted by repo B's.
         """
         for run in cls.list_runs(root=root):
-            if run.workflow_name == workflow_name and run.run_key == run_key:
-                return run
+            if run.workflow_name != workflow_name or run.run_key != run_key:
+                continue
+            if repo and run.repo != repo:
+                continue
+            return run
         return None
 
     @classmethod
@@ -224,8 +246,24 @@ class WorkflowRun:
     @classmethod
     def create(cls, workflow_name: str, event: dict) -> WorkflowRun:
         return cls(
-            run_id=str(uuid.uuid4())[:8],
+            # 16 hex chars, not 8: the ledger now holds one entry per run
+            # (#1048), not one per suspension, and at 32 bits a busy year of
+            # retained runs makes a silent same-id overwrite plausible.
+            run_id=uuid.uuid4().hex[:16],
             workflow_name=workflow_name,
             trigger_event=event,
             started_at=now_iso(),
         )
+
+
+def ledger_lock(root: Path | None = None):
+    """Cross-process lock for a ledger read-modify-write cycle.
+
+    ``atomic_write_json`` keeps each run file parseable; only this lock keeps
+    a concurrent updater's decision from being overwritten (the repo's
+    durable-state rule). Taken by launch admission (find -> refuse/supersede)
+    and by ``run_workflow``'s open/adopt block - the two places that load a
+    run another process may own, mutate it, and save.
+    """
+    from bobi.fsutil import file_lock
+    return file_lock(_runs_dir(root) / "ledger")
