@@ -19,6 +19,7 @@ from bobi.brain import (
     BrainSession,
     ClaudeBrain,
     DEFAULT_BRAIN,
+    ERROR_KIND_CREDITS_EXHAUSTED,
     TurnResult,
     get_brain,
 )
@@ -905,6 +906,35 @@ async def test_receive_response_preserves_structured_auth_failure():
     assert out[-1].is_error is True
     assert out[-1].error_kind == "authentication_failed"
     assert out[-1].error_message == text
+
+
+@pytest.mark.asyncio
+async def test_receive_response_normalizes_structured_credit_exhaustion():
+    text = "You're out of usage credits"
+    assistant = AssistantMessage(
+        content=[TextBlock(text=text)],
+        model="<synthetic>",
+        error="out_of_credits",
+    )
+    result = _result(is_error=True, result=text)
+
+    out = [
+        message
+        async for message in _claude_session_over(
+            [assistant, result]
+        ).receive_response()
+    ]
+
+    assert out[-1].error_kind == ERROR_KIND_CREDITS_EXHAUSTED
+    assert out[-1].error_message == text
+
+
+def test_result_normalizes_text_only_credit_exhaustion():
+    result = _result_to_turn(
+        _result(is_error=True, result="Usage credits exhausted"),
+    )
+
+    assert result.error_kind == ERROR_KIND_CREDITS_EXHAUSTED
 
 
 @pytest.mark.asyncio

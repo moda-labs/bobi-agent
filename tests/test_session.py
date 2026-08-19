@@ -654,6 +654,54 @@ class TestMessageAck:
         assert acked == []
 
     @pytest.mark.asyncio
+    async def test_credit_failure_is_terminal_alerted_and_not_acked(
+        self, session, monkeypatch
+    ):
+        posts = []
+        monkeypatch.setattr(
+            "bobi.events.publish.post_event",
+            lambda topic, payload, project_path=None: posts.append((topic, payload)),
+        )
+        session._set_state("waiting_input")
+        registry = get_registry()
+        registry.register(SessionEntry(
+            name=session.name,
+            role="manager",
+            status="idle",
+        ))
+
+        class CreditFailureClient:
+            provider = "anthropic"
+
+            async def query(self, text):
+                pass
+
+            async def receive_response(self):
+                yield TurnResult(
+                    session_id="credit-turn",
+                    is_error=True,
+                    error_kind="credits_exhausted",
+                    error_message="brain credits exhausted",
+                    result_text="You're out of usage credits",
+                )
+
+        session._client = CreditFailureClient()
+        acked = []
+        msg = _make_msg(wait=False)
+        msg.on_done = lambda: acked.append(True)
+
+        await session._process_message(msg)
+
+        entry = registry.get(session.name)
+        assert session.detect_state() == "error"
+        assert entry.status == "error"
+        assert entry.error == "brain credits exhausted"
+        assert acked == []
+        assert [topic for topic, _ in posts] == [
+            "system/brain.credits.exhausted"
+        ]
+
+    @pytest.mark.asyncio
     async def test_compact_sentinel_acks(self, session):
         from bobi.session import COMPACT_SENTINEL
         session._set_state("waiting_input")

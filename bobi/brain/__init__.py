@@ -19,6 +19,8 @@ import os
 from collections.abc import MutableMapping
 
 from bobi.brain.base import (
+    ERROR_KIND_AUTHENTICATION,
+    ERROR_KIND_CREDITS_EXHAUSTED,
     ERROR_KIND_MAX_TURNS,
     AssistantText,
     BrainCapabilities,
@@ -29,6 +31,7 @@ from bobi.brain.base import (
     DeferredTool,
     StreamDelta,
     TurnResult,
+    classify_brain_unavailability,
     turn_error_text,
 )
 from bobi.brain.claude import ClaudeBrain
@@ -549,11 +552,14 @@ __all__ = [
     "DEFAULT_MAX_TURNS",
     "BRAIN_ENV",
     "ERROR_KIND_MAX_TURNS",
+    "ERROR_KIND_AUTHENTICATION",
+    "ERROR_KIND_CREDITS_EXHAUSTED",
     "GATEWAY_BASE_URL_ENV",
     "GATEWAY_SMALL_MODEL_ENV",
     "GATEWAY_UNRESOLVED_BASE_URL",
     "GATEWAY_WIRE_API_ENV",
     "continuation_token",
+    "classify_brain_unavailability",
     "get_brain",
     "get_process_brain_effort",
     "get_process_brain_model",

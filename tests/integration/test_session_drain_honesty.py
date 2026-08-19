@@ -134,3 +134,41 @@ def test_brain_auth_failure_is_terminal_visible_and_not_acked(
         assert acked == []
     finally:
         session.stop()
+
+
+@pytest.mark.timeout(120)
+def test_stub_credit_failure_alerts_without_acknowledging_the_event(
+    bobi_env, monkeypatch
+):
+    """The full manager thread emits the alert without a successful turn."""
+    if bobi_env.env.get("BOBI_BRAIN") != "stub":
+        pytest.skip("credit exhaustion is deterministic only on the stub brain")
+
+    posts = []
+    monkeypatch.setattr(
+        "bobi.events.publish.post_event",
+        lambda topic, payload, project_path=None: posts.append((topic, payload)),
+    )
+    session = Session(
+        name="brain-credit-alert",
+        cwd=str(bobi_env.project_path),
+        system_prompt={"type": "preset", "preset": "claude_code"},
+    )
+    try:
+        assert session.start(startup_prompt=None, timeout=30)
+        acked = []
+        session.inbox.push(Message(
+            id="credits-1",
+            sender="e2e",
+            text="__stub__:credits",
+            on_done=lambda: acked.append(True),
+        ))
+
+        assert _wait_for(lambda: session._state == "error", 30)
+        assert [topic for topic, _ in posts] == [
+            "system/brain.credits.exhausted"
+        ]
+        time.sleep(0.2)
+        assert acked == []
+    finally:
+        session.stop()

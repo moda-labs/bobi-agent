@@ -32,6 +32,7 @@ Directives:
   ``__stub__:error``         complete with ``TurnResult(is_error=True)``.
   ``__stub__:auth``          complete with the structured terminal auth error
                              emitted by a logged-out brain.
+  ``__stub__:credits``       complete with terminal exhausted-credit metadata.
   ``__stub__:maxturns[:<n>]``
                              complete with the harness's TURN-CAP terminal
                              shape (#845): ``error_kind="max_turns_reached"``,
@@ -64,6 +65,7 @@ from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     ERROR_KIND_AUTHENTICATION,
+    ERROR_KIND_CREDITS_EXHAUSTED,
     ERROR_KIND_MAX_TURNS,
     AssistantText,
     BrainCapabilities,
@@ -155,6 +157,8 @@ class _StubSession:
             reply = arg
         elif verb == "auth":
             reply = "Not logged in - Please run /login"
+        elif verb == "credits":
+            reply = "You're out of usage credits"
         else:
             reply = f"stub ack: {(self._pending or '').strip()[:120]}"
         yield AssistantText(text=reply, usage=None)
@@ -183,6 +187,16 @@ class _StubSession:
                 is_error=True,
                 error_kind=ERROR_KIND_AUTHENTICATION,
                 error_message="brain authentication failed",
+                result_text=reply,
+            )
+            return
+
+        if verb == "credits":
+            yield TurnResult(
+                session_id=self._session_id,
+                is_error=True,
+                error_kind=ERROR_KIND_CREDITS_EXHAUSTED,
+                error_message="brain credits exhausted",
                 result_text=reply,
             )
             return
