@@ -1072,7 +1072,7 @@ async def test_claude_stream_once_preserves_structured_auth_failure(monkeypatch)
         yield _result(is_error=True, result=text)
 
     monkeypatch.setattr("claude_agent_sdk.query", _query)
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
 
     out = [
         message
