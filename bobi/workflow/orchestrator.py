@@ -343,6 +343,12 @@ def run_workflow(
                 run = prior
                 run.status = "running"
                 run.resumed_at = now_iso()
+                # Clear the failed attempt's residue: a running retry must
+                # not render with the old attempt's end time, nor a finished
+                # one as parked at a gate the flip left behind.
+                run.completed_at = ""
+                run.await_event = ""
+                run.suspended_at_step = -1
                 # The retry's identity is THIS dispatch's, not the failed
                 # attempt's: a later suspend/resume must come back to the
                 # session and directory the retry actually ran in.
@@ -477,9 +483,15 @@ def resume_workflow(
     # Advance the retry anchor past the consumed gate: if the first step
     # after this resume fails before any checkpoint fires, a retry must
     # start HERE, not back on the await step - re-arming a gate whose event
-    # already arrived parks the run behind an approval it already has.
-    run.checkpoint_step = step_idx
-    run.checkpoint_fingerprint = workflow.steps_fingerprint()
+    # already arrived parks the run behind an approval it already has. Only
+    # when the stored fingerprint still matches, though: re-stamping a stale
+    # index with the CURRENT workflow's digest would launder a checkpoint
+    # recorded against a step list that has since changed.
+    if run.checkpoint_fingerprint == workflow.steps_fingerprint():
+        run.checkpoint_step = step_idx
+    else:
+        run.checkpoint_step = -1
+        run.checkpoint_fingerprint = ""
     run.save()
 
     _emit_lifecycle_event("agent/workflow.resumed", {
@@ -951,8 +963,10 @@ async def _run_workflow_async(
             # here - suspension is a state of THIS run, not a new record.
             if step.await_event:
                 log.info(f"Await step {step.name}: suspending, waiting for '{step.await_event}'")
-                registry.update(session_name, status="waiting", phase=step.name)
-
+                # Ledger BEFORE registry, mirroring the terminal path's
+                # ordering: admission's liveness check reads "registry
+                # non-active + ledger running" as a dead run, so the registry
+                # must never say waiting while the ledger still says running.
                 run.status = "waiting"
                 run.suspended_at_step = step_idx + 1
                 run.await_event = step.await_event
@@ -960,6 +974,7 @@ async def _run_workflow_async(
                 # the retry anchor, and saves - one writer for the whole
                 # restore payload.
                 _checkpoint(step_idx + 1)
+                registry.update(session_name, status="waiting", phase=step.name)
 
                 _emit_lifecycle_event("agent/workflow.suspended", {
                     "run_key": run_key,

@@ -486,9 +486,10 @@ class TestLedgerRowContent:
         self._ledger(bobi_install, "wf-new", status="completed",
                      session_name="wf-triage-r-42")
         payload = _rows(bobi_install)
-        rows = [r for r in payload["runs"]
-                if r["key"] in ("workflow:wf-old", "workflow:wf-new")]
+        rows = {r["key"]: r for r in payload["runs"]
+                if r["key"] in ("workflow:wf-old", "workflow:wf-new")}
         assert len(rows) == 2
-        assert sum(1 for r in rows if r["tokens"] > 0) <= 1
-        total = sum(r["tokens"] for r in rows)
-        assert total <= 1000, "the session's tokens were counted twice"
+        # The NEWEST entry claims the session's usage; the older gets zero.
+        # Asserting both directions: counted once, and not zero times.
+        assert rows["workflow:wf-new"]["tokens"] == 1000
+        assert rows["workflow:wf-old"]["tokens"] == 0

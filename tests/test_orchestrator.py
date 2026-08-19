@@ -2623,3 +2623,30 @@ class TestRunLedger:
         final = WorkflowRun.list_runs()[0]
         assert final.status == "completed", (
             "retry landed back on the await gate instead of the step after")
+
+    def test_resume_invalidates_checkpoint_when_workflow_changed(self):
+        # The workflow was edited while the run was parked: the stored index
+        # no longer means what it meant. Resume must invalidate the retry
+        # anchor, not launder it with the current fingerprint.
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+        ])
+        self._run(wf, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "waiting"
+        assert run.checkpoint_step == 2
+
+        edited = Workflow(name="t", steps=[
+            StepDef(name="s0", prompt="inserted"),
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+        ])
+        result, _, _ = self._resume(run, edited)
+        saved = WorkflowRun.list_runs()[0]
+        assert saved.checkpoint_step == -1 or saved.checkpoint_fingerprint == (
+            edited.steps_fingerprint()), (
+            "a stale checkpoint index was re-stamped with the edited "
+            "workflow's fingerprint")

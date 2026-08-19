@@ -1316,12 +1316,16 @@ def launch_agent(
 
     from bobi.workflow.state import WorkflowRun, ledger_lock
 
-    # Two locks: the thread lock serializes this process's dispatch threads;
-    # the ledger file lock additionally serializes admission ACROSS processes
-    # (a monitor tick and a manual CLI catch-up are different processes), so
-    # the registry get/register pair and the ledger read-modify-write below
-    # cannot interleave with another launcher's.
-    with _LAUNCH_ADMISSION_LOCK, ledger_lock():
+    def _admit() -> None:
+        """One admission pass: reap, ledger checks, registry guard.
+
+        Runs under ledger_lock so the decision cannot interleave with
+        another process's - and runs TWICE, because the concurrency
+        semaphore between the passes can wait minutes, during which a
+        concurrent launcher may have registered or the period completed.
+        Raises DuplicateRunError on refusal; every step is idempotent.
+        """
+        nonlocal existing
         from bobi.reconcile import close_dead_run, is_dead_run
         existing = registry.get(session_name)
         if existing and is_dead_run(existing):
@@ -1439,6 +1443,17 @@ def launch_agent(
                 derived_key=derived_key,
             )
 
+    existing = None
+    with _LAUNCH_ADMISSION_LOCK:
+        # The ledger file lock serializes the admission DECISION across
+        # processes (a monitor tick and a manual CLI catch-up are different
+        # processes). It is deliberately NOT held across the semaphore wait
+        # below - that can block for minutes, and every spawned child takes
+        # this same lock to open its ledger entry, so holding it there would
+        # stall the whole host's workflow starts behind one queued launch.
+        with ledger_lock():
+            _admit()
+
         # Preflight: concurrency semaphore — queue if too many agents running
         _check_concurrency_semaphore(root)
 
@@ -1446,19 +1461,24 @@ def launch_agent(
         from bobi.sdk import check_image_rotation, compute_manifest_hash
         check_image_rotation(session_name, root)
 
-        # Register first so the session dir exists for the log file. This write
-        # stays in the same critical section as admission so parallel dispatch
-        # threads cannot all pass on the same stale active/starting count.
-        registry.register(SessionEntry(
-            name=session_name, session_id="", role=role,
-            run_key=run_key, title=task[:80], phase=workflow_name,
-            project=project, cwd=cwd, status="starting",
-            requested_by=requested_by or {},
-            image_hash=compute_manifest_hash(root),
-            # Persist the declared timeout so the dead-man reconciler knows this
-            # run's deadline (MDS-65 §4.6).
-            timeout=timeout,
-        ))
+        with ledger_lock():
+            # Second pass: the wait above may have been minutes - a
+            # concurrent launcher may hold the name now, or the period may
+            # have completed. Register in the SAME critical section as the
+            # re-check so parallel dispatchers cannot both pass on the same
+            # stale read; registering first also creates the session dir the
+            # log file needs.
+            _admit()
+            registry.register(SessionEntry(
+                name=session_name, session_id="", role=role,
+                run_key=run_key, title=task[:80], phase=workflow_name,
+                project=project, cwd=cwd, status="starting",
+                requested_by=requested_by or {},
+                image_hash=compute_manifest_hash(root),
+                # Persist the declared timeout so the dead-man reconciler knows
+                # this run's deadline (MDS-65 §4.6).
+                timeout=timeout,
+            ))
 
     # Everything from here to the pid write is inside the try: the entry is
     # already registered `starting` with pid 0, and `is_dead_run` cannot tell
