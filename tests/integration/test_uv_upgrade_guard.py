@@ -114,6 +114,9 @@ def test_uv_force_reinstall_survives_agent_launch_inside_release_window(
 
     after = _run(install, env=env)
     assert after.returncode == 0, after.stdout + after.stderr
+    upgraded = _run(
+        [uv, "tool", "upgrade", "--reinstall", "bobi"], env=env)
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
     version = _run([str(bin_dir / "bobi"), "--version"], env=env)
     assert version.returncode == 0, version.stdout + version.stderr
 
@@ -142,8 +145,9 @@ def test_pipx_reinstall_replaces_guarded_framework_after_release(
 
     release = _run([str(bin_dir / "bobi"), "guard", "release"], env=env)
     assert release.returncode == 0, release.stdout + release.stderr
-    reinstalled = _run([pipx, "reinstall", "bobi"], env=env, cwd=tmp_path)
-    assert reinstalled.returncode == 0, reinstalled.stdout + reinstalled.stderr
+    upgraded = _run(
+        [pipx, "upgrade", "--force", "bobi"], env=env, cwd=tmp_path)
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
     assert not list(venv.glob("lib/python*/site-packages/~obi*"))
 
 

@@ -21,14 +21,17 @@ relock_framework_roots() {
 
 remove_release_marker() {
     if [[ -n "$release_marker" ]]; then
-        rm -f "$release_marker"
+        if ! rm -f "$release_marker"; then
+            echo "Could not close Bobi runtime guard release window: $release_marker" >&2
+            return 1
+        fi
     fi
 }
 
 on_exit() {
     local status=$?
     if (( release_failed )); then
-        remove_release_marker
+        remove_release_marker || true
     fi
     if (( release_failed )) && [[ -n "$released_tool_root" ]]; then
         relock_framework_roots "$released_tool_root"
@@ -98,11 +101,21 @@ json_escape() {
     printf '%s' "$value"
 }
 
+write_release_marker() {
+    local tool_root="$1"
+    local expires_at="$2"
+    local state="$3"
+    local marker_tmp="$release_marker.$$"
+
+    printf '{"prefix":"%s","expires_at":%s,"opened_by":"scripts/install.sh","pid":%s,"state":"%s"}\n' \
+        "$(json_escape "$tool_root")" "$expires_at" "$$" "$state" > "$marker_tmp"
+    mv "$marker_tmp" "$release_marker"
+}
+
 release_write_guard() {
     local tool_dir="$1"
     local tool_root="$tool_dir/bobi"
     local bobi_home
-    local marker_tmp
     local expires_at
 
     [[ -d "$tool_root" ]] || return 0
@@ -110,11 +123,13 @@ release_write_guard() {
     release_marker="$bobi_home/runtime-guard-released"
     released_tool_root="$tool_root"
     release_failed=1
-    marker_tmp="$release_marker.$$"
     expires_at="$(( $(date +%s) + 900 ))"
-    printf '{"prefix":"%s","expires_at":%s,"opened_by":"scripts/install.sh","pid":%s}\n' \
-        "$(json_escape "$tool_root")" "$expires_at" "$$" > "$marker_tmp"
-    mv "$marker_tmp" "$release_marker"
+    # Older Bobi versions ignore state, so make the transient marker expired
+    # until the tree is fully writable and the open marker can be activated.
+    write_release_marker "$tool_root" "0" "opening"
+    chmod -R u+w "$tool_root"
+    write_release_marker "$tool_root" "$expires_at" "open"
+    # Repair an apply sweep that started while the marker was still opening.
     chmod -R u+w "$tool_root"
     release_failed=0
 }
@@ -123,7 +138,13 @@ echo "Installing bobi..."
 tool_dir="$(uv tool dir)"
 release_write_guard "$tool_dir"
 uv tool install --force bobi
-remove_release_marker
+if [[ -n "$release_marker" ]]; then
+    if ! write_release_marker "$released_tool_root" "0" "opening" ||
+            ! remove_release_marker; then
+        relock_framework_roots "$released_tool_root"
+        exit 1
+    fi
+fi
 release_marker=""
 released_tool_root=""
 

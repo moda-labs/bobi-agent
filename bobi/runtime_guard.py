@@ -53,7 +53,7 @@ class GuardReport:
 @dataclass(frozen=True)
 class ReleaseWindowStatus:
     marker_path: Path
-    state: Literal["missing", "open", "expired", "invalid"]
+    state: Literal["missing", "opening", "open", "expired", "invalid"]
     detail: str
     prefix: Path | None = None
     expires_at: float | None = None
@@ -215,6 +215,7 @@ def release_window_status(*, now: float | None = None) -> ReleaseWindowStatus:
     expires_at = raw.get("expires_at")
     opened_by = raw.get("opened_by")
     pid = raw.get("pid")
+    marker_state = raw.get("state")
     if not isinstance(prefix_raw, str) or not prefix_raw:
         return ReleaseWindowStatus(marker, "invalid", "marker prefix is missing")
     prefix = Path(prefix_raw).expanduser()
@@ -233,14 +234,20 @@ def release_window_status(*, now: float | None = None) -> ReleaseWindowStatus:
         return ReleaseWindowStatus(marker, "invalid", "marker opener is missing")
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return ReleaseWindowStatus(marker, "invalid", "marker pid is invalid")
+    if marker_state not in ("opening", "open"):
+        return ReleaseWindowStatus(marker, "invalid", "marker state is invalid")
 
-    current = time.time() if now is None else now
     common = dict(
         prefix=prefix,
         expires_at=expires_at,
         opened_by=opened_by,
         pid=pid,
     )
+    if marker_state == "opening":
+        return ReleaseWindowStatus(
+            marker, "opening", "release window is still opening", **common)
+
+    current = time.time() if now is None else now
     if expires_at <= current:
         return ReleaseWindowStatus(marker, "expired", "release window expired", **common)
     if expires_at > current + RELEASE_WINDOW + RELEASE_CLOCK_SKEW:
@@ -308,13 +315,13 @@ def _apply_runtime_write_policy(
     runtime_root: Path | None, *, honor_release_window: bool,
 ) -> GuardReport:
     report = GuardReport()
-    window = release_window_status() if honor_release_window else None
+    initial_window = release_window_status() if honor_release_window else None
     for root in protected_runtime_roots(runtime_root):
         if (
             honor_release_window
             and root.kind in FRAMEWORK_KINDS
-            and window is not None
-            and window.covers(root.path)
+            and initial_window is not None
+            and initial_window.covers(root.path)
         ):
             report.released.append(root)
             continue
@@ -326,6 +333,31 @@ def _apply_runtime_write_policy(
                 len(skipped), root.path, skipped[0],
             )
             report.skipped.extend(skipped)
+        if honor_release_window and root.kind in FRAMEWORK_KINDS:
+            # Release can open after this apply read the marker but before its
+            # read-only sweep finishes. Reconcile after the sweep so an old
+            # apply cannot be the last writer and silently defeat the window.
+            final_window = release_window_status()
+            if final_window.covers(root.path):
+                restore_failures = _chmod_tree(root.path, _mutable_mode)
+                restore_failures.extend(_mutable_failures(root))
+                if restore_failures:
+                    logger.warning(
+                        "Runtime write guard could not honor the newly opened "
+                        "release window under %s (first: %s)",
+                        root.path, restore_failures[0],
+                    )
+                    report.skipped.extend(restore_failures)
+                    report.protected.append(root)
+                    continue
+                settled_window = release_window_status()
+                if settled_window.covers(root.path):
+                    report.released.append(root)
+                    continue
+                # Reapply can close the marker while this process is restoring
+                # write bits. If so, converge back to the closed policy.
+                relock_failures = _chmod_tree(root.path, _readonly_mode)
+                report.skipped.extend(relock_failures)
         report.protected.append(root)
     return report
 
@@ -341,21 +373,27 @@ def _framework_prefix(roots: list[ProtectedRoot]) -> Path:
     return Path(os.path.commonpath([str(root.path.resolve()) for root in roots]))
 
 
-def _write_release_marker(prefix: Path, opened_by: str, now: float) -> tuple[Path, float]:
+def _write_release_marker(
+    prefix: Path, opened_by: str, expires_at: float,
+    *, state: Literal["opening", "open"],
+) -> Path:
     marker = release_marker_path()
-    expires_at = now + RELEASE_WINDOW
+    # Legacy readers do not understand state. An expired opening marker keeps
+    # those readers fail-closed while this process changes permissions.
+    marker_expiry = 0 if state == "opening" else expires_at
     fsutil.atomic_write_json(
         marker,
         {
             "prefix": str(prefix),
-            "expires_at": expires_at,
+            "expires_at": marker_expiry,
             "opened_by": opened_by,
             "pid": os.getpid(),
+            "state": state,
         },
         indent=None,
         sort_keys=True,
     )
-    return marker, expires_at
+    return marker
 
 
 def _mutable_failures(root: ProtectedRoot) -> list[str]:
@@ -420,9 +458,10 @@ def release_runtime_write_policy(
     current = time.time() if now is None else now
     prefix = _framework_prefix(roots)
     report.prefix = prefix
+    report.expires_at = current + RELEASE_WINDOW
     try:
-        report.marker_path, report.expires_at = _write_release_marker(
-            prefix, opened_by, current)
+        report.marker_path = _write_release_marker(
+            prefix, opened_by, report.expires_at, state="opening")
     except OSError as exc:
         report.marker_path = release_marker_path()
         report.skipped.append(f"{report.marker_path}: could not open release window ({exc})")
@@ -438,16 +477,46 @@ def release_runtime_write_policy(
     for root in failed_roots:
         unlock_errors.extend(_chmod_tree(root.path, _mutable_mode))
 
-    final_failures = [
+    opening_failures = [
         failure
         for root in roots
         for failure in _mutable_failures(root)
     ]
+    opening_failures = [*unlock_errors, *opening_failures]
+    if opening_failures:
+        report.skipped.extend(opening_failures)
+        marker_error = _close_release_marker()
+        if marker_error:
+            report.skipped.append(marker_error)
+        for root in roots:
+            report.skipped.extend(_chmod_tree(root.path, _readonly_mode))
+        return report
+
+    try:
+        report.marker_path = _write_release_marker(
+            prefix, opened_by, report.expires_at, state="open")
+    except OSError as exc:
+        report.skipped.append(
+            f"{report.marker_path}: could not activate release window ({exc})")
+        marker_error = _close_release_marker()
+        if marker_error:
+            report.skipped.append(marker_error)
+        for root in roots:
+            report.skipped.extend(_chmod_tree(root.path, _readonly_mode))
+        return report
+
+    # An apply that saw the transient opening state can finish after the first
+    # verification. Sweep once more after activation; any still-later apply
+    # performs its own post-sweep reconciliation against the open marker.
+    final_failures: list[str] = []
+    for root in roots:
+        final_failures.extend(_chmod_tree(root.path, _mutable_mode))
+        final_failures.extend(_mutable_failures(root))
+
     window = release_window_status(now=current)
     if not window.is_open or any(not window.covers(root.path) for root in roots):
         final_failures.append(
             f"{report.marker_path}: release window did not remain open ({window.detail})")
-    final_failures = [*unlock_errors, *final_failures]
     if final_failures:
         report.skipped.extend(final_failures)
         marker_error = _close_release_marker()

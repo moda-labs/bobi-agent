@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import stat
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,6 +64,7 @@ def _write_release_marker(home: Path, prefix: Path, expires_at: float, **overrid
         "expires_at": expires_at,
         "opened_by": "test",
         "pid": os.getpid(),
+        "state": "open",
     }
     payload.update(overrides)
     home.mkdir(parents=True, exist_ok=True)
@@ -242,6 +244,46 @@ class TestRuntimeWritePolicy:
         assert release_window_status().state == "invalid"
         assert not framework.stat().st_mode & stat.S_IWUSR
 
+    def test_interrupted_opening_marker_fails_closed(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        framework, _, roots = _framework_roots(tmp_path)
+        _write_release_marker(
+            home, tmp_path / "tool", 0, state="opening")
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+
+        report = apply_runtime_write_policy(None)
+
+        assert not report.released
+        assert release_window_status().state == "opening"
+        assert not framework.stat().st_mode & stat.S_IWUSR
+
+    def test_release_opening_marker_fails_closed_for_legacy_readers(
+        self, tmp_path, monkeypatch,
+    ):
+        framework, _, roots = _framework_roots(tmp_path)
+        monkeypatch.setattr(
+            runtime_guard, "framework_release_roots", lambda: (roots, ""),
+        )
+        writes = []
+        real_write = runtime_guard.fsutil.atomic_write_json
+
+        def capture_write(path, payload, **kwargs):
+            writes.append(dict(payload))
+            return real_write(path, payload, **kwargs)
+
+        monkeypatch.setattr(
+            runtime_guard.fsutil, "atomic_write_json", capture_write,
+        )
+
+        report = release_runtime_write_policy()
+
+        assert report.ok
+        assert writes[0]["state"] == "opening"
+        assert writes[0]["expires_at"] == 0
+        assert writes[-1]["state"] == "open"
+        assert writes[-1]["expires_at"] == report.expires_at
+
     def test_expired_window_resumes_writable_drift_detection(
         self, tmp_path, monkeypatch,
     ):
@@ -312,6 +354,52 @@ class TestRuntimeWritePolicy:
         assert report.ok
         assert raced
         assert framework.stat().st_mode & stat.S_IWUSR
+
+    def test_late_apply_reconciles_after_release_returns(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("BOBI_HOME", str(home))
+        framework, _, roots = _framework_roots(tmp_path)
+        monkeypatch.setattr(runtime_guard, "protected_runtime_roots", lambda _: roots)
+        monkeypatch.setattr(runtime_guard, "framework_release_roots", lambda: (roots, ""))
+        real_chmod_tree = runtime_guard._chmod_tree
+        apply_blocked = threading.Event()
+        resume_apply = threading.Event()
+        apply_result = {}
+
+        def delayed_chmod(root, mode_fn, **kwargs):
+            if (
+                threading.current_thread().name == "late-apply"
+                and mode_fn is runtime_guard._readonly_mode
+                and not apply_blocked.is_set()
+            ):
+                apply_blocked.set()
+                assert resume_apply.wait(timeout=10)
+            return real_chmod_tree(root, mode_fn, **kwargs)
+
+        monkeypatch.setattr(runtime_guard, "_chmod_tree", delayed_chmod)
+
+        thread = threading.Thread(
+            target=lambda: apply_result.setdefault(
+                "report", apply_runtime_write_policy(None)),
+            name="late-apply",
+        )
+        thread.start()
+        assert apply_blocked.wait(timeout=10)
+
+        release = release_runtime_write_policy()
+        assert release.ok
+        assert release_window_status().state == "open"
+
+        resume_apply.set()
+        thread.join(timeout=10)
+
+        assert not thread.is_alive()
+        assert [root.kind for root in apply_result["report"].released] == [
+            "bobi-package", "bobi-dist-info"]
+        assert not apply_result["report"].skipped
+        for root in roots:
+            assert not runtime_guard._mutable_failures(root)
+        assert release_window_status().state == "open"
 
     def test_release_does_not_chmod_when_marker_cannot_be_written(
         self, tmp_path, monkeypatch,

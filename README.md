@@ -135,7 +135,10 @@ bobi guard release && uv tool install --force bobi
 Use `pipx upgrade bobi` or `brew upgrade bobi` after `bobi guard release` for
 those install methods. `bobi guard status` shows the imported installation,
 marker, expiry, and root modes; `bobi guard reapply` closes the window early.
-Do not hot-swap Bobi under a running team.
+Expiry stops later launches from honoring the release exception, but it does
+not schedule a background `chmod`: the next agent launch re-locks the framework,
+or `bobi guard reapply` does so immediately. Do not hot-swap Bobi under a
+running team.
 
 Manual recovery for a broken uv install is `chmod -R u+w "$(uv tool dir)/bobi"`
 followed by `uv tool install --force bobi`. `--force` is required because uv's

@@ -126,8 +126,10 @@ bobi guard release && uv tool install --force bobi
 Use `pipx upgrade bobi` or `brew upgrade bobi` after the release command for
 those install methods. Inspect the window with `bobi guard status`, or close it
 early with `bobi guard reapply`. The window expires after 15 minutes and the
-guard stays active for team packages throughout. Do not upgrade under a running
-team.
+guard stays active for team packages throughout. Expiry invalidates the
+exception; it does not run `chmod` in the background. The next agent launch
+physically re-locks the framework, or `bobi guard reapply` does so immediately.
+Do not upgrade under a running team.
 
 Manual recovery is:
 

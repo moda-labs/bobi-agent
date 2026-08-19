@@ -152,12 +152,15 @@ therefore runs untrusted-author code against your credentials.
   on Bobi's framework package and distribution metadata, never on an installed
   team package. A JSON marker under `$BOBI_HOME` records the covered install,
   opener, process, and expiry; malformed, expired, future-dated, or
-  prefix-mismatched markers fail closed. The window lasts at most 15 minutes,
-  appears in `bobi guard status` and doctor, and can be closed immediately with
-  `bobi guard reapply`. It remains a same-UID guardrail, not a privilege boundary:
-  an actor with that UID can still chmod files or renew the marker. Stop running
-  teams before upgrading because replacing imported code under a live process is
-  unsupported.
+  prefix-mismatched markers fail closed. A transient `opening` marker also fails
+  closed, so an interrupted unlock cannot suppress the next guard sweep. The
+  window lasts at most 15 minutes, appears in `bobi guard status` and doctor,
+  and can be closed immediately with `bobi guard reapply`. Expiry invalidates
+  the exception but does not run a background chmod; the next agent launch
+  physically re-locks the framework. It remains a same-UID guardrail, not a
+  privilege boundary: an actor with that UID can still chmod files or renew the
+  marker. Stop running teams before upgrading because replacing imported code
+  under a live process is unsupported.
 
 ## Deployed instances
 

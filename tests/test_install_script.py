@@ -1,5 +1,6 @@
 """Installer prerequisite coverage for the embedded local event server."""
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -122,6 +123,7 @@ def test_installer_unlocks_existing_uv_tool_before_install(tmp_path):
     assert result.returncode == 0, result.stderr
     assert trace.read_text().splitlines() == [
         f"chmod -R u+w {tool_dir}/bobi",
+        f"chmod -R u+w {tool_dir}/bobi",
         "uv tool install --force bobi",
     ]
     assert not (tmp_path / "home" / ".bobi" / "runtime-guard-released").exists()
@@ -149,6 +151,7 @@ def test_installer_marker_covers_uv_tree_and_survives_failed_install(tmp_path):
     assert marker["opened_by"] == "scripts/install.sh"
     assert isinstance(marker["pid"], int)
     assert marker["expires_at"] > 0
+    assert marker["state"] == "open"
     assert (tmp_path / "home" / ".bobi" / "runtime-guard-released").exists()
 
 
@@ -180,6 +183,38 @@ def test_installer_partial_chmod_failure_closes_window_and_relocks(tmp_path):
     assert result.returncode != 0
     assert not uv_install_called.exists()
     assert not (tmp_path / "home" / ".bobi" / "runtime-guard-released").exists()
+    assert not module.stat().st_mode & 0o200
+
+
+def test_installer_relocks_when_marker_cleanup_fails_after_install(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "node", "printf 'v20.19.2\\n'\n")
+    tool_dir = tmp_path / "uv-tools"
+    framework = tool_dir / "bobi" / "lib" / "python3.13" / "site-packages" / "bobi"
+    framework.mkdir(parents=True)
+    module = framework / "module.py"
+    module.write_text("x = 1\n")
+    marker = tmp_path / "home" / ".bobi" / "runtime-guard-released"
+    uv_called = tmp_path / "uv-called"
+    _write_executable(
+        fake_bin / "uv",
+        f"if [ \"$*\" = \"tool dir\" ]; then printf '%s\\n' {tool_dir}; "
+        f"else touch {uv_called}; fi\n",
+    )
+    _write_executable(
+        fake_bin / "rm",
+        f"if [ \"$2\" = {marker} ]; then exit 1; fi\n/bin/rm \"$@\"\n",
+    )
+
+    result = _run_installer(fake_bin, tmp_path)
+
+    assert result.returncode != 0
+    assert uv_called.exists()
+    assert "Could not close Bobi runtime guard release window" in result.stderr
+    marker_payload = json.loads(marker.read_text())
+    assert marker_payload["state"] == "opening"
+    assert marker_payload["expires_at"] == 0
     assert not module.stat().st_mode & 0o200
 
 

@@ -208,6 +208,32 @@ def test_guard_reapply_exits_nonzero_when_marker_cannot_be_removed(
     assert "permission denied" in result.output
 
 
+def test_guard_reapply_closes_window_and_locks_via_cli(tmp_path, monkeypatch):
+    from bobi import runtime_guard
+
+    framework = tmp_path / "tool" / "site-packages" / "bobi"
+    framework.mkdir(parents=True)
+    (framework / "module.py").write_text("x = 1\n")
+    root = runtime_guard.ProtectedRoot(framework, "bobi-package")
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        runtime_guard, "framework_release_roots", lambda: ([root], ""),
+    )
+    monkeypatch.setattr(
+        runtime_guard, "protected_runtime_roots", lambda _: [root],
+    )
+    release = runtime_guard.release_runtime_write_policy()
+    assert release.ok
+
+    result = CliRunner().invoke(main, ["guard", "reapply"])
+
+    assert result.exit_code == 0, result.output
+    assert "Locked bobi-package" in result.output
+    assert "Release window closed:" in result.output
+    assert not runtime_guard.release_marker_path().exists()
+    assert not framework.stat().st_mode & 0o200
+
+
 def test_agents_help_lists_machine_commands():
     result = CliRunner().invoke(main, ["agents", "--help"])
     assert result.exit_code == 0
