@@ -130,7 +130,7 @@ def test_cycle_detected(project):
 
 def test_cache_used_when_no_local_source(project, monkeypatch):
     # No agents/core source; a cached copy exists.
-    cache = registry.cache_path(project, "core")
+    cache = registry.cache_path("core")
     _write(cache / "agent.yaml", 'version: "1.5.0"\nentry_point: director\n')
     leaf = _team(project, "moda", 'from: core@1.5.0\nversion: "2.0.0"\n')
     chain = compose.resolve_chain(leaf, project)
@@ -143,12 +143,12 @@ def test_registry_fetch_when_nothing_local(project, monkeypatch):
     _write(fetched_dir / "agent.yaml", 'version: "3.0.0"\nentry_point: director\n')
     calls = {}
 
-    def fake_fetch(proj, name, *, version=None, repo=None):
+    def fake_fetch(name, *, version=None, repo=None):
         calls["name"], calls["version"] = name, version
         return fetched_dir
 
     monkeypatch.setattr(registry, "fetch", fake_fetch)
-    monkeypatch.setattr(registry, "is_cached", lambda p, n: False)
+    monkeypatch.setattr(registry, "is_cached", lambda n: False)
     leaf = _team(project, "moda", 'from: core@3.0.0\nversion: "2.0.0"\n')
     chain = compose.resolve_chain(leaf, project)
     assert chain[0].source == "registry"
@@ -162,7 +162,7 @@ def test_pinned_skips_local_source(project, monkeypatch):
     _write(fetched / "agent.yaml", 'version: "1.0.0"\nentry_point: director\n')
     seen = {}
 
-    def fake_fetch(proj, name, *, version=None, repo=None):
+    def fake_fetch(name, *, version=None, repo=None):
         seen["called"] = True
         return fetched
 
@@ -177,7 +177,7 @@ def test_pinned_lock_pins_latest_ref(project, monkeypatch):
     _write(fetched / "agent.yaml", 'version: "1.0.0"\nentry_point: director\n')
     seen = {}
 
-    def fake_fetch(proj, name, *, version=None, repo=None):
+    def fake_fetch(name, *, version=None, repo=None):
         seen["version"] = version
         return fetched
 
@@ -902,9 +902,9 @@ def test_install_versioned_from_team_fetches_base_from_registry(tmp_path, monkey
     _write(published_core / "roles" / "engineer" / "ROLE.md",
            "# Engineer\nrun your review gate")
 
-    def fake_fetch(project_path, name, *, version=None, repo=None):
+    def fake_fetch(name, *, version=None, repo=None):
         assert (name, version) == ("core", "1.0.0")  # versioned base, exact pin
-        dest = registry.cache_path(project_path, name)
+        dest = registry.cache_path(name)
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(published_core, dest)

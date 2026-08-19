@@ -30,6 +30,8 @@ Directives:
                              enough to trip wedge detection) before completing,
                              so the manager reads as ``running``/``wedged``.
   ``__stub__:error``         complete with ``TurnResult(is_error=True)``.
+  ``__stub__:auth``          complete with the structured terminal auth error
+                             emitted by a logged-out brain.
   ``__stub__:maxturns[:<n>]``
                              complete with the harness's TURN-CAP terminal
                              shape (#845): ``error_kind="max_turns_reached"``,
@@ -61,6 +63,7 @@ import re
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
+    ERROR_KIND_AUTHENTICATION,
     ERROR_KIND_MAX_TURNS,
     AssistantText,
     BrainCapabilities,
@@ -105,10 +108,9 @@ class _StubSession:
         self._options = options or {}
         self._pending: str | None = None
 
-    async def connect(self, prompt: str | None = None) -> None:
-        # Returns promptly (a real connect can be slow; the stub never is) so
-        # the manager leaves "starting" as soon as the startup turn drains.
-        self._pending = prompt
+    async def connect(self) -> None:
+        # Setup only, never a turn (#1016) — input arrives via query().
+        return None
 
     async def query(self, text: str) -> None:
         self._pending = text
@@ -151,6 +153,8 @@ class _StubSession:
             )
         elif verb == "reply":
             reply = arg
+        elif verb == "auth":
+            reply = "Not logged in - Please run /login"
         else:
             reply = f"stub ack: {(self._pending or '').strip()[:120]}"
         yield AssistantText(text=reply, usage=None)
@@ -170,6 +174,16 @@ class _StubSession:
                 turn_count=cap + 1,
                 num_turns=cap + 1,
                 result_text="",
+            )
+            return
+
+        if verb == "auth":
+            yield TurnResult(
+                session_id=self._session_id,
+                is_error=True,
+                error_kind=ERROR_KIND_AUTHENTICATION,
+                error_message="brain authentication failed",
+                result_text=reply,
             )
             return
 

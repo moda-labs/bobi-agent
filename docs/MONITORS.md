@@ -215,7 +215,10 @@ reconcile path (`scheduler.py`):
   `indeterminate-result`), and detail. The drain loop actively delivers the
   first failure for each monitor/flavor/reason to the director inbox and
   throttles repeated identical failures there so observability does not become
-  inbox spam. The failure is also written to `manager.log`.
+  inbox spam. The failure is also written to `manager.log`, dated and once.
+  A monitor's fires sit adjacent in that file but are usually days apart, so
+  read the date before concluding anything about how often one ran; the
+  authoritative last-run time is `run/state/monitor_state.json`.
 
 Scheduler-owned state (last-run times, active condition keys, parked payloads)
 lives in `run/state/monitor_state.json`, rewritten wholesale each tick.

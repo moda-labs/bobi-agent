@@ -113,7 +113,7 @@ class _ClaudeSession:
 
         return ClaudeSDKClient(self._options)
 
-    async def connect(self, prompt: str | None = None) -> None:
+    async def connect(self) -> None:
         _configure_initialize_timeout()
         attempts = _env_int("BOBI_CLAUDE_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)
         backoff = _env_float(
@@ -125,7 +125,9 @@ class _ClaudeSession:
             if attempt > 1:
                 self._client = self._new_client()
             try:
-                await self._connect_once(prompt)
+                # Bare connect: setup only, no turn (#1016). The SDK defaults
+                # prompt to None, which keeps no-arg fakes/clients working.
+                await self._client.connect()
                 return
             except Exception as exc:
                 should_retry = attempt < attempts and _is_initialize_timeout(exc)
@@ -143,15 +145,6 @@ class _ClaudeSession:
                 )
                 if backoff > 0:
                     await asyncio.sleep(backoff * attempt)
-
-    async def _connect_once(self, prompt: str | None = None) -> None:
-        # Match the historical call shape: a bare connect() when there is no
-        # connect-prompt (the SDK defaults prompt to None), an explicit
-        # connect(prompt) otherwise. Keeps no-arg fakes/clients working.
-        if prompt is None:
-            await self._client.connect()
-        else:
-            await self._client.connect(prompt)
 
     async def query(self, text: str) -> None:
         await self._client.query(text)
@@ -194,21 +187,37 @@ class _ClaudeSession:
         """Translate one turn's SDK messages into normalized brain messages."""
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
+        assistant_error_kind = ""
+        assistant_error_message = ""
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
                 text_parts = [
                     b.text for b in msg.content if isinstance(b, TextBlock)
                 ]
+                text = "\n".join(text_parts) if text_parts else ""
+                error_kind = str(getattr(msg, "error", "") or "")
+                if error_kind:
+                    assistant_error_kind = error_kind
+                    assistant_error_message = text
                 yield AssistantText(
-                    text="\n".join(text_parts) if text_parts else "",
+                    text=text,
                     usage=getattr(msg, "usage", None),
                 )
             elif isinstance(msg, ResultMessage):
-                yield _result_to_turn(msg)
+                yield _result_to_turn(
+                    msg,
+                    assistant_error_kind=assistant_error_kind,
+                    assistant_error_message=assistant_error_message,
+                )
             # Other SDK message types carry no signal the call sites consume.
 
 
-def _result_to_turn(msg: Any) -> TurnResult:
+def _result_to_turn(
+    msg: Any,
+    *,
+    assistant_error_kind: str = "",
+    assistant_error_message: str = "",
+) -> TurnResult:
     """Normalize an SDK ``ResultMessage`` into a :class:`TurnResult`."""
     costs = _model_usage_to_costs(getattr(msg, "model_usage", None))
 
@@ -220,6 +229,9 @@ def _result_to_turn(msg: Any) -> TurnResult:
         )
 
     error_kind, error_message, max_turns, turn_count = _terminal_error(msg)
+    if not error_kind and assistant_error_kind:
+        error_kind = assistant_error_kind
+        error_message = assistant_error_message
 
     is_error = bool(getattr(msg, "is_error", False) or error_kind)
 
@@ -565,20 +577,31 @@ class ClaudeBrain(GatewayAwareEngine):
 
         for attempt in range(1, attempts + 1):
             yielded_message = False
+            assistant_error_kind = ""
+            assistant_error_message = ""
             try:
                 async for msg in query(prompt=user_prompt, options=opts):
                     yielded_message = True
                     if isinstance(msg, StreamEvent):
                         yield StreamDelta(text=_delta_text(msg.event))
                     elif isinstance(msg, AssistantMessage):
+                        text = "\n".join(
+                            b.text for b in msg.content if isinstance(b, TextBlock)
+                        )
+                        error_kind = str(getattr(msg, "error", "") or "")
+                        if error_kind:
+                            assistant_error_kind = error_kind
+                            assistant_error_message = text
                         yield AssistantText(
-                            text="\n".join(
-                                b.text for b in msg.content if isinstance(b, TextBlock)
-                            ),
+                            text=text,
                             usage=getattr(msg, "usage", None),
                         )
                     elif isinstance(msg, ResultMessage):
-                        yield _result_to_turn(msg)
+                        yield _result_to_turn(
+                            msg,
+                            assistant_error_kind=assistant_error_kind,
+                            assistant_error_message=assistant_error_message,
+                        )
                 return
             except Exception as exc:
                 should_retry = (

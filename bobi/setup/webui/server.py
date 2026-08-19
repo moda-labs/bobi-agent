@@ -345,7 +345,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
         # Network-backed and lazy — only fetched to populate the intro's
         # template list, so the intro screen never blocks on it.
         from bobi.setup import open_mode
-        return {"teams": open_mode.list_registry_teams(project)}
+        return {"teams": open_mode.list_registry_teams()}
 
     @app.get("/api/browse")
     def browse(request: Request) -> JSONResponse:
@@ -531,7 +531,7 @@ def build_app(state: SetupState, project: Path, *, nonce: str,
                      "the hub, or remove it first to start from this template."},
                     status_code=409)
             try:
-                open_mode.fetch_into(project, team, abs_loc)
+                open_mode.fetch_into(team, abs_loc)
             except Exception as e:
                 # Anything now in the target is this request's partial copy -
                 # remove it, else the leftover blocks the slot with a baffling

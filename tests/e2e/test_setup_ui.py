@@ -301,11 +301,11 @@ def test_template_lands_in_library_slot_and_shows_on_hub(page, bobi, monkeypatch
     # interpreter, so monkeypatching open_mode is visible to it.
     from bobi.setup import open_mode
 
-    def fake_list_registry_teams(proj):
+    def fake_list_registry_teams():
         return [{"name": "eng-team", "description": "An engineering team.",
                  "official": True, "registry": "test"}]
 
-    def fake_fetch_into(proj, name, dest):
+    def fake_fetch_into(name, dest):
         stage = _write_team_source(bobi.home / "stage" / name, name)
         open_mode.copy_into(stage, dest)
 
@@ -332,11 +332,11 @@ def test_template_at_custom_location_lands_in_child_folder(page, bobi,
     # after it (and stays visible on the hub via the session's source_dir).
     from bobi.setup import open_mode
 
-    def fake_list_registry_teams(proj):
+    def fake_list_registry_teams():
         return [{"name": "eng-team", "description": "An engineering team.",
                  "official": True, "registry": "test"}]
 
-    def fake_fetch_into(proj, name, dest):
+    def fake_fetch_into(name, dest):
         stage = _write_team_source(bobi.home / "stage" / name, name)
         open_mode.copy_into(stage, dest)
 
@@ -625,7 +625,7 @@ def test_rendered_type_never_falls_back_to_browser_defaults(page, bobi,
     # The registry is faked in-process so the audit covers a template row.
     from bobi.setup import open_mode
 
-    monkeypatch.setattr(open_mode, "list_registry_teams", lambda proj: [
+    monkeypatch.setattr(open_mode, "list_registry_teams", lambda: [
         {"name": "eng-team", "description": "An engineering team.",
          "official": True, "registry": "test"}])
 

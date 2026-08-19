@@ -18,7 +18,7 @@ def test_install_pins_version(tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     calls = []
     monkeypatch.setattr(registry, "fetch",
-                        lambda pp, name, *, version=None, repo=None:
+                        lambda name, *, version=None, repo=None:
                         calls.append((name, version)))
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -32,7 +32,7 @@ def test_install_bare_name_is_latest(tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     calls = []
     monkeypatch.setattr(registry, "fetch",
-                        lambda pp, name, *, version=None, repo=None:
+                        lambda name, *, version=None, repo=None:
                         calls.append((name, version)))
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -46,8 +46,8 @@ def test_install_url_branch_does_not_split_on_at(tmp_path, monkeypatch):
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
     seen = {}
     monkeypatch.setattr(registry, "fetch_from_url",
-                        lambda pp, url, name=None: seen.update(url=url) or (
-                            __import__("pathlib").Path(pp) / "x", "x"))
+                        lambda url, name=None: seen.update(url=url) or (
+                            tmp_path / "x", "x"))
     monkeypatch.setattr(registry, "fetch", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("registry.fetch must not run for a URL install")))
     runner = CliRunner()
@@ -61,9 +61,9 @@ def test_install_url_branch_does_not_split_on_at(tmp_path, monkeypatch):
 def test_agents_update_pins_version(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(registry, "fetch",
-                        lambda pp, name, *, version=None, repo=None:
+                        lambda name, *, version=None, repo=None:
                         calls.append((name, version)))
-    monkeypatch.setattr(registry, "_read_local_version", lambda pp, name: "1.1.0")
+    monkeypatch.setattr(registry, "_read_local_version", lambda name: "1.1.0")
     # A pin must NOT consult check_update (no latest-vs-local short-circuit).
     monkeypatch.setattr(registry, "check_update", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("a pin must not call check_update")))
@@ -76,11 +76,11 @@ def test_agents_update_pins_version(tmp_path, monkeypatch):
 
 def test_agents_update_bare_name_checks_latest(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(registry, "check_update", lambda pp, name: ("1.0.0", "1.1.0"))
+    monkeypatch.setattr(registry, "check_update", lambda name: ("1.0.0", "1.1.0"))
     monkeypatch.setattr(registry, "fetch",
-                        lambda pp, name, *, version=None, repo=None:
+                        lambda name, *, version=None, repo=None:
                         calls.append((name, version)) or (tmp_path / name))
-    monkeypatch.setattr(registry, "_read_local_version", lambda pp, name: "1.1.0")
+    monkeypatch.setattr(registry, "_read_local_version", lambda name: "1.1.0")
     runner = CliRunner()
     with patch("bobi.cli._detect_project_root", return_value=tmp_path):
         result = runner.invoke(main, ["agents", "update", "eng-team"])

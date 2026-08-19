@@ -21,12 +21,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bobi.sdk import (
-    save_session_id, load_resumable_session_id, log_activity,
+    save_session_id, load_resumable_session_id,
     session_handoff_path, session_log_path,
     get_registry, SessionEntry, ACTIVE_STATUSES,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
+from bobi.brain.turns import drain_turn, timeout_error, tool_crash_error
 from bobi.transient import is_transient_api_error
 from bobi.env import (
     agent_spawn_env,
@@ -93,24 +94,6 @@ class AgentResult:
     # persistent session agree on "transient" — the launcher's re-dispatch
     # decision can consult it. Survival/retry stays at the #444 layer (§4.3).
     transient: bool = False
-
-
-def _network_drop_error(detail: str = "") -> str:
-    base = "network drop: response stream ended before turn result"
-    return f"{base} ({detail})" if detail else base
-
-
-def _timeout_error(timeout: int | None = None) -> str:
-    if timeout is None:
-        return "subprocess timeout while draining response"
-    return f"subprocess timeout after {timeout}s"
-
-
-def _tool_crash_error(error: BaseException | str) -> str:
-    message = str(error).strip() or error.__class__.__name__
-    if message.startswith("tool crash:"):
-        return message
-    return f"tool crash: {message}"
 
 
 def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -> str:
@@ -424,7 +407,7 @@ async def _run_agent_supervised(
     agents that no one needs to message mid-run. Any agent that must be
     reachable goes through ``Session`` instead.
     """
-    from bobi.brain import AssistantText, TurnResult, get_brain
+    from bobi.brain import get_brain
 
     name = _session_name(run_key, role=role, phase=phase)
     _cfg = _load_team_config()
@@ -478,10 +461,7 @@ async def _run_agent_supervised(
         # `except asyncio.TimeoutError` (until now unreachable) and is recorded.
         async with asyncio.timeout(timeout if timeout and timeout > 0 else None):
             try:
-                connect_prompt = prompt if not saved_id else None
-                await client.connect(connect_prompt)
-                if saved_id:
-                    await client.query(prompt)
+                await client.connect()
             except Exception as e:
                 if not saved_id:
                     raise
@@ -499,27 +479,29 @@ async def _run_agent_supervised(
                 except Exception:
                     pass
                 client = _build_client("")
-                await client.connect(prompt)
+                await client.connect()
+            # The task is turn 1, explicitly — connect() is never a turn
+            # (#1016). Fresh and resumed sessions now take one identical path.
+            await client.query(prompt)
 
             while True:
-                result_msg = None
-                async for msg in client.receive_response():
-                    if isinstance(msg, AssistantText):
-                        if msg.text:
-                            result.final_text = msg.text
-                            log_activity("response", {
-                                "text": msg.text[:500],
-                            }, session=name)
-                    elif isinstance(msg, TurnResult):
-                        result_msg = msg
+                outcome = await drain_turn(client, name, model=model)
+                if outcome.final_text:
+                    result.final_text = outcome.final_text
+                result_msg = outcome.result
 
                 if result_msg is None:
-                    result.error = _network_drop_error("no ResultMessage")
-                    _persist_terminal(registry, name, TERMINAL_FAILED,
+                    # The drain itself died. A crash mid-stream is a crash
+                    # here exactly as it was when the exception reached the
+                    # outer handler; a broken/silent stream is a failed run.
+                    result.error = outcome.failure
+                    terminal = (TERMINAL_CRASHED
+                                if outcome.failure_kind == "tool_crash"
+                                else TERMINAL_FAILED)
+                    _persist_terminal(registry, name, terminal,
                                       error=result.error, phase=phase)
                     return result
 
-                save_session_id(name, result_msg.session_id, model=model)
                 result.session_id = result_msg.session_id
                 result.duration_ms += result_msg.duration_ms
                 result.total_cost_usd += result_msg.total_cost_usd or 0.0
@@ -561,16 +543,14 @@ async def _run_agent_supervised(
                 terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
                 _persist_terminal(registry, name, terminal, error=result.error,
                                   session_id=result_msg.session_id, phase=phase)
-                log_activity("stop", {"session_id": result_msg.session_id,
-                                      "status": terminal}, session=name)
                 return result
 
     except asyncio.TimeoutError:
-        result.error = _timeout_error(timeout)
+        result.error = timeout_error(timeout)
         _persist_terminal(registry, name, TERMINAL_FAILED, error=result.error,
                           phase=phase)
     except Exception as e:
-        result.error = _tool_crash_error(e)
+        result.error = tool_crash_error(e)
         # An unhandled executor exception is a crash, not a clean failure.
         _persist_terminal(registry, name, TERMINAL_CRASHED, error=result.error,
                           phase=phase)

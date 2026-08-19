@@ -297,7 +297,9 @@ class TestReadConversationCommand:
                 "read-conversation", "slack:T1:dm:D1:thread:1.2", "--json-output",
             ])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output) == messages
+        # stdout only: log records go to stderr, and `--json-output` promises
+        # a parseable stdout, not a stream with no logging on it (#851).
+        assert json.loads(result.stdout) == messages
 
 
 class TestRemovedSlackShims:

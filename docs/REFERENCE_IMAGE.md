@@ -147,6 +147,9 @@ a connection that does not complete a request is dropped after 10s — one
 stalled or half-open client cannot queue every probe behind it. **Keep the
 health port private to the pod network** — `/health` reports process and session
 status for operators, so it does not belong behind a public Service or Ingress.
+The manager block includes its persisted `error` and `terminal_at`; a brain
+authentication failure therefore reports `status: error` instead of looking
+like a healthy idle director.
 
 ## Build it yourself
 

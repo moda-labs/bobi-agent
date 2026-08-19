@@ -22,8 +22,10 @@ def stub_enabled(monkeypatch):
 
 
 async def _drain(session, prompt=None):
-    """One turn: connect/query then collect the normalized stream."""
-    await session.connect(prompt)
+    """One turn: connect, query (connect is never a turn, #1016), collect."""
+    await session.connect()
+    if prompt is not None:
+        await session.query(prompt)
     return [m async for m in session.receive_response()]
 
 
@@ -83,11 +85,22 @@ def test_error_directive_flags_turn(stub_enabled):
     assert msgs[-1].is_error is True
 
 
+def test_auth_directive_reports_structured_failure(stub_enabled):
+    session = get_brain("stub").make_session(cwd=None, system_prompt=None)
+    msgs = asyncio.run(_drain(session, "__stub__:auth"))
+
+    assert isinstance(msgs[-1], TurnResult)
+    assert msgs[-1].is_error is True
+    assert msgs[-1].error_kind == "authentication_failed"
+    assert msgs[-1].error_message
+
+
 def test_hang_directive_stalls_until_cancelled(stub_enabled):
     session = get_brain("stub").make_session(cwd=None, system_prompt=None)
 
     async def run():
-        await session.connect("__stub__:hang:5")
+        await session.connect()
+        await session.query("__stub__:hang:5")
         agen = session.receive_response()
         # The turn must NOT complete promptly - a hang keeps the manager in-turn
         # (running -> wedged). 0.3s is ample to prove it did not yield a result.
@@ -119,7 +132,8 @@ def test_exit_directive_terminates_process(stub_enabled):
         from bobi.brain import get_brain
         async def go():
             s = get_brain("stub").make_session(cwd=None, system_prompt=None)
-            await s.connect("__stub__:exit:7")
+            await s.connect()
+            await s.query("__stub__:exit:7")
             async for _ in s.receive_response():
                 pass
         asyncio.run(go())

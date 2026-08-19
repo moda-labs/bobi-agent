@@ -99,11 +99,11 @@ def _resolve_team_package(project_path: Path, team: str) -> Path:
     if version:
         # Reuse an already-cached pin with no second download (§3.4); the
         # immutable asset makes the cached copy authoritative.
-        if (registry.cached_version(project_path, name) == version
-                and registry.is_cached(project_path, name)):
-            return registry.cache_path(project_path, name)
+        if (registry.cached_version(name) == version
+                and registry.is_cached(name)):
+            return registry.cache_path(name)
         try:
-            return registry.fetch(project_path, name, version=version)
+            return registry.fetch(name, version=version)
         except Exception as e:
             raise BuildError(
                 f"could not resolve pinned team '{name}@{version}': {e}"
@@ -113,7 +113,7 @@ def _resolve_team_package(project_path: Path, team: str) -> Path:
         if (cand / "agent.yaml").exists():
             return cand.resolve()
     try:
-        return registry.fetch(project_path, name)
+        return registry.fetch(name)
     except Exception as e:
         raise BuildError(
             f"local team '{name}' not found and could not fetch it from the "

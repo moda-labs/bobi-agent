@@ -23,6 +23,29 @@ $BOBI_HOME/
             └── .env          # runtime credentials
 ```
 
+### Runtime logs
+
+`state/` holds append-only logs retained across days: `manager.log` (the
+manager and everything it spawns) and `embedding-sidecar.log` (the knowledge
+base's embedding server). Every line carries a full ISO-8601 local timestamp
+with its UTC offset, and each record appears exactly once:
+
+```text
+2026-07-25T15:00:19.417-07:00 [INFO] Monitor sales-call-manager due - spawning non-interactive check
+```
+
+Read the date, not just the clock. Adjacent lines in these files are routinely
+days apart - a monitor that fires once daily puts four `15:00` lines next to
+each other - so a bare wall clock reads as a burst that never happened. For how
+often a monitor actually ran, `state/monitor_state.json` is authoritative; the
+log shows only what was retained.
+
+Two logs nearby are NOT in this format. `state/event-server.log` is written by
+the Node event server through bare `console` calls and carries no timestamp at
+all, so it cannot be read for timing the way the two above can. The web app's
+`app.log` is not under `state/` at all: it lives at `$BOBI_HOME/webapp/app.log`,
+and its uvicorn lines carry their own timestamp-free format.
+
 Runtime commands are scoped to one installed Bobi Agent:
 
 ```bash

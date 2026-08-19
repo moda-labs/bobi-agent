@@ -1144,7 +1144,7 @@ class TestAgentsUpdateAndBrowse:
         # exit codes for identical failures and CI could not detect it.
         monkeypatch.setattr(
             "bobi.registry.list_cached",
-            lambda p: [{"name": "alpha"}, {"name": "beta"}])
+            lambda: [{"name": "alpha"}, {"name": "beta"}])
 
         def boom(*a, **k):
             raise RuntimeError("registry unreachable")
@@ -1160,9 +1160,9 @@ class TestAgentsUpdateAndBrowse:
                                                               monkeypatch):
         monkeypatch.setattr(
             "bobi.registry.list_cached",
-            lambda p: [{"name": "alpha"}, {"name": "beta"}])
+            lambda: [{"name": "alpha"}, {"name": "beta"}])
 
-        def check(project, name, *a, **k):
+        def check(name, *a, **k):
             if name == "beta":
                 raise RuntimeError("registry unreachable")
             return ("1.0.0", "1.0.0")
@@ -1184,7 +1184,7 @@ class TestAgentsUpdateAndBrowse:
                               "description": "unquoted version"},
                              {"name": "ordinary", "version": "2.1.0",
                               "description": "quoted version"}])
-        monkeypatch.setattr("bobi.registry.list_cached", lambda p: [])
+        monkeypatch.setattr("bobi.registry.list_cached", lambda: [])
 
         result = CliRunner().invoke(main, ["agents", "browse"])
 
@@ -1202,7 +1202,7 @@ class TestAgentsUpdateAndBrowse:
             lambda *a, **k: [{"name": "numeric", "version": 1.0}])
         monkeypatch.setattr(
             "bobi.registry.list_cached",
-            lambda p: [{"name": "numeric", "version": "1.0"}])
+            lambda: [{"name": "numeric", "version": "1.0"}])
 
         result = CliRunner().invoke(main, ["agents", "browse"])
 

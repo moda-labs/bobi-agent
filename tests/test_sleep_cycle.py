@@ -8,6 +8,7 @@ Python (the #454 lesson: never let a mocked model bypass the gate).
 """
 
 import queue
+import re
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -871,6 +872,15 @@ class TestCuratorTaskTransport:
         assert published[0][0] == "system/monitor.error"
         assert published[0][1]["reason"] == "spawn-failed"
         assert "argv element" in published[0][1]["detail"]
+
+        # The failure also reaches manager.log, dated (#851). Asserted from
+        # the real spawn path: the helper's own tests call it directly, so
+        # without this nothing proves these call sites still fire.
+        line = (tmp_path / "state" / "manager.log").read_text().strip()
+        assert re.match(
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2} "
+            r"\[ERROR\] ", line), line
+        assert "argv element" in line
 
     def test_monitor_spawn_uses_injected_publisher_for_errors(
         self, tmp_path, monkeypatch, monitor

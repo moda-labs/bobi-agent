@@ -216,7 +216,10 @@ def test_render_team_instructions_writes_all_targets(fake_homes):
         assert "# House rules" in text
 
 
-def test_render_team_instructions_without_package_file_touches_nothing(fake_homes):
+def test_render_team_instructions_without_any_content_touches_nothing(
+        fake_homes, monkeypatch):
+    """House style off + no package AGENTS.md → the files are never created."""
+    monkeypatch.setenv(instructions.COMMUNICATION_STYLE_ENV, "off")
     project = _project_with_package(fake_homes, None)
     written = instructions.render_team_instructions(project, brain_kind="claude")
     assert written == []
@@ -224,8 +227,9 @@ def test_render_team_instructions_without_package_file_touches_nothing(fake_home
     assert not (fake_homes / "claude" / "CLAUDE.md").exists()
 
 
-def test_render_team_instructions_removal_lifecycle(fake_homes):
+def test_render_team_instructions_removal_lifecycle(fake_homes, monkeypatch):
     """A team that drops its AGENTS.md cleans the previously managed block."""
+    monkeypatch.setenv(instructions.COMMUNICATION_STYLE_ENV, "off")
     project = _project_with_package(fake_homes, "# House rules\n")
     instructions.render_team_instructions(project, brain_kind="claude")
     claude_md = fake_homes / "claude" / "CLAUDE.md"
@@ -274,3 +278,66 @@ def test_render_team_instructions_defaults_to_process_brain(fake_homes, monkeypa
     project = _project_with_package(fake_homes, "rules\n")
     written = instructions.render_team_instructions(project)
     assert fake_homes / "codex" / "AGENTS.md" in written
+
+
+# --- framework communication style -----------------------------------------------------
+
+
+def test_communication_style_renders_without_package_agents_md(fake_homes):
+    """The communication baseline reaches teams that ship no AGENTS.md."""
+    project = _project_with_package(fake_homes, None)
+    written = instructions.render_team_instructions(project, brain_kind="claude")
+    assert written == [
+        fake_homes / "home" / "AGENTS.md",
+        fake_homes / "claude" / "CLAUDE.md",
+    ]
+    for p in written:
+        assert "# Communication Style" in p.read_text()
+
+
+def test_communication_style_precedes_team_content(fake_homes):
+    project = _project_with_package(fake_homes, "# House rules\n")
+    instructions.render_team_instructions(project, brain_kind="claude")
+    text = (fake_homes / "claude" / "CLAUDE.md").read_text()
+    assert text.index("# Communication Style") < text.index("# House rules")
+
+
+def test_communication_style_opt_out_leaves_team_content_only(fake_homes, monkeypatch):
+    monkeypatch.setenv(instructions.COMMUNICATION_STYLE_ENV, "0")
+    project = _project_with_package(fake_homes, "# House rules\n")
+    instructions.render_team_instructions(project, brain_kind="claude")
+    text = (fake_homes / "claude" / "CLAUDE.md").read_text()
+    assert "# House rules" in text
+    assert "# Communication Style" not in text
+
+
+def test_communication_style_env_truthy_value_keeps_it_on(fake_homes, monkeypatch):
+    monkeypatch.setenv(instructions.COMMUNICATION_STYLE_ENV, "true")
+    project = _project_with_package(fake_homes, None)
+    instructions.render_team_instructions(project, brain_kind="claude")
+    assert "# Communication Style" in (
+        fake_homes / "claude" / "CLAUDE.md").read_text()
+
+
+def test_communication_style_opt_out_cleans_previous_block(fake_homes, monkeypatch):
+    """Turning the baseline off cleans the block it rendered on a prior boot."""
+    project = _project_with_package(fake_homes, None)
+    instructions.render_team_instructions(project, brain_kind="claude")
+    claude_md = fake_homes / "claude" / "CLAUDE.md"
+    assert instructions.has_managed_block(claude_md)
+
+    monkeypatch.setenv(instructions.COMMUNICATION_STYLE_ENV, "off")
+    instructions.render_team_instructions(project, brain_kind="claude")
+    assert not instructions.has_managed_block(claude_md)
+
+
+def test_communication_style_missing_file_warns_and_renders_team_content(
+        fake_homes, monkeypatch):
+    """A packaging defect in communication_style.md must not crash-loop boot."""
+    monkeypatch.setattr(
+        "bobi.prompts.COMMUNICATION_STYLE_PATH", fake_homes / "missing.md")
+    project = _project_with_package(fake_homes, "# House rules\n")
+    instructions.render_team_instructions(project, brain_kind="claude")
+    text = (fake_homes / "claude" / "CLAUDE.md").read_text()
+    assert "# House rules" in text
+    assert "# Communication Style" not in text

@@ -157,9 +157,9 @@ def resolve_team_ref(
         # Registry-only. An explicit pin fetches that immutable asset; a "latest"
         # ref fetches the rolling asset. (A compose-lock can pin "latest" to a
         # locked version upstream — see compose()'s lock handling.)
-        fetched = registry.fetch(project_path, name, version=version)
+        fetched = registry.fetch(name, version=version)
         return ResolvedLayer(dir=fetched, ref=ref,
-                             version=version or registry.cached_version(project_path, name),
+                             version=version or registry.cached_version(name),
                              source="registry")
 
     # 1. Checked-in sibling source — local always wins.
@@ -172,18 +172,18 @@ def resolve_team_ref(
 
     # 2. Already-fetched cache. Version comes from .meta.json, falling back to
     #    the cached agent.yaml (spec §4) for a cache stamped without one.
-    if registry.is_cached(project_path, name):
-        cache_dir = registry.cache_path(project_path, name)
-        cached_v = registry.cached_version(project_path, name) or _read_version(cache_dir)
+    if registry.is_cached(name):
+        cache_dir = registry.cache_path(name)
+        cached_v = registry.cached_version(name) or _read_version(cache_dir)
         _assert_pin(ref, name, version, cached_v, cache_dir, referrer_dir)
         return ResolvedLayer(dir=cache_dir, ref=ref, version=cached_v,
                              source="cache")
 
     # 3. Registry fetch (immutable asset for a pin; rolling for latest).
-    fetched = registry.fetch(project_path, name, version=version)
+    fetched = registry.fetch(name, version=version)
     return ResolvedLayer(
         dir=fetched, ref=ref,
-        version=version or registry.cached_version(project_path, name),
+        version=version or registry.cached_version(name),
         source="registry")
 
 

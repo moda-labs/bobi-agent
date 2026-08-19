@@ -70,8 +70,7 @@ def test_probe_http_connected(monkeypatch):
     @contextlib.asynccontextmanager
     async def _fake_http(url, headers=None):
         yield ("r", "w", None)
-    monkeypatch.setattr(
-        "mcp.client.streamable_http.streamablehttp_client", _fake_http)
+    monkeypatch.setattr(mcp_handshake, "open_streamable_http", _fake_http)
 
     out = asyncio.run(mcp_handshake.probe_server(
         "h", {"type": "http", "url": "https://x/mcp"}))
@@ -157,3 +156,74 @@ def test_probe_servers_default_timeout_stays_standalone_default(monkeypatch):
 
 def test_probe_servers_empty_is_empty():
     assert asyncio.run(mcp_handshake.probe_servers({})) == {"mcpServers": []}
+
+
+# --- open_streamable_http across the mcp 2.0 rename -------------------------
+
+
+def _fake_transport_module(**attrs):
+    import types
+    mod = types.ModuleType("mcp.client.streamable_http")
+    for name, value in attrs.items():
+        setattr(mod, name, value)
+    return mod
+
+
+def test_open_streamable_http_new_spelling(monkeypatch):
+    """mcp >= 1.29 / 2.0: headers ride an SDK-built httpx client."""
+    import sys
+    seen = {}
+
+    @contextlib.asynccontextmanager
+    async def _client(url, *, http_client=None, terminate_on_close=True):
+        seen["url"], seen["http_client"] = url, http_client
+        yield ("r", "w", None)
+
+    class _HttpClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    def _create(headers=None):
+        seen["headers"] = headers
+        return _HttpClient()
+
+    monkeypatch.setitem(
+        sys.modules, "mcp.client.streamable_http",
+        _fake_transport_module(
+            streamable_http_client=_client, create_mcp_http_client=_create))
+
+    async def _run():
+        async with mcp_handshake.open_streamable_http(
+                "https://x/mcp", headers={"a": "b"}) as streams:
+            return streams
+
+    assert asyncio.run(_run()) == ("r", "w", None)
+    assert seen["url"] == "https://x/mcp"
+    assert seen["headers"] == {"a": "b"}
+    assert isinstance(seen["http_client"], _HttpClient)
+
+
+def test_open_streamable_http_legacy_spelling(monkeypatch):
+    """mcp < 1.29 ships only streamablehttp_client, which takes headers."""
+    import sys
+    seen = {}
+
+    @contextlib.asynccontextmanager
+    async def _legacy(url, headers=None):
+        seen["url"], seen["headers"] = url, headers
+        yield ("r", "w", None)
+
+    monkeypatch.setitem(
+        sys.modules, "mcp.client.streamable_http",
+        _fake_transport_module(streamablehttp_client=_legacy))
+
+    async def _run():
+        async with mcp_handshake.open_streamable_http(
+                "https://x/mcp", headers={"a": "b"}) as streams:
+            return streams
+
+    assert asyncio.run(_run()) == ("r", "w", None)
+    assert seen == {"url": "https://x/mcp", "headers": {"a": "b"}}

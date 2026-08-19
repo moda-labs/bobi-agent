@@ -18,7 +18,9 @@ import time
 
 import pytest
 
+from bobi import manager_health
 from bobi.inbox import Message
+from bobi.sdk import get_registry
 from bobi.session import Session
 
 
@@ -80,6 +82,54 @@ def test_dead_transport_mid_turn_is_not_acked_and_reads_as_error(bobi_env):
         # And the triggering message is NOT acked, so the event server replays
         # it after the supervisor restarts the process (D001, #688). Give the
         # inbox loop a beat to prove the ack is skipped, not merely pending.
+        time.sleep(1.0)
+        assert acked == []
+    finally:
+        session.stop()
+
+
+@pytest.mark.timeout(240)
+def test_brain_auth_failure_is_terminal_visible_and_not_acked(
+    bobi_env, monkeypatch, tmp_path
+):
+    """The same session path handles stub and real Claude auth failures."""
+    is_stub = bobi_env.env.get("BOBI_BRAIN") == "stub"
+    if not is_stub:
+        config_dir = tmp_path / "claude-config"
+        config_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "invalid-mod-292-test-key")
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    session = Session(
+        name="brain-auth-honesty",
+        cwd=str(bobi_env.project_path),
+        system_prompt={"type": "preset", "preset": "claude_code"},
+    )
+    try:
+        assert session.start(startup_prompt=None, timeout=120), \
+            "session failed to start"
+
+        acked = []
+        text = "__stub__:auth" if is_stub else "Reply with exactly OK."
+        msg = Message(id="auth-1", sender="e2e", text=text,
+                      on_done=lambda: acked.append(True))
+        session.inbox.push(msg)
+
+        assert _wait_for(lambda: session._state == "error", 90), \
+            f"session never reached error state (state={session._state})"
+        entry = get_registry().get(session.name)
+        assert entry is not None
+        assert entry.status == "error"
+        assert entry.error
+        assert entry.terminal_at > 0
+
+        block = manager_health._manager_block_from_registry(session.name)
+        assert block["status"] == "error"
+        assert block["error"] == entry.error
+        assert block["terminal_at"] == entry.terminal_at
+
         time.sleep(1.0)
         assert acked == []
     finally:

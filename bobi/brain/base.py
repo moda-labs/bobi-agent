@@ -96,6 +96,9 @@ class TurnResult:
         )
 
 
+# Provider-neutral cause emitted when the brain cannot authenticate.
+ERROR_KIND_AUTHENTICATION = "authentication_failed"
+
 # The brain-neutral error kind for a turn the harness cut off at its turn cap.
 # One constant so the cap's terminal handling (resume, retry-vs-give-up) keys
 # off the same string the adapters set.
@@ -186,8 +189,15 @@ class BrainSession(Protocol):
 
     provider: str
 
-    async def connect(self, prompt: str | None = None) -> None:
-        """Open the session, optionally sending an initial prompt."""
+    async def connect(self) -> None:
+        """Open the session. Pure setup — never a turn.
+
+        connect() deliberately takes no prompt (#1016): a connect-time prompt
+        was an executable agent turn that no driver owned, which is how a
+        workflow's dispatch text ran before step 0 and how a reconnect once
+        drained a turn that did not exist (#799). All text enters a session
+        through ``query()``, as an explicit turn.
+        """
 
     async def query(self, text: str) -> None:
         """Send a message into the live session."""

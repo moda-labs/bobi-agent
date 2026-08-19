@@ -72,6 +72,7 @@ class FakeClient:
 
 
 SDK_PATCH = "bobi.subagent"
+TURNS_PATCH = "bobi.brain.turns"
 
 
 def _sdk_module(client):
@@ -101,7 +102,8 @@ def _register(run_key, phase, role=""):
 async def _run(client, run_key, phase):
     with patch(f"{SDK_PATCH}.load_resumable_session_id", return_value=""), \
          patch(f"{SDK_PATCH}.save_session_id"), \
-         patch(f"{SDK_PATCH}.log_activity"), \
+         patch(f"{TURNS_PATCH}.save_session_id"), \
+         patch(f"{TURNS_PATCH}.log_activity"), \
          patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
          patch.dict("sys.modules", {"claude_agent_sdk": _sdk_module(client)}):
         return await _run_agent_supervised(
@@ -168,9 +170,44 @@ class TestHonestTerminalStatus:
         result = await _run(client, "LOST-1", "implement")
         assert result.success is False
         assert result.error == (
-            "network drop: response stream ended before turn result "
-            "(no ResultMessage)"
+            "network drop: response stream ended before turn result"
         )
+        assert get_registry().get(name).status == TERMINAL_FAILED
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_crash_records_crashed_not_failed(self):
+        """A drain that dies mid-stream is a CRASH, exactly as it was when
+        the exception reached the outer handler pre-#1048 - not a clean
+        failure. The reconciler and the crashed-vs-failed counts key off
+        this distinction."""
+
+        class CrashingClient(FakeClient):
+            async def receive_response(self):
+                yield FakeAssistantMessage(content=[FakeTextBlock(text="hm")])
+                raise RuntimeError("subprocess died")
+
+        name = _register("CRASH-2", "implement")
+        result = await _run(CrashingClient([]), "CRASH-2", "implement")
+        assert result.success is False
+        assert result.error == "tool crash: subprocess died"
+        assert get_registry().get(name).status == TERMINAL_CRASHED
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_timeout_records_failed(self):
+        """An SDK-internal TimeoutError mid-drain is a failed run (the
+        wall-clock budget handler at the asyncio.timeout boundary is a
+        separate path, covered in test_subagent_blocking)."""
+        import asyncio
+
+        class TimingOutClient(FakeClient):
+            async def receive_response(self):
+                raise asyncio.TimeoutError()
+                yield  # pragma: no cover
+
+        name = _register("TMO-2", "implement")
+        result = await _run(TimingOutClient([]), "TMO-2", "implement")
+        assert result.success is False
+        assert result.error == "subprocess timeout while draining response"
         assert get_registry().get(name).status == TERMINAL_FAILED
 
 
