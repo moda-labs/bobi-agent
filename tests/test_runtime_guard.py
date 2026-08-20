@@ -36,12 +36,15 @@ def _sha256_record_value(data: bytes) -> str:
 
 
 class TestRuntimeWritePolicy:
-    def test_protected_roots_include_bound_team_package(self, tmp_path):
+    def test_protected_roots_strictly_contains_team_package_only(self, tmp_path):
         package = _write_runtime(tmp_path)
 
         roots = protected_runtime_roots(tmp_path)
 
-        assert any(root.path == package and root.kind == "team-package" for root in roots)
+        assert len(roots) == 1
+        assert roots[0].path == package
+        assert roots[0].kind == "team-package"
+        assert not any(r.kind in ("bobi-package", "bobi-dist-info") for r in roots)
 
     def test_check_fails_for_writable_package_file(self, tmp_path):
         _write_runtime(tmp_path)
@@ -160,23 +163,91 @@ class _FakeFile:
 
 
 class _FakeDist:
-    def __init__(self, root: Path, files, entry_points=()):
+    def __init__(self, root: Path, files, entry_points=(), direct_url_text: str | None = None):
         self.root = root
         self.files = files
         self.entry_points = entry_points
+        self._direct_url_text = direct_url_text
 
     def locate_file(self, file):
         return self.root / Path(str(file))
 
+    def read_text(self, filename: str):
+        if filename == "direct_url.json":
+            return self._direct_url_text
+        return None
+
 
 class TestBobiDistributionIntegrity:
-    def test_editable_source_without_record_passes(self):
-        dist = SimpleNamespace(files=None)
+    def test_direct_url_editable_passes(self, tmp_path, monkeypatch):
+        package = tmp_path / "site-packages" / "bobi"
+        package.mkdir(parents=True)
+        monkeypatch.setattr("bobi.__file__", str(package / "__init__.py"))
+        dist = _FakeDist(tmp_path, files=[], direct_url_text='{"editable": true}')
 
         result = check_bobi_distribution_integrity(dist)
 
         assert result.ok
         assert "editable" in result.detail
+
+    def test_direct_source_checkout_passes(self, tmp_path, monkeypatch):
+        repo_root = tmp_path / "repo"
+        repo_root.mkdir()
+        (repo_root / "pyproject.toml").write_text("[project]\nname = 'bobi'\n")
+        (repo_root / ".git").mkdir()
+        package = repo_root / "bobi"
+        package.mkdir()
+        init = package / "__init__.py"
+        init.write_text("# source\n")
+        monkeypatch.setattr("bobi.__file__", str(init))
+
+        result = check_bobi_distribution_integrity(None)
+
+        assert result.ok
+        assert "source checkout" in result.detail
+
+    def test_missing_dist_on_non_source_checkout_fails(self, tmp_path, monkeypatch):
+        package = tmp_path / "site-packages" / "bobi"
+        package.mkdir(parents=True)
+        init = package / "__init__.py"
+        init.write_text("# installed\n")
+        monkeypatch.setattr("bobi.__file__", str(init))
+
+        result = check_bobi_distribution_integrity(None)
+
+        assert not result.ok
+        assert "distribution metadata not found" in result.detail
+
+    def test_missing_record_metadata_on_non_source_fails(self, tmp_path, monkeypatch):
+        package = tmp_path / "site-packages" / "bobi"
+        package.mkdir(parents=True)
+        init = package / "__init__.py"
+        init.write_text("# installed\n")
+        monkeypatch.setattr("bobi.__file__", str(init))
+        dist = _FakeDist(tmp_path / "site-packages", files=None)
+
+        result = check_bobi_distribution_integrity(dist)
+
+        assert not result.ok
+        assert "no RECORD metadata" in result.detail
+
+    def test_zero_hashed_files_fails(self, tmp_path, monkeypatch):
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("content\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [_FakeFile("bobi-1.0.dist-info/RECORD")],
+        )
+
+        result = check_bobi_distribution_integrity(dist)
+
+        assert not result.ok
+        assert "0 hashed Bobi file(s) verified" in result.detail
 
     def test_hashed_bobi_file_mismatch_fails(self, tmp_path, monkeypatch):
         package = tmp_path / "site-packages" / "bobi"
@@ -215,7 +286,7 @@ class TestBobiDistributionIntegrity:
 
         result = check_bobi_distribution_integrity(dist)
 
-        assert result.ok
+        assert not result.ok
         assert "0 hashed" in result.detail
 
     def test_hashed_file_outside_distribution_roots_fails(self, tmp_path, monkeypatch):
@@ -262,6 +333,7 @@ class TestBobiDistributionIntegrity:
             [
                 _FakeFile("../../../bin/bobi", _sha256_record_value(b"#!/bin/sh\n")),
                 _FakeFile("bobi-1.0.dist-info/RECORD"),
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"content\n")),
             ],
             entry_points=[
                 SimpleNamespace(group="console_scripts", name="bobi"),
@@ -271,6 +343,96 @@ class TestBobiDistributionIntegrity:
         result = check_bobi_distribution_integrity(dist)
 
         assert result.ok
+
+
+class TestFrameworkIntegrityVerification:
+    def test_verify_framework_integrity_or_raise_passes_for_clean_dist(self, tmp_path, monkeypatch):
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("clean\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"clean\n")),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        check = verify_framework_integrity_or_raise(dist=dist)
+        assert check.ok
+
+    def test_verify_framework_integrity_or_raise_fails_on_tampered_file(self, tmp_path, monkeypatch):
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("tampered\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        with pytest.raises(RuntimeError, match="Bobi framework integrity violation detected"):
+            verify_framework_integrity_or_raise(dist=dist)
+
+    def test_prepare_brain_runtime_passes_on_clean_distribution_via_default_distribution(
+        self, tmp_path, monkeypatch
+    ):
+        from bobi.runtime_guard import prepare_brain_runtime
+
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("clean\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"clean\n")),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+        monkeypatch.setattr("bobi.runtime_guard._distribution", lambda name: dist)
+
+        report = prepare_brain_runtime()
+        assert report is not None
+
+    def test_prepare_brain_runtime_fails_closed_when_framework_is_compromised(self, tmp_path, monkeypatch):
+        from bobi.runtime_guard import prepare_brain_runtime
+
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("compromised\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"expected\n")),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+        monkeypatch.setattr("bobi.runtime_guard._distribution", lambda name: dist)
+
+        with pytest.raises(RuntimeError, match="Bobi framework integrity violation"):
+            prepare_brain_runtime()
 
 
 def test_session_prepares_runtime_before_brain_session():

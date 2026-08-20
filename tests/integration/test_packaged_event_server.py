@@ -288,6 +288,7 @@ RUNTIME_PROBE = textwrap.dedent(
     from bobi.events.signing import serialize_body, sign_headers
     from bobi.runtime_guard import (
         apply_runtime_write_policy,
+        check_bobi_distribution_integrity,
         check_runtime_write_policy,
     )
 
@@ -513,6 +514,7 @@ RUNTIME_PROBE = textwrap.dedent(
 
     guard = apply_runtime_write_policy(runtime_root)
     policy = check_runtime_write_policy(runtime_root)
+    integrity = check_bobi_distribution_integrity()
     before = snapshot(event_server_dir)
     status = None
     error = None
@@ -543,13 +545,10 @@ RUNTIME_PROBE = textwrap.dedent(
             "drivers": drivers,
             "error": error,
             "event_server_mode": stat.S_IMODE(event_server_dir.stat().st_mode),
-            "event_server_read_only": all(
-                not stat.S_IMODE(path.lstat().st_mode) & 0o222
-                for path in [event_server_dir, *event_server_dir.rglob("*")]
-                if not path.is_symlink()
-            ),
             "guard_kinds": [root.kind for root in guard.protected],
             "health": health_payload(base_url),
+            "integrity_detail": integrity.detail,
+            "integrity_ok": integrity.ok,
             "node_modules_exists": (event_server_dir / "node_modules").exists(),
             "npm_trace": npm_trace.read_text() if npm_trace.exists() else "",
             "policy_detail": policy.detail,
@@ -904,13 +903,13 @@ def test_installed_wheel_starts_without_mutating_frozen_event_server(
         failures.append(
             f"runtime imported {result['bobi_package']}, expected {expected_package}"
         )
-    if "bobi-package" not in result["guard_kinds"]:
-        failures.append(f"real guard did not protect Bobi: {result['guard_kinds']}")
-    if not result["policy_ok"] or not result["event_server_read_only"]:
+    if "team-package" not in result["guard_kinds"]:
+        failures.append(f"real guard did not protect team package: {result['guard_kinds']}")
+    if not result["policy_ok"]:
+        failures.append(f"policy check failed: {result['policy_detail']}")
+    if not result["integrity_ok"]:
         failures.append(
-            "installed event server was not frozen: "
-            f"mode={oct(result['event_server_mode'])}, "
-            f"policy={result['policy_detail']}"
+            f"distribution integrity check failed: {result['integrity_detail']}"
         )
     if result["status"] != "started":
         failures.append(
