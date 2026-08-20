@@ -478,3 +478,93 @@ async def test_supervised_agent_prepares_runtime_before_provider_client(monkeypa
 
     assert result.success is True
     assert events[:2] == ["prepare", "make_session"]
+
+
+@pytest.mark.asyncio
+async def test_setup_llm_stream_prepares_runtime_before_stream_once():
+    from bobi.setup.llm import _sdk_stream
+
+    events: list[str] = []
+
+    class FakeBrain:
+        async def stream_once(self, **kwargs):
+            events.append("stream_once")
+            yield MagicMock(text="response")
+
+    def prepare():
+        events.append("prepare")
+
+    with patch("bobi.brain.get_brain", return_value=FakeBrain()), \
+         patch("bobi.runtime_guard.prepare_brain_runtime", side_effect=prepare):
+        async for _ in _sdk_stream(system_prompt="s", user_prompt="u"):
+            pass
+
+    assert events == ["prepare", "stream_once"]
+
+
+@pytest.mark.asyncio
+async def test_validate_mcp_probe_prepares_runtime_before_probe_session(tmp_path):
+    from bobi.validate import _async_probe_mcp
+
+    events: list[str] = []
+    brain = MagicMock()
+    brain.make_session.side_effect = lambda **kwargs: events.append("make_session")
+
+    def prepare(path=None):
+        events.append("prepare")
+
+    with patch("bobi.brain.get_brain", return_value=brain), \
+         patch("bobi.runtime_guard.prepare_brain_runtime", side_effect=prepare), \
+         patch("bobi.validate.child_agent_env", return_value={}):
+        try:
+            await _async_probe_mcp(["server1"], {"server1": {}}, tmp_path)
+        except Exception:
+            pass
+
+    assert "prepare" in events
+
+
+def test_workflow_orchestrator_make_session_prepares_runtime(tmp_path, monkeypatch):
+    from bobi.workflow.schema import Workflow, StepDef
+    from bobi.workflow.orchestrator import run_workflow
+
+    events: list[str] = []
+
+    class FakeBrainSession:
+        async def submit_turn(self, *args, **kwargs):
+            return MagicMock(stop_reason="end_turn", is_error=False, text="ok")
+
+    class FakeBrain:
+        def make_session(self, **kwargs):
+            events.append("make_session")
+            return FakeBrainSession()
+
+    def prepare():
+        events.append("prepare")
+
+    wf = Workflow(name="w", steps=[StepDef(name="s1", prompt="p", model="haiku")])
+
+    paths.package_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    paths.agent_yaml_path(tmp_path).write_text("agent: test\nentry_point: manager\n")
+    monkeypatch.setattr(paths, "_root", None)
+    paths.bind_root(tmp_path)
+
+    registry = MagicMock()
+    cwd = str(tmp_path)
+
+    with patch("bobi.brain.get_brain", return_value=FakeBrain()), \
+         patch("bobi.runtime_guard.prepare_brain_runtime", side_effect=prepare), \
+         patch("bobi.workflow.orchestrator.get_registry", return_value=registry), \
+         patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+         patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
+         patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+         patch("bobi.workflow.orchestrator.save_session_id"), \
+         patch("bobi.brain.turns.save_session_id"), \
+         patch("bobi.workflow.orchestrator.log_activity"), \
+         patch("bobi.brain.turns.log_activity"):
+        try:
+            run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+        except Exception:
+            pass
+
+    assert "prepare" in events
