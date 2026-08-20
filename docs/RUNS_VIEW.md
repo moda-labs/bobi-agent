@@ -134,7 +134,18 @@ every store read from `bobi/webapp/` takes an explicit `root=`. That is why
 Never `mkdir` on a read path: asking about a team that has never run a workflow
 must not create its runs directory.
 
+## Rolling usage summary
+
+`build_usage_summary` reuses this exact de-duplicated fold for fleet reporting.
+It counts terminal jobs by completion time inside a caller-specified rolling
+window and sums their input, cached-input, output, recorded-cost, and
+estimated-cost fields. Running and waiting work is excluded.
+
+Session usage is cumulative rather than a token-level time series. A terminal
+job that completes inside the window therefore contributes its whole usage;
+the summary does not claim to split a long job across calendar boundaries.
+
 ## What is deliberately not here
 
-Per-run latency (not captured) · time-series cost (no data) · decisions and raw
-event deliveries.
+Per-run latency (not captured) · sub-run time-series cost (no data) · decisions
+and raw event deliveries.

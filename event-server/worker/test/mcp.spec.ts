@@ -254,7 +254,7 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 		expect(res.status).toBe(202);
 	});
 
-	it("lists exactly the six tools, with schemas", async () => {
+	it("lists exactly the seven tools, with schemas", async () => {
 		const res = await replay(findCaptured("tools/list"));
 		const msg = await rpcResult(res);
 		const tools = (msg.result as { tools: { name: string; description?: string; inputSchema?: Record<string, unknown> }[] }).tools;
@@ -266,6 +266,7 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 			"bobi_lifecycle",
 			"bobi_read_transcript",
 			"bobi_send_message",
+			"bobi_usage_summary",
 		]);
 
 		for (const tool of tools) {
@@ -292,6 +293,9 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 		// make the orienting read uncallable.
 		const status = tools.find((t) => t.name === "bobi_fleet_status")!;
 		expect((status.inputSchema as { required?: string[] }).required ?? []).toEqual([]);
+
+		const usage = tools.find((t) => t.name === "bobi_usage_summary")!;
+		expect((usage.inputSchema as { required?: string[] }).required?.sort()).toEqual(["days"]);
 
 		// `reason` is the audit control on lifecycle: it has to be REQUIRED at the
 		// schema, not merely documented, or an agent simply omits it.
@@ -474,9 +478,8 @@ function snapshot(fleet: string, instance: string) {
 }
 
 /** A deployment that is addressable AND has a supervisor listening. */
-async function liveInstance(tag: string): Promise<{ bubble: Bubble; fleet: string; instance: string }> {
+async function liveInstance(tag: string, fleet = "acme"): Promise<{ bubble: Bubble; fleet: string; instance: string }> {
 	const bubble = await mintBubble();
-	const fleet = "acme";
 	const instance = `${tag}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 	const reg = await registerSigned(`${instance}-admin`, [adminTopic(fleet, instance)], bubble);
 	expect(reg.status).toBeLessThan(300);
@@ -486,9 +489,8 @@ async function liveInstance(tag: string): Promise<{ bubble: Bubble; fleet: strin
 }
 
 /** An addressable deployment with NO supervisor subscribed. */
-async function deafInstance(tag: string): Promise<{ bubble: Bubble; fleet: string; instance: string }> {
+async function deafInstance(tag: string, fleet = "acme"): Promise<{ bubble: Bubble; fleet: string; instance: string }> {
 	const bubble = await mintBubble();
-	const fleet = "acme";
 	const instance = `${tag}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 	const hb = await publishSigned("fleet/heartbeat", bubble, snapshot(fleet, instance));
 	expect(hb.status).toBeLessThan(300);
@@ -622,6 +624,90 @@ describe("/mcp write tools", () => {
 			command: "restart",
 			args: { reason: "wedged websocket, no heartbeat for 20m" },
 		});
+	});
+
+	it("bobi_usage_summary fans out and aggregates one fleet over the requested window", async () => {
+		const fleetName = `usage-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+		const { bubble, fleet, instance } = await liveInstance("summary", fleetName);
+
+		const inFlight = callTool("bobi_usage_summary", { days: 3, fleet });
+		const recorded = await awaitRecordedCommand(fleet, instance);
+		expect(recorded).toMatchObject({
+			command: "usage",
+			args: { window_seconds: 259200 },
+		});
+		expect(typeof (recorded.args as Record<string, unknown>).end_at).toBe("number");
+
+		await publishSigned("fleet/command_result", bubble, {
+			deployment: { fleet, instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: {
+				usage: {
+					window: { seconds: 259200 },
+					jobs: { total: 4, completed: 3, failed: 1, closed: 0 },
+					tokens: { input: 1000, cached_input: 200, output: 300, total: 1300 },
+					cost_usd: 1.25,
+					estimated_cost_usd: 0.5,
+				},
+			},
+		});
+
+		const body = JSON.parse(await toolText(await inFlight));
+		expect(body.complete).toBe(true);
+		expect(body.window.days).toBe(3);
+		expect(body.fleets).toEqual([
+			{
+				fleet,
+				jobs: { total: 4, completed: 3, failed: 1, closed: 0 },
+				tokens: { input: 1000, cached_input: 200, output: 300, total: 1300 },
+				cost_usd: 1.25,
+				estimated_cost_usd: 0.5,
+				instances: [
+					{
+						instance,
+						jobs: { total: 4, completed: 3, failed: 1, closed: 0 },
+						tokens: { input: 1000, cached_input: 200, output: 300, total: 1300 },
+						cost_usd: 1.25,
+						estimated_cost_usd: 0.5,
+					},
+				],
+			},
+		]);
+		expect(body.unavailable).toEqual([]);
+	});
+
+	it("bobi_usage_summary returns partial data when one instance is unavailable", async () => {
+		const fleetName = `partial-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+		const live = await liveInstance("live", fleetName);
+		const deaf = await deafInstance("deaf", fleetName);
+
+		const inFlight = callTool("bobi_usage_summary", { days: 1, fleet: fleetName });
+		const recorded = await awaitRecordedCommand(live.fleet, live.instance);
+		await publishSigned("fleet/command_result", live.bubble, {
+			deployment: { fleet: live.fleet, instance: live.instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: {
+				usage: {
+					jobs: { total: 1, completed: 1, failed: 0, closed: 0 },
+					tokens: { input: 10, cached_input: 0, output: 5, total: 15 },
+					cost_usd: 0.1,
+					estimated_cost_usd: 0,
+				},
+			},
+		});
+
+		const body = JSON.parse(await toolText(await inFlight));
+		expect(body.complete).toBe(false);
+		expect(body.fleets[0].instances[0].instance).toBe(live.instance);
+		expect(body.unavailable).toEqual([
+			expect.objectContaining({
+				fleet: fleetName,
+				instance: deaf.instance,
+				reason: expect.stringMatching(/not delivered/i),
+			}),
+		]);
 	});
 
 	it("bobi_lifecycle says plainly that a pending restart is not a failure", async () => {

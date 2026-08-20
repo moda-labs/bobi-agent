@@ -17,7 +17,7 @@ the reference implementation if you are writing your own operator surface —
 including the parts a first attempt gets wrong, like which poll failures are
 transient and which are not.
 
-- **Version:** `SUPERVISOR_VERSION = "0.2.0"` (`bobi/supervisor/snapshot.py`),
+- **Version:** `SUPERVISOR_VERSION = "0.3.0"` (`bobi/supervisor/snapshot.py`),
   reported on every heartbeat at `supervisor.version`.
 - **Transport:** the bobi event bus. See `docs/EVENT_SERVER.md` for the server,
   `docs/SELF_HOSTED_EVENT_SERVER.md` for running your own.
@@ -122,7 +122,7 @@ A command is published to the deployment's admin topic:
 
 `command_id` is caller-supplied and opaque to the supervisor; it is echoed on
 the result so a caller can correlate. A command whose `command` is not one of
-the fifteen below, or which carries no `command_id`, is **dropped without a
+the sixteen below, or which carries no `command_id`, is **dropped without a
 reply** (the supervisor logs it locally). An unrecognized command has no
 command to acknowledge, so a consumer must not wait on a result for one — it
 never executes and never answers.
@@ -210,6 +210,7 @@ an incident.
 | `transcript` | `{"session": "<name>", "detail": bool}` (both optional) | `{"messages": [...]}`, plus `{"session", "entries": [...], "usage": {...}}` when `detail` is set |
 | `roster` | — | `{"subagents": [...]}` |
 | `spend` | — | `{"spend": {...}}` |
+| `usage` | `{"window_seconds": number, "end_at": epoch?}` | `{"usage": {"window", "jobs", "tokens", "cost_usd", "estimated_cost_usd"}}` |
 | `session_log` | — | `{"sessions": [...], "counts": {...}, "truncated": bool}` |
 | `runs` | `{"status", "query", "offset", "limit"}` (all optional) | `{"runs": [...], "counts": {...}, "total", "offset", "limit", "query", "truncated"}` |
 | `overview` | — | `{"overview": {...}}` |
@@ -235,6 +236,12 @@ the full set, not the capped rows.
 `runs` coerces its pagination args the way the local runtime does: a
 non-positive or unparseable `limit` falls back to the builder default rather
 than failing the command.
+
+`usage` folds the same de-duplicated rows as `runs`. It includes terminal jobs
+whose completion time falls in `[end_at - window_seconds, end_at]`; running and
+waiting work is excluded. Usage is recorded per session, not as a token-level
+time series, so a matching job contributes its whole recorded usage. Recorded
+and estimated dollars remain separate.
 
 **`transcript` and its `detail` arg.** Without `detail`, the reply is
 unchanged: `messages` is the **chat** view — two roles, prose only, tool calls
@@ -302,7 +309,7 @@ renders.
 ```json
 {
   "deployment":  { "fleet": "...", "instance": "...", "platform": "..." },
-  "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.2.0" },
+  "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.3.0" },
   "manager": {
     "status": "running" | "idle" | "starting" | "wedged" | "down" | "stopped",
     "pid": 42,
@@ -500,24 +507,26 @@ state read from KV. Browser clients are not supported and CORS is off.
 |---|---|---|
 | `bobi_fleet_status` | none | Every instance: reachability, manager state, sessions, versions |
 | `bobi_instance_detail` | `fleet`, `instance` | One instance's full heartbeat plus its lifecycle trail |
+| `bobi_usage_summary` | `days`, `fleet?` | Rolling job/token/cost totals per fleet with per-instance detail and explicit partial failures |
 | `bobi_command_result` | `fleet`, `instance`, `command_id` | One command's folded view (`pending` / `done` / `error`) |
 | `bobi_read_transcript` | `fleet`, `instance`, `session?` | One session's recent messages, framed as untrusted content |
 | `bobi_send_message` | `fleet`, `instance`, `message`, `session?` | A `command_id`. **Never the reply** |
 | `bobi_lifecycle` | `fleet`, `instance`, `action`, `reason` | The `restart`/`stop`/`start` command's view |
 
-Six tools over fifteen admin commands, because the vocabulary is deliberately
+Seven tools over sixteen admin commands, because the vocabulary is deliberately
 **not** one tool per command: `bobi_lifecycle` folds `restart`/`stop`/`start`
 behind an `action` enum, and `status` is already covered by the heartbeat that
 `bobi_instance_detail` returns.
 
-Nine commands are **not** exposed as tools in v1 — `roster`, `spend`,
+Nine commands are **not** exposed as tools — `roster`, `spend`,
 `session_log`, and the six that back the single-agent view (`runs`,
 `overview`, `run_details`, `resume_run`, `remind_run`, `close_run`). The three
 writes are the notable omission and a deliberate one: acting on a suspended
 workflow run is an operator decision made while looking at the runs table, and
-v1 of the MCP surface does not put that table in front of an agent. Whatever the heartbeat happens to carry (sessions, and spend
-when the supervisor reports it) is readable through `bobi_instance_detail`;
-the commands themselves are not callable from MCP. They remain available over
+the MCP surface does not put that table in front of an agent. Whatever the
+heartbeat carries, including sessions, is readable through
+`bobi_instance_detail`; the remaining commands are not callable from MCP. They
+remain available over
 `POST /fleet/instances/:fleet/:instance/commands`, which the hosted console
 uses. Exposing them is a sizing question — whether their responses belong
 inline in `bobi_instance_detail` or as separate tools — and that needs

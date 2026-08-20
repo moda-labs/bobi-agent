@@ -174,6 +174,7 @@ describe("admin command view", () => {
 		expect(isAdminCommand("roster")).toBe(true);
 		// Observability (#733): the spend + session-log reads ride the same vocab.
 		expect(isAdminCommand("spend")).toBe(true);
+		expect(isAdminCommand("usage")).toBe(true);
 		expect(isAdminCommand("session_log")).toBe(true);
 		// The single-agent view: three reads and three run-scoped writes. This
 		// list is an ALLOWLIST — a verb the supervisor implements but this
