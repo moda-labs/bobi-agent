@@ -284,8 +284,15 @@ def run_workflow(
     model: str = "",
     effort: str = "",
     fresh: bool = False,
+    *,
+    collect: dict | None = None,
 ) -> bool:
     """Execute a workflow end-to-end with a single agent session.
+
+    ``collect``, when given, receives the run's in-process results the bool
+    return cannot carry: ``final_text`` (the last prompt step's final
+    response) and, on failure, ``error``. The synchronous launch path
+    (``--wait``, #1057) prints from it; a detached run passes nothing.
 
     ``model`` and ``effort`` are explicit launch overrides: like ``--role``,
     each wins over every step-level and config-level value for the whole run.
@@ -413,7 +420,7 @@ def run_workflow(
             registry, ctx, requested_by, timeout, interactive,
             start_step=start_step, role=role,
             launch_model=model, launch_effort=effort, fresh=fresh, run=run,
-            adopted_retry=adopted,
+            adopted_retry=adopted, collect=collect,
         )
     )
 
@@ -601,6 +608,7 @@ async def _run_workflow_async(
     *,
     run: WorkflowRun,
     adopted_retry: bool = False,
+    collect: dict | None = None,
 ) -> str:
     """Async core: one brain session for all steps.
 
@@ -611,6 +619,11 @@ async def _run_workflow_async(
     ``run`` is this run's ledger entry (#1048), owned by the caller. The loop
     checkpoints it after each completed step, flips it to "waiting" at an
     await step, and closes it with the honest outcome in its finally.
+
+    ``collect`` (see ``run_workflow``) receives ``final_text`` after each
+    successful prompt step - deliberately NOT persisted on the ledger entry,
+    where an agent's full final message would bloat every run document the
+    runs view scans - and ``error`` in the finally when the run failed.
     """
     from bobi.brain import (
         ERROR_KIND_MAX_TURNS, continuation_token, get_brain,
@@ -1239,6 +1252,12 @@ async def _run_workflow_async(
                                   drain.error)
                 return OUTCOME_FAILED
 
+            if collect is not None:
+                # Last prompt step wins: for the synchronous launch path this
+                # is the run's answer, and it must travel in-process at full
+                # fidelity (the delegation idiom reads it from --wait stdout).
+                collect["final_text"] = drain.final_text
+
             # Validate handoff
             handoff = _read_handoff(session_name, step.name)
             missing = _validate_handoff(step, handoff)
@@ -1336,6 +1355,8 @@ async def _run_workflow_async(
                 failure_error = failure_error or (
                     f"{workflow.name} failed with no error reported"
                 )
+                if collect is not None:
+                    collect["error"] = failure_error
                 landed = _emit_lifecycle_event("agent/session.failed", {
                     "run_key": run_key, "role": role, "project": repo,
                     "error": failure_error,

@@ -988,8 +988,31 @@ class TestLaunchAgentUnkeyedDedup:
         assert self._launch(registry, persistent=True) == name
 
 
-class TestSpawnAdhocUnkeyedDedup:
-    """`--wait` derives its key from the same helper (#850)."""
+class TestWaitAndPersistentShareOneNamespace:
+    """#1057: one derivation namespace, two distinct name SHAPES.
+
+    The retired `adhoc:spawn` namespace existed to keep an un-keyed --wait
+    run and an un-keyed persistent agent on one task from colliding on one
+    session name (one inbox, one registry pid, one transcript, two live
+    processes). Both now derive in the `adhoc` namespace: the wait run
+    registers the workflow shape (make_session_name), the persistent agent
+    the bare key - distinct by construction. A mutant that registers the
+    wait run under the bare derived key recreates the collision and fails
+    here.
+    """
+
+    def test_wait_session_name_differs_from_a_persistent_launch(self):
+        from bobi.subagent import derive_run_key
+        from bobi.workflow.orchestrator import make_session_name
+        key = derive_run_key("adhoc", "Investigate CI")
+        persistent_name = key  # launch_agent: session_name = run_key
+        wait_name = make_session_name("adhoc", "proj", key)
+        assert wait_name != persistent_name
+        assert wait_name == f"wf-adhoc-proj-{key}"
+
+
+class TestLaunchAgentWaitMode:
+    """wait=True runs the admitted workflow in-process (#1057)."""
 
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path):
@@ -998,44 +1021,62 @@ class TestSpawnAdhocUnkeyedDedup:
         yield
         paths.bind_root(None)
 
+    def test_wait_refuses_persistent(self):
+        from bobi.subagent import launch_agent
+        with pytest.raises(ValueError, match="persistent"):
+            launch_agent(task="t", cwd="/tmp", workflow_name="adhoc",
+                         wait=True, persistent=True)
+
     @staticmethod
-    def _run(**kwargs):
-        from bobi.subagent import spawn_adhoc
-        with patch("bobi.session.Session") as session_cls, \
-             patch("bobi.subagent._emit_session_started"), \
-             patch("bobi.subagent._emit_session_finished"):
-            session_cls.return_value.start.return_value = True
-            session_cls.return_value._last_is_error = False
-            spawn_adhoc(cwd="/tmp/test", task="Investigate CI", **kwargs)
-            return session_cls.call_args.kwargs
+    def _launch_wait(**kwargs):
+        from bobi.subagent import launch_agent
 
-    def test_derived_key_matches_the_shared_derivation(self):
-        from bobi.subagent import resolve_adhoc_session_name
-        assert self._run()["name"] == resolve_adhoc_session_name(
-            "Investigate CI")[0]
+        collected = {}
 
-    def test_does_not_collide_with_a_persistent_launch_of_the_same_task(self):
-        """Both use the key as the session name outright, so one namespace
-        would give them one inbox, one registry pid and one transcript."""
-        from bobi.subagent import derive_run_key
-        assert self._run()["name"] != derive_run_key("adhoc", "Investigate CI")
+        def fake_run_workflow(*, collect=None, **kw):
+            collected.update(kw)
+            if collect is not None:
+                collect["final_text"] = "the answer"
+            return True
 
-    def test_derived_key_starts_a_clean_transcript(self):
-        assert self._run()["fresh"] is True
+        with patch("bobi.workflow.orchestrator.run_workflow",
+                   side_effect=fake_run_workflow), \
+             patch("bobi.subagent.check_requires", return_value=[]), \
+             patch("bobi.subagent._check_spend_governor"), \
+             patch("bobi.subagent._check_concurrency_semaphore"), \
+             patch("bobi.sdk.check_image_rotation"):
+            result = launch_agent(task="Investigate CI", cwd="/tmp/test",
+                                  workflow_name="adhoc", wait=True, **kwargs)
+        return result, collected
 
-    def test_explicit_name_keeps_the_resume_contract(self):
-        kwargs = self._run(name="manager-x")
-        assert kwargs["name"] == "manager-x"
-        assert kwargs["fresh"] is False
+    def test_wait_returns_the_final_text_from_the_run(self):
+        result, kw = self._launch_wait()
+        assert result.success is True
+        assert result.final_text == "the answer"
+        # The executor is run_workflow, under the admitted identity.
+        assert kw["workflow"].name == "adhoc"
+        assert kw["run_key"]
 
-    def test_random_key_restores_distinct_names(self):
-        assert self._run(random_key=True)["name"] != self._run(random_key=True)["name"]
+    def test_wait_registers_the_workflow_shaped_session_name(self):
+        from bobi.sdk import get_registry
+        result, kw = self._launch_wait()
+        from bobi.workflow.orchestrator import make_session_name
+        expected = make_session_name(
+            "adhoc", "test", kw["run_key"])
+        assert result.run_key == expected
+        assert get_registry().get(expected) is not None
+
+    def test_wait_stamps_the_chain_into_its_own_environment(self, monkeypatch):
+        from bobi.launch_lineage import LINEAGE_ENV_VAR
+        monkeypatch.delenv(LINEAGE_ENV_VAR, raising=False)
+        result, _ = self._launch_wait()
+        assert result.run_key in os.environ[LINEAGE_ENV_VAR]
 
 
 class TestRunAgentEntryRootBinding:
     """_run_agent_entry binds the root its spawner passed, never cwd."""
 
-    @patch("bobi.subagent.spawn_adhoc")
+    @patch("bobi.subagent.run_persistent_agent")
     def test_binds_passed_root(self, mock_spawn, tmp_path, monkeypatch):
         import bobi.sdk as sdk
         monkeypatch.setattr("bobi.paths._root", None)
@@ -1054,7 +1095,7 @@ class TestRunAgentEntryRootBinding:
         # cwd stays the working dir for the spawned session
         assert mock_spawn.call_args.kwargs["cwd"] == str(repo)
 
-    @patch("bobi.subagent.spawn_adhoc")
+    @patch("bobi.subagent.run_persistent_agent")
     def test_sets_process_brain_from_passed_root(self, mock_spawn, tmp_path,
                                                 monkeypatch):
         monkeypatch.setattr("bobi.paths._root", None)
@@ -1077,7 +1118,7 @@ class TestRunAgentEntryRootBinding:
         assert os.environ[BRAIN_ENV] == "codex"
         assert get_process_brain_model() == "gpt-5-codex"
 
-    @patch("bobi.subagent.spawn_adhoc")
+    @patch("bobi.subagent.run_persistent_agent")
     def test_clears_stale_process_brain_when_passed_root_has_default_brain(
         self, mock_spawn, tmp_path, monkeypatch,
     ):
@@ -1099,7 +1140,7 @@ class TestRunAgentEntryRootBinding:
         assert BRAIN_ENV not in os.environ
         assert get_process_brain_model() == ""
 
-    @patch("bobi.subagent.spawn_adhoc")
+    @patch("bobi.subagent.run_persistent_agent")
     def test_missing_root_is_a_spawner_bug(self, mock_spawn, tmp_path,
                                            monkeypatch):
         """An args blob without a root fails loudly — the child never
@@ -1116,7 +1157,7 @@ class TestRunAgentEntryRootBinding:
             })
         mock_spawn.assert_not_called()
 
-    @patch("bobi.subagent.spawn_adhoc")
+    @patch("bobi.subagent.run_persistent_agent")
     def test_rejects_root_without_marker(self, mock_spawn, tmp_path,
                                          monkeypatch):
         """A root that is not a real installation must be refused — binding

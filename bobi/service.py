@@ -636,7 +636,7 @@ def run_manager_from_config(
         log.info("Monitor scheduler started")
 
     from bobi.prompts.resolver import build_startup_prompt
-    from bobi.subagent import spawn_adhoc
+    from bobi.subagent import run_persistent_agent
 
     task = build_startup_prompt(
         role, project_path, agent_name=agent_name, session_name=session_name
@@ -659,11 +659,10 @@ def run_manager_from_config(
         "Bobi launching manager session for %s",
         paths.agent_name_for_root(project_path),
     )
-    spawn_adhoc(
+    run_persistent_agent(
         cwd=str(project_path),
         task=task,
         name=session_name,
-        persistent=True,
         role=role,
         mcp_servers=cfg.mcp_servers or None,
         subscribe=subscribe,

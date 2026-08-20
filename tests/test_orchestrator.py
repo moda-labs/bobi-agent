@@ -594,6 +594,30 @@ class TestRunWorkflow:
 
         assert result is False
 
+    def test_collect_receives_the_final_text(self):
+        """The synchronous launch path (#1057) prints the run's answer from
+        `collect` - the bool return cannot carry it, and the ledger entry
+        deliberately does not (full final text would bloat every run doc)."""
+        wf = Workflow(name="adhoc", steps=[StepDef(name="task", prompt="p")])
+        collect: dict = {}
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", collect=collect)
+        assert result is True
+        assert collect["final_text"] == "Done."
+        assert "error" not in collect
+
+    def test_collect_receives_the_error_on_failure(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="gate", condition="ready == true", goto="done",
+                    else_goto="gate", max_iterations=1),
+            StepDef(name="done", prompt="done"),
+        ])
+        collect: dict = {}
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", collect=collect)
+        assert result is False
+        assert "max_iterations" in collect["error"]
+
     def test_session_name_is_deterministic(self):
         name1 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")
         name2 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")

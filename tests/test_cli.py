@@ -403,36 +403,38 @@ class TestSubagents:
         assert mock.call_args[1]["random_key"] is True
 
     def test_id_random_reaches_the_wait_path_too(self, bobi_install):
-        """--wait resolves the name itself, so it needs its OWN passthrough.
+        """--wait needs its OWN --id-random passthrough (#850).
 
         Asserting only the detached branch leaves `--wait --id-random` free to
         fall back to a derived key, which is the opposite of what was asked
         for: two deliberate parallel runs would land on one name.
         """
-        with patch("bobi.subagent.spawn_adhoc") as spawn:
-            spawn.return_value = MagicMock(final_text="", success=True, error="")
+        with patch("bobi.subagent.launch_agent") as mock:
+            mock.return_value = MagicMock(final_text="", success=True, error="")
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
                 "-w", "adhoc", "--role", "engineer", "--wait", "--id-random",
                 "--task", "Fan out",
             ])
         assert result.exit_code == 0, result.output
-        assert spawn.call_args[1]["name"].startswith("rand-")
+        assert mock.call_args[1]["random_key"] is True
+        assert mock.call_args[1]["wait"] is True
 
-    def test_wait_derives_a_name_and_starts_it_fresh(self, bobi_install):
-        """The --wait path resolves the name a frame before spawn_adhoc, so it
-        carries the derived-key implication itself: spawn_adhoc sees an
-        explicit name and would otherwise resume that name's transcript."""
-        with patch("bobi.subagent.spawn_adhoc") as spawn:
-            spawn.return_value = MagicMock(final_text="", success=True, error="")
+    def test_wait_routes_through_the_one_launch_path(self, bobi_install):
+        """--wait is launch_agent's synchronous mode (#1057): derivation,
+        admission and the run ledger are launch_agent's own, so the CLI
+        passes the raw launch through rather than resolving a name first."""
+        with patch("bobi.subagent.launch_agent") as mock:
+            mock.return_value = MagicMock(final_text="", success=True, error="")
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
                 "-w", "adhoc", "--role", "engineer", "--wait",
                 "--task", "Investigate X",
             ])
         assert result.exit_code == 0, result.output
-        assert spawn.call_args[1]["name"].startswith("adhoc-")
-        assert spawn.call_args[1]["fresh"] is True
+        assert mock.call_args[1]["wait"] is True
+        assert mock.call_args[1]["run_key"] is None
+        assert mock.call_args[1]["workflow_name"] == "adhoc"
 
     def test_id_and_id_random_are_mutually_exclusive(self, bobi_install):
         with patch("bobi.subagent.launch_agent") as mock:
@@ -507,7 +509,7 @@ class TestSubagents:
             session_id="sess-1", run_key="run-1", phase="adhoc",
             success=True, final_text="done",
         )
-        with patch("bobi.subagent.spawn_adhoc", return_value=agent) as spawn, \
+        with patch("bobi.subagent.launch_agent", return_value=agent) as spawn, \
              patch("bobi.subagent.run_check_blocking") as check:
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
@@ -525,7 +527,7 @@ class TestSubagents:
         check = CheckResult(success=True, finding=False,
                             session="monitor-check-abc-check")
         with patch("bobi.subagent.run_check_blocking", return_value=check) as run_check, \
-             patch("bobi.subagent.spawn_adhoc") as spawn:
+             patch("bobi.subagent.launch_agent") as spawn:
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
                 "-w", "adhoc", "--role", "engineer",
@@ -555,7 +557,7 @@ class TestSubagents:
         assert "monitoring check" in result.output
 
     def test_agent_wait_alias_is_not_supported(self, bobi_install):
-        with patch("bobi.subagent.spawn_adhoc") as spawn, \
+        with patch("bobi.subagent.launch_agent") as spawn, \
              patch("bobi.subagent.run_check_blocking") as check:
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
@@ -597,7 +599,7 @@ class TestSubagents:
         # recover without reading the source (#845).
         assert "--wait requires '-w adhoc'" in result.output
         assert "issue-lifecycle" in result.output
-        assert "dispatched" in result.output
+        assert "fan out" in result.output
         assert "wait" in result.output
 
     def test_passes_requested_by(self, bobi_install):

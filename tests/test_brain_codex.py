@@ -502,7 +502,7 @@ def test_make_session_without_mcp_leaves_a_live_block_alone(tmp_path, monkeypatc
     assert data["mcp_servers"]["weather"]["command"] == "/opt/weather"
 
 
-def test_spawn_adhoc_passes_an_empty_set_explicitly(bobi_install, monkeypatch):
+def test_persistent_bootstrap_passes_an_empty_set_explicitly(bobi_install, monkeypatch):
     """The clearing path still has a real trigger.
 
     With an absent key now meaning "no opinion", something has to say "this
@@ -530,7 +530,7 @@ def test_spawn_adhoc_passes_an_empty_set_explicitly(bobi_install, monkeypatch):
                         })())
     monkeypatch.setattr(subagent, "_load_long_term_memory_prompt", lambda: "")
 
-    subagent.spawn_adhoc(cwd=".", task="t", name="n")
+    subagent.run_persistent_agent(cwd=".", task="t", name="n")
 
     assert "mcp_servers" in captured, (
         "an empty set must be passed explicitly, or a team that dropped its "
