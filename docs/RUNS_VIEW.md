@@ -8,7 +8,8 @@ agent's work is recorded have to become one shape.
 - **workflow runs** — `run/state/workflow/runs/*.json`. Every workflow run
   leaves one (#1048), including the ones suspended waiting for a human
   approval or clarification - suspension is a state of the run's own record,
-  not a separate one
+  not a separate one. Ad-hoc `--wait` runs are one-step workflow executions
+  since #1057, so they leave one too
 - **monitor runs** — `run/state/monitor_runs/*.json`, one record per firing,
   plus one per completed retry-park recovery ([MONITORS.md](MONITORS.md))
 

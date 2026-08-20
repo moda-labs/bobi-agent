@@ -18,7 +18,7 @@ agents/<pack-name>/
 ├── tools/                # Service interaction guides (loaded into all roles)
 │   └── <service>.md
 ├── workflows/            # DAG definitions for multi-step processes
-│   ├── adhoc.yaml        # Always include — open-ended task handler
+│   ├── adhoc.yaml        # Recommended — trigger text for the manager's menu
 │   └── <workflow>.yaml
 ├── monitors/             # Optional: background polling checks
 │   └── defaults.yaml
@@ -380,7 +380,11 @@ both do), carrying the full transcript into the new model's context. A step
 that moves a long conversation onto a pricier model pays for that history in
 input tokens; a step that also changes `agent:` always starts fresh instead.
 
-Always include `adhoc.yaml`:
+Include `adhoc.yaml` so the manager's workflow menu can offer ad-hoc dispatch
+with your team's own trigger wording. Launching `-w adhoc` works even without
+it — the framework carries a built-in one-step definition (#1057) — but the
+built-in never appears in the manager's semantic menu, and a shipped yaml
+overrides it:
 ```yaml
 name: adhoc
 trigger: >

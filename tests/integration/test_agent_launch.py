@@ -199,6 +199,101 @@ class TestUnkeyedLaunchDedup:
     # tests/test_subagent.py::TestLaunchAgentUnkeyedDedup instead.
 
 
+@pytest.mark.timeout(240)
+class TestWaitRunsThroughTheExecutor:
+    """--wait is a one-step workflow execution (#1057).
+
+    The blocking CLI form produces the same run identity, ledger entry and
+    session shape as a detached dispatch of the same task - one executor.
+    Before #1057 a --wait run went through a second executor (spawn_adhoc)
+    with no WorkflowRun entry at all, so the ledger assertion here is the
+    feature, not a detail.
+    """
+
+    ROLE = "engineer"
+
+    def test_wait_prints_the_final_text_and_writes_a_ledger_entry(
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
+    ):
+        from bobi.workflow.orchestrator import make_session_name
+        from bobi.workflow.state import WorkflowRun
+
+        env = stub_bobi_env
+        session_name = make_session_name("adhoc", env.agent_name, "W1057")
+        stub_clean_session(session_name)
+
+        result = stub_cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--wait", "--id", "W1057",
+            "--task", "please __stub__:reply:executor-said-done",
+            timeout=LAUNCH_TIMEOUT_S * 3,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        # The run's answer travels to --wait stdout at full fidelity.
+        assert "executor-said-done" in result.stdout, result.stdout
+
+        run = WorkflowRun.find_by_run_key("adhoc", "W1057",
+                                          repo=env.agent_name)
+        assert run is not None, "no WorkflowRun ledger entry for the wait run"
+        assert run.status == "completed"
+        assert run.session_name == session_name
+
+    def test_an_unkeyed_wait_run_derives_and_ledgers_against_the_real_stack(
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
+    ):
+        """The delegation-idiom shape (no --id): derivation, implied fresh,
+        registry and ledger composing for real - each piece is unit-proven
+        with the neighbors mocked, and this is where an interaction between
+        them would surface."""
+        from bobi.workflow.state import WorkflowRun
+
+        env = stub_bobi_env
+        task = "unkeyed wait unit __stub__:reply:derived-leg-done"
+        result = stub_cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--wait", "--task", task,
+            timeout=LAUNCH_TIMEOUT_S * 3,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "derived-leg-done" in result.stdout, result.stdout
+        # The derivation is announced, so the un-keyed launch is not silent.
+        assert "derived" in result.stderr, result.stderr
+
+        runs = [r for r in WorkflowRun.list_runs()
+                if r.workflow_name == "adhoc"
+                and r.run_key.startswith("adhoc-")
+                and r.repo == env.agent_name]
+        assert runs, "no ledger entry for the derived-key wait run"
+        assert runs[0].status == "completed"
+        assert runs[0].session_name.startswith(
+            f"wf-adhoc-{env.agent_name}-adhoc-")
+        stub_clean_session(runs[0].session_name)
+
+    def test_a_failed_wait_run_exits_nonzero_with_the_error(
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
+    ):
+        from bobi.workflow.orchestrator import make_session_name
+        from bobi.workflow.state import WorkflowRun
+
+        env = stub_bobi_env
+        session_name = make_session_name("adhoc", env.agent_name, "W1057F")
+        stub_clean_session(session_name)
+
+        result = stub_cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--wait", "--id", "W1057F",
+            "--task", "please __stub__:raise:executor-broke",
+            timeout=LAUNCH_TIMEOUT_S * 3,
+        )
+        assert result.returncode != 0, result.stdout
+        assert "executor-broke" in result.stderr, result.stderr
+        assert "Traceback" not in result.stdout + result.stderr
+
+        run = WorkflowRun.find_by_run_key("adhoc", "W1057F",
+                                          repo=env.agent_name)
+        assert run is not None and run.status == "failed"
+
+
 @pytest.mark.timeout(120)
 class TestAdhocAgentLaunch:
 

@@ -416,7 +416,8 @@ class Session:
         """The honest error text for the last turn, or "" when it succeeded.
 
         Thin delegate over the shared composition in ``bobi.brain`` so the
-        Session-backed paths (``run_phase_blocking``, ``spawn_adhoc``) name the
+        Session-backed paths (``run_phase_blocking``, ``run_persistent_agent``)
+        name the
         same cause the workflow drain does (#845).
         """
         from bobi.brain import turn_error_text

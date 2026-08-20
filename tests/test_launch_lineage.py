@@ -700,9 +700,14 @@ class TestWaitPathIsGuarded:
     ``adhoc`` is exempt from the self-recursion rule, so depth is the ONLY
     thing bounding it. It had no coverage: deleting its admit+stamp block left
     the whole suite green while chains through it became unbounded.
+
+    Since #1057 the wait path IS ``launch_agent`` (wait=True): one admit for
+    every launch, and the wait branch stamps the chain into ``os.environ``
+    before running the workflow in-process. The executor is ``run_workflow``,
+    so that is the capture point.
     """
 
-    def _run_wait(self, project, **kwargs):
+    def _run_wait(self, project, capture=None, **kwargs):
         from bobi.cli import _run_agent_wait
         defaults = dict(
             cwd=str(project), task="delegate this", workflow="adhoc",
@@ -710,98 +715,114 @@ class TestWaitPathIsGuarded:
             interactive=True, persistent=False, subscribe=[],
         )
         defaults.update(kwargs)
-        with patch("bobi.cli._detect_project_root", return_value=project):
+
+        def _fake_run_workflow(*, collect=None, **kw):
+            if capture is not None:
+                capture["chain"] = current_lineage()
+                capture["kwargs"] = kw
+                # The environment a child generation would inherit: launches
+                # from the agent's shell happen DURING the run - the stamp is
+                # restored once the run returns (#1057).
+                capture["env"] = dict(os.environ)
+            if collect is not None:
+                collect["final_text"] = ""
+            return True
+
+        with patch("bobi.cli._detect_project_root", return_value=project), \
+             patch("bobi.workflow.orchestrator.run_workflow",
+                   side_effect=_fake_run_workflow) as run_wf, \
+             patch("bobi.subagent.check_requires", return_value=[]), \
+             patch("bobi.subagent._check_spend_governor"), \
+             patch("bobi.subagent._check_concurrency_semaphore"), \
+             patch("bobi.sdk.check_image_rotation"):
             _run_agent_wait(**defaults)
+        return run_wf
 
     def test_stamps_the_chain_into_its_own_environment(self, project):
         """--wait runs the agent IN THIS PROCESS, so the chain must land in
         os.environ - that is what a `bobi` call from the agent's shell reads."""
         seen: dict = {}
-
-        def _spawn(**kwargs):
-            seen["chain"] = current_lineage()
-            return MagicMock(final_text="", success=True, error="")
-
-        with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
-            with _process_env({}):
-                self._run_wait(project)
+        with _process_env({}):
+            self._run_wait(project, capture=seen)
         assert len(seen["chain"]) == 1
 
-    def test_stamped_name_is_the_name_spawn_adhoc_registers(self, project):
+    def test_stamped_name_is_the_name_the_run_registers(self, project):
         """The lineage invariant on this path: a link can never name a session
         that never exists.
 
-        The caller resolves the name ONCE and hands it to spawn_adhoc, so the
-        two cannot drift - there is no second derivation to disagree with the
-        stamped one (#850).
-
-        Asserting the stamped link against spawn_adhoc's `name` kwarg alone
-        would compare a variable to itself. It is checked against the real
-        production derivation as well, so a caller that stopped passing the
-        resolved name - or passed a differently-derived one - is caught."""
-        from bobi.subagent import (_resolve_project_name,
-                                   resolve_adhoc_session_name)
+        launch_agent resolves the key and the session name ONCE and both the
+        stamp and the executor use them, so the two cannot drift (#850).
+        Asserting the stamped link against run_workflow's kwargs alone would
+        compare a variable to itself; it is checked against the real
+        production derivation as well, so a wait branch that stamped a
+        differently-derived name is caught."""
+        from bobi.subagent import _resolve_project_name, _resolve_run_key
+        from bobi.workflow.orchestrator import make_session_name
         seen: dict = {}
-
-        def _spawn(**kwargs):
-            seen["chain"] = current_lineage()
-            seen["name"] = kwargs["name"]
-            return MagicMock(final_text="", success=True, error="")
-
-        with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
-            with _process_env({}):
-                self._run_wait(project, task="delegate this")
+        with _process_env({}):
+            self._run_wait(project, capture=seen, task="delegate this")
         # Every dial the CLI passes has to be passed here too, or this asserts
         # against a name production never produces.
-        expected, derived = resolve_adhoc_session_name(
-            "delegate this", project=_resolve_project_name(str(project)),
+        proj = _resolve_project_name(str(project))
+        expected_key, derived = _resolve_run_key(
+            "adhoc", "delegate this", None, False, project=proj,
             role="engineer")
         assert derived is True
-        assert seen["name"] == expected
-        assert seen["chain"][-1].session == expected
+        assert seen["kwargs"]["run_key"] == expected_key
+        assert seen["chain"][-1].session == make_session_name(
+            "adhoc", proj, expected_key)
 
     def test_stamped_name_holds_for_a_random_key(self, project):
         """The case a recomputed name could not survive: --id-random mints a
         key that cannot be derived twice, so a stamp site that recomputed it
         would name a session that never registers."""
+        from bobi.subagent import _resolve_project_name
+        from bobi.workflow.orchestrator import make_session_name
         seen: dict = {}
-
-        def _spawn(**kwargs):
-            seen["chain"] = current_lineage()
-            seen["name"] = kwargs["name"]
-            return MagicMock(final_text="", success=True, error="")
-
-        with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
-            with _process_env({}):
-                self._run_wait(project, task="delegate this", random_key=True)
-        assert seen["name"].startswith("rand-")
-        assert seen["chain"][-1].session == seen["name"]
+        with _process_env({}):
+            self._run_wait(project, capture=seen, random_key=True)
+        key = seen["kwargs"]["run_key"]
+        assert key.startswith("rand-")
+        assert seen["chain"][-1].session == make_session_name(
+            "adhoc", _resolve_project_name(str(project)), key)
 
     def test_a_deep_chain_is_refused_and_nothing_spawns(self, project):
         deep = encode(tuple(_link(f"g{i}") for i in range(8)))
-        with patch("bobi.subagent.spawn_adhoc") as spawn:
-            with _process_env({LINEAGE_ENV_VAR: deep}):
-                with pytest.raises(LaunchBlockedError) as exc:
-                    self._run_wait(project)
+        seen: dict = {}
+        with _process_env({LINEAGE_ENV_VAR: deep}):
+            with pytest.raises(LaunchBlockedError) as exc:
+                self._run_wait(project, capture=seen)
         assert exc.value.rule == "depth"
-        spawn.assert_not_called()
+        # The capture only fills when run_workflow runs; a refused launch
+        # must never reach the executor.
+        assert seen == {}
 
     def test_chain_grows_across_wait_generations(self, project):
         """The incident shape through the second site: each generation
-        inherits the previous one's environment."""
+        inherits the environment of the RUNNING previous one (a child is
+        launched from the agent's shell mid-run; after the run the stamp is
+        restored, so sampling post-return would test nothing)."""
         depths = []
 
-        def _spawn(**kwargs):
-            depths.append(len(current_lineage()))
-            return MagicMock(final_text="", success=True, error="")
-
         env: dict = {}
-        with patch("bobi.subagent.spawn_adhoc", side_effect=_spawn):
-            for generation in range(3):
-                with _process_env(dict(env)):
-                    self._run_wait(project, task=f"gen {generation}")
-                    env = dict(os.environ)
+        for generation in range(3):
+            seen: dict = {}
+            with _process_env(dict(env)):
+                self._run_wait(project, capture=seen,
+                               task=f"gen {generation}")
+                env = seen["env"]
+            depths.append(len(seen["chain"]))
         assert depths == [1, 2, 3]
+
+    def test_the_stamp_is_restored_after_the_run(self, project):
+        """A long-lived caller must not accumulate depth across wait runs -
+        that would end in the depth guard refusing it everything."""
+        seen: dict = {}
+        with _process_env({}):
+            self._run_wait(project, capture=seen)
+            after = os.environ.get(LINEAGE_ENV_VAR)
+        assert seen["chain"], "stamp was never visible to the run"
+        assert after is None
 
 
 class TestRefusalReachesTheAgent:

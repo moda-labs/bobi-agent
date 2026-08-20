@@ -82,8 +82,9 @@ against a chain that keeps launching itself; do not route around it by rewording
 the task. Fanning out? Give each unit its own task string. Genuinely need N
 copies of an identical task at once? Pass `--id-random`.
 
-`--wait` is the exception: it derives its key from the same dials but has no
-duplicate guard, so identical `--wait` launches still run side by side.
+`--wait` is no exception (#1057): it is the same launch, blocking - the same
+derived key, the same duplicate guard. Identical `--wait` fan-out units need
+`--id-random` too.
 
 ### Communicate with other agents
 
