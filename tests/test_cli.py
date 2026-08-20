@@ -420,6 +420,28 @@ class TestSubagents:
         assert mock.call_args[1]["random_key"] is True
         assert mock.call_args[1]["wait"] is True
 
+    def test_wait_refusal_renders_readably_not_as_a_traceback(
+            self, bobi_install):
+        """--wait can raise DuplicateRunError since #1057 (the old executor
+        had no active-run guard). The reader is an LLM mid-delegation: a raw
+        traceback reads as a transient crash and teaches it to retry, so the
+        refusal must land through _launch_refusal_is_readable like every
+        other launch."""
+        from bobi.subagent import DuplicateRunError
+        exc = DuplicateRunError(
+            "A run is already active: wf-adhoc-r-adhoc-abc123",
+            session_name="wf-adhoc-r-adhoc-abc123", status="running",
+            derived_key=True)
+        with patch("bobi.subagent.launch_agent", side_effect=exc):
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--wait",
+                "--task", "Investigate X",
+            ])
+        assert result.exit_code == 1
+        assert "Launch refused" in result.output
+        assert "Traceback" not in result.output
+
     def test_wait_routes_through_the_one_launch_path(self, bobi_install):
         """--wait is launch_agent's synchronous mode (#1057): derivation,
         admission and the run ledger are launch_agent's own, so the CLI

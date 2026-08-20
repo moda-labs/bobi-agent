@@ -618,6 +618,72 @@ class TestRunWorkflow:
         assert result is False
         assert "max_iterations" in collect["error"]
 
+    def test_collect_last_prompt_step_wins(self):
+        """The synchronous caller prints the run's ANSWER - the final step's
+        text, not the first's. A setdefault mutant (first wins) fails here."""
+
+        class CountingClient(FakeBrainClient):
+            turn = 0
+
+            async def receive_response(self):
+                from bobi.brain import AssistantText, TurnResult
+                CountingClient.turn += 1
+                yield AssistantText(text=f"reply-{CountingClient.turn}")
+                yield TurnResult(session_id="test-session-id")
+
+        class CountingBrain:
+            def make_session(self, **_kwargs):
+                return CountingClient()
+
+        CountingClient.turn = 0
+        wf = Workflow(name="t", steps=[
+            StepDef(name="first", prompt="a"),
+            StepDef(name="second", prompt="b"),
+        ])
+        collect: dict = {}
+        with patch("bobi.brain.get_brain", lambda: CountingBrain()):
+            result = self._mock_asyncio_run(
+                wf, task="t", repo="r", cwd="/tmp", run_key="1",
+                collect=collect)
+        assert result is True
+        assert collect["final_text"] == "reply-2"
+
+    def test_collect_reports_a_suspended_run(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="gate", await_event="approval"),
+        ])
+        collect: dict = {}
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", collect=collect)
+        assert result is True
+        assert collect["suspended"] == "approval"
+
+    def test_an_interrupted_run_is_ledgered_failed_not_completed(self):
+        """Ctrl-C unwinds the foreground --wait executor as CancelledError -
+        a BaseException the `except Exception` arm never sees. The finally
+        must record the honest terminal status: a false `completed` would
+        consume a period and make retry adoption impossible (#1057)."""
+        import asyncio as _asyncio
+
+        class InterruptedClient(FakeBrainClient):
+            async def receive_response(self):
+                raise _asyncio.CancelledError()
+                yield  # pragma: no cover - makes this an async generator
+
+        class InterruptedBrain:
+            def make_session(self, **_kwargs):
+                return InterruptedClient()
+
+        from bobi.workflow.state import WorkflowRun
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="p")])
+        with patch("bobi.brain.get_brain", lambda: InterruptedBrain()):
+            with pytest.raises(BaseException):
+                self._mock_asyncio_run(
+                    wf, task="t", repo="r", cwd="/tmp", run_key="ki-1")
+        runs = [r for r in WorkflowRun.list_runs() if r.run_key == "ki-1"]
+        assert runs and runs[0].status == "failed"
+        assert "interrupted" in runs[0].error
+
     def test_session_name_is_deterministic(self):
         name1 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")
         name2 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")

@@ -988,29 +988,6 @@ class TestLaunchAgentUnkeyedDedup:
         assert self._launch(registry, persistent=True) == name
 
 
-class TestWaitAndPersistentShareOneNamespace:
-    """#1057: one derivation namespace, two distinct name SHAPES.
-
-    The retired `adhoc:spawn` namespace existed to keep an un-keyed --wait
-    run and an un-keyed persistent agent on one task from colliding on one
-    session name (one inbox, one registry pid, one transcript, two live
-    processes). Both now derive in the `adhoc` namespace: the wait run
-    registers the workflow shape (make_session_name), the persistent agent
-    the bare key - distinct by construction. A mutant that registers the
-    wait run under the bare derived key recreates the collision and fails
-    here.
-    """
-
-    def test_wait_session_name_differs_from_a_persistent_launch(self):
-        from bobi.subagent import derive_run_key
-        from bobi.workflow.orchestrator import make_session_name
-        key = derive_run_key("adhoc", "Investigate CI")
-        persistent_name = key  # launch_agent: session_name = run_key
-        wait_name = make_session_name("adhoc", "proj", key)
-        assert wait_name != persistent_name
-        assert wait_name == f"wf-adhoc-proj-{key}"
-
-
 class TestLaunchAgentWaitMode:
     """wait=True runs the admitted workflow in-process (#1057)."""
 
@@ -1066,11 +1043,139 @@ class TestLaunchAgentWaitMode:
         assert result.run_key == expected
         assert get_registry().get(expected) is not None
 
-    def test_wait_stamps_the_chain_into_its_own_environment(self, monkeypatch):
+    def test_wait_stamps_the_chain_for_the_run_and_restores_after(
+            self, monkeypatch):
+        """The chain is visible to the run's own shell children (#849) and
+        GONE afterwards - a long-lived caller that launched N wait runs
+        would otherwise deepen its own chain until the depth guard refused
+        it everything."""
         from bobi.launch_lineage import LINEAGE_ENV_VAR
         monkeypatch.delenv(LINEAGE_ENV_VAR, raising=False)
-        result, _ = self._launch_wait()
-        assert result.run_key in os.environ[LINEAGE_ENV_VAR]
+        seen = {}
+
+        def fake_run_workflow(*, collect=None, **kw):
+            seen["chain"] = os.environ.get(LINEAGE_ENV_VAR, "")
+            if collect is not None:
+                collect["final_text"] = "x"
+            return True
+
+        from bobi.subagent import launch_agent
+        with patch("bobi.workflow.orchestrator.run_workflow",
+                   side_effect=fake_run_workflow), \
+             patch("bobi.subagent.check_requires", return_value=[]), \
+             patch("bobi.subagent._check_spend_governor"), \
+             patch("bobi.subagent._check_concurrency_semaphore"), \
+             patch("bobi.sdk.check_image_rotation"):
+            result = launch_agent(task="Investigate CI", cwd="/tmp/test",
+                                  workflow_name="adhoc", wait=True)
+        assert result.run_key in seen["chain"]
+        assert LINEAGE_ENV_VAR not in os.environ
+
+    def test_wait_refuses_a_duplicate_in_flight_launch(self):
+        """The headline of #1057: --wait takes the SAME admission as a
+        detached launch. A refactor that runs the wait branch before the
+        admission block recreates the #850 spend incident on the exact
+        delegation idiom the role prompts teach - this is the test that
+        refactor fails."""
+        from bobi.sdk import SessionEntry, get_registry
+        from bobi.subagent import (DuplicateRunError, _resolve_run_key,
+                                   launch_agent)
+        from bobi.workflow.orchestrator import make_session_name
+
+        key, _ = _resolve_run_key("adhoc", "Investigate CI", None, False,
+                                  project="test")
+        name = make_session_name("adhoc", "test", key)
+        get_registry().register(SessionEntry(
+            name=name, session_id="", run_key=key, title="Investigate CI",
+            phase="adhoc", project="test", cwd="/tmp/test",
+            status="running", pid=os.getpid(),
+        ))
+
+        with patch("bobi.workflow.orchestrator.run_workflow") as run_wf, \
+             patch("bobi.subagent.check_requires", return_value=[]), \
+             patch("bobi.subagent._check_spend_governor"), \
+             patch("bobi.subagent._check_concurrency_semaphore"), \
+             patch("bobi.sdk.check_image_rotation"):
+            with pytest.raises(DuplicateRunError):
+                launch_agent(task="Investigate CI", cwd="/tmp/test",
+                             workflow_name="adhoc", wait=True)
+        run_wf.assert_not_called()
+
+    def test_wait_records_the_invocation_and_its_pid(self):
+        """Both are new on the wait path (#874 closed by #1057): deleting
+        either line reopens the hourly-cap bypass or leaves a pid-0
+        `starting` entry that is_dead_run misreads as a corpse."""
+        from bobi.sdk import get_registry
+        with patch("bobi.spend_governor.record_invocation") as rec:
+            result, _ = self._launch_wait()
+        rec.assert_called_once()
+        assert get_registry().get(result.run_key).pid == os.getpid()
+
+    def test_wait_passes_fresh_for_a_derived_key(self):
+        """A derived key names a slot for collision, not a conversation to
+        resume (#850) - the executor must see fresh=True for it, and the
+        resume default must survive for an explicit --id."""
+        _, kw = self._launch_wait()
+        assert kw["fresh"] is True
+        _, kw = self._launch_wait(run_key="UNIT-9")
+        assert kw["fresh"] is False
+
+    def test_wait_surfaces_a_suspended_run(self):
+        """A pack may override adhoc with a gated workflow; parked is
+        dormant, not done, and the caller must be able to say so."""
+        from bobi.subagent import launch_agent
+
+        def fake_run_workflow(*, collect=None, **kw):
+            if collect is not None:
+                collect["suspended"] = "approval"
+            return True
+
+        with patch("bobi.workflow.orchestrator.run_workflow",
+                   side_effect=fake_run_workflow), \
+             patch("bobi.subagent.check_requires", return_value=[]), \
+             patch("bobi.subagent._check_spend_governor"), \
+             patch("bobi.subagent._check_concurrency_semaphore"), \
+             patch("bobi.sdk.check_image_rotation"):
+            result = launch_agent(task="gated", cwd="/tmp/test",
+                                  workflow_name="adhoc", wait=True)
+        assert result.success is True
+        assert result.error_kind == "suspended"
+
+    def test_unkeyed_wait_and_persistent_launches_register_distinct_names(
+            self):
+        """The production pin for the retired adhoc:spawn namespace's job:
+        one un-keyed task launched --wait and --persistent lands on TWO
+        sessions, or it is one inbox, one registry pid, one transcript,
+        two live processes. Drives launch_agent both ways and compares the
+        names production actually registered."""
+        from bobi.sdk import get_registry
+        from bobi.subagent import launch_agent
+
+        registered_before = set()
+
+        def fake_run_workflow(*, collect=None, **kw):
+            if collect is not None:
+                collect["final_text"] = "x"
+            return True
+
+        with patch("bobi.workflow.orchestrator.run_workflow",
+                   side_effect=fake_run_workflow), \
+             patch("bobi.subagent._launch_detached", return_value=4242), \
+             patch("bobi.subagent.check_requires", return_value=[]), \
+             patch("bobi.subagent._check_spend_governor"), \
+             patch("bobi.subagent._check_concurrency_semaphore"), \
+             patch("bobi.sdk.check_image_rotation"):
+            wait_result = launch_agent(
+                task="One task, two shapes", cwd="/tmp/test",
+                workflow_name="adhoc", wait=True)
+            persistent_name = launch_agent(
+                task="One task, two shapes", cwd="/tmp/test",
+                workflow_name="adhoc", persistent=True)
+
+        assert wait_result.run_key != persistent_name
+        registry = get_registry()
+        assert registry.get(wait_result.run_key) is not None
+        assert registry.get(persistent_name) is not None
 
 
 class TestRunAgentEntryRootBinding:

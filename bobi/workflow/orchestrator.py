@@ -722,6 +722,15 @@ async def _run_workflow_async(
         # place the cap is resolved, so a call site cannot quietly fall back to
         # a second default and drift from the configured value (#845).
         options = {"max_turns": max_turns, "skills": "all"}
+        # Config-declared MCP servers reach workflow sessions too (#1057):
+        # before the executor consolidation only the Session-backed spawn
+        # paths resolved them, so a team's declared tools were absent from
+        # every workflow run. An empty resolved set is passed EXPLICITLY,
+        # not dropped - this is the path that resolved it from the team
+        # config, so it is the one entitled to say "this team declares
+        # none" and clear a stale rendered block (D009).
+        if team_cfg is not None:
+            options["mcp_servers"] = team_cfg.mcp_servers
         if model:
             options["model"] = model
         if effort:
@@ -1036,6 +1045,12 @@ async def _run_workflow_async(
                 })
 
                 suspended = True
+                if collect is not None:
+                    # The synchronous caller promised "blocks until done";
+                    # a parked run is dormant, not done, and the caller has
+                    # to be able to say so instead of exiting as a silent
+                    # success with no final text.
+                    collect["suspended"] = step.await_event
                 if client is not None:
                     try:
                         await client.disconnect()
@@ -1339,6 +1354,16 @@ async def _run_workflow_async(
             "text": f"Workflow error: {error}",
         }, blocking=True)
         return OUTCOME_FAILED
+    except BaseException as e:
+        # Ctrl-C / loop cancellation. Newly routine since #1057 put this
+        # executor in the foreground --wait process, where SIGINT unwinds as
+        # CancelledError - a BaseException the branch above never sees. Mark
+        # the failure so the finally below records an honest terminal status
+        # instead of ledgering the aborted run as completed (which would
+        # consume a period and make retry adoption impossible), then let the
+        # interrupt keep propagating.
+        run_failed, failure_error = True, f"run interrupted: {_named_exception(e)}"
+        raise
     finally:
         # A suspended run is not terminal — skip the terminal emit + status
         # write entirely (the agent/workflow.suspended event already fired and

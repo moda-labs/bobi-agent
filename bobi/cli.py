@@ -3301,6 +3301,14 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
     )
     if result.final_text:
         click.echo(result.final_text)
+    if result.error_kind == "suspended":
+        # A pack may override `adhoc` with a gated workflow. Parked is
+        # dormant, not done - exiting silently as a success would report
+        # work finished that never ran past the gate.
+        click.echo(
+            "Run suspended at an approval gate; it resumes when its event "
+            "arrives (see the console runs view).", err=True,
+        )
     if not result.success:
         if result.error:
             click.echo(f"Agent failed: {result.error}", err=True)

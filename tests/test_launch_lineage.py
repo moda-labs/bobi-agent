@@ -720,6 +720,10 @@ class TestWaitPathIsGuarded:
             if capture is not None:
                 capture["chain"] = current_lineage()
                 capture["kwargs"] = kw
+                # The environment a child generation would inherit: launches
+                # from the agent's shell happen DURING the run - the stamp is
+                # restored once the run returns (#1057).
+                capture["env"] = dict(os.environ)
             if collect is not None:
                 collect["final_text"] = ""
             return True
@@ -795,7 +799,9 @@ class TestWaitPathIsGuarded:
 
     def test_chain_grows_across_wait_generations(self, project):
         """The incident shape through the second site: each generation
-        inherits the previous one's environment."""
+        inherits the environment of the RUNNING previous one (a child is
+        launched from the agent's shell mid-run; after the run the stamp is
+        restored, so sampling post-return would test nothing)."""
         depths = []
 
         env: dict = {}
@@ -804,9 +810,19 @@ class TestWaitPathIsGuarded:
             with _process_env(dict(env)):
                 self._run_wait(project, capture=seen,
                                task=f"gen {generation}")
-                env = dict(os.environ)
+                env = seen["env"]
             depths.append(len(seen["chain"]))
         assert depths == [1, 2, 3]
+
+    def test_the_stamp_is_restored_after_the_run(self, project):
+        """A long-lived caller must not accumulate depth across wait runs -
+        that would end in the depth guard refusing it everything."""
+        seen: dict = {}
+        with _process_env({}):
+            self._run_wait(project, capture=seen)
+            after = os.environ.get(LINEAGE_ENV_VAR)
+        assert seen["chain"], "stamp was never visible to the run"
+        assert after is None
 
 
 class TestRefusalReachesTheAgent:

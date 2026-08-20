@@ -5,8 +5,10 @@
 > through `launch_agent`/`run_workflow` with the same admission as every
 > other launch, and the wait/persistent collision this spec's second
 > namespace prevented is now prevented by name shape (`wf-adhoc-*` vs the
-> bare key). The derivation dials and admission rules here still describe
-> current behavior.
+> bare key). The `--wait` exemption described under Rollout is likewise
+> retired: `--wait` now takes the full admission (dedup, spend governor,
+> concurrency). The derivation dials themselves still describe current
+> behavior.
 
 ## Problem
 

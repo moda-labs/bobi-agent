@@ -238,6 +238,37 @@ class TestWaitRunsThroughTheExecutor:
         assert run.status == "completed"
         assert run.session_name == session_name
 
+    def test_an_unkeyed_wait_run_derives_and_ledgers_against_the_real_stack(
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
+    ):
+        """The delegation-idiom shape (no --id): derivation, implied fresh,
+        registry and ledger composing for real - each piece is unit-proven
+        with the neighbors mocked, and this is where an interaction between
+        them would surface."""
+        from bobi.workflow.state import WorkflowRun
+
+        env = stub_bobi_env
+        task = "unkeyed wait unit __stub__:reply:derived-leg-done"
+        result = stub_cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--wait", "--task", task,
+            timeout=LAUNCH_TIMEOUT_S * 3,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        assert "derived-leg-done" in result.stdout, result.stdout
+        # The derivation is announced, so the un-keyed launch is not silent.
+        assert "derived" in result.stderr, result.stderr
+
+        runs = [r for r in WorkflowRun.list_runs()
+                if r.workflow_name == "adhoc"
+                and r.run_key.startswith("adhoc-")
+                and r.repo == env.agent_name]
+        assert runs, "no ledger entry for the derived-key wait run"
+        assert runs[0].status == "completed"
+        assert runs[0].session_name.startswith(
+            f"wf-adhoc-{env.agent_name}-adhoc-")
+        stub_clean_session(runs[0].session_name)
+
     def test_a_failed_wait_run_exits_nonzero_with_the_error(
         self, stub_bobi_env, stub_cli_run, stub_clean_session
     ):

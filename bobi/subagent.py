@@ -790,14 +790,11 @@ def run_persistent_agent(
     run identity, so this path deliberately stays outside the workflow
     executor and its run ledger. Every RUN - ad-hoc included - goes through
     ``launch_agent`` / ``run_workflow``; this bootstrap is the one surviving
-    caller of a bare Session with a startup prompt (formerly
-    ``spawn_adhoc``, whose non-persistent executor role #1057 retired).
+    caller of a bare Session with a startup prompt.
 
     ``name`` is the session name and is caller-chosen, always: the manager
     bootstrap passes its own session name, and ``launch_agent``'s persistent
-    branch passes the run key it already admitted. The old task-text
-    derivation - and the ``adhoc:spawn`` namespace that kept it from
-    colliding with those admitted keys - died with the executor role.
+    branch passes the run key it already admitted.
 
     ``subscribe`` adds event topics beyond the session's own ``inbox/<self>``
     (the manager passes its external resource topics here).
@@ -1121,6 +1118,9 @@ def launch_agent(
     Incompatible with ``persistent`` (a persistent session has no run to
     wait out).
 
+    ``subscribe`` applies to PERSISTENT sessions only - workflow runs
+    (detached or wait) self-subscribe to their own inbox and ignore it.
+
     Session name is deterministic: wf-{workflow}-{project}-{run_key}.
     - If an active run exists for the same session → reject
     - If a failed/stale run exists → resume (same session ID)
@@ -1423,40 +1423,86 @@ def launch_agent(
             ))
 
     if wait:
-        # Synchronous mode (#1057): the run executes IN THIS PROCESS, so
-        # there is no child env to build - the chain goes into our own
-        # environment, which is what any `bobi` command the agent runs from
-        # its shell inherits (#849). run_workflow's own register() replaces
-        # the `starting` entry a few lines up with the running one, exactly
-        # as the detached child's does.
-        from bobi.launch_lineage import stamp as stamp_launch_lineage
-        stamp_launch_lineage(os.environ, child_lineage)
-        registry.update(session_name, pid=os.getpid())
-        # The invocation happened either way - the detached branch records
-        # right after its spawn, before the child's outcome is known.
-        from bobi.spend_governor import record_invocation
-        record_invocation(root)
+        # Synchronous mode (#1057): the run executes IN THIS PROCESS. The
+        # detached child's entry re-pins the brain and re-renders the team
+        # AGENTS.md at startup; the wait form does the same here so the two
+        # forms of one launch run under the same team selection - a stale
+        # BOBI_BRAIN inherited from the delegating agent's environment must
+        # not pick this run's brain.
+        pin_brain_from_root(root, os.environ)
+        from bobi.brain.instructions import render_team_instructions
+        render_team_instructions(root)
 
-        from bobi.sdk import load_session_id
-        from bobi.workflow.orchestrator import run_workflow
-        from bobi.workflow.triggers import find_installed_workflow
-        workflow = find_installed_workflow(workflow_name)
-        if workflow is None:
-            # Terminal-close the entry registered above: a `starting` corpse
-            # holding this name would refuse its own relaunch until the
-            # reconciler's deadline branch fires (#850).
-            error = f"Workflow '{workflow_name}' not found"
-            registry.mark_terminal(session_name, TERMINAL_FAILED, error=error)
-            raise RuntimeError(error)
-        collect: dict = {}
-        run_started = time.time()
-        ok = run_workflow(
-            workflow=workflow, task=task, repo=project, cwd=cwd,
-            run_key=run_key, requested_by=requested_by or {},
-            timeout=timeout, interactive=interactive, role=role,
-            input_fields=input_fields, model=model, effort=effort,
-            fresh=fresh, collect=collect,
-        )
+        # The chain goes into our own environment - that is what any `bobi`
+        # command the agent runs from its shell inherits (#849) - and is
+        # RESTORED afterwards: a long-lived caller (webapp, manager) that
+        # launched N wait runs would otherwise deepen its own chain until
+        # the depth guard refused it everything.
+        from bobi.launch_lineage import LINEAGE_ENV_VAR
+        from bobi.launch_lineage import stamp as stamp_launch_lineage
+        prior_chain = os.environ.get(LINEAGE_ENV_VAR)
+        stamp_launch_lineage(os.environ, child_lineage)
+        try:
+            registry.update(session_name, pid=os.getpid())
+            # The invocation happened either way - the detached branch
+            # records right after its spawn, before the child's outcome is
+            # known.
+            from bobi.spend_governor import record_invocation
+            record_invocation(root)
+
+            from bobi.sdk import load_session_id
+            from bobi.workflow.orchestrator import run_workflow
+            from bobi.workflow.triggers import find_installed_workflow
+            workflow = find_installed_workflow(workflow_name)
+            if workflow is None:
+                # Terminal-close the entry registered above: a `starting`
+                # corpse holding this name would refuse its own relaunch
+                # until the reconciler's deadline branch fires (#850).
+                error = f"Workflow '{workflow_name}' not found"
+                registry.mark_terminal(session_name, TERMINAL_FAILED,
+                                       error=error)
+                raise RuntimeError(error)
+            collect: dict = {}
+            run_started = time.time()
+            try:
+                # run_workflow's own register() replaces the `starting`
+                # entry with the running one, and its finally records the
+                # honest terminal status - this handler covers only the
+                # window before that finally engages (mirrors the detached
+                # branch's spawn handler).
+                ok = run_workflow(
+                    workflow=workflow, task=task, repo=project, cwd=cwd,
+                    run_key=run_key, requested_by=requested_by or {},
+                    timeout=timeout, interactive=interactive, role=role,
+                    input_fields=input_fields, model=model, effort=effort,
+                    fresh=fresh, collect=collect,
+                )
+            except BaseException as exc:
+                try:
+                    # Only when the entry is still active: the executor's
+                    # own finally usually recorded the honest terminal (or
+                    # waiting) status before the exception reached us, and
+                    # this backstop must not overwrite it.
+                    entry = registry.get(session_name)
+                    if entry and entry.status in ACTIVE_STATUSES:
+                        registry.mark_terminal(
+                            session_name, TERMINAL_CRASHED,
+                            error=f"wait-mode run died: {exc}",
+                        )
+                except Exception:
+                    log.warning("Failed to mark wait-run failure for %s",
+                                session_name, exc_info=True)
+                raise
+        finally:
+            if prior_chain is None:
+                os.environ.pop(LINEAGE_ENV_VAR, None)
+            else:
+                os.environ[LINEAGE_ENV_VAR] = prior_chain
+        # Cost/turn telemetry deliberately stays unset here: the workflow
+        # executor accounts spend per step in its own records, and nothing
+        # consumes these fields on the wait path. ``error_kind`` carries
+        # "suspended" for a run parked at an await step - dormant, not
+        # done, and the caller has to be able to say so.
         return AgentResult(
             session_id=load_session_id(session_name),
             run_key=session_name,
@@ -1465,6 +1511,7 @@ def launch_agent(
             duration_ms=int((time.time() - run_started) * 1000),
             final_text=collect.get("final_text", ""),
             error=collect.get("error", ""),
+            error_kind="suspended" if collect.get("suspended") else "",
         )
 
     # Everything from here to the pid write is inside the try: the entry is
@@ -1936,7 +1983,18 @@ def _run_agent_entry(args: dict) -> None:
 
     workflow = find_installed_workflow(workflow_name)
     if not workflow:
+        # Terminal-close the entry the launcher registered, exactly as the
+        # wait branch does: a `starting` corpse holding this name would
+        # refuse its own relaunch until the reconciler's deadline branch
+        # fires (#850) - and this print lands only in the detached child's
+        # log, so the corpse used to be the only visible symptom.
+        from bobi.workflow.orchestrator import make_session_name
         print(f"Workflow '{workflow_name}' not found")
+        get_registry().mark_terminal(
+            make_session_name(workflow_name, _resolve_project_name(cwd),
+                              run_key),
+            TERMINAL_FAILED, error=f"Workflow '{workflow_name}' not found",
+        )
         return
 
     project = _resolve_project_name(cwd)
