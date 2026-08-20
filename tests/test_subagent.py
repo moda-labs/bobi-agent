@@ -6,8 +6,6 @@ For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 import json
 import logging
 import os
-import tempfile
-import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,13 +21,6 @@ from bobi.subagent import (
     find_agent,
     list_agents,
 )
-
-
-@pytest.fixture
-def tmp_cwd():
-    d = tempfile.mkdtemp(prefix="subagent_test_")
-    yield d
-    shutil.rmtree(d, ignore_errors=True)
 
 
 def _write_agent_yaml(root: Path, body: str = "agent: t\nentry_point: x\n") -> None:

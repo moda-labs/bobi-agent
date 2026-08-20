@@ -7,7 +7,6 @@ scheduler's dispatch + publish + seed wiring — kept in plain, unit-testable
 Python (the #454 lesson: never let a mocked model bypass the gate).
 """
 
-import queue
 import re
 import time
 from pathlib import Path
@@ -19,6 +18,7 @@ from bobi import history, paths
 from bobi.monitors import curator as curator_mod
 from bobi.monitors.schema import Monitor
 from bobi.monitors.scheduler import MonitorScheduler
+from tests.drain_utils import drain_one_batch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SLEEP_CYCLE_PROMPT = REPO_ROOT / "bobi" / "prompts" / "sleep_cycle.md"
@@ -987,47 +987,9 @@ class TestCuratorSeed:
 # drain-side passive/active delivery (test 11)
 # ---------------------------------------------------------------------------
 
-class _OneShotQueue:
-    def __init__(self, events):
-        self._events = list(events)
-        self._calls = 0
-
-    def get(self):
-        self._calls += 1
-        if self._calls == 1 and self._events:
-            return self._events[0]
-        raise KeyboardInterrupt
-
-    def empty(self):
-        return not (self._calls == 1 and len(self._events) > 1)
-
-    def get_nowait(self):
-        if len(self._events) > 1:
-            return self._events.pop(1)
-        raise queue.Empty
-
-
 def _run_drain_one_batch(events):
-    from bobi.events.drain import drain_loop
-    from bobi.inbox import register_local_inbox, unregister_local_inbox
-
-    delivered = []
-
-    class _CaptureInbox:
-        def push(self, msg, priority=False):
-            delivered.append(msg)
-
-    register_local_inbox("test-policy-session", _CaptureInbox())
-    try:
-        with patch("bobi.events.drain.time.sleep"):
-            try:
-                drain_loop("test-policy-session", queue=_OneShotQueue(events),
-                           formatter=lambda e: e.get("text", ""))
-            except KeyboardInterrupt:
-                pass
-    finally:
-        unregister_local_inbox("test-policy-session")
-    return delivered
+    return drain_one_batch(events, session="test-policy-session",
+                           capture="message")
 
 
 class TestPolicyUpdatedDelivery:

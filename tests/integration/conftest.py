@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,35 @@ import yaml
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
+
+
+def _free_port() -> int:
+    """Pick an OS-assigned free TCP port (bind, read, release).
+
+    The one definition for the integration suite — a fix to the port-picking
+    logic (SO_REUSEADDR, retry against the pick-then-close race) lands here
+    once instead of in every file (D103).
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def wait_healthy(base_url: str, timeout: float = 15) -> bool:
+    """Poll an event server's /health until it reports ok, or time out.
+
+    Loops on ``bobi.events.server.health()`` — the product's single
+    definition of "what counts as healthy" — instead of a hand-rolled
+    urllib poll per file (Q041).
+    """
+    from bobi.events.server import health
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if health(base_url):
+            return True
+        time.sleep(0.3)
+    return False
 
 
 @dataclass
@@ -49,10 +79,7 @@ def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None,
     state_dir = project_path / "state"
     sessions_dir = state_dir / "sessions"
     workflows_dir = package_dir / "workflows"
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        event_server_port = sock.getsockname()[1]
-    event_server_url = f"http://localhost:{event_server_port}"
+    event_server_url = f"http://localhost:{_free_port()}"
 
     for d in [home_dir, package_dir, state_dir, sessions_dir, workflows_dir,
               state_dir / "workflow" / "runs", state_dir / "logs"]:
@@ -319,7 +346,7 @@ async def _drain(client):
     text, result = "", None
     async for msg in client.receive_response():
         if isinstance(msg, AssistantText) and msg.text:
-            text = msg.text
+            text += msg.text
         elif isinstance(msg, TurnResult):
             result = msg
     return text, result

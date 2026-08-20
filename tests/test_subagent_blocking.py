@@ -12,9 +12,7 @@ import asyncio
 import hashlib
 import threading
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
@@ -63,84 +61,13 @@ from bobi.sdk import TERMINAL_FAILED
 from bobi.session import Session as _RealSession
 
 
-# ---------------------------------------------------------------------------
-# Fake SDK types — mirror just enough structure for testing
-# ---------------------------------------------------------------------------
-
-@dataclass
-class FakeTextBlock:
-    text: str
-
-
-@dataclass
-class FakeToolUseBlock:
-    id: str
-    name: str
-    input: dict[str, Any]
-
-
-@dataclass
-class FakeAssistantMessage:
-    content: list
-    model: str = "claude-test"
-
-
-@dataclass
-class FakeDeferredToolUse:
-    id: str
-    name: str
-    input: dict[str, Any]
-
-
-@dataclass
-class FakeResultMessage:
-    subtype: str = "success"
-    duration_ms: int = 1000
-    duration_api_ms: int = 800
-    is_error: bool = False
-    num_turns: int = 5
-    session_id: str = "sess-abc"
-    total_cost_usd: float | None = 0.10
-    result: str | None = None
-    deferred_tool_use: FakeDeferredToolUse | None = None
-    stop_reason: str | None = None
-    errors: list[str] | None = None
-    usage: dict | None = None
-
-
-# ---------------------------------------------------------------------------
-# Helper: builds a fake client whose receive_response yields given messages
-# ---------------------------------------------------------------------------
-
-class FakeClient:
-    """Mimics ClaudeSDKClient with controllable message sequences."""
-
-    def __init__(self, rounds: list[list]):
-        """rounds: list of message-lists. Each round is one receive_response() call."""
-        self._rounds = list(rounds)
-        self._round_idx = 0
-        self.connected = False
-        self.queries: list[str] = []
-        self.disconnected = False
-        self._connect_prompt: str | None = None
-
-    async def connect(self, prompt=None):
-        self.connected = True
-        self._connect_prompt = prompt
-
-    async def query(self, prompt, session_id="default"):
-        self.queries.append(prompt)
-
-    async def receive_response(self):
-        if self._round_idx >= len(self._rounds):
-            return
-        msgs = self._rounds[self._round_idx]
-        self._round_idx += 1
-        for msg in msgs:
-            yield msg
-
-    async def disconnect(self):
-        self.disconnected = True
+from tests.brain_fakes import (
+    FakeAssistantMessage,
+    FakeClient,
+    FakeDeferredToolUse,
+    FakeResultMessage,
+    FakeTextBlock,
+)
 
 
 # ---------------------------------------------------------------------------

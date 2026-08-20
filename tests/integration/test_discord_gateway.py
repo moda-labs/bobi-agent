@@ -21,7 +21,6 @@ No live Discord credentials are involved anywhere.
 import json
 import os
 import signal
-import socket
 import subprocess
 import threading
 import time
@@ -41,6 +40,8 @@ from bobi.events.server import (
 )
 from bobi.events.signing import signed_request
 
+from .conftest import _free_port
+
 APP_ID = "111222333444555666"
 BOT_USER = "999888777666555444"
 BOT_TOKEN = "dc-gw-test-token"
@@ -52,12 +53,6 @@ MESSAGE_CONTENT_INTENT = 1 << 15
 # production bad-token signal that must park the connection as fatal.
 BAD_APP_ID = "222333444555666777"
 BAD_TOKEN = "dc-gw-revoked-token"
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 # Minimal Discord Gateway stub. Node (with the event-server's `ws` package via

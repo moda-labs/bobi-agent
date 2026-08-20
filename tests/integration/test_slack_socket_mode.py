@@ -8,7 +8,6 @@ only through NODE_EXTRA_CA_CERTS. No live Slack credentials are involved.
 import json
 import os
 import signal
-import socket
 import subprocess
 import threading
 import time
@@ -22,6 +21,8 @@ from bobi.events.state import save_bubble_state
 from bobi.events.server import _find_event_server_dir, _post_register, ensure_running
 from bobi.events.signing import signed_request
 
+from .conftest import _free_port
+
 APP_ID = "A_SOCKET_TEST"
 APP_TOKEN = "xapp-test-socket-secret"
 BOT_ID = "B_SOCKET_TEST"
@@ -32,12 +33,6 @@ DM_CHANNEL_ID = "D_SOCKET_TEST"
 HUMAN_USER_ID = "U_SOCKET_HUMAN"
 TEAM_ID = "T_SOCKET_TEST"
 TOPIC = f"slack:{TEAM_ID}:app:{APP_ID}"
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _generate_tls_material(base):
