@@ -1976,6 +1976,7 @@ def test_mcp_tool_call_against_real_workerd(event_server):
     assert names == [
         "bobi_command_result", "bobi_fleet_status", "bobi_instance_detail",
         "bobi_lifecycle", "bobi_read_transcript", "bobi_send_message",
+        "bobi_usage_summary",
     ], names
 
     status, called = _mcp_rpc(base_url, {
