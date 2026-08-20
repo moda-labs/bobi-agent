@@ -155,6 +155,13 @@ consecutive-failure count per monitor in `monitor_state.json`
   `(session, monitor, flavor, reason)`, so an escalation sharing the ordinary
   failure's reason would be buried in exactly the noise it needs to break out of.
 
+The counting rule behind all three: **a run counts as a failure exactly when it
+leaves the cursor parked**, because a parked cursor is what re-reads the same
+window forever. That includes a cursor the scheduler validated but could not
+write (`cursor-write-failed`) - reporting that one clean would reset the streak
+on every attempt, so the escalation could never fire on the one loop genuinely
+unable to advance.
+
 Out-of-band monitor agents must not inline large context into the spawn command.
 Use the request-file pattern instead: write the full context under `run/state/`,
 pass the absolute path in a dedicated `--request` argument, and delete the file

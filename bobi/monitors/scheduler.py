@@ -2160,11 +2160,6 @@ class MonitorScheduler:
             result["merged"] = int(sync.get("merged", 0) or 0)
             result["flagged"] = int(sync.get("flagged", 0) or 0)
 
-        # Every validation passed, so this run's window is done with — clear the
-        # degradation streak even on a compaction-only run that ingested no
-        # transcript rows (#1064).
-        self._note_sleep_cycle_outcome(monitor, succeeded=True)
-
         # A seed-only first run ingests no transcript rows (highest_id is None) -
         # there is nothing to advance; the cursor stays at 0 and the next run
         # reads the real transcript delta normally.
@@ -2172,8 +2167,22 @@ class MonitorScheduler:
             try:
                 sleep_cycle_mod.write_cursor(cursor_path, highest_id)
             except OSError as e:
-                log.error("Monitor %s: failed to advance sleep-cycle cursor: %s",
-                          monitor.name, e)
+                # A cursor that did not move leaves this window to be re-read
+                # forever, which IS the wedge (#1064) - so this is a turn-back
+                # like every other parked-cursor path, never a clean run.
+                # Counting it matters most here: swallowing it would clear the
+                # streak on every attempt, so the stuck escalation could never
+                # fire on precisely the loop that cannot advance.
+                detail = (f"failed to advance sleep-cycle cursor to {highest_id} "
+                          f"at {cursor_path}: {e}")
+                self._sleep_cycle_turn_back(
+                    monitor, "cursor-write-failed", detail, tracker)
+                return
+
+        # Every validation passed and the window is closed out - clear the
+        # degradation streak, including on a compaction-only run that ingested
+        # no transcript rows (#1064).
+        self._note_sleep_cycle_outcome(monitor, succeeded=True)
 
         if result.get("lossy_drops"):
             log.warning("Monitor %s: sleep cycle made %s LOSSY drop(s) of still-valid "

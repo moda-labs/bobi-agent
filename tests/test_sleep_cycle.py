@@ -1157,6 +1157,36 @@ class TestSleepCycleWedge:
         assert cursor == max(ingested)
         assert cursor > 0
 
+    def test_cursor_write_failure_is_a_turn_back_not_a_clean_run(
+        self, tmp_path, monitor
+    ):
+        """A cursor that cannot be written leaves this window to be re-read
+        forever - the wedge itself. Reporting the run clean would also clear
+        the streak on every attempt, so the stuck escalation could never fire
+        on precisely the loop that is unable to advance."""
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        # Real failure injection, not a mock: a directory where the cursor file
+        # belongs. read_cursor treats a non-file as 0; write_cursor raises.
+        paths.long_term_memory_cursor_path(tmp_path).mkdir(parents=True)
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+            full = _ingested_ids(h.captured["task"])
+            h.captured["on_result"]({"success": True, "updated": False,
+                                     "summary": "no durable changes"})
+
+            assert [d for e, d in h.published
+                    if e == "system/monitor.error"
+                    and d.get("reason") == "cursor-write-failed"], \
+                "a parked cursor was reported as a clean run"
+
+            # And it counts: the next run's window shrinks like any failure.
+            h.sched._spawn_curator(monitor, [tmp_path])
+            assert len(_ingested_ids(h.captured["task"])) < len(full)
+
 
 def _spawn_curator_and_wait(monkeypatch, monitor, task: str = "task body",
                             on_spawn=None):
