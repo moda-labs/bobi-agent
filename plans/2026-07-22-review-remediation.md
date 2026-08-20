@@ -1,6 +1,6 @@
 # Full-repo review remediation (defects + mechanical quality)
 
-> **Status:** Approved
+> **Status:** Done
 > **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** 2026-07-29 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -571,7 +571,7 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
 **Lanes (filed 2026-07-22):** A=#818, B=#821, C=#819, D=#820, E=#822. A: Phases 1–4. C: Phase 7 (parallel with A, no shared files). D: Phase 8 (docs, parallel). B: Phases 5–6 (builds in parallel, *lands after* A — shares bobi/ files, not a build-blocking dependency). E: Phase 9 (builds in parallel, *lands after* A). Only "lands after" ordering here — nothing build-blocks except that B/E should rebase onto A's merge to avoid churn.
 
-- [ ] Convergence gate: full `pytest tests/ -q` + `cd event-server && npm test` green on main after the last lane merges, plus the in-repo dogfood run (isolated `BOBI_HOME`, dogfood-content-review pack: agent boots, event round-trips, the D015 fix-step route actually takes) — run by the session landing the last lane
+- [x] Convergence gate: full `pytest tests/ -q` + `cd event-server && npm test` green on main after the last lane merges, plus the in-repo dogfood run (isolated `BOBI_HOME`, dogfood-content-review pack: agent boots, event round-trips, the D015 fix-step route actually takes) — run by the session landing the last lane
 
 ## Amendments
 
@@ -1111,6 +1111,51 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   closing batch; #819 closes when it lands. The convergence gate (corrected
   wording, 2026-08-05 amendment) runs on main after this merge — it is the
   last open line.
+
+- **2026-08-20** (gate session): **convergence gate EXECUTED on `main` @
+  `6c8f6681` (the #1065 merge = the last lane's merge); the gate box and
+  `Status: Done` flip on that evidence.** All three legs of the corrected
+  2026-08-05 wording, run from a worktree checked out at the merge commit
+  (own venv, editable install verified to import the worktree tree):
+
+  - **Full `pytest tests/ -q`** (Node 20.20.2 on PATH, `event-server/
+    npm ci` done, real Claude CLI 2.1.220): **5416 passed / 52 skipped /
+    1 failed in 20:01.** The 1 failure is the KNOWN parked TZ-sensitive
+    `tests/e2e/test_webapp_ui.py::TestRunModal::…opens_its_transcript`
+    (machine on PDT; re-run in isolation reproduces it; passes under
+    `TZ=UTC` and in CI) — identical in the Phase 6 and Phase 9 gate runs,
+    not a regression. All 52 skips enumerated via `-rs` and every one is
+    environment-gated, none vacuous: 27 docker-daemon-gated (container
+    image + otel collector; no docker running), the live-credential lanes
+    (ANTHROPIC/OPENAI keys, live Slack ×6, gateway, worker-deploy smoke
+    ×4, codex cross-model), the known `wire_api=chat` codex skip, `/mcp`
+    on the local backend ×3, `/proc` on macOS, and the deploy plugin.
+    Collected 5469 = the Phase 9 baseline 5462 + 15 (#1058's net test
+    delta, landed after Lane E's gate tree) − 10 (the orphaned markdown
+    suite deleted by #1065) + 2 (#1065's hostile-payload e2e tests) —
+    every count movement accounted for.
+  - **`cd event-server && npm test`**: **442 passed, 12 files** (vitest,
+    Node 24.4.1 — Node 22 was not installed on the box; wrangler's floor
+    is 22+, satisfied).
+  - **Real-agent smoke, surviving pack, isolated `BOBI_HOME`**:
+    `agents/personal-assistant` installed via `bobi agents install` into a
+    throwaway home, booted with `bobi agent pa start` (manager up, local
+    event server auto-started on :8080, assistant session spawned on the
+    real Claude brain), then one round-trip: `bobi agent pa ask "Reply
+    with exactly the single word: pong"` → event queued over the connected
+    websocket (`reply/reply/2957b90b`) → **`pong` returned in ~10s**.
+    Stopped and torn down after; one sleep-cycle curator descendant
+    survived the stop and was killed by hand (the known
+    cancel-agent-orphans-descendants shape, recorded, not fixed here).
+
+  **Post-merge CI on `6c8f6681`: green** (`CI` success; the Container
+  workflow correctly did not trigger — its path filter names image inputs
+  only, and #1065 touched none). With this, every non-parked line in the
+  plan is closed: Lanes A (#818), B (#821), C (#819), D (#820), E (#822)
+  all landed and their issues closed. Parked residue stays recorded in the
+  amendments and Notes: the TZ-sensitive e2e test (unfiled at Zach's
+  call), the otel-collector flake, D052's second half, and the deferred
+  structural refactors including D124's wrapper redesign.
 
 ## Notes
 
