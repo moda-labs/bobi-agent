@@ -24,7 +24,7 @@ import yaml
 
 from bobi.runtime_guard import with_mutable_runtime_package
 
-from .conftest import _free_port
+from .conftest import _free_port, wait_healthy
 
 
 
@@ -47,17 +47,7 @@ def inbox_event_server(bobi_env):
 
     ensure_running(port, project_path=bobi_env.project_path)
 
-    deadline = time.monotonic() + 15
-    healthy = False
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
-                if json.loads(r.read()).get("status") == "ok":
-                    healthy = True
-                    break
-        except Exception:
-            time.sleep(0.3)
-    if not healthy:
+    if not wait_healthy(url, timeout=15):
         pytest.skip("local event server (Node) unavailable")
 
     yield url
@@ -273,17 +263,7 @@ def fast_eviction_event_server(bobi_env):
         "BOBI_ES_EVICTION_SWEEP_MS": "1000",
     })
 
-    deadline = time.monotonic() + 15
-    healthy = False
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
-                if json.loads(r.read()).get("status") == "ok":
-                    healthy = True
-                    break
-        except Exception:
-            time.sleep(0.3)
-    if not healthy:
+    if not wait_healthy(url, timeout=15):
         pytest.skip("local event server (Node) unavailable")
 
     yield url

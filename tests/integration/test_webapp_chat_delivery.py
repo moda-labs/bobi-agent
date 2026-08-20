@@ -31,10 +31,8 @@ dressing - it is the acceptance bar.
 
 from __future__ import annotations
 
-import json
 import os
 import time
-import urllib.request
 
 import pytest
 import yaml
@@ -45,7 +43,7 @@ from bobi.runtime_guard import with_mutable_runtime_package
 from bobi.session import Session
 from bobi.webapp import server
 
-from .conftest import _free_port
+from .conftest import _free_port, wait_healthy
 
 TOKEN = "chat-delivery-token"
 
@@ -92,15 +90,7 @@ def chat_event_server(bobi_env):
     except RuntimeError as e:      # no Node, or its deps cannot be installed
         _unavailable(str(e))
 
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
-                if json.loads(r.read()).get("status") == "ok":
-                    break
-        except Exception:
-            time.sleep(0.25)
-    else:
+    if not wait_healthy(url, timeout=20):
         _unavailable("it never became healthy")
 
     yield url

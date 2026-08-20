@@ -38,7 +38,7 @@ import yaml
 
 from bobi.runtime_guard import with_mutable_runtime_package
 
-from .conftest import _free_port
+from .conftest import _free_port, wait_healthy
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
@@ -195,18 +195,6 @@ def _event_server_backends():
     return backends
 
 
-def _wait_healthy(base_url: str, timeout: float = 15) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            data = _get_json(f"{base_url}/health")
-            if data.get("status") == "ok":
-                return True
-        except Exception:
-            time.sleep(0.3)
-    return False
-
-
 def _start_local_server(bobi_env):
     """Start the local Node.js event server, return (base_url, port, cleanup)."""
     from bobi.events.server import ensure_running
@@ -220,7 +208,7 @@ def _start_local_server(bobi_env):
             extra_env={"BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET},
         )
 
-        if _wait_healthy(base_url, timeout=10):
+        if wait_healthy(base_url, timeout=10):
             break
 
         pid_file = bobi_env.state_dir / "event-server.pid"
@@ -346,7 +334,7 @@ def _start_wrangler_server():
             start_new_session=True,
         )
 
-        if not _wait_healthy(base_url, timeout=30):
+        if not wait_healthy(base_url, timeout=30):
             log_file.close()
             try:
                 log_text = log_path.read_text()
@@ -1002,17 +990,7 @@ class TestEventServerCLI:
             _get_json(f"{base_url}/health")
 
         ensure_running(port, project_path=bobi_env.project_path)
-        deadline = time.monotonic() + 10
-        running = False
-        while time.monotonic() < deadline:
-            try:
-                data = _get_json(f"{base_url}/health")
-                if data.get("status") == "ok":
-                    running = True
-                    break
-            except Exception:
-                time.sleep(0.3)
-        assert running
+        assert wait_healthy(base_url, timeout=10)
 
         if pid_file.exists():
             try:
@@ -1531,19 +1509,6 @@ class TestBindAddress:
         return proc, log_path, lf
 
     @staticmethod
-    def _wait_healthy(url: str, timeout: float = 10) -> bool:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                data = _get_json(f"{url}/health")
-                if data.get("status") == "ok":
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.3)
-        return False
-
-    @staticmethod
     def _stop(proc, lf):
         try:
             os.kill(proc.pid, signal.SIGTERM)
@@ -1558,7 +1523,7 @@ class TestBindAddress:
         port = _free_port()
         proc, log_path, lf = self._start_server(bobi_env, port)
         try:
-            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+            assert wait_healthy(f"http://127.0.0.1:{port}")
 
             log_text = log_path.read_text()
             assert f"127.0.0.1:{port}" in log_text
@@ -1574,7 +1539,7 @@ class TestBindAddress:
         proc, log_path, lf = self._start_server(
             bobi_env, port, {"BOBI_ES_BIND": "0.0.0.0"})
         try:
-            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+            assert wait_healthy(f"http://127.0.0.1:{port}")
 
             log_text = log_path.read_text()
             assert f"0.0.0.0:{port}" in log_text
@@ -1589,7 +1554,7 @@ class TestBindAddress:
         proc, log_path, lf = self._start_server(
             bobi_env, port, {"BOBI_ES_WEBHOOK_SECRET": "s3cret"})
         try:
-            assert self._wait_healthy(f"http://127.0.0.1:{port}")
+            assert wait_healthy(f"http://127.0.0.1:{port}")
 
             log_text = log_path.read_text()
             assert f"127.0.0.1:{port}" in log_text
@@ -1619,7 +1584,7 @@ class TestWebhookSignatureVerification:
             "BOBI_ES_LINEAR_WEBHOOK_SECRET": self.LINEAR_SECRET,
         })
         try:
-            assert TestBindAddress._wait_healthy(f"http://127.0.0.1:{port}")
+            assert wait_healthy(f"http://127.0.0.1:{port}")
             yield f"http://127.0.0.1:{port}"
         finally:
             TestBindAddress._stop(proc, lf)
@@ -1838,7 +1803,7 @@ class TestIngestTokens:
             )
             procs.append((proc, lf))
             base = f"http://127.0.0.1:{port}"
-            assert TestBindAddress._wait_healthy(base, timeout=30)
+            assert wait_healthy(base, timeout=30)
             return base
 
         def assert_delivers(base_url: str, suffix: str, token: str):

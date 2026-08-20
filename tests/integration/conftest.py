@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,23 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def wait_healthy(base_url: str, timeout: float = 15) -> bool:
+    """Poll an event server's /health until it reports ok, or time out.
+
+    Loops on ``bobi.events.server.health()`` — the product's single
+    definition of "what counts as healthy" — instead of a hand-rolled
+    urllib poll per file (Q041).
+    """
+    from bobi.events.server import health
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if health(base_url):
+            return True
+        time.sleep(0.3)
+    return False
 
 
 @dataclass
