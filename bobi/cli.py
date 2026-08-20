@@ -2523,8 +2523,10 @@ def workflow_status():
         click.echo("No workflow runs found.")
         return
     for run in runs[:20]:
+        # The run_key FIELD is authoritative (#1048); the trigger-event copy
+        # is display fallback for records written before the field existed.
         event_data = run.trigger_event.get("data", {})
-        issue = event_data.get("run_key", run.run_key or "?")
+        issue = run.run_key or event_data.get("run_key", "?")
         suffix = ""
         if run.suspended_at_step >= 0:
             suffix = f"  step={run.suspended_at_step}"
@@ -2626,10 +2628,10 @@ def workflow_resume(run_id, verdict, reply, timeout):
         sys.exit(1)
     # resume_workflow returns True for two different endings: the run finished,
     # or it parked on a LATER await step. The second is dormant, not done - the
-    # orchestrator stamps this record "superseded" and a fresh waiting record
-    # owns the run - so report it as such instead of claiming completion. A
-    # rejected gate that reworks and re-gates ends here every cycle.
-    if run.status == "superseded":
+    # run's own ledger entry is back to "waiting" (#1048: one run, one record)
+    # - so report it as such instead of claiming completion. A rejected gate
+    # that reworks and re-gates ends here every cycle.
+    if run.status == "waiting":
         click.echo("Workflow suspended again on a later await step. "
                    "Run `workflows status` for the waiting run.")
     else:

@@ -735,6 +735,22 @@ def derive_run_key(workflow_name: str, task: str, *, project: str = "",
     return f"adhoc-{hashlib.sha256(dials.encode()).hexdigest()[:12]}"
 
 
+def _workflow_period_key(workflow_name: str) -> str:
+    """The period run key for *workflow_name*, or "" when it is not periodic.
+
+    Derived HERE, at launch admission, and nowhere later (#1048): the launcher
+    and its detached child can straddle a period boundary, and two derivations
+    would mint two identities for one dispatch. A workflow that cannot be
+    found resolves to "" - the child reports the missing workflow itself.
+    """
+    from bobi.workflow.triggers import find_installed_workflow
+
+    workflow = find_installed_workflow(workflow_name)
+    if workflow is None or not workflow.period:
+        return ""
+    return workflow.period_run_key()
+
+
 def _resolve_run_key(workflow_name: str, task: str, run_key: str | None,
                      random_key: bool, *, project: str = "", role: str = "",
                      model: str = "", effort: str = "") -> tuple[str, bool]:
@@ -1191,10 +1207,32 @@ def launch_agent(
     instead of the workflow orchestrator.
     """
     project = _resolve_project_name(cwd)
-    run_key, derived_key = _resolve_run_key(workflow_name, task, run_key,
-                                            random_key, project=project,
-                                            role=role, model=model,
-                                            effort=effort)
+    period_key = "" if persistent else _workflow_period_key(workflow_name)
+    if period_key:
+        # The workflow field owns the period (#1048): every dispatch path -
+        # scheduled tick, manual catch-up, event reaction - lands on the same
+        # run identity, so the admission below can dedupe them. A caller's
+        # key AND --id-random are deliberately overridden, not refused:
+        # honoring either is exactly the two-identities-one-period shape
+        # behind the #1016 double-publish, and refusing would break the
+        # reactor, which passes random_key for every id-less event.
+        if run_key and run_key != period_key:
+            log.info(
+                "Workflow %s declares a period; overriding run key %r with "
+                "the period key %s", workflow_name, run_key, period_key,
+            )
+        elif random_key:
+            log.info(
+                "Workflow %s declares a period; a random key would run the "
+                "same period twice, using the period key %s",
+                workflow_name, period_key,
+            )
+        run_key, derived_key = period_key, False
+    else:
+        run_key, derived_key = _resolve_run_key(workflow_name, task, run_key,
+                                                random_key, project=project,
+                                                role=role, model=model,
+                                                effort=effort)
     fresh = fresh or derived_key
 
     if persistent:
@@ -1276,7 +1314,18 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
-    with _LAUNCH_ADMISSION_LOCK:
+    from bobi.workflow.state import WorkflowRun, ledger_lock
+
+    def _admit() -> None:
+        """One admission pass: reap, ledger checks, registry guard.
+
+        Runs under ledger_lock so the decision cannot interleave with
+        another process's - and runs TWICE, because the concurrency
+        semaphore between the passes can wait minutes, during which a
+        concurrent launcher may have registered or the period completed.
+        Raises DuplicateRunError on refusal; every step is idempotent.
+        """
+        nonlocal existing
         from bobi.reconcile import close_dead_run, is_dead_run
         existing = registry.get(session_name)
         if existing and is_dead_run(existing):
@@ -1289,12 +1338,61 @@ def launch_agent(
             # the entry wholesale a few lines down.
             existing, _ = close_dead_run(existing, registry)
 
+        # The run ledger (#1048): a periodic workflow admits ONE run per
+        # period, across every dispatch path. The registry only remembers the
+        # latest holder of a session name, so "this period already completed"
+        # must be answered by the durable run record instead. Consulted after
+        # the dead-run reap above so a run that died without a terminal
+        # status has already been closed - its ledger entry is then flipped
+        # to failed rather than left "running" to block the period forever
+        # (the liveness check the naive period-key design lacked).
+        if period_key:
+            prior_run = WorkflowRun.find_by_run_key(workflow_name, run_key,
+                                                    repo=project)
+            if prior_run and prior_run.status == "completed" and not fresh:
+                # ``fresh`` is the deliberate escape hatch: an operator who
+                # KNOWS the completed run did nothing useful re-runs the
+                # period explicitly. Automatic dispatchers never pass it.
+                raise DuplicateRunError(
+                    f"This period already ran: {run_key} completed at "
+                    f"{prior_run.completed_at}. The next period admits the "
+                    f"next run; pass --fresh to deliberately run it again.",
+                    session_name=session_name, status="completed",
+                    derived_key=False,
+                )
+            if prior_run and prior_run.status == "waiting":
+                raise DuplicateRunError(
+                    f"This period's run is suspended: {run_key} is awaiting "
+                    f"{prior_run.await_event or 'an event'}. It resumes on "
+                    f"that event; to release the period instead, close the "
+                    f"run from the console runs view.",
+                    session_name=session_name, status=prior_run.status,
+                    derived_key=False,
+                )
+            if (prior_run and prior_run.status in ("running", "resuming")
+                    and not (existing and existing.status in ACTIVE_STATUSES)):
+                # The ledger says running (or stuck mid-claim at "resuming",
+                # the D071 orphan) but no live process holds the session -
+                # reaped above, or the registry entry is gone. Registry-gone
+                # is ambiguous (a state-dir restore could orphan a live
+                # process), but refusing on it would let a wiped registry
+                # block the period forever, which is the exact failure the
+                # liveness check exists to prevent. Close the entry honestly;
+                # the relaunch below adopts its checkpoint. A LIVE run falls
+                # through to the active-run refusal below.
+                prior_run.status = "failed"
+                prior_run.save()
+
         # A DERIVED key also refuses a suspended run. "waiting" is dormant, not
         # free: the process exited and an await event resumes it. An explicit
         # --id may legitimately re-dispatch onto that name; a launch that only
         # matched by task text cannot mean that, and would take over the
-        # suspended run's session, worktree branch and registry entry.
-        blocking = ACTIVE_STATUSES + (("waiting",) if derived_key else ())
+        # suspended run's session, worktree branch and registry entry. A
+        # PERIOD key refuses one too: the period is in flight at a gate, and
+        # its ledger refusal above already said so - this is the registry's
+        # matching backstop.
+        blocking = ACTIVE_STATUSES + (
+            ("waiting",) if (derived_key or period_key) else ())
         if existing and existing.status in blocking:
             # A caller that never chose this key cannot act on the session name
             # alone - it has to be told the key came from its own task text,
@@ -1318,11 +1416,22 @@ def launch_agent(
                 # status it is shown says otherwise invites it to disbelieve
                 # the whole refusal.
                 lead = "A suspended run already holds this name"
-                remedy = (
-                    f"It is awaiting an event, so it will not finish on its "
-                    f"own and cannot be cancelled; re-dispatch onto it with "
-                    f"--id {existing.run_key!r} if that is what you mean."
-                )
+                if period_key:
+                    # --id cannot be the remedy here: a period key overrides
+                    # any caller key, so that re-dispatch lands right back on
+                    # this refusal.
+                    remedy = (
+                        "It is this period's run, parked at an await step; "
+                        "it resumes when its event arrives (or from the "
+                        "console runs view)."
+                    )
+                else:
+                    remedy = (
+                        f"It is awaiting an event, so it will not finish on "
+                        f"its own and cannot be cancelled; re-dispatch onto "
+                        f"it with --id {existing.run_key!r} if that is what "
+                        f"you mean."
+                    )
             else:
                 lead = "A run is already active"
                 remedy = "Cancel it first or wait for it to complete."
@@ -1334,6 +1443,17 @@ def launch_agent(
                 derived_key=derived_key,
             )
 
+    existing = None
+    with _LAUNCH_ADMISSION_LOCK:
+        # The ledger file lock serializes the admission DECISION across
+        # processes (a monitor tick and a manual CLI catch-up are different
+        # processes). It is deliberately NOT held across the semaphore wait
+        # below - that can block for minutes, and every spawned child takes
+        # this same lock to open its ledger entry, so holding it there would
+        # stall the whole host's workflow starts behind one queued launch.
+        with ledger_lock():
+            _admit()
+
         # Preflight: concurrency semaphore — queue if too many agents running
         _check_concurrency_semaphore(root)
 
@@ -1341,19 +1461,24 @@ def launch_agent(
         from bobi.sdk import check_image_rotation, compute_manifest_hash
         check_image_rotation(session_name, root)
 
-        # Register first so the session dir exists for the log file. This write
-        # stays in the same critical section as admission so parallel dispatch
-        # threads cannot all pass on the same stale active/starting count.
-        registry.register(SessionEntry(
-            name=session_name, session_id="", role=role,
-            run_key=run_key, title=task[:80], phase=workflow_name,
-            project=project, cwd=cwd, status="starting",
-            requested_by=requested_by or {},
-            image_hash=compute_manifest_hash(root),
-            # Persist the declared timeout so the dead-man reconciler knows this
-            # run's deadline (MDS-65 §4.6).
-            timeout=timeout,
-        ))
+        with ledger_lock():
+            # Second pass: the wait above may have been minutes - a
+            # concurrent launcher may hold the name now, or the period may
+            # have completed. Register in the SAME critical section as the
+            # re-check so parallel dispatchers cannot both pass on the same
+            # stale read; registering first also creates the session dir the
+            # log file needs.
+            _admit()
+            registry.register(SessionEntry(
+                name=session_name, session_id="", role=role,
+                run_key=run_key, title=task[:80], phase=workflow_name,
+                project=project, cwd=cwd, status="starting",
+                requested_by=requested_by or {},
+                image_hash=compute_manifest_hash(root),
+                # Persist the declared timeout so the dead-man reconciler knows
+                # this run's deadline (MDS-65 §4.6).
+                timeout=timeout,
+            ))
 
     # Everything from here to the pid write is inside the try: the entry is
     # already registered `starting` with pid 0, and `is_dead_run` cannot tell
@@ -1821,11 +1946,9 @@ def _run_agent_entry(args: dict) -> None:
         return
 
     from bobi.workflow.orchestrator import run_workflow
-    from bobi.workflow.triggers import WorkflowDispatcher
+    from bobi.workflow.triggers import find_installed_workflow
 
-    dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
-    workflow = dispatcher.find_workflow(workflow_name)
+    workflow = find_installed_workflow(workflow_name)
     if not workflow:
         print(f"Workflow '{workflow_name}' not found")
         return

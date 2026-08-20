@@ -10,6 +10,7 @@ A workflow is a linear sequence of steps. Each step is either:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -95,12 +96,61 @@ class StepDef:
     action: str = ""         # registered action name (e.g. "cleanup_worktree")
 
 
+# Period vocabulary -> strftime bucket. The bucket is the run identity for one
+# period of a periodic workflow: every dispatcher derives the same run_key from
+# it, so the run ledger can dedupe a scheduled tick against a manual catch-up
+# (issue #1048). Local time on purpose - monitor `at:` schedules are local, and
+# a period boundary that disagrees with the operator's clock reads as a bug.
+PERIOD_FORMATS = {
+    "hourly": "%Y-%m-%dT%H",
+    "daily": "%Y-%m-%d",
+    "weekly": "%G-W%V",
+    "monthly": "%Y-%m",
+}
+
+
 @dataclass
 class Workflow:
     name: str
     steps: list[StepDef]
     trigger: str = ""
     description: str = ""
+    # Declared run period ("daily", ...). Empty = not periodic. The workflow
+    # field owns the period (decision 2026-08-18, #1048): the run_key for a
+    # periodic workflow is always derived from it, never caller-chosen.
+    period: str = ""
+
+    def period_run_key(self, now: float | None = None) -> str:
+        """The run identity for the current period, e.g. ``standup-2026-08-10``.
+
+        Deterministic for every dispatcher within one period, which is what
+        lets admission dedupe across dispatch paths. Derive ONCE per dispatch
+        (at launch admission) and pass the result along; deriving again later
+        can straddle a period boundary and mint a second identity.
+        """
+        if self.period not in PERIOD_FORMATS:
+            # load_workflow validates this for YAML-born workflows; a
+            # programmatically built one gets the same readable error here
+            # instead of a bare KeyError three frames from anything named.
+            raise ValueError(
+                f"Workflow {self.name}: period {self.period!r} must be one "
+                f"of {sorted(PERIOD_FORMATS)}"
+            )
+        fmt = PERIOD_FORMATS[self.period]
+        bucket = time.strftime(fmt, time.localtime(now))
+        return f"{self.name}-{bucket}"
+
+    def steps_fingerprint(self) -> str:
+        """A short digest of the ordered step-name list.
+
+        Stamped onto a run's checkpoint so a retry can tell whether
+        ``checkpoint_step`` still indexes the workflow it was recorded
+        against - a bare index into an edited step list resumes at the wrong
+        step.
+        """
+        import hashlib
+        names = "\n".join(s.name for s in self.steps)
+        return hashlib.sha256(names.encode()).hexdigest()[:12]
 
     def step_by_name(self, name: str) -> StepDef | None:
         for s in self.steps:
@@ -153,11 +203,19 @@ def load_workflow(path: Path) -> Workflow:
         )
         steps.append(step)
 
+    period = raw.get("period", "") or ""
+    if period and period not in PERIOD_FORMATS:
+        raise ValueError(
+            f"Workflow {raw.get('name', path.stem)}: period {period!r} "
+            f"must be one of {sorted(PERIOD_FORMATS)}"
+        )
+
     workflow = Workflow(
         name=raw.get("name", path.stem),
         steps=steps,
         trigger=raw.get("trigger", ""),
         description=raw.get("description", ""),
+        period=period,
     )
     _validate_back_edges(workflow)
     return workflow

@@ -1203,3 +1203,253 @@ class TestAutoDispatchIdentityRequirement:
         assert _auto_dispatch_needs_self_login([
             {"event": "github.pull_request_review"},
         ]) is True
+
+
+class TestPeriodAdmission:
+    """A periodic workflow admits one run per period (#1048)."""
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        _write_agent_yaml(tmp_path)
+        wf_dir = paths.workflows_dir(tmp_path)
+        wf_dir.mkdir(parents=True, exist_ok=True)
+        (wf_dir / "standup.yaml").write_text(
+            "name: standup\n"
+            "period: daily\n"
+            "steps:\n"
+            "  - name: post\n"
+            "    prompt: post it\n"
+        )
+        paths.bind_root(tmp_path)
+        yield
+        paths.bind_root(None)
+
+    @staticmethod
+    def _period_key():
+        import time
+        return "standup-" + time.strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _ledger_entry(status, run_key, session_name="", checkpoint=-1,
+                      repo="test"):
+        # repo defaults to what _resolve_project_name("/tmp/test") yields:
+        # the ledger is repo-scoped, so an entry for another repo must not
+        # block this one (see test_other_repos_period_does_not_block).
+        from bobi.workflow.state import WorkflowRun
+        run = WorkflowRun.create("standup", {"data": {"run_key": run_key}})
+        run.run_key = run_key
+        run.status = status
+        run.session_name = session_name
+        run.checkpoint_step = checkpoint
+        run.repo = repo
+        if status == "completed":
+            run.completed_at = "2026-08-18T09:00:00+00:00"
+        if status in ("waiting",):
+            run.await_event = "review.approved"
+        run.save()
+        return run
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_period_key_overrides_caller_key(self, mock_launch, mock_reg,
+                                             mock_check):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="standup", run_key="manual-oops")
+        assert self._period_key() in name
+        assert "manual-oops" not in name
+        blob = json.loads(mock_launch.call_args[0][1][0])
+        assert blob["run_key"] == self._period_key()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_two_dispatch_paths_one_period_key(self, mock_launch, mock_reg,
+                                               mock_check):
+        # The #1016 shape: a scheduled tick and a manual catch-up, different
+        # caller keys, land on ONE identity.
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        a = launch_agent(task="scheduled tick", cwd="/tmp/test",
+                         workflow_name="standup", run_key="sched-1")
+        b = launch_agent(task="manual catch-up", cwd="/tmp/test",
+                         workflow_name="standup", run_key="manual-2")
+        assert a == b
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_completed_period_refuses_relaunch(self, mock_launch, mock_reg,
+                                               mock_check):
+        from bobi.subagent import DuplicateRunError, launch_agent
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        self._ledger_entry("completed", self._period_key())
+        with pytest.raises(DuplicateRunError, match="already ran"):
+            launch_agent(task="post it", cwd="/tmp/test",
+                         workflow_name="standup")
+        mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_suspended_period_refuses_relaunch(self, mock_launch, mock_reg,
+                                               mock_check):
+        from bobi.subagent import DuplicateRunError, launch_agent
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        self._ledger_entry("waiting", self._period_key())
+        with pytest.raises(DuplicateRunError, match="suspended"):
+            launch_agent(task="post it", cwd="/tmp/test",
+                         workflow_name="standup")
+        mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_stale_running_entry_does_not_block_the_period(
+            self, mock_launch, mock_reg, mock_check):
+        # The liveness check the naive period-key design lacked: the ledger
+        # says running, but no live process holds the session. Admission
+        # closes the entry and admits the relaunch.
+        from bobi.subagent import launch_agent
+        from bobi.workflow.state import WorkflowRun
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        stale = self._ledger_entry("running", self._period_key())
+        name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="standup")
+        assert name
+        mock_launch.assert_called_once()
+        assert WorkflowRun.load(stale.run_id).status == "failed"
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_live_running_period_still_refused(self, mock_launch, mock_reg,
+                                               mock_check):
+        from bobi.subagent import DuplicateRunError, launch_agent
+        from bobi.workflow.state import WorkflowRun
+        live = MagicMock()
+        live.status = "running"
+        live.pid = os.getpid()
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=live))
+        stale = self._ledger_entry("running", self._period_key())
+        with pytest.raises(DuplicateRunError, match="already active"):
+            launch_agent(task="post it", cwd="/tmp/test",
+                         workflow_name="standup")
+        # A LIVE run's ledger entry is not clobbered.
+        assert WorkflowRun.load(stale.run_id).status == "running"
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_random_key_overridden_for_periodic_workflow(
+            self, mock_launch, mock_reg, mock_check):
+        # Overridden, never refused: the reactor passes random_key for every
+        # id-less event, so a refusal would kill periodic auto-dispatch.
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="standup", random_key=True)
+        assert self._period_key() in name
+        assert "rand-" not in name
+        mock_launch.assert_called_once()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_non_periodic_workflow_keeps_caller_key(self, mock_launch,
+                                                    mock_reg, mock_check):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        name = launch_agent(task="fix it", cwd="/tmp/test",
+                            workflow_name="adhoc", run_key="42")
+        assert "42" in name
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_other_repos_period_does_not_block(self, mock_launch, mock_reg,
+                                               mock_check):
+        # The period is scoped per repo, like the session name: repo A's
+        # completed standup must not deny repo B its run.
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        self._ledger_entry("completed", self._period_key(), repo="other-repo")
+        name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="standup")
+        assert name
+        mock_launch.assert_called_once()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_fresh_reruns_a_completed_period(self, mock_launch, mock_reg,
+                                             mock_check):
+        # --fresh is the deliberate operator escape hatch: automatic
+        # dispatchers never pass it, so the dedupe still holds for them.
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        self._ledger_entry("completed", self._period_key())
+        name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="standup", fresh=True)
+        assert name
+        mock_launch.assert_called_once()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_stale_resuming_entry_does_not_block_the_period(
+            self, mock_launch, mock_reg, mock_check):
+        # A resume process killed mid-claim leaves "resuming" behind (D071);
+        # with no live session it must not hold the period hostage.
+        from bobi.subagent import launch_agent
+        from bobi.workflow.state import WorkflowRun
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        stale = self._ledger_entry("resuming", self._period_key())
+        name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="standup")
+        assert name
+        mock_launch.assert_called_once()
+        assert WorkflowRun.load(stale.run_id).status == "failed"
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_registry_waiting_backstop_refuses_with_period_remedy(
+            self, mock_launch, mock_reg, mock_check):
+        # Ledger empty but the registry remembers a suspended holder of this
+        # session name: the backstop must refuse, and must NOT suggest --id,
+        # which a period key overrides right back onto this refusal.
+        from bobi.subagent import DuplicateRunError, launch_agent
+        waiting = MagicMock()
+        waiting.status = "waiting"
+        waiting.pid = 0
+        waiting.title = "post it"
+        waiting.run_key = self._period_key()
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=waiting))
+        with pytest.raises(DuplicateRunError, match="parked at an await"):
+            launch_agent(task="post it", cwd="/tmp/test",
+                         workflow_name="standup")
+        mock_launch.assert_not_called()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_workflow_without_period_keeps_caller_key(self, mock_launch,
+                                                      mock_reg, mock_check,
+                                                      tmp_path):
+        # A REAL workflow file with no period: the caller's key must survive
+        # (the not-found path is covered separately by the adhoc test).
+        from bobi import paths
+        (paths.workflows_dir() / "oneshot.yaml").write_text(
+            "name: oneshot\n"
+            "steps:\n"
+            "  - name: go\n"
+            "    prompt: go\n"
+        )
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        name = launch_agent(task="fix it", cwd="/tmp/test",
+                            workflow_name="oneshot", run_key="42")
+        assert "42" in name

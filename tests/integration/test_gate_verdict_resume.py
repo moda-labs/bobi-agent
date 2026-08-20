@@ -11,8 +11,9 @@ the real command as a subprocess against the isolated stub-brain home, and
 reads the run records back off disk. The three endings are unambiguous there:
 
   approve   the record is `completed` and no run is left waiting
-  reject    the record is `superseded` and a FRESH record waits at the gate
-            again - the same session, the same run key, reworked not built
+  reject    the SAME record (#1048: one run, one entry) is back to
+            `waiting` at the gate - the same session, the same run key,
+            reworked not built
   neither   an empty or malformed verdict ends exactly like a rejection,
             because the workflow's route makes its `else` the safe branch
 
@@ -136,9 +137,9 @@ def test_an_approve_resumes_and_the_run_finishes(gated, stub_cli_run):
 def test_a_reject_reworks_the_same_run_and_re_gates_it(gated, stub_cli_run):
     """Not a dead end and not a fresh session: the same work, reworked.
 
-    The record that ran is stamped `superseded` rather than `completed` - a
-    re-suspend mints a new waiting record, and calling the old one done is
-    what made a dormant run read as finished.
+    The run's one ledger entry (#1048) is back to `waiting` rather than
+    `completed` - calling a dormant run done is what made it read as
+    finished.
     """
     run = _park(gated)
 
@@ -150,12 +151,12 @@ def test_a_reject_reworks_the_same_run_and_re_gates_it(gated, stub_cli_run):
     assert "suspended again" in result.stdout
 
     from bobi.workflow.state import WorkflowRun
-    assert WorkflowRun.load(run.run_id).status == "superseded"
+    assert WorkflowRun.load(run.run_id).status == "waiting"
 
     waiting = _waiting()
     assert len(waiting) == 1, [(r.run_id, r.status) for r in _runs()]
     regated = waiting[0]
-    assert regated.run_id != run.run_id
+    assert regated.run_id == run.run_id
     assert regated.session_name == run.session_name
     assert regated.run_key == run.run_key
     assert regated.suspended_at_step == 2
@@ -179,7 +180,7 @@ def test_a_resume_with_no_verdict_reworks_rather_than_advancing(
     assert "suspended again" in result.stdout
 
     from bobi.workflow.state import WorkflowRun
-    assert WorkflowRun.load(run.run_id).status == "superseded"
+    assert WorkflowRun.load(run.run_id).status == "waiting"
     assert len(_waiting()) == 1
 
 

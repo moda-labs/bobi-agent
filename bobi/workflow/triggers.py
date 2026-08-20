@@ -14,6 +14,18 @@ from .schema import Workflow, load_workflow
 log = logging.getLogger(__name__)
 
 
+def find_installed_workflow(name: str) -> Workflow | None:
+    """Load the installed pack's workflows and return *name*, or None.
+
+    The one spelling of the load-and-find triple the launch paths need -
+    launch admission (period derivation) and the spawned child both resolve
+    a workflow by name from the bound root.
+    """
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    return dispatcher.find_workflow(name)
+
+
 class WorkflowDispatcher:
 
     def __init__(self):

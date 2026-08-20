@@ -232,6 +232,8 @@ trigger: >
   When [condition]. One sentence.
 description: >
   What this workflow does end-to-end.
+period: daily        # optional: hourly/daily/weekly/monthly - one run per
+                     # period, deduped across every dispatch path (#1048)
 
 steps:
   - name: step-name

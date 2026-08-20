@@ -52,7 +52,9 @@ class TestWorkflowRunCreate:
         assert run.trigger_event == event
         assert run.status == "running"
         assert run.started_at != ""
-        assert len(run.run_id) == 8
+        # 64 bits: the ledger holds one entry per run now, and an 8-char id
+        # makes a silent same-id overwrite plausible at real volumes (#1048).
+        assert len(run.run_id) == 16
 
     def test_create_writes_aware_utc_started_at(self):
         # The one wall-clock convention (bobi.timeutil): timestamps persist
@@ -308,3 +310,100 @@ class TestListRuns:
         assert runs[0].run_id == "good"
 
 
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint field (#1048)
+# ---------------------------------------------------------------------------
+
+class TestCheckpointStep:
+    def test_round_trip(self, runs_dir):
+        run = _make_run(runs_dir, run_id="cp1", checkpoint_step=3)
+        loaded = WorkflowRun.load("cp1")
+        assert loaded.checkpoint_step == 3
+
+    def test_defaults_to_no_checkpoint_on_old_files(self, runs_dir):
+        # A run persisted before the field existed must load as "no
+        # checkpoint", not crash and not resume at step 0.
+        run = _make_run(runs_dir, run_id="old1")
+        path = runs_dir / "old1.json"
+        data = json.loads(path.read_text())
+        del data["checkpoint_step"]
+        path.write_text(json.dumps(data))
+        assert WorkflowRun.load("old1").checkpoint_step == -1
+
+
+# ---------------------------------------------------------------------------
+# find_by_run_key (#1048) - the ledger read behind period admission
+# ---------------------------------------------------------------------------
+
+class TestFindByRunKey:
+    def test_finds_matching_run(self, runs_dir):
+        _make_run(runs_dir, run_id="a1", workflow_name="standup",
+                  run_key="standup-2026-08-10", status="completed")
+        found = WorkflowRun.find_by_run_key("standup", "standup-2026-08-10")
+        assert found is not None
+        assert found.run_id == "a1"
+
+    def test_filters_by_workflow_name(self, runs_dir):
+        _make_run(runs_dir, run_id="a1", workflow_name="other",
+                  run_key="standup-2026-08-10")
+        assert WorkflowRun.find_by_run_key(
+            "standup", "standup-2026-08-10") is None
+
+    def test_filters_by_run_key(self, runs_dir):
+        _make_run(runs_dir, run_id="a1", workflow_name="standup",
+                  run_key="standup-2026-08-09")
+        assert WorkflowRun.find_by_run_key(
+            "standup", "standup-2026-08-10") is None
+
+    def test_returns_most_recent(self, runs_dir):
+        import os as _os
+        _make_run(runs_dir, run_id="first", workflow_name="standup",
+                  run_key="k", status="failed")
+        _make_run(runs_dir, run_id="second", workflow_name="standup",
+                  run_key="k", status="completed")
+        now = time.time()
+        _os.utime(runs_dir / "first.json", (now - 60, now - 60))
+        _os.utime(runs_dir / "second.json", (now, now))
+        found = WorkflowRun.find_by_run_key("standup", "k")
+        assert found.run_id == "second"
+
+    def test_matches_on_the_field_not_trigger_data(self, runs_dir):
+        # The run_key FIELD is the identity (#1048). A run whose trigger data
+        # disagrees (or lacks the key) is still found by its field.
+        run = _make_run(runs_dir, run_id="f1", workflow_name="standup")
+        run.run_key = "k2"
+        run.trigger_event = {"type": "t", "data": {"run_key": "something-else"}}
+        run.save()
+        found = WorkflowRun.find_by_run_key("standup", "k2")
+        assert found is not None
+        assert found.run_id == "f1"
+
+
+class TestFindWaitingMatchesField:
+    def test_run_key_match_uses_the_field(self, runs_dir):
+        # find_waiting keys on the run_key FIELD (#1048); trigger data is
+        # payload, not identity.
+        run = _make_run(runs_dir, run_id="w1", status="waiting",
+                        await_event="pr.merged")
+        run.run_key = "42-comment-7"
+        run.trigger_event = {"type": "t", "data": {}}
+        run.save()
+        found = WorkflowRun.find_waiting("pr.merged", run_key="42-comment-7")
+        assert found is not None
+        assert found.run_id == "w1"
+
+
+class TestFindByRunKeyRepoScope:
+    def test_filters_by_repo(self, runs_dir):
+        _make_run(runs_dir, run_id="a1", workflow_name="standup",
+                  run_key="k", repo="repo-a", status="completed")
+        assert WorkflowRun.find_by_run_key("standup", "k", repo="repo-b") is None
+        found = WorkflowRun.find_by_run_key("standup", "k", repo="repo-a")
+        assert found is not None and found.run_id == "a1"
+
+    def test_empty_repo_matches_all(self, runs_dir):
+        _make_run(runs_dir, run_id="a1", workflow_name="standup",
+                  run_key="k", repo="repo-a")
+        assert WorkflowRun.find_by_run_key("standup", "k") is not None
