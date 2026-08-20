@@ -463,13 +463,13 @@ Each appendix entry names the surviving implementation — move callers to it; n
 
 Read `docs/FRONTEND_QA.md` before touching the static UIs. Security items first: D007 (attr injection via markdown links — `esc()` must escape quotes), D077 per Q5, D006 (path confinement), D082 (register payload validation).
 
-- [ ] **D098** `bobi/setup/webui/static/app.css:8` — The framed app-window chrome (.app rule, body radial-gradient background, and the data-retro grid overlay) is copied verbatim between the setup UI…
-- [ ] **D099** `bobi/setup/webui/static/app.js:20` — HTML-escaping is hand-rolled in three variants across the two UIs: setup app.js esc (5 chars incl. quotes), agent.js esc (3 chars, pre-markdown), and…
-- [ ] **D124** `bobi/setup/webui/static/app.js:90` — The token-header JSON fetch wrapper with server-gone health tracking is implemented independently in both SPAs: setup app.js getJSON/postJSON +… *(plausible — re-verify first)*
-- [ ] **Q073** `bobi/webapp/static/shell.js:166` — The dynamic `import("./views/agent.js").catch(() => null)` with the stub() fallback ('The agent view is coming in this build.') is leftover…
-- [ ] **Q076** `bobi/webapp/static/views/agent.js:17` — The header interpolates the agent name into an innerHTML template with a hand-rolled `name.replace(/[&<>]/g, "")` strip — the single deviation from…
+- [f] state:falsified **D098** `bobi/setup/webui/static/app.css:8` — The framed app-window chrome (.app rule, body radial-gradient background, and the data-retro grid overlay) is copied verbatim between the setup UI…
+- [x] **D099** `bobi/setup/webui/static/app.js:20` — HTML-escaping is hand-rolled in three variants across the two UIs: setup app.js esc (5 chars incl. quotes), agent.js esc (3 chars, pre-markdown), and…
+- [f] state:declined-redesign **D124** `bobi/setup/webui/static/app.js:90` — The token-header JSON fetch wrapper with server-gone health tracking is implemented independently in both SPAs: setup app.js getJSON/postJSON +… *(plausible — re-verify first)*
+- [x] **Q073** `bobi/webapp/static/shell.js:166` — The dynamic `import("./views/agent.js").catch(() => null)` with the stub() fallback ('The agent view is coming in this build.') is leftover…
+- [f] state:falsified **Q076** `bobi/webapp/static/views/agent.js:17` — The header interpolates the agent name into an innerHTML template with a hand-rolled `name.replace(/[&<>]/g, "")` strip — the single deviation from…
 - [x] **D008/Q025** `bobi/webapp/static/views/agent.js:189` — Markdown link renderer interpolates the URL into a double-quoted href attribute without escaping quotes, allowing agent output to inject…
-- [ ] **Q074** `bobi/webapp/static/views/agent.js:322` — loadMessages wraps `await api(...)` in try/catch, but api() is designed never to reject — its own catch returns {ok:false,status:0,data:null} — so…
+- [f] state:falsified **Q074** `bobi/webapp/static/views/agent.js:322` — loadMessages wraps `await api(...)` in try/catch, but api() is designed never to reject — its own catch returns {ok:false,status:0,data:null} — so…
 - [x] **D011** `event-server/core/src/adapters/chat-sdk-slack.ts:82` — The blanket `if (innerEvent.subtype) skip` drops every Slack message carrying subtype 'file_share', so file uploads in DMs and thread replies are…
 - [x] **D091** `event-server/core/src/adapters/discord.ts:91` — The attachment-to-files normalization loop (build Array<Record<string,string>> with per-key presence checks and String() coercion, then mirror into…
 - [x] **Q117** `event-server/core/src/adapters/github.ts:42` — Webhook-payload field extraction is handled in two conflicting styles: linear/whatsapp/discord narrow at runtime (asRecord/stringField helpers,… *(plausible — re-verify first)*
@@ -489,8 +489,8 @@ Read `docs/FRONTEND_QA.md` before touching the static UIs. Security items first:
 **Validation gate**
 
 - [x] `cd event-server && npm test` (vitest) green, incl. new failing-first tests: `file_share` subtype delivered, breaker pause-buffer bound, `readBody` size cap, workspace-register shape validation
-- [ ] New JS escaping tests (or minimal harness per FRONTEND_QA.md): quotes escaped in href interpolation; agent-name rendering
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q -k "webapp or webui"`
+- [x] New JS escaping tests (or minimal harness per FRONTEND_QA.md): quotes escaped in href interpolation; agent-name rendering
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q -k "webapp or webui"`
 
 ### Phase 8 — Documentation drift sweep
 
@@ -1026,6 +1026,81 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   (net zero), unit lane 4972 → 4995 (+23) / integration 410 → 387 (−23) =
   exactly the five moved files; **zero tests deleted** (the dead code was two
   fixtures and three never-constructed dataclasses).
+
+- **2026-08-20** (Lane C build session): **the 6 deferred web-UI items un-park
+  and close — mostly by falsification.** The 2026-08-04 deferral waited for
+  "Luke's single-agent UI work to reach main"; that condition was satisfied
+  the same day it was recorded (**#948 merged to `main` 2026-08-04T23:08Z as
+  `7c627fd7`** — the deferral comment's "no `feat/single-agent-*` → main PR
+  has ever been opened" was true at 01:55 and stale by that evening), and
+  Zach gave the explicit go to proceed 2026-08-20. Every item re-derived
+  against `main` @ `f68c6399`. What #948's rewrite of `views/agent.js`
+  (1,569 → 1,111 lines) did to this batch:
+
+  - **D098 `[f] state:falsified`** — the framed app-window chrome the finding
+    says is duplicated no longer exists anywhere: both `.app` rules are now
+    trivial full-bleed resets ("the browser window IS the app window"), the
+    radial-gradient body and `data-retro` grid overlay are deleted, and the
+    consolidation mechanism the finding asked for is already in place — the
+    shared top bar lives in `bobi/webui_common/static/chrome.css`, in
+    `SHARED_ASSET_NAMES`, since the design-system reskin. Nothing to move.
+  - **D099 `[x]`, by deletion rather than by a shared module** — the finding's
+    three variants are down to one. #948 deleted `agent.js`'s 3-char `esc`
+    and the inline `name.replace` strip along with the whole markdown path;
+    the quote-safe `esc` that #942 extracted to `views/markdown.js` became
+    dead code the same day (zero importers — the rewrite renders every
+    dynamic string through `mk()`/`textContent`, and the transcript slab is
+    deliberately plain text per `docs/RUN_DRILLDOWNS.md`). This lane deletes
+    the orphaned `markdown.js`, its test (`tests/test_webapp_markdown.py`),
+    and the dead `.msg`/`.pending` CSS block that styled the old chat panel
+    (`bobi/webapp/static/app.css:635-689`; nothing creates those classes).
+    Exactly one HTML-escaping implementation remains in the product UIs: the
+    5-char attribute-safe `esc` in `setup/webui/static/app.js`.
+  - **D124 `[f] state:declined-redesign`** — the "plausible — re-verify
+    first" flag was right to worry. The duplication claim still holds at the
+    narrowest reading (both SPAs read a token meta tag and set the
+    `x-bobi-webui-token` header), but the two wrappers now implement
+    deliberately different error contracts — setup's `getJSON/postJSON`
+    THROW and drive a full-page overlay + 4s heartbeat (a wizard where any
+    failure means the server is gone); `shell.js`'s `api()` never rejects
+    and returns `{ok,status,data}` with a missed-pings threshold (a
+    dashboard that polls) — and setup's SPA is a non-module IIFE while
+    `shell.js` is an ES module, so the finding's "shared client module" is
+    no longer a dedup but a cross-contract redesign plus a script-loading
+    change. Declined here; belongs with the successor structural-refactor
+    list in Notes (alongside Q005/Q111/Q129).
+  - **Q073 `[x]`** — the one survivor, shipped as filed: `agent.js` is now
+    imported statically beside `dashboard.js`, the `.catch(() => null)` and
+    `stub()` fallback are deleted (its only caller), and `route()` loses its
+    now-purposeless `async`. The `.stub` CSS class stays — `showMissing()`
+    and `mountSetupEntry` still build stubs via `mk()`.
+  - **Q076 `[f] state:falsified`** — the deviation is gone: the header is
+    `els.title.textContent = name` (`agent.js:180`), and the rewrite has no
+    innerHTML interpolation of dynamic data anywhere. The gate's agent-name
+    clause is proven by a NEW e2e test rather than by reading source:
+    `test_a_hostile_agent_name_renders_as_text_not_markup` drives
+    `#/agents/<payload>` (the name is client-derived from the hash, so the
+    view can be handed any string) and asserts the name renders literally,
+    injects no element, and executes nothing.
+  - **Q074 `[f] state:falsified`** — `loadMessages` and its try/catch left
+    with #948; today no `api()` call site in any view uses try/catch (zero
+    `catch` tokens in `agent.js`).
+
+  **Phase 7's escaping-tests gate box flips with a correction, same pattern
+  as the convergence-gate correction above.** Its first clause ("quotes
+  escaped in href interpolation") was satisfied by #942 and then mooted by
+  #948: the href interpolation site no longer exists in the product, so this
+  lane deletes those tests together with the dead renderer they exercised.
+  The property the clause defended — agent output cannot inject markup — is
+  now enforced structurally (textContent-only rendering) and proven by the
+  new hostile-name e2e test, which covers the second clause ("agent-name
+  rendering") as written. Comment/docstring references to `markdown.js`
+  (`views/composer.js`, `tests/test_webapp_composer.py`) updated.
+
+  With this, Lane C is complete: 2 shipped PRs (#942, #945) plus this
+  closing batch; #819 closes when it lands. The convergence gate (corrected
+  wording, 2026-08-05 amendment) runs on main after this merge — it is the
+  last open line.
 
 ## Notes
 
