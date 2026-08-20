@@ -550,8 +550,8 @@ For each item: re-verify the claim against the tree, then edit the doc to say th
 
 **Validation gate**
 
-- [ ] `pytest tests/ -q` (full suite) green; the de-skipped manager-lifecycle checks proven by forcing a boot failure locally (they must FAIL, then pass on real boot)
-- [ ] `pytest tests/ --collect-only -q` count change explained in the PR (deleted dead tests enumerated)
+- [x] `pytest tests/ -q` (full suite) green; the de-skipped manager-lifecycle checks proven by forcing a boot failure locally (they must FAIL, then pass on real boot)
+- [x] `pytest tests/ --collect-only -q` count change explained in the PR (deleted dead tests enumerated)
 
 ## Proof of work
 
@@ -1011,6 +1011,21 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
     retired-runner note in `ci.yml`). The header now explains the two gating
     mechanisms (marker vs dual-brain skipif) instead of naming jobs, and the
     session row follows `test_context_rotation.py` to its unit-lane home.
+
+  **Gate evidence (both boxes flip in this PR):** full `pytest tests/ -q`
+  including integration + e2e on the branch tree (Node 20, `npm ci`, real
+  Claude CLI so the dual-brain `[claude]` legs ran): **5409 passed / 52
+  skipped / 1 failed in 26:43** — the one failure is the KNOWN parked
+  TZ-sensitive test (`tests/e2e/test_webapp_ui.py::TestRunModal::…transcript`,
+  fails PDT / passes `TZ=UTC`; identical in the Phase 6 gate run; not a Phase
+  9 regression). The 52-skip count matches the Phase 6 gate baseline. The
+  forced-boot-failure arm ran before the de-skip commit landed: with the
+  `Drain loop active` log line mutated away, the messaging fixture FAILED
+  (setup error, not skip); restored, `test_manager_lifecycle` messaging +
+  `test_e2e_event_flow` stub legs passed 3/3. Collect-only: **5462 → 5462**
+  (net zero), unit lane 4972 → 4995 (+23) / integration 410 → 387 (−23) =
+  exactly the five moved files; **zero tests deleted** (the dead code was two
+  fixtures and three never-constructed dataclasses).
 
 ## Notes
 
