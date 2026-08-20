@@ -192,11 +192,16 @@ A derived key also implies `--fresh`: it is an inference about the launch, not a
 caller pointing at a run to continue. It additionally refuses to land on a
 **suspended** (`waiting`) run - only an explicit `--id` may re-dispatch onto one.
 
-`--wait` blocks until the launched adhoc agent completes. It requires
-`-w adhoc`: waiting works by running the task as one prompt, while a multi-step
-workflow returns as soon as it is dispatched, so there is no run to join. It
-derives its key from the same dials, in its own namespace, and has no active-run
-guard - identical `--wait` launches still run side by side.
+`--wait` blocks until the launched adhoc agent completes and prints its final
+text. It still requires `-w adhoc` (the fan-out unit shape), but it is the
+same launch as a detached one (#1057): an ad-hoc task runs as a one-step
+workflow, so a `--wait` run gets a run-ledger entry, checkpoint retry, and
+every rule above - the derived key, the active-run guard, and period
+override included. Two identical `--wait` launches therefore refuse each
+other; fan identical copies out with `--id-random`, exactly as detached.
+`--timeout` is the run's declared deadline for the dead-man reconciler, the
+same as a detached run - the in-process bound on a runaway agent is the
+role's turn cap, not a wall clock.
 `--as-check` is the explicit short-lived monitoring-check harness; it prints
 verdict JSON and is the only `subagents launch` mode that accepts
 `--post-event`. It never reaches the launch admission path, so run keys do not

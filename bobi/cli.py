@@ -3269,16 +3269,15 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     fresh: bool = False, random_key: bool = False) -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
-        # Deliberate limit, not an oversight: --wait blocks by running the task
-        # as ONE prompt through spawn_adhoc. A multi-step workflow goes through
-        # the orchestrator, which returns once the run is dispatched, so there
-        # is no in-process handle to join. Fan-out-and-block therefore uses
-        # adhoc units (#845; see the engineer role's "Parallel Work" section).
+        # Deliberate limit, not an oversight: --wait is the fan-out-and-block
+        # delegation idiom (#845; see the engineer role's "Parallel Work"
+        # section), and an ad-hoc unit is its unit of work. Widening --wait to
+        # multi-step workflows is a contract change to make on purpose, not a
+        # side effect of the executor consolidation (#1057).
         click.echo(
-            f"--wait requires '-w adhoc' (got '{workflow}'). A multi-step "
-            f"workflow returns as soon as it is dispatched, so there is "
-            f"nothing to block on. To fan out and join, launch adhoc units in "
-            f"the background and 'wait' for them in a single shell command.",
+            f"--wait requires '-w adhoc' (got '{workflow}'). To fan out and "
+            f"join, launch adhoc units in the background and 'wait' for them "
+            f"in a single shell command.",
             err=True,
         )
         raise SystemExit(1)
@@ -3288,36 +3287,28 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
 
     requester = _parse_requested_by(requested_by)
 
-    # --wait runs the agent IN THIS PROCESS, so there is no child env to stamp:
-    # the chain goes into our own environment, which is what any `bobi` command
-    # the agent runs from its shell inherits. Admission happens here for the
-    # same reason it does in launch_agent - this path chains just as deeply,
-    # and `-w adhoc --wait` is the delegation idiom the role prompts teach, so
-    # it is the shape most likely to run away.
-    from .launch_lineage import ADHOC_WORKFLOW, admit, stamp
-    from .subagent import (_resolve_project_name, resolve_adhoc_session_name,
-                           spawn_adhoc)
-    # Resolved ONCE and handed to spawn_adhoc as the name: with --id-random
-    # there is no derivation to repeat, and a stamped link naming a session
-    # that never registers makes every chain through it unreadable.
-    session_name, derived_key = resolve_adhoc_session_name(
-        task, run_key, random_key, project=_resolve_project_name(cwd),
-        role=role, model=model, effort=effort)
-    stamp(os.environ, admit(
-        _detect_project_root(), session=session_name,
-        workflow=ADHOC_WORKFLOW, run_key=session_name,
-    ))
-
-    result = spawn_adhoc(
-        cwd=cwd, task=task, timeout=timeout, name=session_name,
-        requested_by=requester, persistent=False, role=role,
-        subscribe=subscribe, model=model, effort=effort,
-        # spawn_adhoc forces fresh on a name it derived itself; this one was
-        # derived a frame earlier, so the caller carries the same implication.
-        fresh=fresh or derived_key,
+    # One launch path (#1057): launch_agent owns the derivation, preflights,
+    # admission and lineage for EVERY run, and wait=True just runs the
+    # workflow in this process instead of detaching it. The ad-hoc task is
+    # literally a one-step workflow execution, with the same ledger entry,
+    # checkpoints and period dedupe every other run gets.
+    from .subagent import launch_agent
+    result = launch_agent(
+        task=task, cwd=cwd, workflow_name=workflow, timeout=timeout,
+        requested_by=requester, interactive=interactive, role=role,
+        subscribe=subscribe, run_key=run_key, random_key=random_key,
+        model=model, effort=effort, fresh=fresh, wait=True,
     )
     if result.final_text:
         click.echo(result.final_text)
+    if result.error_kind == "suspended":
+        # A pack may override `adhoc` with a gated workflow. Parked is
+        # dormant, not done - exiting silently as a success would report
+        # work finished that never ran past the gate.
+        click.echo(
+            "Run suspended at an approval gate; it resumes when its event "
+            "arrives (see the console runs view).", err=True,
+        )
     if not result.success:
         if result.error:
             click.echo(f"Agent failed: {result.error}", err=True)

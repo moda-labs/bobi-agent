@@ -233,3 +233,49 @@ class TestNoFrameworkFallback:
         dispatcher.load_all_workflows(project_path=tmp_path)
         names = [wf.name for wf, _src in dispatcher.workflows]
         assert names == ["my-workflow"]
+
+
+class TestBuiltinAdhocFallback:
+    """`adhoc` resolves even when the pack ships no adhoc.yaml (#1057).
+
+    Since the ad-hoc executor collapsed into the workflow path, the
+    framework itself depends on an `adhoc` workflow existing at launch. The
+    built-in lives in CODE, deliberately not YAML - the #176 rule that the
+    framework package ships no workflow YAMLs still holds, and
+    load_all_workflows (the manager's menu) still lists only installed pack
+    workflows. The fallback applies at find_installed_workflow, the launch
+    path, alone; a pack's own adhoc.yaml wins over it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        paths.workflows_dir(tmp_path).mkdir(parents=True)
+        monkeypatch.setattr("bobi.paths._root", tmp_path)
+        self.root = tmp_path
+
+    def test_adhoc_falls_back_to_the_builtin(self):
+        from bobi.workflow.triggers import find_installed_workflow
+        wf = find_installed_workflow("adhoc")
+        assert wf is not None
+        assert [s.name for s in wf.steps] == ["task"]
+        assert wf.steps[0].prompt == "${{input.task}}"
+
+    def test_pack_adhoc_wins_over_the_builtin(self):
+        from bobi.workflow.triggers import find_installed_workflow
+        _make_workflow_yaml(paths.workflows_dir(self.root) / "adhoc.yaml",
+                            "adhoc", "Pack-owned trigger text.")
+        wf = find_installed_workflow("adhoc")
+        assert wf is not None
+        assert "Pack-owned trigger text." in wf.trigger
+        assert [s.name for s in wf.steps] == ["work"]
+
+    def test_other_missing_names_still_return_none(self):
+        from bobi.workflow.triggers import find_installed_workflow
+        assert find_installed_workflow("nonexistent") is None
+
+    def test_the_builtin_is_not_in_the_managers_menu(self):
+        """The fallback is a launch-path affordance, not a listed workflow:
+        the menu advertises only what the pack ships."""
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(project_path=self.root)
+        assert "adhoc" not in [wf.name for wf, _src in dispatcher.workflows]

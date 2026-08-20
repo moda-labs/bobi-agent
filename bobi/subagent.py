@@ -41,12 +41,6 @@ log = logging.getLogger(__name__)
 
 _LAUNCH_ADMISSION_LOCK = threading.Lock()
 
-# Derivation namespace for :func:`spawn_adhoc`, whose derived key IS the session
-# name - as is a persistent :func:`launch_agent`'s. Sharing ``adhoc`` with the
-# latter would collide the two on one task; see resolve_adhoc_session_name.
-ADHOC_SPAWN_WORKFLOW = "adhoc:spawn"
-
-
 class DuplicateRunError(RuntimeError):
     """A launch was refused because an identical run is already in flight.
 
@@ -777,51 +771,30 @@ def _resolve_run_key(workflow_name: str, task: str, run_key: str | None,
                           model=model, effort=effort), True
 
 
-def resolve_adhoc_session_name(task: str, name: str | None = None,
-                               random_key: bool = False, *, project: str = "",
-                               role: str = "", model: str = "",
-                               effort: str = "") -> tuple[str, bool]:
-    """The session name :func:`spawn_adhoc` will use, and whether it derived it.
-
-    Extracted so a caller that must know the name BEFORE spawning - the
-    ``--wait`` path, which stamps the launch chain into its own environment -
-    shares one derivation with ``spawn_adhoc`` instead of recomputing it. A
-    recomputed name that drifts would stamp a link naming a session that never
-    exists, which is the lineage invariant (see ``bobi/launch_lineage.py``).
-    ``random_key`` is why the caller resolves the name and passes it back in as
-    ``name`` rather than letting ``spawn_adhoc`` derive it a second time: a
-    random key cannot be derived twice.
-
-    The namespace is :data:`ADHOC_SPAWN_WORKFLOW`, not ``adhoc``, because this
-    name IS the session name - and so is a persistent :func:`launch_agent`'s.
-    Sharing the derivation namespace would give an un-keyed ``--wait`` run and
-    an un-keyed ``--persistent`` agent on one task the same session: one inbox,
-    one registry pid, one saved transcript, two live processes.
-    """
-    return _resolve_run_key(ADHOC_SPAWN_WORKFLOW, task, name, random_key,
-                            project=project, role=role, model=model,
-                            effort=effort)
-
-
-def spawn_adhoc(
+def run_persistent_agent(
     cwd: str,
     task: str,
+    name: str,
     timeout: int = 3600,
-    name: str | None = None,
     requested_by: dict | None = None,
-    persistent: bool = False,
     role: str = "",
     mcp_servers: dict | None = None,
     subscribe: list[str] | None = None,
     model: str = "",
     effort: str = "",
     fresh: bool = False,
-    random_key: bool = False,
 ) -> AgentResult:
-    """Spawn an agent with a freeform task prompt.
+    """Bootstrap a persistent agent session and block for its lifetime.
 
-    Creates a Session with the task as the startup prompt. The session
-    has an inbox so other sessions can message it during execution.
+    Persistent agents are sessions, not runs (#1057): an inbox loop has no
+    run identity, so this path deliberately stays outside the workflow
+    executor and its run ledger. Every RUN - ad-hoc included - goes through
+    ``launch_agent`` / ``run_workflow``; this bootstrap is the one surviving
+    caller of a bare Session with a startup prompt.
+
+    ``name`` is the session name and is caller-chosen, always: the manager
+    bootstrap passes its own session name, and ``launch_agent``'s persistent
+    branch passes the run key it already admitted.
 
     ``subscribe`` adds event topics beyond the session's own ``inbox/<self>``
     (the manager passes its external resource topics here).
@@ -829,39 +802,16 @@ def spawn_adhoc(
     ``model`` and ``effort`` are explicit overrides (e.g. the launch flags);
     when empty the role's configured value or the team default applies.
 
-    With ``persistent=True`` the session stays alive after the initial
-    task completes, accepting messages via its inbox until explicitly
-    stopped. The caller blocks for the lifetime of the session.
-
-    Without ``name`` the session name is derived from the task
-    (:func:`derive_run_key`), so dispatching the SAME task text twice collides
-    by construction. That collision used to mean the second run silently
-    continued the first's dead session, along with its spent turn budget, so a
-    derived name now implies ``fresh``. ``random_key=True`` opts out of the
-    derivation entirely for genuinely parallel fan-out.
-
     ``fresh=True`` starts a new transcript instead of resuming this name's
-    saved one. Pass it on every RE-dispatch under an explicit ``name``: the
-    name is stable on purpose, and a worker that re-orients from durable state
-    (a committed checklist, the branch's commits) wants that stable name with
-    a clean transcript.
-
-    NOTE: unlike :func:`launch_agent`, this path has no active-run guard, no
-    concurrency semaphore and no spend-governor accounting - a derived name
-    here prevents a stale-transcript resume, not a duplicate run. See #874.
+    saved one.
     """
     from bobi.session import Session
 
-    run_key, derived_key = resolve_adhoc_session_name(
-        task, name, random_key, role=role, model=model, effort=effort)
-    # A derived name is an inference, not an assertion that this continues an
-    # earlier conversation - so it never resumes one.
-    fresh = fresh or derived_key
     project = _resolve_project_name(cwd)
     requested_by = requested_by or {}
 
     started_at = time.time()
-    _emit_session_started(run_key, project, task, run_key, phase="adhoc",
+    _emit_session_started(name, project, task, name, phase="adhoc",
                           requested_by=requested_by, role=role)
 
     from bobi.paths import bobi_root
@@ -871,13 +821,10 @@ def spawn_adhoc(
     label = role or "agent"
     append_parts = [
         f"You are a {label} agent working on an adhoc task. "
-        f"Complete the task described in your initial prompt."
+        f"Complete the task described in your initial prompt.",
+        "After completing the initial task, stay available — "
+        "you will receive follow-up messages via your inbox.",
     ]
-    if persistent:
-        append_parts.append(
-            "After completing the initial task, stay available — "
-            "you will receive follow-up messages via your inbox."
-        )
     if role_prompt:
         append_parts.append(role_prompt)
 
@@ -904,7 +851,7 @@ def spawn_adhoc(
     effort = _resolve_launch_effort(role, explicit=effort, cfg=_cfg)
 
     session = Session(
-        name=run_key,
+        name=name,
         cwd=cwd,
         system_prompt={
             "type": "preset",
@@ -925,7 +872,7 @@ def spawn_adhoc(
 
     ok = session.start(startup_prompt=task, timeout=timeout)
 
-    if persistent and ok:
+    if ok:
         try:
             session._thread.join()
         except KeyboardInterrupt:
@@ -935,7 +882,7 @@ def spawn_adhoc(
 
         result = AgentResult(
             session_id=session.get_session_id(),
-            run_key=run_key,
+            run_key=name,
             phase="adhoc",
             success=True,
             duration_ms=session._total_duration_ms,
@@ -943,33 +890,14 @@ def spawn_adhoc(
             num_turns=session._total_turns,
             final_text=session._last_response,
         )
-        _emit_session_finished(result, project, run_key, started_at,
-                               requested_by=requested_by, role=role)
-        return result
-
-    if ok:
-        result = AgentResult(
-            session_id=session.get_session_id(),
-            run_key=run_key,
-            phase="adhoc",
-            success=not session._last_is_error,
-            duration_ms=session._total_duration_ms,
-            total_cost_usd=session._total_cost_usd,
-            num_turns=session._total_turns,
-            final_text=session._last_response,
-            # A failed adhoc run carried NO error at all before #845, so the
-            # launcher reported it as "unknown error".
-            error_kind=session._last_error_kind,
-            error=session.last_error(),
-        )
     else:
+        session.stop()
         result = AgentResult(
-            session_id="", run_key=run_key, phase="adhoc",
+            session_id="", run_key=name, phase="adhoc",
             success=False, error=f"session failed to start within {timeout}s",
         )
 
-    session.stop()
-    _emit_session_finished(result, project, run_key, started_at,
+    _emit_session_finished(result, project, name, started_at,
                            requested_by=requested_by, role=role)
     return result
 
@@ -1178,8 +1106,20 @@ def launch_agent(
     effort: str = "",
     fresh: bool = False,
     random_key: bool = False,
-) -> str:
+    wait: bool = False,
+) -> "str | AgentResult":
     """Launch an agent as a detached subprocess and return immediately.
+
+    ``wait=True`` is the synchronous mode (#1057): the same derivation,
+    preflights, admission and registration as a detached launch, but the
+    workflow then runs IN THIS PROCESS via ``run_workflow`` and the call
+    returns an :class:`AgentResult` carrying the last step's final text -
+    the CLI ``--wait`` contract. A detached launch returns the session name.
+    Incompatible with ``persistent`` (a persistent session has no run to
+    wait out).
+
+    ``subscribe`` applies to PERSISTENT sessions only - workflow runs
+    (detached or wait) self-subscribe to their own inbox and ignore it.
 
     Session name is deterministic: wf-{workflow}-{project}-{run_key}.
     - If an active run exists for the same session → reject
@@ -1203,9 +1143,11 @@ def launch_agent(
     got a brand-new name and so a clean transcript.
 
     With ``persistent=True``, the agent stays alive after its initial
-    task, accepting messages via its inbox. Uses spawn_adhoc() directly
-    instead of the workflow orchestrator.
+    task, accepting messages via its inbox. Uses run_persistent_agent()
+    directly instead of the workflow orchestrator.
     """
+    if wait and persistent:
+        raise ValueError("wait=True cannot be combined with persistent=True")
     project = _resolve_project_name(cwd)
     period_key = "" if persistent else _workflow_period_key(workflow_name)
     if period_key:
@@ -1479,6 +1421,98 @@ def launch_agent(
                 # this run's deadline (MDS-65 §4.6).
                 timeout=timeout,
             ))
+
+    if wait:
+        # Synchronous mode (#1057): the run executes IN THIS PROCESS. The
+        # detached child's entry re-pins the brain and re-renders the team
+        # AGENTS.md at startup; the wait form does the same here so the two
+        # forms of one launch run under the same team selection - a stale
+        # BOBI_BRAIN inherited from the delegating agent's environment must
+        # not pick this run's brain.
+        pin_brain_from_root(root, os.environ)
+        from bobi.brain.instructions import render_team_instructions
+        render_team_instructions(root)
+
+        # The chain goes into our own environment - that is what any `bobi`
+        # command the agent runs from its shell inherits (#849) - and is
+        # RESTORED afterwards: a long-lived caller (webapp, manager) that
+        # launched N wait runs would otherwise deepen its own chain until
+        # the depth guard refused it everything.
+        from bobi.launch_lineage import LINEAGE_ENV_VAR
+        from bobi.launch_lineage import stamp as stamp_launch_lineage
+        prior_chain = os.environ.get(LINEAGE_ENV_VAR)
+        stamp_launch_lineage(os.environ, child_lineage)
+        try:
+            registry.update(session_name, pid=os.getpid())
+            # The invocation happened either way - the detached branch
+            # records right after its spawn, before the child's outcome is
+            # known.
+            from bobi.spend_governor import record_invocation
+            record_invocation(root)
+
+            from bobi.sdk import load_session_id
+            from bobi.workflow.orchestrator import run_workflow
+            from bobi.workflow.triggers import find_installed_workflow
+            workflow = find_installed_workflow(workflow_name)
+            if workflow is None:
+                # Terminal-close the entry registered above: a `starting`
+                # corpse holding this name would refuse its own relaunch
+                # until the reconciler's deadline branch fires (#850).
+                error = f"Workflow '{workflow_name}' not found"
+                registry.mark_terminal(session_name, TERMINAL_FAILED,
+                                       error=error)
+                raise RuntimeError(error)
+            collect: dict = {}
+            run_started = time.time()
+            try:
+                # run_workflow's own register() replaces the `starting`
+                # entry with the running one, and its finally records the
+                # honest terminal status - this handler covers only the
+                # window before that finally engages (mirrors the detached
+                # branch's spawn handler).
+                ok = run_workflow(
+                    workflow=workflow, task=task, repo=project, cwd=cwd,
+                    run_key=run_key, requested_by=requested_by or {},
+                    timeout=timeout, interactive=interactive, role=role,
+                    input_fields=input_fields, model=model, effort=effort,
+                    fresh=fresh, collect=collect,
+                )
+            except BaseException as exc:
+                try:
+                    # Only when the entry is still active: the executor's
+                    # own finally usually recorded the honest terminal (or
+                    # waiting) status before the exception reached us, and
+                    # this backstop must not overwrite it.
+                    entry = registry.get(session_name)
+                    if entry and entry.status in ACTIVE_STATUSES:
+                        registry.mark_terminal(
+                            session_name, TERMINAL_CRASHED,
+                            error=f"wait-mode run died: {exc}",
+                        )
+                except Exception:
+                    log.warning("Failed to mark wait-run failure for %s",
+                                session_name, exc_info=True)
+                raise
+        finally:
+            if prior_chain is None:
+                os.environ.pop(LINEAGE_ENV_VAR, None)
+            else:
+                os.environ[LINEAGE_ENV_VAR] = prior_chain
+        # Cost/turn telemetry deliberately stays unset here: the workflow
+        # executor accounts spend per step in its own records, and nothing
+        # consumes these fields on the wait path. ``error_kind`` carries
+        # "suspended" for a run parked at an await step - dormant, not
+        # done, and the caller has to be able to say so.
+        return AgentResult(
+            session_id=load_session_id(session_name),
+            run_key=session_name,
+            phase=workflow_name,
+            success=ok,
+            duration_ms=int((time.time() - run_started) * 1000),
+            final_text=collect.get("final_text", ""),
+            error=collect.get("error", ""),
+            error_kind="suspended" if collect.get("suspended") else "",
+        )
 
     # Everything from here to the pid write is inside the try: the entry is
     # already registered `starting` with pid 0, and `is_dead_run` cannot tell
@@ -1930,13 +1964,12 @@ def _run_agent_entry(args: dict) -> None:
     # --subscribe list) flow in via the Session's `subscribe` argument. The
     # workflow path's phase Sessions each self-subscribe to their own inbox.
     if persistent:
-        spawn_adhoc(
+        run_persistent_agent(
             cwd=cwd,
             task=task,
             timeout=timeout,
             name=run_key,
             requested_by=requested_by,
-            persistent=True,
             role=role,
             subscribe=subscribe,
             model=model,
@@ -1950,7 +1983,18 @@ def _run_agent_entry(args: dict) -> None:
 
     workflow = find_installed_workflow(workflow_name)
     if not workflow:
+        # Terminal-close the entry the launcher registered, exactly as the
+        # wait branch does: a `starting` corpse holding this name would
+        # refuse its own relaunch until the reconciler's deadline branch
+        # fires (#850) - and this print lands only in the detached child's
+        # log, so the corpse used to be the only visible symptom.
+        from bobi.workflow.orchestrator import make_session_name
         print(f"Workflow '{workflow_name}' not found")
+        get_registry().mark_terminal(
+            make_session_name(workflow_name, _resolve_project_name(cwd),
+                              run_key),
+            TERMINAL_FAILED, error=f"Workflow '{workflow_name}' not found",
+        )
         return
 
     project = _resolve_project_name(cwd)

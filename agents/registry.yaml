@@ -1,6 +1,6 @@
 agents:
   eng-team:
-    version: "1.5.4"
+    version: "1.5.5"
     description: "Portable asynchronous engineering org - director plus async engineer workers; GitHub + Slack with tool-agnostic seams. Derive a house team with `from: eng-team`."
   personal-assistant:
     version: "1.0.2"

@@ -22,7 +22,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def bound_root(tmp_path, monkeypatch):
-    """spawn_adhoc and prompt building read the bound installation root
+    """run_persistent_agent and prompt building read the bound installation root
     (roles, registry, memory) — bind explicitly instead of relying on a
     root leaked from earlier test files."""
     (tmp_path / ".bobi").mkdir()
@@ -55,7 +55,7 @@ from bobi.subagent import (
     run_curator_blocking,
     run_gate_blocking,
     run_phase_blocking,
-    spawn_adhoc,
+    run_persistent_agent,
 )
 from bobi.sdk import TERMINAL_FAILED
 # The real Session, imported under an alias because SESSION_PATCH below
@@ -144,7 +144,7 @@ class FakeClient:
 
 
 # ---------------------------------------------------------------------------
-# Fake Session for run_phase_blocking / spawn_adhoc tests
+# Fake Session for run_phase_blocking / run_persistent_agent tests
 # ---------------------------------------------------------------------------
 
 class FakeSession:
@@ -174,6 +174,9 @@ class FakeSession:
         self._session_id = session_id
         self.inbox = MagicMock()
         self.inbox.port = 0
+        # The persistent bootstrap joins the session thread for its
+        # lifetime; the fake's is already finished.
+        self._thread = MagicMock()
 
     def start(self, startup_prompt=None, timeout=120):
         return self._start_ok
@@ -1286,7 +1289,7 @@ class TestSessionFinishedEvents:
         assert data["error"] in data["text"]
 
 
-class TestSpawnAdhocLifecycle:
+class TestRunPersistentAgentLifecycle:
     def test_emits_started_and_completed(self):
         events = []
         fake_cls = _make_fake_session_class(success=True, response="done")
@@ -1294,7 +1297,7 @@ class TestSpawnAdhocLifecycle:
         with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: events.append(et)):
-            spawn_adhoc(cwd="/tmp/test", task="Fix the login bug", name="adhoc-x")
+            run_persistent_agent(cwd="/tmp/test", task="Fix the login bug", name="adhoc-x")
 
         assert events == ["agent/session.started", "agent/session.completed"]
 
@@ -1306,7 +1309,7 @@ class TestSpawnAdhocLifecycle:
              patch(f"{SDK_PATCH}._resolve_project_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
-            spawn_adhoc(cwd="/repo/path", task="Investigate CI", name="adhoc-y")
+            run_persistent_agent(cwd="/repo/path", task="Investigate CI", name="adhoc-y")
 
         et, data = captured[0]
         assert et == "agent/session.started"
@@ -1323,7 +1326,7 @@ class TestSpawnAdhocLifecycle:
         with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
-            spawn_adhoc(cwd="/repo", task="Fix it", name="adhoc-z",
+            run_persistent_agent(cwd="/repo", task="Fix it", name="adhoc-z",
                         requested_by=requester)
 
         started = next(d for et, d in captured if et.endswith("started"))
@@ -1338,7 +1341,7 @@ class TestSpawnAdhocLifecycle:
         with patch(SESSION_PATCH, side_effect=fake_cls), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
-            spawn_adhoc(cwd="/repo", task="Fix it", name="adhoc-w")
+            run_persistent_agent(cwd="/repo", task="Fix it", name="adhoc-w")
 
         started = next(d for et, d in captured if et.endswith("started"))
         assert started["requested_by"] is None
@@ -1351,27 +1354,13 @@ class TestSpawnAdhocLifecycle:
              patch(f"{SDK_PATCH}._resolve_project_name", return_value="moda-labs/jobtack"), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event",
                    side_effect=lambda et, d, **kw: captured.append((et, d))):
-            spawn_adhoc(cwd="/repo/path",
+            run_persistent_agent(cwd="/repo/path",
                         task="Write a spec for issue #5: AI Extraction Pipeline",
                         name="5")
 
         et, data = captured[0]
         assert et == "agent/session.started"
         assert data["run_key"] == "5"
-
-    def test_started_generates_adhoc_id_without_explicit_name(self):
-        captured = []
-        fake_cls = _make_fake_session_class(success=True)
-
-        with patch(SESSION_PATCH, side_effect=fake_cls), \
-             patch(f"{SDK_PATCH}._resolve_project_name", return_value="moda-labs/jobtack"), \
-             patch(f"{SDK_PATCH}._emit_lifecycle_event",
-                   side_effect=lambda et, d, **kw: captured.append((et, d))):
-            spawn_adhoc(cwd="/repo/path", task="Fix the login bug")
-
-        et, data = captured[0]
-        assert et == "agent/session.started"
-        assert data["run_key"].startswith("adhoc-")
 
 
 class TestRunPhaseBlockingLifecycle:
@@ -1758,29 +1747,29 @@ class TestLaunchModelResolution:
             return FakeSession(success=True)
         return _cls
 
-    def test_spawn_adhoc_passes_role_model(self, tmp_path):
+    def test_persistent_agent_passes_role_model(self, tmp_path):
         _write_roles_yaml(tmp_path)
         captured: dict = {}
         with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor")
+            run_persistent_agent(cwd="/tmp", task="t", name="x", role="monitor")
         assert captured["extra_options"]["model"] == "haiku"
 
-    def test_spawn_adhoc_explicit_model_wins(self, tmp_path):
+    def test_persistent_agent_explicit_model_wins(self, tmp_path):
         _write_roles_yaml(tmp_path)
         captured: dict = {}
         with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor",
+            run_persistent_agent(cwd="/tmp", task="t", name="x", role="monitor",
                         model="opus")
         assert captured["extra_options"]["model"] == "opus"
 
-    def test_spawn_adhoc_unconfigured_role_stays_unchanged(self, tmp_path):
+    def test_persistent_agent_unconfigured_role_stays_unchanged(self, tmp_path):
         _write_roles_yaml(tmp_path)
         captured: dict = {}
         with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="t", name="x", role="engineer")
+            run_persistent_agent(cwd="/tmp", task="t", name="x", role="engineer")
         assert "model" not in captured["extra_options"]
 
     def test_run_phase_blocking_passes_role_model(self, tmp_path):
@@ -1834,29 +1823,29 @@ class TestLaunchEffortResolution:
             return FakeSession(success=True)
         return _cls
 
-    def test_spawn_adhoc_passes_role_effort(self, tmp_path):
+    def test_persistent_agent_passes_role_effort(self, tmp_path):
         _write_roles_yaml(tmp_path)
         captured: dict = {}
         with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor")
+            run_persistent_agent(cwd="/tmp", task="t", name="x", role="monitor")
         assert captured["extra_options"]["effort"] == "low"
 
-    def test_spawn_adhoc_explicit_effort_wins(self, tmp_path):
+    def test_persistent_agent_explicit_effort_wins(self, tmp_path):
         _write_roles_yaml(tmp_path)
         captured: dict = {}
         with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor",
+            run_persistent_agent(cwd="/tmp", task="t", name="x", role="monitor",
                         effort="xhigh")
         assert captured["extra_options"]["effort"] == "xhigh"
 
-    def test_spawn_adhoc_unconfigured_role_omits_effort(self, tmp_path):
+    def test_persistent_agent_unconfigured_role_omits_effort(self, tmp_path):
         _write_roles_yaml(tmp_path)
         captured: dict = {}
         with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="t", name="x", role="engineer")
+            run_persistent_agent(cwd="/tmp", task="t", name="x", role="engineer")
         assert "effort" not in captured["extra_options"]
 
     def test_run_phase_blocking_passes_role_effort(self, tmp_path):
@@ -1898,7 +1887,7 @@ class TestLaunchMaxTurnsResolution:
     TestLaunchModelResolution / TestLaunchEffortResolution.
 
     These are the sites that used to hardcode ``max_turns=200``:
-    ``spawn_adhoc`` (subagent.py:746), ``run_phase_blocking`` (:587) and
+    ``run_persistent_agent``, ``run_phase_blocking`` (:587) and
     ``_run_agent_supervised`` (:351). Phase 1's gate requires a configured
     cap be honored at EVERY one of them, and the model/effort classes above
     already establish the idiom - the cap simply had no equivalent coverage,
@@ -1920,15 +1909,15 @@ class TestLaunchMaxTurnsResolution:
             return FakeSession(success=True)
         return _cls
 
-    def test_spawn_adhoc_passes_role_max_turns(self, tmp_path):
+    def test_persistent_agent_passes_role_max_turns(self, tmp_path):
         _write_roles_yaml(tmp_path)
         captured: dict = {}
         with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="t", name="x", role="monitor")
+            run_persistent_agent(cwd="/tmp", task="t", name="x", role="monitor")
         assert captured["extra_options"]["max_turns"] == 8
 
-    def test_spawn_adhoc_unconfigured_role_gets_the_framework_default(
+    def test_persistent_agent_unconfigured_role_gets_the_framework_default(
             self, tmp_path):
         from bobi.brain import DEFAULT_MAX_TURNS
 
@@ -1936,7 +1925,7 @@ class TestLaunchMaxTurnsResolution:
         captured: dict = {}
         with patch(SESSION_PATCH, side_effect=self._capture_session_cls(captured)), \
              patch(f"{SDK_PATCH}._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="t", name="x", role="engineer")
+            run_persistent_agent(cwd="/tmp", task="t", name="x", role="engineer")
         assert captured["extra_options"]["max_turns"] == DEFAULT_MAX_TURNS
         # The literal that killed two engineer sessions is gone from this path.
         assert captured["extra_options"]["max_turns"] != 200
