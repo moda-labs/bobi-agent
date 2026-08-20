@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import signal
-import socket
 import stat
 import subprocess
 import sys
@@ -19,6 +18,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+
+from .conftest import _free_port
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -55,11 +56,6 @@ RUNTIME_ENVIRONMENT_DENYLIST = frozenset(
     }
 )
 
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _run(

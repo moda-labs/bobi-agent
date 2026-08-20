@@ -15,7 +15,6 @@ Requires Node (the local event server). Skips cleanly if it can't start.
 import json
 import os
 import signal
-import socket
 import threading
 import time
 import urllib.request
@@ -25,11 +24,8 @@ import yaml
 
 from bobi.runtime_guard import with_mutable_runtime_package
 
+from .conftest import _free_port
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 @pytest.fixture

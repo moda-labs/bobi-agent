@@ -30,6 +30,8 @@ from pathlib import Path
 
 import pytest
 
+from .conftest import _free_port
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Brings up a container - excluded from integration-fast via `-m "not docker"`
@@ -91,11 +93,6 @@ requires_collector = pytest.mark.skipif(
            "otelcol binary on PATH / BOBI_TEST_OTELCOL)",
 )
 
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 class _Collector:

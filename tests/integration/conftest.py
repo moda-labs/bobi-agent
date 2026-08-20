@@ -19,6 +19,18 @@ PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
 
 
+def _free_port() -> int:
+    """Pick an OS-assigned free TCP port (bind, read, release).
+
+    The one definition for the integration suite — a fix to the port-picking
+    logic (SO_REUSEADDR, retry against the pick-then-close race) lands here
+    once instead of in every file (D103).
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 @dataclass
 class BobiEnv:
     """Paths for an isolated Bobi home."""
@@ -49,10 +61,7 @@ def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None,
     state_dir = project_path / "state"
     sessions_dir = state_dir / "sessions"
     workflows_dir = package_dir / "workflows"
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        event_server_port = sock.getsockname()[1]
-    event_server_url = f"http://localhost:{event_server_port}"
+    event_server_url = f"http://localhost:{_free_port()}"
 
     for d in [home_dir, package_dir, state_dir, sessions_dir, workflows_dir,
               state_dir / "workflow" / "runs", state_dir / "logs"]:

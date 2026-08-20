@@ -18,7 +18,6 @@ session actually subscribed to.
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -26,6 +25,8 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+
+from .conftest import _free_port
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 
@@ -68,11 +69,6 @@ _start_event_subscription(session, subs, project)
 time.sleep(120)  # parent terminates us
 '''
 
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:

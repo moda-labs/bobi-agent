@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import time
 import urllib.request
 
@@ -46,6 +45,8 @@ from bobi.runtime_guard import with_mutable_runtime_package
 from bobi.session import Session
 from bobi.webapp import server
 
+from .conftest import _free_port
+
 TOKEN = "chat-delivery-token"
 
 
@@ -53,11 +54,6 @@ TOKEN = "chat-delivery-token"
 def bobi_env(dual_brain_env):
     return dual_brain_env
 
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 @pytest.fixture(autouse=True)

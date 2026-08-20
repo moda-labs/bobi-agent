@@ -16,7 +16,6 @@ delivers through the Chat SDK Slack adapter to a stubbed Slack Web API
 import json
 import os
 import signal
-import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
@@ -29,11 +28,8 @@ from bobi.events.state import save_bubble_state
 from bobi.events.server import _post_register, ensure_running
 from bobi.events.signing import signed_request
 
+from .conftest import _free_port
 
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 class _SlackStub:

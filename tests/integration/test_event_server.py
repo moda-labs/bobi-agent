@@ -24,7 +24,6 @@ import os
 import queue
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -39,17 +38,14 @@ import yaml
 
 from bobi.runtime_guard import with_mutable_runtime_package
 
+from .conftest import _free_port
+
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
 #: Operator credential handed to the `wrangler dev` Worker so `/mcp` is
 #: reachable. Test-only, and only ever written into a local `.dev.vars`.
 TEST_FLEET_OPERATOR_TOKEN = "bobi-integration-test-operator"
 
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:

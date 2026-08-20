@@ -21,7 +21,6 @@ import hmac
 import json
 import os
 import signal
-import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,6 +38,8 @@ from bobi.events.server import (
 )
 from bobi.events.signing import signed_request
 
+from .conftest import _free_port
+
 PNID = "747556541"
 WA_USER = "15551234567"
 CONV = f"whatsapp:{PNID}:dm:{WA_USER}"
@@ -46,11 +47,6 @@ APP_SECRET = "wa-app-secret"
 VERIFY_TOKEN = "wa-verify-token"
 ACCESS_TOKEN = "EAAG-gw-test"
 
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 class _GraphStub:

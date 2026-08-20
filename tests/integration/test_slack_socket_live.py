@@ -13,7 +13,6 @@ Run with output visible so the mention instruction can be followed:
 import json
 import os
 import signal
-import socket
 import time
 from types import SimpleNamespace
 
@@ -29,6 +28,8 @@ from bobi.events.server import (
 )
 from bobi.events.signing import signed_request
 
+from .conftest import _free_port
+
 pytestmark = [
     pytest.mark.live,
     pytest.mark.timeout(180),
@@ -42,11 +43,6 @@ pytestmark = [
     ),
 ]
 
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _stop_event_server(project) -> None:
