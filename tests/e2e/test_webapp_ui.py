@@ -161,6 +161,23 @@ class TestShell:
         page.wait_for_selector(".agent-page")
         expect(page.locator(".agent-page-header h1")).to_have_text(webapp.agent)
 
+    def test_a_hostile_agent_name_renders_as_text_not_markup(self, webapp,
+                                                             page):
+        # The route's name is client-derived (`decodeURIComponent` on the
+        # hash), so the view can be handed ANY string regardless of what the
+        # server would accept at install time. The whole view renders dynamic
+        # data through `textContent` (review-remediation Q076); this drives
+        # that contract with a name that is a live payload, not a claim about
+        # source text. It lands on the missing-agent stub (nothing by that
+        # name is installed), which renders the same name.
+        hostile = '<img src=x onerror="window.__pwned=1">&"rogue"'
+        page.goto(webapp.agent_url(hostile))
+        page.wait_for_selector(".agent-page")
+        expect(page.locator(".agent-page .stub h2")).to_have_text(hostile)
+        expect(page.locator("#subtitle")).to_have_text(hostile)
+        assert page.evaluate("window.__pwned") is None
+        assert page.locator(".agent-page img").count() == 0
+
     def test_subtitle_tracks_the_route(self, webapp, page):
         # `setSubtitle` has no null guard and every route calls it, so this is
         # also the assertion that catches #subtitle being removed at all.
