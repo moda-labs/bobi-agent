@@ -1,4 +1,5 @@
-"""Integration test for MDS-65 — the sub-agent completion-delivery loop.
+"""MDS-65 — the sub-agent completion-delivery loop (unit lane: in-process,
+mocked launch boundary).
 
 Reproduces the production bug: detached sub-agents finish silently (their
 lifecycle events are emitted into the void because nothing subscribes), and a
@@ -26,7 +27,7 @@ from bobi.events.subscriptions import lifecycle_subscription_keys
 from bobi.reconcile import reconcile_sessions
 from tests.drain_utils import drain_one_batch
 from bobi.sdk import (
-    SessionEntry, SessionRegistry, get_registry, TERMINAL_CRASHED,
+    SessionEntry, get_registry, TERMINAL_CRASHED,
 )
 
 

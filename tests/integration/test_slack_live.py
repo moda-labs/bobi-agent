@@ -52,7 +52,6 @@ pytestmark = [
 ]
 
 
-
 def _wait_for(predicate, timeout: float = 15.0, interval: float = 1.0):
     """Poll ``predicate`` until it returns a truthy value (returned) or the
     timeout elapses (returns the last falsy value) - Slack history reads are

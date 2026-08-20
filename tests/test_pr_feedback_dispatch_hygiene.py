@@ -1,4 +1,5 @@
-"""Integration tests for PR comment routing hygiene.
+"""PR comment routing hygiene (unit lane: real drain path in-process,
+mocked launch boundary).
 
 PR comments are visible to the director and routed by eng-team markdown policy.
 The shipped deterministic reactor must not intercept comments before the

@@ -47,7 +47,6 @@ TEST_GRANTS_SECRET = "bobi-integration-test-grants"
 TEST_FLEET_OPERATOR_TOKEN = "bobi-integration-test-operator"
 
 
-
 def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:
     payload = json.dumps(data).encode()
     hdrs = {"Content-Type": "application/json"}
@@ -1033,7 +1032,8 @@ def _send_and_drain(base_url: str, dep_id: str, api_key: str,
                         events.append(msg["data"])
                 except websocket.WebSocketTimeoutException:
                     break
-                except Exception:
+                except Exception as exc:
+                    connect_errors.append(exc)
                     break
         finally:
             ws.close()
@@ -1051,6 +1051,9 @@ def _send_and_drain(base_url: str, dep_id: str, api_key: str,
     send_fn()
 
     t.join(timeout=timeout)
+    # Same rule for the drain half: a socket error mid-collection must fail
+    # the test, not truncate `events` and let a negative assertion pass.
+    assert not connect_errors, f"WS drain died mid-collection: {connect_errors}"
     return events
 
 

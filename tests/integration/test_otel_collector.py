@@ -94,7 +94,6 @@ requires_collector = pytest.mark.skipif(
 )
 
 
-
 class _Collector:
     """A running collector, however it was launched, plus its rendered output."""
 

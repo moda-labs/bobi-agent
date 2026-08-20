@@ -44,7 +44,6 @@ pytestmark = [
 ]
 
 
-
 def _stop_event_server(project) -> None:
     pid_file = project / "state" / "event-server.pid"
     if not pid_file.exists():

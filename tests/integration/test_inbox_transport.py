@@ -27,7 +27,6 @@ from bobi.runtime_guard import with_mutable_runtime_package
 from .conftest import _free_port, wait_healthy
 
 
-
 @pytest.fixture
 def inbox_event_server(bobi_env):
     """Start a local event server on a free port and point config at it."""
@@ -48,6 +47,11 @@ def inbox_event_server(bobi_env):
     ensure_running(port, project_path=bobi_env.project_path)
 
     if not wait_healthy(url, timeout=15):
+        # Never skip on CI: integration-fast installs the event server's Node
+        # deps precisely so this suite runs, and a silent skip here greens the
+        # lane with the inbox transport unproven (same mechanism as D012).
+        if os.environ.get("CI"):
+            pytest.fail("local event server is required on CI and never became healthy")
         pytest.skip("local event server (Node) unavailable")
 
     yield url
@@ -264,6 +268,11 @@ def fast_eviction_event_server(bobi_env):
     })
 
     if not wait_healthy(url, timeout=15):
+        # Never skip on CI: integration-fast installs the event server's Node
+        # deps precisely so this suite runs, and a silent skip here greens the
+        # lane with the inbox transport unproven (same mechanism as D012).
+        if os.environ.get("CI"):
+            pytest.fail("local event server is required on CI and never became healthy")
         pytest.skip("local event server (Node) unavailable")
 
     yield url

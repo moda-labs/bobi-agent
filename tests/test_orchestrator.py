@@ -25,6 +25,11 @@ from bobi.workflow.orchestrator import (
     make_session_name,
 )
 from bobi.workflow.state import WorkflowRun
+from tests.brain_fakes import (
+    FakeAssistantMessage,
+    FakeResultMessage,
+    FakeTextBlock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -430,13 +435,6 @@ class TestRouteConditions:
 # ---------------------------------------------------------------------------
 # Orchestrator integration (mock the SDK client)
 # ---------------------------------------------------------------------------
-
-from tests.brain_fakes import (  # noqa: E402
-    FakeAssistantMessage,
-    FakeResultMessage,
-    FakeTextBlock,
-)
-
 
 class FakeClient:
     """Mock ClaudeSDKClient that yields one turn per query."""

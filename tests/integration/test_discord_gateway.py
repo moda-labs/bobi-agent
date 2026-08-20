@@ -55,7 +55,6 @@ BAD_APP_ID = "222333444555666777"
 BAD_TOKEN = "dc-gw-revoked-token"
 
 
-
 # Minimal Discord Gateway stub. Node (with the event-server's `ws` package via
 # NODE_PATH) because the Python test deps only ship a WebSocket client. The
 # HTTP control plane lets the test inject dispatches and drop the socket.

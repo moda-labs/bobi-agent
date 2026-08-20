@@ -57,7 +57,6 @@ RUNTIME_ENVIRONMENT_DENYLIST = frozenset(
 )
 
 
-
 def _run(
     args: list[str],
     *,

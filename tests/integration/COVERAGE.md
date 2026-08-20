@@ -15,17 +15,17 @@ integration test that runs in CI. Two gating mechanisms, easy to conflate:
 
 | Subsystem | Integration Test File(s) | Tests | Marker | Coverage |
 |-----------|--------------------------|-------|--------|----------|
-| **cli** | `test_cli_commands.py` | 25 | — | Full: every CLI command exercised against isolated install |
-| **config** | `test_agent_yaml_config.py`, `test_config_resolution.py` | 7+8 | — | Full: YAML loading, env var interpolation, dotenv chain, deployment state, channels |
-| **session** | `test_session_lifecycle.py` | 7 | — | Full: lifecycle (start → idle → message → stop), registry tracking; rotation is covered at unit level (`tests/test_context_rotation.py`) |
-| **subagent** | `test_agent_launch.py`, `test_subagent_executor.py` | 5+8 | dual-brain (launch only) | Full: launch, build_prompt, session naming, lifecycle events, requires gating |
-| **sdk** | `test_manager_sdk.py` | 4 | claude | Good: connect, multi-turn, resume, inject |
-| **registry** | `test_registry.py` | 11 | — | Full: fetch, update, browse, multi-registry, cache |
-| **inbox** | `test_inbox_transport.py` | 4 | — | Good: round-trip, blocking, teardown, concurrent |
-| **events** | `test_event_server.py`, `test_event_isolation.py`, `test_e2e_event_flow.py` | 30+ | — / dual-brain (e2e flow) | Full: lifecycle, webhooks, WS drain, bubble isolation, scheduler |
-| **workflow** | `test_agent_launch.py`, `test_workflow_orchestrator.py` | 5+8 | dual-brain (launch) | Full: schema loading, state persistence, routing, await/resume, variable resolution |
-| **kb** | `test_kb.py` | 16 | — | Full: create, add, search, FTS, hybrid, sidecar |
-| **monitors** | `test_event_server.py` (scheduler), `test_monitor_scheduler.py` | 1+9 | — | Full: registry loading, scheduler lifecycle, command/check/notify, dedup, state persistence |
+| **cli** | `test_cli_commands.py` | 29 | — | Full: every CLI command exercised against isolated install |
+| **config** | `test_agent_yaml_config.py`, `test_config_resolution.py` | 7+7 | — | Full: YAML loading, env var interpolation, dotenv chain, deployment state, channels |
+| **session** | `test_session_lifecycle.py` | 10 | — | Full: lifecycle (start → idle → message → stop), registry tracking; rotation is covered at unit level (`tests/test_context_rotation.py`) |
+| **subagent** | `test_agent_launch.py`, `test_subagent_executor.py` | 8+13 | dual-brain (launch only) | Full: launch, build_prompt, session naming, lifecycle events, requires gating |
+| **sdk** | `test_manager_sdk.py` | 5 | claude | Good: connect, multi-turn, resume, inject |
+| **registry** | `test_registry.py` | 13 | — | Full: fetch, update, browse, multi-registry, cache |
+| **inbox** | `test_inbox_transport.py` | 5 | — | Good: round-trip, blocking, teardown, concurrent |
+| **events** | `test_event_server.py`, `test_event_isolation.py`, `test_e2e_event_flow.py` | 46+1+2 | — / dual-brain (e2e flow) | Full: lifecycle, webhooks, WS drain, bubble isolation, scheduler |
+| **workflow** | `test_agent_launch.py`, `test_workflow_orchestrator.py` | 8+17 | dual-brain (launch) | Full: schema loading, state persistence, routing, await/resume, variable resolution |
+| **kb** | `test_kb.py` | 17 | — | Full: create, add, search, FTS, hybrid, sidecar |
+| **monitors** | `test_event_server.py` (scheduler), `test_monitor_scheduler.py` | 1+18 | — | Full: registry loading, scheduler lifecycle, command/check/notify, dedup, state persistence |
 | **setup** | `test_setup_flow.py` | 1 | claude | Good: full create flow |
 
 ## Maintenance

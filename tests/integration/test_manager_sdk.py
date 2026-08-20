@@ -1,10 +1,9 @@
 """Integration tests for the SDK-based manager session.
 
 These tests drive real Claude Code sessions via ClaudeSDKClient and require the
-`claude` CLI. They run in CI as a step of the `integration-claude` job
-(self-hosted EC2, gated to nightly / workflow_dispatch / the `ci:claude` label),
-alongside the other real-Claude integration tests — so they exercise on a real
-schedule without gating every PR on real-session latency.
+`claude` CLI. They run locally only — no CI job has a claude CLI since the
+self-hosted EC2 runner was retired (see the note at the bottom of `ci.yml`);
+CI's `integration-fast` deselects the `claude` marker.
 
 Keep this file under `tests/integration/`, NOT `tests/` root: the PR unit job
 globs `tests/` (minus integration/e2e) and a dev machine with `claude` installed

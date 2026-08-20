@@ -48,7 +48,6 @@ VERIFY_TOKEN = "wa-verify-token"
 ACCESS_TOKEN = "EAAG-gw-test"
 
 
-
 class _GraphStub:
     """Minimal Meta Graph API stub recording every call it receives."""
 

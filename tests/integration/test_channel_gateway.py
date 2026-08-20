@@ -31,7 +31,6 @@ from bobi.events.signing import signed_request
 from .conftest import _free_port
 
 
-
 class _SlackStub:
     """Minimal Slack Web API stub recording every call it receives."""
 

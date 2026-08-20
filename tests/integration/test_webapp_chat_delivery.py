@@ -53,7 +53,6 @@ def bobi_env(dual_brain_env):
     return dual_brain_env
 
 
-
 @pytest.fixture(autouse=True)
 def chat_event_server(bobi_env):
     """A real local event server, because the inbox has no other transport.

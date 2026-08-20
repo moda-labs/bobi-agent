@@ -1,4 +1,5 @@
-"""Integration coverage for deterministic issue-assignment dispatch.
+"""Deterministic issue-assignment dispatch (unit lane: in-process drain,
+mocked launch boundary).
 
 The matcher and drain path are brain-agnostic, so the launch boundary is mocked
 while the test drives the shipped eng-team rule through the real drain loop.

@@ -35,7 +35,6 @@ TEAM_ID = "T_SOCKET_TEST"
 TOPIC = f"slack:{TEAM_ID}:app:{APP_ID}"
 
 
-
 def _generate_tls_material(base):
     ca_key = base / "ca.key"
     ca_cert = base / "ca.pem"

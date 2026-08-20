@@ -19,7 +19,7 @@ from bobi.sdk import (
 from bobi.subagent import _run_agent_supervised, _session_name
 
 
-# --- minimal SDK fakes (mirror test_subagent_blocking) ---------------------
+# --- shared SDK fakes ---------------------
 
 from tests.brain_fakes import (
     FakeAssistantMessage,
