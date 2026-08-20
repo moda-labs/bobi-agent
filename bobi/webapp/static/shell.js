@@ -1,10 +1,11 @@
 /* bobi app shell — hash router + shared API client. Vanilla ES modules,
    no build step. Routes:
      #/                 dashboard (all agents on this machine)
-     #/agents/<name>    one agent: subagent roster + chat
+     #/agents/<name>    one agent: status, identity, the runs table
      #/setup            onboarding (create/modify a team)              */
 
 import { mountDashboard } from "./views/dashboard.js";
+import { mountAgent } from "./views/agent.js";
 
 const TOKEN = document
   .querySelector('meta[name="bobi-webui-token"]')
@@ -56,10 +57,20 @@ export function setSubtitle(text) {
 
 /** Fill the top bar's back slot for the current route, or clear it.
     Back navigation lives in the global bar on every surface (chrome.css), so
-    it is always in the same place rather than moving per view. */
-export function setNavBack(html) {
+    it is always in the same place rather than moving per view. Built with
+    createElement/textContent like every other dynamic sink in these views —
+    both callers pass constants today, but an innerHTML slot one line from
+    route data is an idiom worth not keeping. */
+export function setNavBack(label, href) {
   const el = document.getElementById("navback");
-  if (el) el.innerHTML = html || "";
+  if (!el) return;
+  el.textContent = "";
+  if (!label) return;
+  const a = document.createElement("a");
+  a.className = "navback-link";
+  a.href = href;
+  a.textContent = "← " + label;
+  el.appendChild(a);
 }
 
 // Spend formatting, shared by the dashboard and agent views (#733):
@@ -153,33 +164,15 @@ function parseRoute() {
   return { view: "dashboard" };
 }
 
-function stub(el, title, hint) {
-  el.innerHTML = "";
-  const wrap = document.createElement("div");
-  wrap.className = "stub";
-  const h = document.createElement("h2");
-  h.textContent = title;
-  const p = document.createElement("p");
-  p.textContent = hint;
-  wrap.appendChild(h);
-  wrap.appendChild(p);
-  el.appendChild(wrap);
-}
-
-async function route() {
+function route() {
   if (teardown) { teardown(); teardown = null; }
   const el = document.getElementById("view");
   const r = parseRoute();
-  setNavBack("");
+  setNavBack();
   if (r.view === "agent") {
-    const mod = await import("./views/agent.js").catch(() => null);
-    if (mod) {
-      setSubtitle(r.name);
-      setNavBack('<a class="navback-link" href="#/">&larr; agents</a>');
-      teardown = mod.mountAgent(el, { api, name: r.name });
-      return;
-    }
-    stub(el, r.name, "The agent view is coming in this build.");
+    setSubtitle(r.name);
+    setNavBack("agents", "#/");
+    teardown = mountAgent(el, { api, name: r.name });
     return;
   }
   if (r.view === "setup") {

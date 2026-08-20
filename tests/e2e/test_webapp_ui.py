@@ -161,6 +161,22 @@ class TestShell:
         page.wait_for_selector(".agent-page")
         expect(page.locator(".agent-page-header h1")).to_have_text(webapp.agent)
 
+    def test_a_hostile_agent_name_renders_as_text_not_markup(self, webapp,
+                                                             page):
+        # The route's name is client-derived (`decodeURIComponent` on the
+        # hash), so the view can be handed ANY string regardless of what the
+        # server would accept at install time. This drives a live payload
+        # through the two sinks such a name deterministically reaches: the
+        # missing-agent stub (nothing by that name is installed) and the top
+        # bar's subtitle. Agent OUTPUT has its own hostile test in
+        # TestRunModal.
+        hostile = '<img src=x onerror="window.__pwned=1">&"rogue"'
+        _agent(page, webapp, hostile)
+        expect(page.locator(".agent-page .stub h2")).to_have_text(hostile)
+        expect(page.locator("#subtitle")).to_have_text(hostile)
+        assert page.evaluate("window.__pwned") is None
+        assert page.locator(".agent-page img").count() == 0
+
     def test_subtitle_tracks_the_route(self, webapp, page):
         # `setSubtitle` has no null guard and every route calls it, so this is
         # also the assertion that catches #subtitle being removed at all.
@@ -415,6 +431,33 @@ class TestRunModal:
         expect(lines.nth(2)).to_have_class("tr-line tool")
         expect(lines.nth(2).locator(".txt")).to_have_text(
             "Bash: pytest -q tests/test_flaky.py")
+
+    def test_hostile_agent_output_renders_as_text_not_markup(self, webapp,
+                                                             page,
+                                                             monkeypatch):
+        # Agent OUTPUT is the prompt-injectable surface: a reply — and the
+        # run title that echoes it — can carry any markup an injected prompt
+        # asks for. The runs table, the slab title, and the transcript lines
+        # all render through `mk()`/`textContent`; this proves that against
+        # the DOM with a live payload. It replaces the deleted renderer
+        # suite's job for the output surfaces that still exist.
+        payload = '<img src=x onerror="window.__pwned=1">rogue output'
+        _session(webapp.install, "worker-x", status="completed",
+                 title=payload)
+        _seed_transcript(webapp, monkeypatch, "worker-x", [
+            _entry("assistant", [{"type": "text", "text": payload}],
+                   "2026-08-01T09:15:00.000Z"),
+        ])
+        _agent(page, webapp)
+
+        row = page.locator(".runs tbody tr", has_text="rogue output")
+        expect(row).to_have_count(1)
+        row.click()
+        expect(page.locator("[data-el=slabKind]")).to_have_text("transcript")
+        expect(page.locator("[data-el=slabTitle]")).to_have_text(payload)
+        expect(page.locator(".transcript .tr-line .txt")).to_have_text(payload)
+        assert page.evaluate("window.__pwned") is None
+        assert page.locator(".runs img, .modal-backdrop img").count() == 0
 
     def test_a_monitor_row_opens_details_from_the_endpoint(self, webapp, page):
         _seed_runs(webapp.install)

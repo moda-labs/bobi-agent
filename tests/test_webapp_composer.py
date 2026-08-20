@@ -13,8 +13,7 @@ behaviour in a browser and belongs to `tests/e2e/test_webapp_ui.py`:
    it is never inferred from what the operator typed.
 
 Asserting on the JS source would prove nothing about what it returns, so this
-runs the real module under Node and reads back its values (the
-`test_webapp_markdown.py` pattern).
+runs the real module under Node and reads back its values.
 """
 
 from __future__ import annotations
