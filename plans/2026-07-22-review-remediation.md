@@ -534,19 +534,19 @@ For each item: re-verify the claim against the tree, then edit the doc to say th
 
 ### Phase 9 — Test-suite cleanup
 
-- [ ] **D101** `tests/integration/COVERAGE.md:13` — COVERAGE.md's marker column claims the subagent-launch and e2e-event-flow tests are claude-gated, but both files now run dual-brain with an unmarked…
-- [ ] **Q044** `tests/integration/test_context_rotation.py:1` — test_context_rotation.py lives in tests/integration/ but is a fully-mocked unit test (MagicMock SDK clients, no subprocess, no event server, no…
-- [ ] **D103** `tests/integration/test_event_server.py:42` — An identical _free_port() helper is defined in seven separate integration test files instead of once in tests/integration/conftest.py.
-- [ ] **D100** `tests/integration/test_event_server.py:877` — _send_and_drain ignores the ready.wait() result and its WS thread swallows every exception, so negative-delivery tests pass vacuously when the…
-- [ ] **Q128** `tests/integration/test_gateway_openai_brain.py:244` — test_gateway_openai_brain.py defines its own async _drain(session) that duplicates tests/integration/conftest._drain — the helper whose docstring… *(unverified — re-verify first)*
-- [ ] **Q041** `tests/integration/test_inbox_transport.py:53` — Four integration files hand-roll /health polling loops (raw urllib + json + status=='ok') that bobi.events.server.health() already implements — and…
-- [ ] **D012** `tests/integration/test_manager_lifecycle.py:218` — The only two checks in the whole suite that the manager's drain loop actually starts convert boot failure into pytest.skip, so a drain-loop…
-- [ ] **Q043** `tests/integration/test_pr_feedback_followup_dispatch.py:22` — The run-drain_loop-for-one-batch harness (_OneShotQueue + _CaptureInbox + register/unregister_local_inbox + patch time.sleep + swallow…
-- [ ] **D105** `tests/test_kb_embedder.py:27` — The mock_project_root fixture is dead code — defined but never requested by any test.
-- [ ] **D102** `tests/test_orchestrator.py:399` — The fake Claude-SDK message dataclasses (FakeResultMessage/FakeTextBlock/FakeAssistantMessage) are copy-pasted across four unit-test files, two of…
-- [ ] **Q110** `tests/test_orchestrator.py:567` — test_orchestrator.py defines the same 4-line inline 'class FakeBrain: def make_session(...): calls.append(kwargs); return FakeBrainClient()' plus its… *(plausible — re-verify first)*
-- [ ] **D104** `tests/test_subagent.py:28` — The tmp_cwd fixture is dead code — defined but never requested by any test.
-- [ ] **Q042** `tests/test_subagent_blocking.py:67` — The fake brain/SDK message protocol (FakeTextBlock / FakeAssistantMessage / FakeResultMessage / FakeClient) is modeled independently in four unit…
+- [x] **D101** `tests/integration/COVERAGE.md:13` — COVERAGE.md's marker column claims the subagent-launch and e2e-event-flow tests are claude-gated, but both files now run dual-brain with an unmarked…
+- [x] **Q044** `tests/integration/test_context_rotation.py:1` — test_context_rotation.py lives in tests/integration/ but is a fully-mocked unit test (MagicMock SDK clients, no subprocess, no event server, no…
+- [x] **D103** `tests/integration/test_event_server.py:42` — An identical _free_port() helper is defined in seven separate integration test files instead of once in tests/integration/conftest.py.
+- [x] **D100** `tests/integration/test_event_server.py:877` — _send_and_drain ignores the ready.wait() result and its WS thread swallows every exception, so negative-delivery tests pass vacuously when the…
+- [x] **Q128** `tests/integration/test_gateway_openai_brain.py:244` — test_gateway_openai_brain.py defines its own async _drain(session) that duplicates tests/integration/conftest._drain — the helper whose docstring… *(unverified — re-verify first)*
+- [x] **Q041** `tests/integration/test_inbox_transport.py:53` — Four integration files hand-roll /health polling loops (raw urllib + json + status=='ok') that bobi.events.server.health() already implements — and…
+- [x] **D012** `tests/integration/test_manager_lifecycle.py:218` — The only two checks in the whole suite that the manager's drain loop actually starts convert boot failure into pytest.skip, so a drain-loop…
+- [x] **Q043** `tests/integration/test_pr_feedback_followup_dispatch.py:22` — The run-drain_loop-for-one-batch harness (_OneShotQueue + _CaptureInbox + register/unregister_local_inbox + patch time.sleep + swallow…
+- [x] **D105** `tests/test_kb_embedder.py:27` — The mock_project_root fixture is dead code — defined but never requested by any test.
+- [x] **D102** `tests/test_orchestrator.py:399` — The fake Claude-SDK message dataclasses (FakeResultMessage/FakeTextBlock/FakeAssistantMessage) are copy-pasted across four unit-test files, two of…
+- [x] **Q110** `tests/test_orchestrator.py:567` — test_orchestrator.py defines the same 4-line inline 'class FakeBrain: def make_session(...): calls.append(kwargs); return FakeBrainClient()' plus its… *(plausible — re-verify first)*
+- [x] **D104** `tests/test_subagent.py:28` — The tmp_cwd fixture is dead code — defined but never requested by any test.
+- [x] **Q042** `tests/test_subagent_blocking.py:67` — The fake brain/SDK message protocol (FakeTextBlock / FakeAssistantMessage / FakeResultMessage / FakeClient) is modeled independently in four unit…
 
 **Validation gate**
 
@@ -958,6 +958,59 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   webhook→manager injection and response logging, real manager processes,
   isolated `BOBI_HOME`. Phase 6 closes; the phase's two gate boxes flip in
   this PR.
+
+- **2026-08-19** (Lane E build session): **Phase 9 ships whole — all 13 items,
+  one PR, per the re-triage sizing table (Lane E 13 / 1).** Every item
+  re-derived against `main` @ `abaa5392`; the two flagged re-verify-first both
+  confirmed — **Q128** (the two `_drain`s differ by exactly `+=` vs `=`; the
+  conftest one adopts accumulate and the local copy is deleted) and **Q110**
+  (the inline recording FakeBrain had grown to ~20 copies from the finding's
+  12; 18 collapse onto a module-level `_recording_brain()` factory, and the
+  two genuinely custom ones — stale-resume client selection, mid-run
+  reconcile — stay local). Per-item notes the checklist lines cannot carry:
+
+  - **Growth since the 2026-08-03 re-validation:** D103's `_free_port` was in
+    **12** files (7 at review, 10 at re-triage) plus the inline copy in
+    `_provision_bobi_env`; Q043's drain harness was in **6** files
+    (`test_issue_assignment_dispatch.py` is new since review, with a
+    single-event queue variant that folds into the shared list-based one).
+  - **Q041 shrank and then regrew differently than recorded.** The 2026-08-03
+    note counted three hand-rolled `/health` polls; at build time there were
+    five convertible sites (`test_inbox_transport` ×2, a new one in
+    `test_webapp_chat_delivery`, `test_event_server`'s module-level
+    `_wait_healthy` plus a second copy inside `TestBindAddress` and one inline
+    loop) — all now on `tests/integration/conftest.wait_healthy`, which loops
+    on `bobi.events.server.health()`. **One listed site is deliberately NOT
+    converted:** `test_slack_socket_mode._wait_for_health` no longer polls
+    `status == "ok"` at all — since review it polls `slack_socket` connection
+    state, a different predicate — so it is no longer Q041 duplication.
+  - **Q044 moved five files, not one.** The finding's Detail names
+    `test_completion_delivery_loop` and both `test_pr_feedback_*_dispatch`
+    files as "candidates for the same move";
+    `test_issue_assignment_dispatch.py` is the same shape and post-dates the
+    review. All five are in-process and fully mocked; the only edit beyond
+    `git mv` is `PACKAGE_ROOT` losing one `.parent`. Full-suite collection is
+    **5462 → 5462 (net zero)**: +23 unit lane / −23 integration lane, exactly
+    the moved tests. **Zero tests were deleted anywhere in this lane** — the
+    dead code (D104/D105) was fixtures, and `test_notify_step`'s three fake
+    dataclasses (D102) were constructed nowhere.
+  - **D102/Q042's superset takes `test_subagent_blocking`'s defaults** (the
+    12-field copy), so the other files' *default values* changed
+    (`session_id`, `total_cost_usd`, `num_turns`); no test asserted on them —
+    proven by the suites, with one mechanical exception: one assert read the
+    old client's private `_i` counter and now reads `_round_idx`.
+    `FakeToolUseBlock` was already dead in its own file and is NOT carried
+    into `tests/brain_fakes.py`.
+  - **D012's gate proof ran both ways:** with the `Drain loop active` log
+    line mutated away, `test_manager_lifecycle`'s messaging fixture went red
+    (`Failed: Manager did not become ready`, a setup error, not a skip); on
+    real boot the same tests pass. `test_e2e_event_flow`'s fixture carries the
+    identical fix.
+  - **D101's doc drift was worse than filed:** the header also claimed an
+    `integration-claude` CI job exists; no CI job has a claude CLI (see the
+    retired-runner note in `ci.yml`). The header now explains the two gating
+    mechanisms (marker vs dual-brain skipif) instead of naming jobs, and the
+    session row follows `test_context_rotation.py` to its unit-lane home.
 
 ## Notes
 
