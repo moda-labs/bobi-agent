@@ -512,10 +512,16 @@ RUNTIME_PROBE = textwrap.dedent(
     event_server_dir = package_dir / "event-server"
     pid_file = runtime_root / "state" / "event-server.pid"
 
+    team_package = runtime_root / "package"
     guard = apply_runtime_write_policy(runtime_root)
     policy = check_runtime_write_policy(runtime_root)
     integrity = check_bobi_distribution_integrity()
     before = snapshot(event_server_dir)
+    team_package_frozen = team_package.is_dir() and all(
+        not stat.S_IMODE(path.lstat().st_mode) & 0o222
+        for path in [team_package, *team_package.rglob("*")]
+        if not path.is_symlink()
+    )
     status = None
     error = None
     protocol = None
@@ -556,6 +562,7 @@ RUNTIME_PROBE = textwrap.dedent(
             "protocol": protocol,
             "snapshot_unchanged": before == snapshot(event_server_dir),
             "status": status,
+            "team_package_frozen": team_package_frozen,
         }
         result_path.write_text(json.dumps(payload, sort_keys=True))
     finally:
@@ -802,6 +809,17 @@ def test_installed_wheel_starts_without_mutating_frozen_event_server(
 
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
+    # The chmod guard only protects runtime_root/package when that tree exists.
+    team_package = runtime_root / "package"
+    team_package.mkdir()
+    agent_yaml = team_package / "agent.yaml"
+    agent_yaml.write_text("agent: packaged-event-server\nentry_point: manager\n")
+    roles = team_package / "roles"
+    roles.mkdir()
+    role_file = roles / "ROLE.md"
+    role_file.write_text("# Role\n")
+    for path in (team_package, agent_yaml, roles, role_file):
+        path.chmod(path.stat().st_mode | 0o222)
     npm_cache = tmp_path / "npm-cache"
     npm_cache.mkdir()
     home_dir = tmp_path / "home"
@@ -905,6 +923,16 @@ def test_installed_wheel_starts_without_mutating_frozen_event_server(
         )
     if "team-package" not in result["guard_kinds"]:
         failures.append(f"real guard did not protect team package: {result['guard_kinds']}")
+    if not result["team_package_frozen"]:
+        still_writable = [
+            str(path.relative_to(runtime_root))
+            for path in [team_package, *team_package.rglob("*")]
+            if not path.is_symlink() and path.stat().st_mode & 0o222
+        ]
+        failures.append(
+            "real guard left the team package writable: "
+            f"{still_writable or 'missing'}"
+        )
     if not result["policy_ok"]:
         failures.append(f"policy check failed: {result['policy_detail']}")
     if not result["integrity_ok"]:

@@ -46,6 +46,16 @@ class TestRuntimeWritePolicy:
         assert roots[0].kind == "team-package"
         assert not any(r.kind in ("bobi-package", "bobi-dist-info") for r in roots)
 
+    def test_missing_team_package_is_not_reported_as_protected(self, tmp_path):
+        roots = protected_runtime_roots(tmp_path)
+
+        assert roots == []
+        report = apply_runtime_write_policy(tmp_path)
+        assert report.protected == []
+        check = check_runtime_write_policy(tmp_path)
+        assert check.ok
+        assert check.protected == []
+
     def test_check_fails_for_writable_package_file(self, tmp_path):
         _write_runtime(tmp_path)
 
