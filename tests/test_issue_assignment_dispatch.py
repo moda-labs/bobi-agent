@@ -14,7 +14,7 @@ from bobi.events.drain import drain_loop
 from bobi.events.reactor import EventReactor
 
 
-PACKAGE_ROOT = Path(__file__).parent.parent.parent
+PACKAGE_ROOT = Path(__file__).parent.parent
 ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team" / "agent.yaml"
 BOT_LOGIN = "bobi"
 

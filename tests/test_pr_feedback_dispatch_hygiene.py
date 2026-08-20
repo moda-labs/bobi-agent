@@ -1,8 +1,11 @@
-"""PR comments should reach the director instead of auto-dispatching.
+"""Integration tests for PR comment routing hygiene.
 
-Question-only and actionable PR comments are both visible to the director. The
-eng-team markdown policy decides whether to answer directly or launch
-pr-feedback, so the shipped auto_dispatch config must not consume comments.
+PR comments are visible to the director and routed by eng-team markdown policy.
+The shipped deterministic reactor must not intercept comments before the
+director can answer question-only comments or classify actionable requests.
+
+This drives the real drain path against the shipped eng-team auto_dispatch
+rules, with launch_agent mocked so no live session starts.
 """
 
 import queue
@@ -15,8 +18,10 @@ import yaml
 from bobi.events.drain import drain_loop
 from bobi.events.reactor import EventReactor
 
-PACKAGE_ROOT = Path(__file__).parent.parent.parent
+PACKAGE_ROOT = Path(__file__).parent.parent
 ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team" / "agent.yaml"
+
+BOT_LOGIN = "bobi"
 
 
 class _OneShotQueue:
@@ -54,25 +59,26 @@ def _reactor_from_shipped_config():
     assert all(r.get("dedup_only") for r in pr_comment_rules), (
         "PR comments must only be deduped structurally, not auto-dispatched"
     )
-    return EventReactor.from_config(rules, cwd="/tmp/proj-326")
+    return EventReactor.from_config(rules, cwd="/tmp/proj-411",
+                                    self_login=BOT_LOGIN)
 
 
-def _human_pr_comment(*, number, delivery_id, comment_id, body):
-    """A human follow-up comment on a PR."""
+def _pr_comment(*, number, delivery_id, comment_id, sender, draft=False):
+    """An issue_comment on a PR."""
     return {
         "type": "github.issue_comment",
         "id": delivery_id,
         "source": "github",
         "delivery": "bulk",
         "topics": ["github:moda-labs/bobi"],
-        "text": f"[moda-labs/bobi] comment PR #{number}: {body}",
+        "text": f"[moda-labs/bobi] comment PR #{number}",
         "fields": {
             "action": "created",
             "number": number,
             "is_pull_request": True,
-            "sender": "underminedsk",
+            "sender": sender,
             "comment_id": comment_id,
-            "comment_body": body,
+            "draft": draft,
             "title": "Some PR",
         },
     }
@@ -92,16 +98,16 @@ def _drain_one_batch(events, reactor):
     def fake_formatter(event):
         return event.get("text", "")
 
-    register_local_inbox("test-session-326", _CaptureInbox())
+    register_local_inbox("test-session-411", _CaptureInbox())
     try:
         with patch("bobi.events.drain.time.sleep"):
             try:
-                drain_loop("test-session-326", queue=q,
+                drain_loop("test-session-411", queue=q,
                            formatter=fake_formatter, reactor=reactor)
             except KeyboardInterrupt:
                 pass
     finally:
-        unregister_local_inbox("test-session-326")
+        unregister_local_inbox("test-session-411")
     return delivered
 
 
@@ -114,20 +120,56 @@ def _drain_sequentially(events, reactor):
 
 
 @patch("bobi.subagent.launch_agent")
-def test_followup_pr_comments_reach_director_without_auto_dispatch(mock_launch):
+def test_bot_authored_comment_reaches_director_without_dispatch(mock_launch):
     reactor = _reactor_from_shipped_config()
 
-    first = _human_pr_comment(
-        number=294, delivery_id="delivery-aaa", comment_id=1,
-        body="Please add a null check.")
-    followup = _human_pr_comment(
-        number=294, delivery_id="delivery-bbb", comment_id=2,
-        body="Why is this helper needed?")
+    bot_comment = _pr_comment(number=410, delivery_id="d-bot",
+                              comment_id=1001, sender=BOT_LOGIN)
+    delivered = _drain_sequentially([bot_comment], reactor)
 
-    delivered = _drain_sequentially([first, followup], reactor)
+    assert len(delivered) == 1
+    time.sleep(0.1)
+    mock_launch.assert_not_called()
 
-    assert len(delivered) == 2
-    assert "Please add a null check." in delivered[0]
-    assert "Why is this helper needed?" in delivered[1]
+
+@patch("bobi.subagent.launch_agent")
+def test_human_comment_on_draft_pr_reaches_director(mock_launch):
+    reactor = _reactor_from_shipped_config()
+
+    human_comment = _pr_comment(number=410, delivery_id="d-human",
+                                comment_id=2002, sender="underminedsk",
+                                draft=True)
+    delivered = _drain_sequentially([human_comment], reactor)
+
+    assert len(delivered) == 1
+    time.sleep(0.1)
+    mock_launch.assert_not_called()
+
+
+@patch("bobi.subagent.launch_agent")
+def test_same_comment_redelivery_reaches_director_without_dispatch(mock_launch):
+    reactor = _reactor_from_shipped_config()
+
+    first = _pr_comment(number=294, delivery_id="d-aaa",
+                        comment_id=3003, sender="underminedsk")
+    redelivery = _pr_comment(number=294, delivery_id="d-bbb",
+                             comment_id=3003, sender="underminedsk")
+
+    delivered = _drain_sequentially([first, redelivery], reactor)
+
+    assert len(delivered) == 1
+    time.sleep(0.1)
+    mock_launch.assert_not_called()
+
+
+@patch("bobi.subagent.launch_agent")
+def test_human_comment_on_ready_pr_reaches_director(mock_launch):
+    reactor = _reactor_from_shipped_config()
+
+    human_comment = _pr_comment(number=294, delivery_id="d-ready",
+                                comment_id=4004, sender="underminedsk")
+    delivered = _drain_sequentially([human_comment], reactor)
+
+    assert len(delivered) == 1
     time.sleep(0.1)
     mock_launch.assert_not_called()
