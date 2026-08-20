@@ -632,62 +632,6 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   flex-direction: column;
   gap: 14px;
 }
-.msg { max-width: 760px; }
-.msg .who {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--slab-muted);
-  margin-bottom: 4px;
-}
-.msg .body { white-space: pre-wrap; word-wrap: break-word; }
-/* rendered markdown (agent replies) reflows, so drop pre-wrap on those */
-.msg.agent .body { white-space: normal; }
-.msg .body p { margin: 0 0 8px; }
-.msg .body > :last-child { margin-bottom: 0; }
-.msg .body ul, .msg .body ol { margin: 6px 0; padding-left: 20px; }
-.msg .body li { margin: 2px 0; }
-.msg .body li > p { margin: 0; }
-.msg .body strong { font-weight: var(--weight-semibold); color: var(--bobi-paper); }
-.msg .body em { font-style: italic; }
-.msg .body a { color: var(--bobi-acc-bright); text-decoration: underline; }
-.msg .body h3, .msg .body h4, .msg .body h5, .msg .body h6 {
-  font-family: var(--font-display);
-  font-size: 1.0em; font-weight: var(--weight-semibold);
-  letter-spacing: var(--track-tightest);
-  margin: 12px 0 4px; color: var(--bobi-paper);
-}
-.msg .body code {
-  font-family: var(--font-mono); font-size: 0.86em;
-  background: var(--slab-surface); border: 1px solid var(--slab-border);
-  border-radius: var(--radius-sm); padding: 1px 5px; color: var(--bobi-term-ok);
-}
-.msg .body pre {
-  background: var(--slab-surface); border: 1px solid var(--slab-border);
-  border-radius: var(--radius-sm); padding: 10px 12px; overflow-x: auto; margin: 8px 0;
-}
-.msg .body pre code {
-  background: none; border: none; padding: 0; color: var(--slab-text);
-  font-size: 0.86em; white-space: pre;
-}
-.msg .body blockquote {
-  border-left: 2px solid var(--slab-border); margin: 6px 0;
-  padding-left: 10px; color: var(--slab-muted);
-}
-.msg .body hr { border: none; border-top: 1px solid var(--slab-border); margin: 10px 0; }
-.msg.user { align-self: flex-end; text-align: right; }
-.msg.user .who { color: var(--bobi-acc-bright); }
-.msg.user .body { color: var(--bobi-paper); }
-.msg.agent .body { color: var(--slab-text); }
-.msg.error .who { color: var(--bobi-clay); }
-.msg.error .body { color: color-mix(in srgb, var(--bobi-clay) 70%, var(--bobi-paper)); }
-
-.pending .body::after {
-  content: "\258B";
-  color: var(--bobi-acc-bright);
-  animation: blink 1s steps(2, start) infinite;
-}
-@keyframes blink { to { visibility: hidden; } }
-
 /* composer - the reply box at the foot of the run slab (#987).
 
    It sits on the slab's dark terminal surface, so it takes the --slab-*
