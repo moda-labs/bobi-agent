@@ -271,6 +271,23 @@ source.
 
 ## Common Tasks
 
+### File feedback
+
+Create a GitHub issue for an explicit Bobi bug report or feature request:
+
+```bash
+bobi feedback bug --title "Short failure summary" --body "What happened, expected behavior, and repro steps"
+bobi feedback feature --title "Short request summary" --body-file report.md
+```
+
+Use `--repo owner/repo` to override the destination, `--label name` for one or
+more labels, `--json` for machine-readable output, and `--dry-run` to preview
+the privacy-safe body without a network write. Destination resolution is
+`--repo`, `BOBI_FEEDBACK_REPO`, `feedback.repo` in `agent.yaml`, then the
+default `moda-labs/bobi-agent`; Bobi never infers a destination from the
+current git remote. Authentication uses the configured GitHub service token,
+then `GITHUB_TOKEN`, `GH_TOKEN`, or the local `gh` auth store.
+
 ```bash
 # Create a new Bobi Agent interactively
 bobi setup support

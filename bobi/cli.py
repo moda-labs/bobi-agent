@@ -240,6 +240,117 @@ def main(ctx):
 
 
 @main.group()
+def feedback():
+    """File an explicit Bobi bug report or feature request."""
+
+
+def _feedback_body(body: str | None, body_file) -> str:
+    if body is not None and body_file is not None:
+        raise click.UsageError("Pass either --body or --body-file, not both.")
+    value = body if body is not None else (
+        body_file.read() if body_file is not None else ""
+    )
+    if not value.strip():
+        raise click.UsageError("Pass --body or --body-file with non-empty content.")
+    return value
+
+
+def _run_feedback(kind, title, body, body_file, repo, labels, json_output, dry_run):
+    from bobi.config import Config
+    from bobi.feedback import (
+        FeedbackError,
+        build_context,
+        build_issue_body,
+        create_github_issue,
+        load_feedback_config,
+        resolve_destination,
+        resolve_token,
+    )
+
+    if not title.strip():
+        raise click.UsageError("--title must not be empty.")
+    try:
+        project_path = _try_detect_project_root()
+        config = Config.load(project_path) if project_path else Config()
+        feedback_config = load_feedback_config(config)
+        destination = resolve_destination(
+            repo, os.environ.get("BOBI_FEEDBACK_REPO"), feedback_config,
+        )
+        issue_body = build_issue_body(
+            kind,
+            _feedback_body(body, body_file),
+            build_context(project_path, config, __version__),
+        )
+        issue_labels = list(dict.fromkeys([
+            *feedback_config.labels_for(kind), *labels,
+        ]))
+        if dry_run:
+            result = {
+                "dry_run": True,
+                "repo": destination,
+                "kind": kind,
+                "title": title,
+                "body": issue_body,
+            }
+            if json_output:
+                click.echo(json.dumps(result))
+            else:
+                click.echo(
+                    f"Would create {kind} issue in {destination}: {title}\n\n"
+                    f"{issue_body}"
+                )
+            return
+        result = create_github_issue(
+            destination,
+            kind,
+            title,
+            issue_body,
+            issue_labels,
+            token=resolve_token(config.credential("github", "token")),
+        )
+    except FeedbackError as exc:
+        if json_output:
+            click.echo(json.dumps({"error": exc.code, "message": exc.message}))
+        else:
+            click.echo(f"Error: {exc.message}", err=True)
+        raise click.exceptions.Exit(1)
+    output = {
+        "url": result.url,
+        "number": result.number,
+        "repo": result.repo,
+        "kind": result.kind,
+        "title": result.title,
+    }
+    click.echo(json.dumps(output) if json_output else result.url)
+
+
+@feedback.command("bug")
+@click.option("--title", required=True)
+@click.option("--body")
+@click.option("--body-file", "body_file", "-F", type=click.File("r"))
+@click.option("--repo")
+@click.option("--label", "labels", multiple=True)
+@click.option("--json", "json_output", is_flag=True)
+@click.option("--dry-run", is_flag=True)
+def feedback_bug(title, body, body_file, repo, labels, json_output, dry_run):
+    """File a bug report as a GitHub issue."""
+    _run_feedback("bug", title, body, body_file, repo, labels, json_output, dry_run)
+
+
+@feedback.command("feature")
+@click.option("--title", required=True)
+@click.option("--body")
+@click.option("--body-file", "body_file", "-F", type=click.File("r"))
+@click.option("--repo")
+@click.option("--label", "labels", multiple=True)
+@click.option("--json", "json_output", is_flag=True)
+@click.option("--dry-run", is_flag=True)
+def feedback_feature(title, body, body_file, repo, labels, json_output, dry_run):
+    """File a feature request as a GitHub issue."""
+    _run_feedback("feature", title, body, body_file, repo, labels, json_output, dry_run)
+
+
+@main.group()
 @click.argument("name")
 @click.pass_context
 def agent(ctx, name):

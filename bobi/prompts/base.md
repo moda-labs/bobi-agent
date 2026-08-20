@@ -65,6 +65,15 @@ conversation's history, use
 
 ## CLI tools
 
+### Filing Bobi feedback
+
+When the user explicitly asks you to file Bobi feedback, or a workflow directs
+you to do so, use `bobi feedback bug` or `bobi feedback feature`. If the user
+has not asked you to file it, summarize the proposed title and body first and
+ask for confirmation. Never include secrets, credentials, raw transcripts,
+stack traces, absolute paths, or private user data. Prefer linking an existing
+issue when one is already known.
+
 ### Launch agents
 
 ```bash

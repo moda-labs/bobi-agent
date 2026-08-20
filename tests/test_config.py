@@ -14,6 +14,7 @@ def test_defaults_when_no_config(tmp_path):
     cfg = Config.load(tmp_path)
 
     assert cfg.event_server_url == ""
+    assert cfg.feedback == {}
     assert cfg.credential("slack", "bot_token") == ""
     assert cfg.credential("linear", "api_key") == ""
 
@@ -103,6 +104,25 @@ def test_loads_agent_yaml(tmp_path):
     assert cfg.services[0].events is True
     assert cfg.services[3].name == "salesforce"
     assert cfg.services[3].events is False
+
+
+def test_feedback_config_parsed(tmp_path):
+    _write_agent_yaml(tmp_path, """
+        agent: demo
+        feedback:
+          repo: example/support
+          labels:
+            bug: [bug, needs-triage]
+            feature: enhancement
+    """)
+
+    assert Config.load(tmp_path).feedback == {
+        "repo": "example/support",
+        "labels": {
+            "bug": ["bug", "needs-triage"],
+            "feature": "enhancement",
+        },
+    }
 
 
 def test_agent_yaml_env_var_interpolation(tmp_path, monkeypatch):
@@ -921,7 +941,7 @@ def test_every_top_level_key_survives_a_null_value(tmp_path):
     keys = ["agent", "version", "entry_point", "chat", "brain", "roles",
             "services", "requires", "monitors", "workflows", "auto_dispatch",
             "event_server", "spend_cap", "mcp_servers", "channels",
-            "venn_api_key", "build", "repos", "tools", "skills"]
+            "venn_api_key", "build", "repos", "tools", "skills", "feedback"]
     broken = []
     for key in keys:
         _write_agent_yaml(tmp_path, f"agent: demo\n{key}:\n")
