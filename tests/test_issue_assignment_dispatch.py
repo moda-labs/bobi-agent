@@ -10,28 +10,14 @@ from unittest.mock import patch
 
 import yaml
 
-from bobi.events.drain import drain_loop
 from bobi.events.reactor import EventReactor
+
+from tests.drain_utils import drain_one_batch
 
 
 PACKAGE_ROOT = Path(__file__).parent.parent
 ENG_TEAM_AGENT_YAML = PACKAGE_ROOT / "agents" / "eng-team" / "agent.yaml"
 BOT_LOGIN = "bobi"
-
-
-class _OneShotQueue:
-    def __init__(self, event):
-        self._event = event
-        self._delivered = False
-
-    def get(self):
-        if not self._delivered:
-            self._delivered = True
-            return self._event
-        raise KeyboardInterrupt
-
-    def empty(self):
-        return True
 
 
 def _reactor_from_shipped_config() -> EventReactor:
@@ -61,29 +47,7 @@ def _issue_event(*, action: str, assignees: str) -> dict:
 
 
 def _drain_one(event: dict, reactor: EventReactor) -> list[str]:
-    from bobi.inbox import register_local_inbox, unregister_local_inbox
-
-    delivered = []
-
-    class _CaptureInbox:
-        def push(self, message, priority=False):
-            delivered.append(message.text)
-
-    register_local_inbox("mod-297", _CaptureInbox())
-    try:
-        with patch("bobi.events.drain.time.sleep"):
-            try:
-                drain_loop(
-                    "mod-297",
-                    queue=_OneShotQueue(event),
-                    formatter=lambda item: item["text"],
-                    reactor=reactor,
-                )
-            except KeyboardInterrupt:
-                pass
-    finally:
-        unregister_local_inbox("mod-297")
-    return delivered
+    return drain_one_batch([event], session="mod-297", reactor=reactor)
 
 
 @patch("bobi.subagent.launch_agent")

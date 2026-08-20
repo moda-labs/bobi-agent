@@ -21,63 +21,19 @@ launcher's inbox without ``--wait``. Each piece also has unit coverage
 proves they compose.
 """
 
-import queue
-from unittest.mock import patch
 
 from bobi.events.subscriptions import lifecycle_subscription_keys
 from bobi.reconcile import reconcile_sessions
+from tests.drain_utils import drain_one_batch
 from bobi.sdk import (
     SessionEntry, SessionRegistry, get_registry, TERMINAL_CRASHED,
 )
 
 
-# --- minimal drain harness (mirrors test_pr_feedback_followup_dispatch) -----
-
-class _OneShotQueue:
-    def __init__(self, events):
-        self._events = list(events)
-        self._calls = 0
-
-    def get(self):
-        self._calls += 1
-        if self._calls == 1 and self._events:
-            return self._events[0]
-        raise KeyboardInterrupt
-
-    def empty(self):
-        return not (self._calls == 1 and len(self._events) > 1)
-
-    def get_nowait(self):
-        if len(self._events) > 1:
-            return self._events.pop(1)
-        raise queue.Empty
-
-
 def _drain_one_batch(events):
-    """Run the real drain_loop for one batch; return delivered inbox texts.
-
-    No reactor → lifecycle events are pure deliver-to-inbox (the manager must be
-    woken by its child's completion, never auto-dispatch it)."""
-    from bobi.inbox import register_local_inbox, unregister_local_inbox
-    from bobi.events.drain import drain_loop
-
-    delivered = []
-
-    class _CaptureInbox:
-        def push(self, msg, priority=False):
-            delivered.append(msg.text)
-
-    register_local_inbox("manager", _CaptureInbox())
-    try:
-        with patch("bobi.events.drain.time.sleep"):
-            try:
-                drain_loop("manager", queue=_OneShotQueue(events),
-                           formatter=lambda e: e.get("text", ""), reactor=None)
-            except KeyboardInterrupt:
-                pass
-    finally:
-        unregister_local_inbox("manager")
-    return delivered
+    """No reactor -> lifecycle events are pure deliver-to-inbox (the manager
+    must be woken by its child's completion, never auto-dispatch it)."""
+    return drain_one_batch(events, session="manager")
 
 
 def _lifecycle_event(event_type, *, run_key, requested_by, text):
