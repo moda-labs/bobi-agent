@@ -5,6 +5,7 @@
      #/setup            onboarding (create/modify a team)              */
 
 import { mountDashboard } from "./views/dashboard.js";
+import { mountAgent } from "./views/agent.js";
 
 const TOKEN = document
   .querySelector('meta[name="bobi-webui-token"]')
@@ -153,33 +154,15 @@ function parseRoute() {
   return { view: "dashboard" };
 }
 
-function stub(el, title, hint) {
-  el.innerHTML = "";
-  const wrap = document.createElement("div");
-  wrap.className = "stub";
-  const h = document.createElement("h2");
-  h.textContent = title;
-  const p = document.createElement("p");
-  p.textContent = hint;
-  wrap.appendChild(h);
-  wrap.appendChild(p);
-  el.appendChild(wrap);
-}
-
-async function route() {
+function route() {
   if (teardown) { teardown(); teardown = null; }
   const el = document.getElementById("view");
   const r = parseRoute();
   setNavBack("");
   if (r.view === "agent") {
-    const mod = await import("./views/agent.js").catch(() => null);
-    if (mod) {
-      setSubtitle(r.name);
-      setNavBack('<a class="navback-link" href="#/">&larr; agents</a>');
-      teardown = mod.mountAgent(el, { api, name: r.name });
-      return;
-    }
-    stub(el, r.name, "The agent view is coming in this build.");
+    setSubtitle(r.name);
+    setNavBack('<a class="navback-link" href="#/">&larr; agents</a>');
+    teardown = mountAgent(el, { api, name: r.name });
     return;
   }
   if (r.view === "setup") {
