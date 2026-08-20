@@ -346,7 +346,7 @@ async def _drain(client):
     text, result = "", None
     async for msg in client.receive_response():
         if isinstance(msg, AssistantText) and msg.text:
-            text = msg.text
+            text += msg.text
         elif isinstance(msg, TurnResult):
             result = msg
     return text, result
