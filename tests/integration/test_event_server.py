@@ -1008,13 +1008,18 @@ def _send_and_drain(base_url: str, dep_id: str, api_key: str,
 
     events = []
     ready = threading.Event()
+    connect_errors: list[BaseException] = []
 
     def _ws_thread():
-        ws = websocket.create_connection(
-            url,
-            header=[f"Authorization: Bearer {api_key}"],
-            timeout=timeout,
-        )
+        try:
+            ws = websocket.create_connection(
+                url,
+                header=[f"Authorization: Bearer {api_key}"],
+                timeout=timeout,
+            )
+        except Exception as exc:
+            connect_errors.append(exc)
+            return
         try:
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
@@ -1036,7 +1041,11 @@ def _send_and_drain(base_url: str, dep_id: str, api_key: str,
     t = threading.Thread(target=_ws_thread, daemon=True)
     t.start()
 
-    ready.wait(timeout=5)
+    # A dead subscription must fail the test, not return [] and let a
+    # negative-delivery assertion pass vacuously (D100).
+    assert ready.wait(timeout=5), (
+        f"WS subscription never connected: {connect_errors or 'no connected message'}"
+    )
     time.sleep(0.1)
 
     send_fn()
