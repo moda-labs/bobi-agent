@@ -8,8 +8,6 @@ reconciler are covered in test_subscriptions / test_subagent_blocking /
 test_reconcile respectively.
 """
 
-from dataclasses import dataclass
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,52 +21,12 @@ from bobi.subagent import _run_agent_supervised, _session_name
 
 # --- minimal SDK fakes (mirror test_subagent_blocking) ---------------------
 
-@dataclass
-class FakeTextBlock:
-    text: str
-
-
-@dataclass
-class FakeAssistantMessage:
-    content: list
-    model: str = "claude-test"
-
-
-@dataclass
-class FakeResultMessage:
-    subtype: str = "success"
-    duration_ms: int = 1000
-    is_error: bool = False
-    num_turns: int = 1
-    session_id: str = "sess-x"
-    total_cost_usd: float | None = 0.05
-    result: str | None = None
-    api_error_status: int | None = None
-    deferred_tool_use: Any = None
-
-
-class FakeClient:
-    def __init__(self, rounds):
-        self._rounds = list(rounds)
-        self._i = 0
-        self.connected = self.disconnected = False
-
-    async def connect(self, prompt=None):
-        self.connected = True
-
-    async def query(self, prompt, session_id="default"):
-        pass
-
-    async def receive_response(self):
-        if self._i >= len(self._rounds):
-            return
-        msgs = self._rounds[self._i]
-        self._i += 1
-        for m in msgs:
-            yield m
-
-    async def disconnect(self):
-        self.disconnected = True
+from tests.brain_fakes import (
+    FakeAssistantMessage,
+    FakeClient,
+    FakeResultMessage,
+    FakeTextBlock,
+)
 
 
 SDK_PATCH = "bobi.subagent"
@@ -150,7 +108,7 @@ class TestHonestTerminalStatus:
         assert result.success is False
         assert result.transient is True
         # exactly one round consumed — no spawn-side retry
-        assert client._i == 1
+        assert client._round_idx == 1
         assert get_registry().get(name).status == TERMINAL_FAILED
 
     @pytest.mark.asyncio

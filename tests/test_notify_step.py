@@ -4,7 +4,6 @@ import json
 import textwrap
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from dataclasses import dataclass
 
 import httpx
 import pytest
@@ -418,27 +417,6 @@ class TestExecuteNotifyStep:
 # ---------------------------------------------------------------------------
 # Orchestrator integration — notify steps are skipped by the LLM loop
 # ---------------------------------------------------------------------------
-
-@dataclass
-class FakeResultMessage:
-    session_id: str = "test-session-id"
-    duration_ms: int = 1000
-    total_cost_usd: float = 0.01
-    num_turns: int = 1
-    is_error: bool = False
-    result: str = ""
-    deferred_tool_use: object = None
-
-
-@dataclass
-class FakeTextBlock:
-    text: str
-
-
-@dataclass
-class FakeAssistantMessage:
-    content: list
-
 
 class FakeClient:
     def __init__(self):
