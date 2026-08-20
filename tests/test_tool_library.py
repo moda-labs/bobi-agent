@@ -170,6 +170,74 @@ def test_otel_catalog_entry_is_guide_only(project):
     assert "otel metric" in guide.read_text()
 
 
+def test_otel_probe_addresses_the_agent_a_run_root_names(tmp_path, monkeypatch):
+    """The shipped otel probe must address the real agent, not the `run` leaf.
+
+    Reproduces #1063 against the catalog entry as shipped. With `BOBI_AGENT`
+    unset and `BOBI_ROOT=<home>/agents/<name>/run` (the canonical layout every
+    container deployment uses) the entry's `basename "$BOBI_ROOT"` fallback
+    resolved the agent `run`, the probe exited 2, and the dispatch preflight
+    refused EVERY workflow launch for that team.
+    """
+    from bobi.config import RequiresEntry, run_requires_checks
+
+    run = tmp_path / "home" / "agents" / "sre" / "run"
+    run.mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    seen = tmp_path / "argv"
+    fake_bobi = bin_dir / "bobi"
+    fake_bobi.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$BOBI_ARGV_SINK"\n')
+    fake_bobi.chmod(0o755)
+
+    monkeypatch.setenv("BOBI_ARGV_SINK", str(seen))
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("BOBI_ROOT", str(run))
+    monkeypatch.delenv("BOBI_AGENT", raising=False)
+    monkeypatch.delenv("BOBI_INSTANCE", raising=False)
+
+    entry = tool_library.load_entry("otel")
+    _, ok, detail = run_requires_checks(
+        [RequiresEntry(name="otel", check=entry.success)], root=run)[0]
+
+    assert ok is True, detail
+    assert seen.read_text().strip() == "agent sre otel --help"
+
+
+def test_otel_probe_says_so_when_no_agent_name_is_supplied(tmp_path):
+    """With no `$BOBI_AGENT`, the probe names THAT, not a missing dependency.
+
+    The image build's `verify: requires` runs the check with no runtime root,
+    so nothing exports the name there. Without the guard the probe reaches the
+    CLI as `bobi agent "" otel`, and the operator reads "otel is missing" for
+    what is really an unset variable (#1063).
+    """
+    entry = tool_library.load_entry("otel")
+    proc = subprocess.run(
+        entry.success, shell=True, capture_output=True, text=True,
+        env={"PATH": os.environ["PATH"]})
+
+    assert proc.returncode != 0
+    assert "BOBI_AGENT" in proc.stderr
+
+
+def test_no_catalog_probe_hand_rolls_the_agent_name(tmp_path):
+    """`basename "$BOBI_ROOT"` is the #1063 bug; the runner exports the name.
+
+    A catalog probe needing the agent reads `$BOBI_AGENT`, which
+    `run_requires_checks` resolves through `paths.agent_name`. Deriving it
+    inline reintroduces the second code path that misread `<name>/run`.
+    """
+    offenders = [
+        name for name in tool_library.available_entries()
+        if "basename" in tool_library.load_entry(name).success
+        and "BOBI_ROOT" in tool_library.load_entry(name).success
+    ]
+    assert offenders == [], (
+        f"{offenders} derive the agent name from BOBI_ROOT themselves; "
+        "read $BOBI_AGENT instead")
+
+
 # --- local / explicit wins (escape hatches) ----------------------------------
 
 

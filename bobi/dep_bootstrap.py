@@ -326,6 +326,16 @@ def preflight(dep: Dependency, *, brains: list[str], shell_runner: ShellRunner,
     """
     env_base = dict(os.environ if base_env is None else base_env)
     env_base["BOBI_VERIFY_PHASE"] = phase
+    # The same agent name `requires:` probes get, from the same resolver: a
+    # `success` contract is ONE contract, so the two runners must not disagree
+    # about who the agent is (#1063). Resolved against `env_base`, so a
+    # selection the caller already put there wins. Absent on the build tier,
+    # where there is no runtime root - a probe that needs the name says so
+    # itself there.
+    from bobi.paths import AGENT_ENV, agent_name
+    selected = agent_name(None, env=env_base)
+    if selected:
+        env_base[AGENT_ENV] = selected
     from bobi.brain import BRAIN_ENV
 
     results: list[PreflightResult] = []
