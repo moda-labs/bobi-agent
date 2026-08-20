@@ -46,7 +46,12 @@ Two things hold across the entire run:
 
 Workflows are YAML files. They ship inside an agent team package under
 `workflows/` and resolve at runtime exclusively from the installed pack image at
-`$BOBI_HOME/agents/<name>/run/package/workflows/` (see `triggers.py`). A
+`$BOBI_HOME/agents/<name>/run/package/workflows/` (see `triggers.py`). The one
+exception is `adhoc`: since #1057 an ad-hoc task IS a one-step workflow
+execution, so the framework carries a built-in `adhoc` definition in code
+(`triggers.builtin_adhoc_workflow`) that the launch path falls back to when the
+pack ships no `adhoc.yaml`. A shipped `adhoc.yaml` wins, and the manager's
+workflow menu still lists only what the pack ships. A
 workflow has a name, a human-readable `trigger`, an optional `description`, an
 optional `period` (`hourly` / `daily` / `weekly` / `monthly` - one run per
 period across every dispatch path, see **Execution model**), and an ordered

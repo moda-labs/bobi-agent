@@ -199,6 +199,70 @@ class TestUnkeyedLaunchDedup:
     # tests/test_subagent.py::TestLaunchAgentUnkeyedDedup instead.
 
 
+@pytest.mark.timeout(240)
+class TestWaitRunsThroughTheExecutor:
+    """--wait is a one-step workflow execution (#1057).
+
+    The blocking CLI form produces the same run identity, ledger entry and
+    session shape as a detached dispatch of the same task - one executor.
+    Before #1057 a --wait run went through a second executor (spawn_adhoc)
+    with no WorkflowRun entry at all, so the ledger assertion here is the
+    feature, not a detail.
+    """
+
+    ROLE = "engineer"
+
+    def test_wait_prints_the_final_text_and_writes_a_ledger_entry(
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
+    ):
+        from bobi.workflow.orchestrator import make_session_name
+        from bobi.workflow.state import WorkflowRun
+
+        env = stub_bobi_env
+        session_name = make_session_name("adhoc", env.agent_name, "W1057")
+        stub_clean_session(session_name)
+
+        result = stub_cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--wait", "--id", "W1057",
+            "--task", "please __stub__:reply:executor-said-done",
+            timeout=LAUNCH_TIMEOUT_S * 3,
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        # The run's answer travels to --wait stdout at full fidelity.
+        assert "executor-said-done" in result.stdout, result.stdout
+
+        run = WorkflowRun.find_by_run_key("adhoc", "W1057",
+                                          repo=env.agent_name)
+        assert run is not None, "no WorkflowRun ledger entry for the wait run"
+        assert run.status == "completed"
+        assert run.session_name == session_name
+
+    def test_a_failed_wait_run_exits_nonzero_with_the_error(
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
+    ):
+        from bobi.workflow.orchestrator import make_session_name
+        from bobi.workflow.state import WorkflowRun
+
+        env = stub_bobi_env
+        session_name = make_session_name("adhoc", env.agent_name, "W1057F")
+        stub_clean_session(session_name)
+
+        result = stub_cli_run(
+            "subagents", "launch",
+            "-w", "adhoc", "--role", self.ROLE, "--wait", "--id", "W1057F",
+            "--task", "please __stub__:raise:executor-broke",
+            timeout=LAUNCH_TIMEOUT_S * 3,
+        )
+        assert result.returncode != 0, result.stdout
+        assert "executor-broke" in result.stderr, result.stderr
+        assert "Traceback" not in result.stdout + result.stderr
+
+        run = WorkflowRun.find_by_run_key("adhoc", "W1057F",
+                                          repo=env.agent_name)
+        assert run is not None and run.status == "failed"
+
+
 @pytest.mark.timeout(120)
 class TestAdhocAgentLaunch:
 

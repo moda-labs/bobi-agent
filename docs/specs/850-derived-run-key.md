@@ -1,5 +1,13 @@
 # Issue #850: Derive A Default Run Key So Duplicate Suppression Is The Default
 
+> **2026-08-19, #1057:** the `spawn_adhoc` executor and its `adhoc:spawn`
+> derivation namespace described below were retired - `--wait` now runs
+> through `launch_agent`/`run_workflow` with the same admission as every
+> other launch, and the wait/persistent collision this spec's second
+> namespace prevented is now prevented by name shape (`wf-adhoc-*` vs the
+> bare key). The derivation dials and admission rules here still describe
+> current behavior.
+
 ## Problem
 
 Bobi already rejects a second launch that lands on an active session name:

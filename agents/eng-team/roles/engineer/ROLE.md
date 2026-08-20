@@ -189,12 +189,18 @@ wait; tail -20 /tmp/r1.log /tmp/r2.log /tmp/suite.log
 the launches and the `wait` are one Bash invocation, the whole fan-out costs two
 turns total: one to start, one to collect.
 
-**`--wait` only supports `-w adhoc`.** It blocks on the launched agent (#753) by
-running the task as a single prompt; a multi-step workflow launch returns as
-soon as it is dispatched and there is nothing to join. So fan-out units must be
-`adhoc`. If you need a multi-step workflow to finish before you continue,
-restructure the work rather than polling for it — dispatch it and let the event
-that reports its completion drive the next step.
+**`--wait` only supports `-w adhoc`.** It blocks on the launched agent (#753);
+a multi-step workflow launch returns as soon as it is dispatched and there is
+nothing to join. So fan-out units must be `adhoc`. If you need a multi-step
+workflow to finish before you continue, restructure the work rather than
+polling for it — dispatch it and let the event that reports its completion
+drive the next step.
+
+**Identical fan-out units need `--id-random`.** A `--wait` launch takes the
+same admission as any other (#1057): two launches of byte-identical task text
+derive the same run key and the second is refused while the first runs. The
+example above is fine because each unit's task differs; N deliberate copies of
+one task opt out of dedup with `--id-random`.
 
 **Do not fan out work you cannot describe self-containedly.** Each unit gets a
 freeform prompt and its own session with no access to your context, so a unit
