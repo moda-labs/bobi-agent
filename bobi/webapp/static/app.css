@@ -598,16 +598,6 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .placeholder .mark.big { color: var(--border-strong); }
 .placeholder p { margin: 0; color: var(--text-secondary); }
 
-/* --- chat --- */
-.chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.chat-head {
-  display: flex; align-items: center; gap: 10px;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--border-hairline);
-  background: var(--surface-card);
-  flex: none;
-}
-.chat-name { font-family: var(--font-mono); font-weight: var(--weight-medium); font-size: 14px; }
 .chip {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -616,21 +606,6 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-sm);
   padding: 1px 7px;
-}
-.agent-hint { font-family: var(--font-mono); font-size: 12px; color: var(--text-faint); }
-
-/* The transcript slab — the one cool surface in the system, where the machine
-   writes. A document: square-cornered and flat. */
-.slab {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  background: var(--surface-terminal);
-  color: var(--slab-text);
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
 }
 /* composer - the reply box at the foot of the run slab (#987).
 
@@ -743,7 +718,6 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
   }
-  .pending .body::after { animation: none; }
   .status.starting::before, .status.stopping::before { animation: none; opacity: 1; }
 }
 

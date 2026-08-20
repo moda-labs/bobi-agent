@@ -1052,8 +1052,14 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
     dynamic string through `mk()`/`textContent`, and the transcript slab is
     deliberately plain text per `docs/RUN_DRILLDOWNS.md`). This lane deletes
     the orphaned `markdown.js`, its test (`tests/test_webapp_markdown.py`),
-    and the dead `.msg`/`.pending` CSS block that styled the old chat panel
-    (`bobi/webapp/static/app.css:635-689`; nothing creates those classes).
+    and the dead chat-panel CSS #948 stranded in
+    `bobi/webapp/static/app.css` — the `.msg`/`.pending` block, its
+    reduced-motion override, and the `.chat`/`.chat-head`/`.chat-name`/
+    `.agent-hint`/`.slab` rules (nothing creates any of those classes; the
+    live slab renders as `.transcript`/`.tr-line`). One adjacent idiom is
+    closed in the same sweep: `shell.js`'s `setNavBack` took raw HTML into
+    `innerHTML` (both callers constant); it now builds the link via
+    `createElement`/`textContent` like every other dynamic sink.
     Exactly one HTML-escaping implementation remains in the product UIs: the
     5-char attribute-safe `esc` in `setup/webui/static/app.js`.
   - **D124 `[f] state:declined-redesign`** — the "plausible — re-verify
@@ -1073,7 +1079,8 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
     imported statically beside `dashboard.js`, the `.catch(() => null)` and
     `stub()` fallback are deleted (its only caller), and `route()` loses its
     now-purposeless `async`. The `.stub` CSS class stays — `showMissing()`
-    and `mountSetupEntry` still build stubs via `mk()`.
+    (via `mk()`) and `mountSetupEntry` (via `createElement`) still build
+    stubs.
   - **Q076 `[f] state:falsified`** — the deviation is gone: the header is
     `els.title.textContent = name` (`agent.js:180`), and the rewrite has no
     innerHTML interpolation of dynamic data anywhere. The gate's agent-name
@@ -1092,10 +1099,13 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   #948: the href interpolation site no longer exists in the product, so this
   lane deletes those tests together with the dead renderer they exercised.
   The property the clause defended — agent output cannot inject markup — is
-  now enforced structurally (textContent-only rendering) and proven by the
-  new hostile-name e2e test, which covers the second clause ("agent-name
-  rendering") as written. Comment/docstring references to `markdown.js`
-  (`views/composer.js`, `tests/test_webapp_composer.py`) updated.
+  now enforced structurally (textContent-only rendering) and proven by TWO
+  new e2e tests against the live DOM: a hostile agent NAME through the
+  route (the gate's second clause as written), and hostile agent OUTPUT —
+  a payload run title and transcript line — through the runs table and the
+  slab, which is the prompt-injectable surface the deleted suite existed
+  for. Comment/docstring references to `markdown.js` (`views/composer.js`,
+  `tests/test_webapp_composer.py`, `docs/specs/987-…md`) updated.
 
   With this, Lane C is complete: 2 shipped PRs (#942, #945) plus this
   closing batch; #819 closes when it lands. The convergence gate (corrected
