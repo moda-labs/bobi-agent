@@ -11,7 +11,7 @@ import os
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal
 
 from bobi import paths
 
@@ -118,25 +118,30 @@ def _dist_info_path(dist) -> Path | None:
 
 
 def _is_editable_distribution(dist) -> bool:
-    files = dist.files
-    if not files:
-        return True
-    for file in files:
-        if str(file).endswith("direct_url.json"):
-            try:
-                data = Path(dist.locate_file(file)).read_text()
-            except OSError:
-                continue
-            if '"editable": true' in data or '"editable":true' in data:
-                return True
-    return False
-
-
-def _looks_like_source_checkout(package_dir: Path) -> bool:
-    for parent in [package_dir, *package_dir.parents]:
-        if (parent / ".git").exists() and (parent / "pyproject.toml").exists():
+    if dist is None:
+        return False
+    try:
+        direct_url = dist.read_text("direct_url.json")
+        if direct_url and ('"editable": true' in direct_url or '"editable":true' in direct_url):
             return True
+    except Exception:
+        pass
+    files = getattr(dist, "files", None)
+    if files:
+        for file in files:
+            if str(file).endswith("direct_url.json"):
+                try:
+                    data = Path(dist.locate_file(file)).read_text()
+                    if '"editable": true' in data or '"editable":true' in data:
+                        return True
+                except OSError:
+                    continue
     return False
+
+
+def _is_direct_source_checkout(package_dir: Path) -> bool:
+    repo_root = package_dir.parent
+    return (repo_root / "pyproject.toml").is_file() and (repo_root / ".git").exists()
 
 
 def protected_runtime_roots(runtime_root: Path | None) -> list[ProtectedRoot]:
@@ -148,30 +153,6 @@ def protected_runtime_roots(runtime_root: Path | None) -> list[ProtectedRoot]:
                 path=package,
                 kind="team-package",
                 reason="installed agent package image",
-            ))
-
-    import bobi
-
-    bobi_package = Path(bobi.__file__).resolve().parent
-    dist = _distribution("bobi")
-    editable = _is_editable_distribution(dist) if dist is not None else True
-    source_checkout = _looks_like_source_checkout(bobi_package)
-    assigned_source = (
-        runtime_root is not None
-        and _is_relative_to(bobi_package, runtime_root)
-    )
-    if not editable and not source_checkout and not assigned_source:
-        roots.append(ProtectedRoot(
-            path=bobi_package,
-            kind="bobi-package",
-            reason="installed Bobi framework package",
-        ))
-        dist_info = _dist_info_path(dist)
-        if dist_info and dist_info.exists():
-            roots.append(ProtectedRoot(
-                path=dist_info,
-                kind="bobi-dist-info",
-                reason="installed Bobi distribution metadata",
             ))
     return roots
 
@@ -238,21 +219,52 @@ def check_runtime_write_policy(runtime_root: Path | None) -> PolicyCheck:
 @contextlib.contextmanager
 def with_mutable_runtime_package(runtime_root: Path) -> Iterator[None]:
     package = paths.package_dir(runtime_root)
-    if package.exists():
-        _chmod_tree(package, _mutable_mode, strict=True)
+    # The unlock is INSIDE the try: the strict sweep raises partway through on
+    # a file this uid cannot chmod (EPERM on another user's file, EROFS on a
+    # read-only mount), and running it before the try meant every file already
+    # opened stayed writable with no rollback (D044) — a half-unlocked
+    # protected tree that fails doctor's write-policy check until some later
+    # spawn re-runs prepare_brain_runtime. The error still propagates; the
+    # tree is re-locked first.
     try:
+        if package.exists():
+            _chmod_tree(package, _mutable_mode, strict=True)
         yield
     finally:
         if package.exists():
             _chmod_tree(package, _readonly_mode)
 
 
+_UNSET = object()
+
+
+def verify_framework_integrity_or_raise(dist: Any = _UNSET) -> PolicyCheck:
+    """Verify Bobi framework files against PEP 376 RECORD digests (FIM).
+
+    Fails closed by raising RuntimeError if any framework file is missing,
+    unreadable, or has a mismatched SHA-256 digest.
+    """
+    check = check_bobi_distribution_integrity(dist=dist)
+    if not check.ok:
+        raise RuntimeError(
+            f"Bobi framework integrity violation detected: {check.detail}. "
+            "Installed framework files appear modified or corrupted."
+        )
+    return check
+
+
 def prepare_brain_runtime(runtime_root: Path | None = None) -> GuardReport:
+    """Prepare the runtime environment before an agent session or workflow step.
+
+    1. Enforces File Integrity Monitoring (FIM) over the Bobi framework distribution.
+    2. Applies read-only permissions to the bound team package image.
+    """
     if runtime_root is None:
         try:
             runtime_root = paths.bound_root()
         except Exception:
             runtime_root = None
+    verify_framework_integrity_or_raise()
     return apply_runtime_write_policy(runtime_root)
 
 
@@ -283,31 +295,35 @@ def _urlsafe_b64_sha256(data: bytes) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
 
 
-def check_bobi_distribution_integrity(dist=None) -> PolicyCheck:
-    dist = dist if dist is not None else _distribution("bobi")
-    if dist is None:
-        return PolicyCheck(ok=True, detail="bobi distribution metadata not found")
-    if _is_editable_distribution(dist):
-        return PolicyCheck(ok=True, detail="editable/source install")
-    if not dist.files:
-        return PolicyCheck(ok=True, detail="no RECORD metadata")
-
+def check_bobi_distribution_integrity(dist: Any = _UNSET) -> PolicyCheck:
     import bobi
 
     package_root = Path(bobi.__file__).resolve().parent
-    dist_info = _dist_info_path(dist)
+
+    resolved_dist = _distribution("bobi") if dist is _UNSET else dist
+    if resolved_dist is None:
+        if _is_direct_source_checkout(package_root):
+            return PolicyCheck(ok=True, detail="source checkout")
+        return PolicyCheck(ok=False, detail="bobi distribution metadata not found")
+
+    if _is_editable_distribution(resolved_dist) or _is_direct_source_checkout(package_root):
+        return PolicyCheck(ok=True, detail="editable/source install")
+    if not getattr(resolved_dist, "files", None):
+        return PolicyCheck(ok=False, detail="no RECORD metadata")
+
+    dist_info = _dist_info_path(resolved_dist)
     allowed_roots = [package_root]
     if dist_info is not None:
         allowed_roots.append(dist_info)
-    console_scripts = _console_script_names(dist)
+    console_scripts = _console_script_names(resolved_dist)
 
     failures: list[str] = []
     checked = 0
-    for file in dist.files:
+    for file in resolved_dist.files:
         digest = _record_digest(file)
         if digest is None:
             continue
-        located = Path(dist.locate_file(file)).resolve()
+        located = Path(resolved_dist.locate_file(file)).resolve()
         if not any(_is_relative_to(located, root) for root in allowed_roots):
             if located.name in console_scripts:
                 continue
@@ -332,5 +348,10 @@ def check_bobi_distribution_integrity(dist=None) -> PolicyCheck:
             ok=False,
             detail=f"{len(failures)} Bobi install integrity issue(s): {shown}{suffix}",
             failures=failures,
+        )
+    if checked == 0:
+        return PolicyCheck(
+            ok=False,
+            detail="0 hashed Bobi file(s) verified (missing SHA-256 RECORD entries)",
         )
     return PolicyCheck(ok=True, detail=f"{checked} hashed Bobi file(s) verified")

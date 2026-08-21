@@ -6,16 +6,21 @@ dedupes on it, and operators read it off the registry. So a re-dispatch of the
 same unit reuses the name — and, before `fresh`, silently resumed the previous
 run's transcript along with its spent turn budget.
 
-That is worst on the adhoc path, where `spawn_adhoc` derives the name from
-`sha256(task)[:8]`: re-running an identical task string collides by
-construction. A worker whose state lives in a committed artifact rather than in
-context wants the stable name and a clean transcript, which is what `fresh`
-buys.
+That is worst on the un-keyed adhoc path, where `launch_agent` derives the
+name from the task: re-running an identical task string collides by
+construction (see TestLaunchAgentUnkeyedDedup in test_subagent.py). A worker
+whose state lives in a committed artifact rather than in context wants the
+stable name and a clean transcript, which is what `fresh` buys.
 
-The default stays resume — that is the workflow engine's documented retry
-contract (`launch_agent`'s docstring) — so every test here has a
-default-behavior twin. Without it the `fresh` assertions would pass vacuously
-against a code path that never resumed in the first place.
+Under an EXPLICIT run key the default stays resume - that is the workflow
+engine's documented retry contract (`launch_agent`'s docstring) - so every test
+here has a default-behavior twin. Without it the `fresh` assertions would pass
+vacuously against a code path that never resumed in the first place.
+
+Under a DERIVED key it does not: #850 made every un-keyed launch land on a
+stable name, and a name the caller never chose is not an assertion that this
+continues an earlier run. Deriving implies `fresh`, which is also what an
+un-keyed launch always got before #850, when its name was random.
 """
 
 from __future__ import annotations
@@ -83,8 +88,13 @@ class TestSessionFresh:
         assert Session(name="n", cwd="/tmp")._fresh is False
 
 
-class TestSpawnAdhocFresh:
-    """The adhoc path, where the name collides by construction."""
+class TestPersistentBootstrapFresh:
+    """The persistent bootstrap: name is caller-chosen, resume is the default.
+
+    The task-derived collision tests that lived here died with the ad-hoc
+    executor role (#1057): every RUN now derives, collides and freshens
+    inside `launch_agent` (TestLaunchAgentUnkeyedDedup, test_subagent.py).
+    """
 
     def _capture(self, captured: dict):
         def _cls(*args, **kwargs):
@@ -96,46 +106,28 @@ class TestSpawnAdhocFresh:
         return _cls
 
     def test_fresh_reaches_the_session(self, bobi_install):
-        from bobi.subagent import spawn_adhoc
+        from bobi.subagent import run_persistent_agent
 
         captured: dict = {}
         with patch("bobi.session.Session", side_effect=self._capture(captured)), \
              patch("bobi.subagent._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="work the checklist", fresh=True)
+            run_persistent_agent(cwd="/tmp", task="work the checklist",
+                                 name="unit-1", fresh=True)
 
         assert captured["fresh"] is True
 
-    def test_default_reaches_the_session_as_false(self, bobi_install):
-        from bobi.subagent import spawn_adhoc
+    def test_the_default_keeps_the_resume_contract(self, bobi_install):
+        """The non-vacuity twin: `fresh` is opt-in for a named session,
+        which is the engine's retry contract."""
+        from bobi.subagent import run_persistent_agent
 
         captured: dict = {}
         with patch("bobi.session.Session", side_effect=self._capture(captured)), \
              patch("bobi.subagent._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="work the checklist")
+            run_persistent_agent(cwd="/tmp", task="work the checklist",
+                                 name="unit-3")
 
         assert captured["fresh"] is False
-
-    def test_the_same_task_text_collides_on_one_session_name(self, bobi_install):
-        """Why `fresh` exists at all, pinned as behavior rather than asserted in
-        a comment. Two dispatches of an identical task resolve to ONE session
-        name, so the second inherits the first's transcript unless it opts out.
-        A checklist re-dispatch is exactly this shape: the task string is a
-        pointer to the artifact and does not change between attempts."""
-        from bobi.subagent import spawn_adhoc
-
-        names: list[str] = []
-
-        def _cls(*args, **kwargs):
-            names.append(kwargs["name"])
-            return MagicMock(start=MagicMock(return_value=False))
-
-        with patch("bobi.session.Session", side_effect=_cls), \
-             patch("bobi.subagent._emit_lifecycle_event"):
-            spawn_adhoc(cwd="/tmp", task="work the checklist at plans/x.md")
-            spawn_adhoc(cwd="/tmp", task="work the checklist at plans/x.md")
-
-        assert names[0] == names[1]
-        assert names[0].startswith("adhoc-")
 
 
 class TestLaunchPlumbing:
@@ -167,7 +159,7 @@ class TestLaunchPlumbing:
         older code must not have its retry semantics changed underneath it."""
         from bobi.subagent import _run_agent_entry
 
-        with patch("bobi.subagent.spawn_adhoc") as spawn, \
+        with patch("bobi.subagent.run_persistent_agent") as spawn, \
              patch("bobi.subagent.pin_brain_from_root"), \
              patch("bobi.brain.instructions.render_team_instructions"):
             _run_agent_entry({
@@ -180,7 +172,7 @@ class TestLaunchPlumbing:
     def test_entry_forwards_fresh_when_present(self, bobi_install):
         from bobi.subagent import _run_agent_entry
 
-        with patch("bobi.subagent.spawn_adhoc") as spawn, \
+        with patch("bobi.subagent.run_persistent_agent") as spawn, \
              patch("bobi.subagent.pin_brain_from_root"), \
              patch("bobi.brain.instructions.render_team_instructions"):
             _run_agent_entry({

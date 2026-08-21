@@ -25,7 +25,7 @@ def _bubble_present():
     doomed unsigned POST when none is loaded. These transport tests use fake
     project paths with no bubble.json, so stand one in to exercise the real
     signed-publish path. Harmless to non-publish tests."""
-    with patch("bobi.config.load_bubble_state",
+    with patch("bobi.events.state.load_bubble_state",
                return_value={"bubble_id": "bub_test", "bubble_key": "bkey_test"}):
         yield
 
@@ -233,7 +233,7 @@ class TestPostEventSigning:
         with patch.object(pooled, '_client', mock_client), \
              patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'), \
-             patch('bobi.config.load_bubble_state',
+             patch('bobi.events.state.load_bubble_state',
                    return_value=fake_bubble):
             result = post_event("release-pipeline/smoke.ping",
                                 {"version": "0.21.0"},
@@ -265,7 +265,7 @@ class TestPostEventSigning:
         with patch.object(pooled, '_client', mock_client), \
              patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'), \
-             patch('bobi.config.load_bubble_state',
+             patch('bobi.events.state.load_bubble_state',
                    return_value={}):
             result = post_event("monitor/test", {"k": "v"}, project_path="/tmp/fake")
 
@@ -286,7 +286,7 @@ class TestPostEventSigning:
         with patch.object(pooled, '_client', mock_client), \
              patch('bobi.events.publish._event_server_url',
                    return_value='http://localhost:8080'), \
-             patch('bobi.config.load_bubble_state',
+             patch('bobi.events.state.load_bubble_state',
                    return_value=fake_bubble):
             result = post_event("monitor/test", {"k": "v"},
                                 project_path="/tmp/fake")

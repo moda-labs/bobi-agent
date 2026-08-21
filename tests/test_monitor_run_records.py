@@ -8,12 +8,10 @@ honest outcome.
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from bobi.monitors import run_records
 from bobi.monitors.run_records import FAILED, NOTIFIED, QUIET, MonitorRun, RunTracker
 from bobi.monitors.scheduler import MonitorScheduler
-from bobi.monitors.schema import Condition, Monitor
+from bobi.monitors.schema import Monitor
 
 
 def _fixed_now():

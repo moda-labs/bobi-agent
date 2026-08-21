@@ -8,6 +8,7 @@ real file I/O, and real scheduler reconciliation.  No Claude CLI needed.
 import json
 import os
 import stat
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -58,8 +59,15 @@ class TestScriptCacheIntegration:
         assert len(result2) == 1
         assert result2[0].key == "item-1"
 
-    def test_mutated_cache_returns_cached_data(self, scripts_dir):
-        """If the cached script is mutated, the runner returns the mutated output."""
+    def test_mutated_cache_is_discarded(self, scripts_dir):
+        """A cached script that no longer matches the command is not run.
+
+        This used to assert the opposite — that the mutated output came back
+        — because the cache was keyed on monitor name alone and validated
+        nothing. Comparing it against the command the monitor resolves to
+        today (D023) rejects a tampered script for the same reason it rejects
+        a stale one: it is not what this monitor asked for.
+        """
         cmd = ["echo", json.dumps([{"id": "original"}])]
         env = dict(os.environ)
 
@@ -75,11 +83,12 @@ class TestScriptCacheIntegration:
         )
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
-        # Second run — uses mutated cached script
         result = _run_command(cmd, env, 10, "mutate-test", "id")
         assert result is not None
         assert len(result) == 1
-        assert result[0].key == "mutated"
+        assert result[0].key == "original"
+        # ...and the tampered content is replaced by the real command's.
+        assert "mutated" not in script.read_text()
 
     def test_broken_cache_falls_back_and_self_heals(self, scripts_dir):
         """A broken cached script triggers fallback to direct execution and re-caching."""
@@ -260,27 +269,41 @@ class TestScriptCacheRunnerIntegration:
                       "echo '" + json.dumps(items_box["items"]) + "'\n")
             return GenResult(True, items=items_box["items"], script=script, cost_usd=0.01)
 
+        def _tick():
+            """One firing, settled.
+
+            script_cache is an `out_of_band` runner (D004): run_monitor
+            dispatches detection to a worker thread and returns immediately,
+            so a caller that wants this tick's outcome has to wait for it.
+            The scheduler itself never does — that is the point.
+            """
+            sched.run_monitor(monitor, FakeRegistry(), sched._now())
+            deadline = time.monotonic() + 30
+            while sched._checks_in_flight and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert not sched._checks_in_flight, "detection never finished"
+
         with patch.object(sc, "generate_candidate", gen):
             # tick 1: first sight of x, y → both fire
-            sched.run_monitor(monitor, FakeRegistry(), sched._now())
+            _tick()
             assert sorted(k for _, k in fired) == ["x", "y"]
             fired.clear()
 
             # tick 2: same IDs → cached path, dedup suppresses (nothing new fires)
-            sched.run_monitor(monitor, FakeRegistry(), sched._now())
+            _tick()
             assert fired == []
 
             # tick 3: y disappears, z appears → only z fires
             items_box["items"] = [{"id": "x"}, {"id": "z"}]
             sc.recache(monitor)  # config/data changed → regenerate
-            sched.run_monitor(monitor, FakeRegistry(), sched._now())
+            _tick()
             assert [k for _, k in fired] == ["z"]
             fired.clear()
 
             # tick 4: y reappears → refires (it had dropped out of active set)
             items_box["items"] = [{"id": "x"}, {"id": "y"}]
             sc.recache(monitor)
-            sched.run_monitor(monitor, FakeRegistry(), sched._now())
+            _tick()
             assert [k for _, k in fired] == ["y"]
 
 

@@ -27,6 +27,18 @@ retired block never keeps feeding a brain the team no longer runs.
 The render runs at runtime, after the deploy entrypoint has re-linked the brain
 config dirs onto the durable volume - nothing baked at image-build time would
 survive those symlinks.
+
+The rendered block opens with the framework's communication baseline
+(``bobi/prompts/communication_style.md``) ahead of the team's ``AGENTS.md``. It rides
+this mechanism rather than the prompt resolver because the resolver's output
+is a startup *message* that only manager and workflow sessions receive, while
+these files are auto-loaded by the brain CLI in every session - phase
+subagents included - and survive rotation. Per-team ``AGENTS.md`` cannot
+deliver a fleet-wide baseline either: it composes by replace (last layer
+wins, ``compose.py``), so a shared bottom layer is shadowed by any base that
+ships its own. Operators who don't want the framework's voice set
+``BOBI_COMMUNICATION_STYLE=off`` (any falsy value); teams cannot override it from the
+package, deliberately - it is operator policy, not team content.
 """
 
 from __future__ import annotations
@@ -48,6 +60,36 @@ MANAGED_END = "<!-- <<< bobi-managed team instructions <<< -->"
 
 # The well-known package input, at the package root (sibling of agent.yaml).
 PACKAGE_AGENTS_MD = "AGENTS.md"
+
+# Operator opt-out for the framework communication baseline. Unset means ON;
+# a set value is read with config._as_bool semantics ("0"/"false"/"off" → off).
+COMMUNICATION_STYLE_ENV = "BOBI_COMMUNICATION_STYLE"
+
+
+def communication_style_content() -> str:
+    """The framework communication baseline, or "" when opted out.
+
+    A missing/unreadable ``communication_style.md`` is a packaging defect, but it must
+    not crash-loop every boot over a style file - warn and render the team's
+    own instructions without it (unlike team AGENTS.md read errors, which
+    propagate: those are the standards the team's PRs are supposed to meet).
+    """
+    raw = os.environ.get(COMMUNICATION_STYLE_ENV)
+    if raw is not None:
+        from bobi.config import _as_bool
+
+        if not _as_bool(raw):
+            return ""
+    from bobi.prompts import COMMUNICATION_STYLE_PATH
+
+    try:
+        return COMMUNICATION_STYLE_PATH.read_text(encoding="utf-8")
+    except OSError:
+        log.warning(
+            "House style prompt missing/unreadable at %s; rendering team "
+            "instructions without it", COMMUNICATION_STYLE_PATH,
+        )
+        return ""
 
 
 def claude_config_dir() -> Path:
@@ -176,16 +218,18 @@ def write_instructions(path: Path, content: str) -> Path:
 def render_team_instructions(
     project_path: Path, brain_kind: str | None = None,
 ) -> list[Path]:
-    """Render the installed package's ``AGENTS.md`` to every applicable target.
+    """Render the communication style + installed package's ``AGENTS.md`` to every
+    applicable target.
 
     The process-bootstrap hook (manager boot in ``run_manager_from_config``,
-    subagent child entry in ``_run_agent_entry``): reads the frozen
+    subagent child entry in ``_run_agent_entry``): prepends the framework
+    communication baseline (:func:`communication_style_content`) to the frozen
     ``run/package/AGENTS.md`` and writes each target the active brain
     auto-loads; targets only OTHER brain kinds auto-load get a previously
     managed block removed (a brain-kind switch must not leave the old brain
     reading retired rules). A target is touched only when there is content to
-    render OR a managed block to clean - a team that never shipped
-    instructions never creates or edits the files.
+    render OR a managed block to clean - with the baseline opted out, a team
+    that never shipped instructions never creates or edits the files.
 
     Errors propagate - a team that ships house rules and can't render them
     would otherwise silently build without the standards its PRs are supposed
@@ -200,7 +244,9 @@ def render_team_instructions(
 
         brain_kind = get_brain().name
     src = paths.package_dir(project_path) / PACKAGE_AGENTS_MD
-    content = src.read_text(encoding="utf-8") if src.is_file() else ""
+    team = src.read_text(encoding="utf-8") if src.is_file() else ""
+    style = communication_style_content()
+    content = f"{style.rstrip()}\n\n{team}" if style and team else (style or team)
     active = instruction_targets(brain_kind)
     written: list[Path] = []
     for target in active:
@@ -210,9 +256,12 @@ def render_team_instructions(
         if _apply(target, ""):
             written.append(target)
     if written:
+        sources = [name for name, present in
+                   (("communication style", bool(style)),
+                    ("package AGENTS.md", bool(team))) if present]
         log.info(
             "Rendered team instructions (%s) to: %s",
-            "package AGENTS.md" if content else "removal",
+            " + ".join(sources) if sources else "removal",
             ", ".join(str(p) for p in written),
         )
     return written

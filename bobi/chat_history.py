@@ -84,9 +84,9 @@ def claude_projects_dirs(claude_config_dir: Path | None = None) -> list[Path]:
     """Where Claude Code retains transcripts, most specific first.
 
     Public because it is the canonical copy of this rule: ``bobi.usage_backfill``
-    calls it rather than growing a third one (``bobi.brain.claude`` still
-    carries its own - tracked as Q027). ``claude_config_dir`` pins the search
-    to one root for an operator who passes ``--claude-config-dir``.
+    and ``bobi.history``'s indexer call it rather than growing their own.
+    ``claude_config_dir`` pins the search to one root for an operator who
+    passes ``--claude-config-dir``.
     """
     if claude_config_dir is not None:
         return [Path(claude_config_dir) / "projects"]
@@ -107,18 +107,34 @@ def claude_projects_dirs(claude_config_dir: Path | None = None) -> list[Path]:
     return out
 
 
-def _transcript_path(session_id: str) -> Path | None:
+def find_claude_transcript(session_id: str) -> Path | None:
+    """The Claude Code transcript for *session_id*, or None.
+
+    The one locator: the replay path here, the max-turns fallback in
+    ``bobi.brain.claude`` and the ``bobi logs`` fallback in ``bobi.cli`` all
+    call it, so a change to Claude's on-disk layout is one edit rather than
+    four. Public because those callers live in other modules.
+
+    Directory reads are guarded: this runs against a tree Claude Code is
+    writing concurrently, and a projects root that is unreadable or vanishes
+    mid-scan means "no transcript here", never a traceback out of a history
+    read. (The guards come from the ``brain.claude`` copy this absorbed; the
+    happy path is unchanged.)
+    """
     if not session_id:
         return None
     for projects in claude_projects_dirs():
-        if not projects.exists():
-            continue
-        for project_dir in projects.iterdir():
-            if not project_dir.is_dir():
+        try:
+            if not projects.is_dir():
                 continue
-            candidate = project_dir / f"{session_id}.jsonl"
-            if candidate.exists():
-                return candidate
+            for project_dir in projects.iterdir():
+                if not project_dir.is_dir():
+                    continue
+                candidate = project_dir / f"{session_id}.jsonl"
+                if candidate.exists():
+                    return candidate
+        except OSError:
+            continue
     return None
 
 
@@ -147,7 +163,7 @@ def read_transcript_messages(session_id: str,
 
 def _read_claude_transcript_messages(session_id: str,
                                      limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
-    path = _transcript_path(session_id)
+    path = find_claude_transcript(session_id)
     if not path:
         return []
 
@@ -258,7 +274,7 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
     if brain in ("codex", "gateway-openai"):
         return _from_codex()
 
-    path = _transcript_path(session_id)
+    path = find_claude_transcript(session_id)
     if not path:
         # No Claude transcript: fall back the same way the chat reader does,
         # so an unrecorded-brain session still renders something.

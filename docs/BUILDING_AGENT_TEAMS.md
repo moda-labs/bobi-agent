@@ -439,6 +439,6 @@ handle, and watch `run/state/manager.log`.
 - `agents/eng-team` (bobi repo) - multi-repo org: director entry
   point plus async engineer workers; github + slack with tool-agnostic seams
   (Moda's house team derives from it via `from: eng-team`).
-- `agents/dogfood-content-review` (bobi repo) - single-repo content
-  pipeline: manager entry point, researcher/editor/fact-checker roles,
-  github + email via Venn, command monitor for inbound email.
+- `agents/personal-assistant` (bobi repo) - single-agent team: one agent
+  manages email, calendar, and to-dos via Venn, posts a daily briefing, and
+  acts within a customizable autonomy line.

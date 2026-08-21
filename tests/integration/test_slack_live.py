@@ -13,17 +13,20 @@ to the sacrificial test channel). Locally:
     set -a; source .bobi-dogfood.env; set +a
     pytest tests/integration/test_slack_live.py -m live
 
-Messages are deliberately left in the channel: the dogfood battery's
-rendering eyeball step (Section 3c) inspects the thread this run creates.
-Rendering fidelity is the one thing these tests cannot assert - they prove
-API acceptance and content round-trip, not that the markdown looks right.
+Messages are deliberately left in the channel so the thread this run creates
+can be eyeballed in Slack afterwards (root message: "Live gateway soak
+`soak-<ts>`"): the edited placeholder should render headers/bold/code as
+markdown, the files should be attached, and the over-budget reply should
+arrive as several messages with no truncation marker and no broken code
+fences. Rendering fidelity is the one thing these tests cannot assert - they
+prove API acceptance and content round-trip, not that the markdown looks
+right.
 """
 
 import json
 import os
 import re
 import signal
-import socket
 import time
 from types import SimpleNamespace
 
@@ -31,10 +34,12 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-from bobi.config import save_bubble_state
+from bobi.events.state import save_bubble_state
 from bobi.events.gateway import channels_history, channels_send
 from bobi.events.server import _post_register, ensure_running
 from bobi.events.signing import signed_request
+
+from .conftest import _free_port
 
 pytestmark = [
     pytest.mark.live,
@@ -45,12 +50,6 @@ pytestmark = [
         reason="live Slack not configured (SLACK_BOT_TOKEN, SLACK_TEST_CHANNEL)",
     ),
 ]
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _wait_for(predicate, timeout: float = 15.0, interval: float = 1.0):

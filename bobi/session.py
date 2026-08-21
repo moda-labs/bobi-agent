@@ -14,15 +14,18 @@ subscribes to (the manager also subscribes to external resource topics).
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
 import queue
 import time
 import threading
-from pathlib import Path
 
 from bobi.brain import AssistantText, TurnResult, get_brain
+from bobi.brain.base import (
+    ERROR_KIND_AUTHENTICATION,
+    ERROR_KIND_CREDITS_EXHAUSTED,
+)
+from bobi.brain_availability import observe_brain_turn
 from bobi.inbox import Inbox, Message
 from bobi.sdk import (
     save_session_id,
@@ -325,9 +328,13 @@ class Session:
         # (orchestrator._setup_worktree) and are what the launch admission
         # check dedupes on — so a re-dispatch reuses the name and would
         # otherwise inherit the DEAD session's context and its spent turn
-        # budget. Opt-in, not the default: the workflow engine's documented
-        # retry semantics (launch_agent's docstring) resume a failed run on
-        # purpose. skills/checklist-execution.md sets it on every re-dispatch.
+        # budget. Opt-in under an EXPLICIT run key, not the default: the
+        # workflow engine's documented retry semantics (launch_agent's
+        # docstring) resume a failed run on purpose, and
+        # skills/checklist-execution.md sets it on every re-dispatch. The
+        # launchers set it themselves when the run key was DERIVED from the
+        # task (#850): that name is an inference about task text, not a caller
+        # pointing at a run to continue.
         self._fresh = fresh
         # Extra event topics beyond this session's own inbox/<self> (e.g. the
         # manager's external resource topics). inbox/<self> is always added.
@@ -409,7 +416,8 @@ class Session:
         """The honest error text for the last turn, or "" when it succeeded.
 
         Thin delegate over the shared composition in ``bobi.brain`` so the
-        Session-backed paths (``run_phase_blocking``, ``spawn_adhoc``) name the
+        Session-backed paths (``run_phase_blocking``, ``run_persistent_agent``)
+        name the
         same cause the workflow drain does (#845).
         """
         from bobi.brain import turn_error_text
@@ -527,10 +535,11 @@ class Session:
     async def _attempt_reconnect(self):
         """Build and connect one fresh rotation candidate under a hard bound.
 
-        ``BrainSession.connect(None)`` opens a session without sending input, so
-        it creates no turn and there is deliberately no ``receive_response``
-        call here. The old code drained that nonexistent turn and made every
-        successful Claude reconnect look hung for 240 seconds (#799).
+        ``BrainSession.connect()`` is setup only — it never creates a turn
+        (#1016 made that the interface-wide invariant), so there is
+        deliberately no ``receive_response`` call here. The old code drained
+        that nonexistent turn and made every successful Claude reconnect look
+        hung for 240 seconds (#799).
 
         The candidate is not published through ``self._client``. The inbox loop
         remains the single owner of that pointer and swaps only between turns.
@@ -945,7 +954,36 @@ class Session:
                                 self.name, cost, provider=provider,
                             )
                     self._last_api_error_status = msg.api_error_status
+                    observe_brain_turn(
+                        msg,
+                        session=self.name,
+                        provider=getattr(self._client, "provider", "anthropic"),
+                    )
                     if msg.is_error:
+                        if msg.error_kind in (
+                            ERROR_KIND_AUTHENTICATION,
+                            ERROR_KIND_CREDITS_EXHAUSTED,
+                        ):
+                            error = (
+                                msg.error_message
+                                or msg.result_text
+                                or "brain unavailable"
+                            )
+                            log.error(
+                                "Session '%s' brain unavailable (%s): %s",
+                                self.name,
+                                msg.error_kind,
+                                error[:200],
+                            )
+                            self._set_state("error")
+                            registry.update(
+                                self.name,
+                                status="error",
+                                session_id=msg.session_id,
+                                error=error,
+                                terminal_at=time.time(),
+                            )
+                            continue
                         # A turn-level API error (e.g. 529 Overloaded, rate
                         # limit) is transient and scoped to this turn — the SDK
                         # client stays connected. It must NOT drop the session
@@ -1465,30 +1503,35 @@ class Session:
         self._client = self._make_brain_session(resume=resume_id)
 
         try:
-            connect_prompt = startup_prompt if not resume_id else None
-            await self._client.connect(connect_prompt)
+            await self._client.connect()
         except Exception as e:
             if resume_id:
                 log.warning(f"Resume failed for '{self.name}', retrying fresh: {e}")
                 save_session_id(self.name, "")
                 self._client = self._make_brain_session(resume=None)
-                await self._client.connect(startup_prompt)
+                await self._client.connect()
             else:
                 raise
 
         self._input_ready = asyncio.Event()
-        self._set_state("running")
+        self._set_state("waiting_input")
         registry = get_registry()
-        registry.update(self.name, status="running")
+        registry.update(self.name, status="idle")
 
-        if startup_prompt and not resume_id:
-            await self._drain_turn()
-        elif startup_prompt and resume_id:
-            await self._client.query(startup_prompt)
-            await self._drain_turn()
-        else:
-            self._set_state("waiting_input")
-            registry.update(self.name, status="idle")
+        if startup_prompt:
+            # The launch brief is a message, not a connect-time turn (#1016):
+            # it goes through _process_message like everything the inbox
+            # delivers — same activity log, same transient-error retry, same
+            # turn machinery — so no text can execute inside the handshake.
+            # _run drives this first delivery inline (rather than queueing it
+            # for the inbox loop) because start() keeps its contract: it
+            # returns only once the startup turn drained, and one-shot
+            # callers read the session's results immediately after.
+            await self._process_message(Message(
+                id=f"startup-{os.getpid()}-{int(time.time())}",
+                sender="launch",
+                text=startup_prompt,
+            ))
 
         self._ready.set()
         log.info(f"Session '{self.name}' ready")

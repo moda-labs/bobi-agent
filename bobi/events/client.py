@@ -17,6 +17,7 @@ import certifi
 import websocket
 
 from bobi.fsutil import atomic_write_json
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ def _save_cursor(seq: int, path: Path | None = None) -> None:
 def _log_event(event: dict, session_id: str = "",
                state_dir: Path | None = None) -> None:
     entry = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "timestamp": now_iso(),
         "type": event.get("type", ""),
         "source": event.get("source", ""),
         "payload": event.get("payload", event.get("data", {})),

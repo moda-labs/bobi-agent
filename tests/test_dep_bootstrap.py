@@ -57,8 +57,8 @@ def _shell(rc_by_brain: dict | int, *, sink: list | None = None):
 # --- ResolvedRecipe ---------------------------------------------------------
 
 
-def test_recipe_from_install_adopts_verbatim():
-    r = ResolvedRecipe.from_install({"apt": ["nodejs", "npm"], "npm": ["@openai/codex@0.142.0"]})
+def test_recipe_coerce_adopts_pinned_install_verbatim():
+    r = ResolvedRecipe.coerce({"apt": ["nodejs", "npm"], "npm": ["@openai/codex@0.142.0"]})
     assert r.apt == ["nodejs", "npm"]
     assert r.npm == ["@openai/codex@0.142.0"]
     assert r.run_root == [] and r.run == []
@@ -66,7 +66,7 @@ def test_recipe_from_install_adopts_verbatim():
 
 
 def test_recipe_coerces_scalar_and_drops_blanks_and_unknown_keys():
-    r = ResolvedRecipe.from_agent(
+    r = ResolvedRecipe.coerce(
         {"run_root": "python3 -m venv /opt/x", "apt": ["", "  ", "curl"],
          "bogus": ["ignored"]})
     assert r.run_root == ["python3 -m venv /opt/x"]
@@ -77,7 +77,8 @@ def test_recipe_coerces_scalar_and_drops_blanks_and_unknown_keys():
 
 def test_empty_recipe_is_empty():
     assert ResolvedRecipe().is_empty
-    assert ResolvedRecipe.from_agent({}).is_empty
+    assert ResolvedRecipe.coerce({}).is_empty
+    assert ResolvedRecipe.coerce(None).is_empty
 
 
 # --- materialize: pinned install path (no agent) ----------------------------
@@ -166,6 +167,39 @@ def test_preflight_runs_once_per_brain_with_build_phase_and_brain_env():
     # every invocation carried build phase + its brain
     assert {b for _, b, _ in sink} == {"claude", "codex"}
     assert {phase for _, _, phase in sink} == {"build"}
+
+
+def test_preflight_exports_the_resolved_agent_name(monkeypatch):
+    """The build/local tier gets the same `$BOBI_AGENT` the dispatch gate does.
+
+    One `success` contract, one resolver: if the two runners disagreed about
+    who the agent is, a probe could pass at bake time and fail at dispatch
+    (#1063).
+    """
+    monkeypatch.setenv("BOBI_AGENT", "sre")
+    sink: list = []
+
+    def _run(cmd, env, timeout):
+        sink.append(env.get("BOBI_AGENT"))
+        return 0, "", ""
+
+    preflight(_dep(success='bobi agent "$BOBI_AGENT" otel --help'),
+              brains=["claude"], shell_runner=_run)
+    assert sink == ["sre"]
+
+
+def test_preflight_keeps_a_caller_supplied_agent_name(monkeypatch):
+    """An explicit `base_env` selection wins over this process's own."""
+    monkeypatch.setenv("BOBI_AGENT", "ambient")
+    sink: list = []
+
+    def _run(cmd, env, timeout):
+        sink.append(env.get("BOBI_AGENT"))
+        return 0, "", ""
+
+    preflight(_dep(), brains=["claude"], shell_runner=_run,
+              base_env={"BOBI_AGENT": "explicit"})
+    assert sink == ["explicit"]
 
 
 def test_preflight_fails_when_any_brain_fails():

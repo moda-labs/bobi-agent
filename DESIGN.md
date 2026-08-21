@@ -299,6 +299,9 @@ One calm screen, three tabs, each landing in the same chat+cards editor:
 dialog, so **Browse…** opens a small **server-side directory lister** (`/api/browse`),
 **rooted at the user's home** (the library and most dev repos live there; confined
 to home so the page can't list the whole filesystem) and returning absolute paths.
+`$BOBI_HOME` is a second root when it is configured outside the home directory,
+so the library stays reachable either way. The same boundary governs the modify
+scan (`/api/teams`) and the MCP folder detect (`/api/mcp/detect`).
 Default source location is `$BOBI_HOME/agents/<name>/src/`; install targets the
 same named agent's `run/package/`. Anything outside home can still be typed into
 the location field. Source dirs are kept separate from `run/`.
@@ -578,8 +581,10 @@ port 8642) serving a shell with a hash router:
   supersedes the roster+chat page this route used to render): a light
   header carrying a **status strip** (a violet RUNNING / STOPPED / NOT
   RESPONDING badge, best-effort telemetry segments, the recovery action)
-  and the **identity** (description, SAVED and ABOUT hover-or-tap popovers,
-  Edit design), and below it **one runs table** folding sessions, workflow
+  and the **identity** (description, SAVED and ABOUT hover-or-tap popovers;
+  composition is read-only here, per the Non-goals in the U7/U8 plan —
+  editing stays in `#/setup`), and below it **one runs table** folding
+  sessions, workflow
   runs and monitor runs with ALL / RUNNING / FAILED tabs. A row opens the
   dark slab: a transcript when it has a session, details when it does not.
   State reads through the system palette - violet for the live/running

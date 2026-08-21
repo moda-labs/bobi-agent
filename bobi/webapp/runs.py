@@ -7,7 +7,9 @@ agent's work is recorded have to become one shape:
 - **sessions** (`SessionRegistry`) — the manager and every subagent it ran
 - **workflow runs** (`run/state/workflow/runs/*.json`) — including the ones
   suspended waiting for an event that never came
-- **monitor run records** (`run/state/monitor_runs/*.json`) — one per firing
+- **monitor run records** (`run/state/monitor_runs/*.json`) — one per firing,
+  plus one per recovery when the retry drain lands a park an earlier firing
+  failed to publish (#1006)
 
 Deliberately NOT here: decisions and raw event deliveries. They are log lines,
 not runs — no status, no cost, nothing to open (`bobi agent events` still
@@ -22,6 +24,10 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# The both-era timestamp reader: aware values (the current convention) read
+# as written; naive values are legacy files written in the host's LOCAL time.
+from bobi.timeutil import epoch_seconds as _epoch
 
 # Status vocabulary. `awaiting_action` is derived for a workflow gate that has
 # waited long enough to require renewed human attention.
@@ -57,24 +63,6 @@ def _iso(epoch: float | None) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
 
 
-def _epoch(iso: str) -> float:
-    """Epoch seconds from an ISO timestamp, 0.0 when unparseable.
-
-    Workflow runs record naive local timestamps (`time.strftime`) and monitor
-    records record aware UTC ones; a naive value is read as local time, which
-    is what its writer meant.
-    """
-    if not iso:
-        return 0.0
-    try:
-        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
-    except ValueError:
-        return 0.0
-    if dt.tzinfo is None:
-        dt = dt.astimezone()
-    return dt.timestamp()
-
-
 def _duration(start: float, end: float) -> float | None:
     if not start or not end or end < start:
         return None
@@ -85,7 +73,8 @@ def _row(*, run_kind: str, key: str, status: str, title: str, origin: str,
          started_at: float, duration: float | None, error: str = "",
          session_id: str = "", run_id: str = "", tokens: int = 0,
          cost_usd: float = 0.0, est_cost_usd: float = 0.0,
-         detail: dict | None = None) -> dict:
+         detail: dict | None = None, ended_at: float = 0.0,
+         usage: dict | None = None) -> dict:
     """One row. Fields a source cannot know are empty/zero, never omitted, so
     render code branches on value and never on key presence."""
     return {
@@ -105,6 +94,8 @@ def _row(*, run_kind: str, key: str, status: str, title: str, origin: str,
         "detail": detail or {},
         # Sort key only — stripped before the response goes out.
         "_started": started_at,
+        "_ended": ended_at,
+        "_usage": usage or {},
     }
 
 
@@ -166,6 +157,8 @@ def _session_rows(entries, *, manager_name: str,
             tokens=usage["total_tokens"],
             cost_usd=usage["cost_usd"],
             est_cost_usd=usage["estimated_cost_usd"],
+            ended_at=end or 0.0,
+            usage=usage,
             detail={"role": entry.role, "phase": entry.phase,
                     "model": entry.model, "provider": entry.provider,
                     "is_manager": is_manager},
@@ -198,28 +191,44 @@ def _workflow_rows(root: Path, *, now: float,
     from bobi.workflow.state import WorkflowRun
 
     rows = []
+    # One session's usage lands on ONE row. Retries reuse their entry, but a
+    # --fresh relaunch mints a second entry on the same session name; giving
+    # each the session's tokens would double-count spend in a column read as
+    # a running total. list_runs is newest-first, so the newest row wins.
+    usage_claimed: set[str] = set()
     for run in WorkflowRun.list_runs(root=root):
         status = _workflow_status(run, now=now)
         trigger = (run.trigger_event or {}).get("type", "")
         started = _epoch(run.started_at)
-        usage = usage_by_session.get(run.session_name) or {}
+        ended = _epoch(run.completed_at)
+        usage = {}
+        if run.session_name and run.session_name not in usage_claimed:
+            usage_claimed.add(run.session_name)
+            usage = usage_by_session.get(run.session_name) or {}
         rows.append(_row(
             run_kind="workflow",
             key=f"workflow:{run.run_id}",
             status=status,
-            title=run.workflow_name,
+            # Every run has a ledger entry now (#1048), so this row replaces
+            # the session row for ordinary runs too - it must carry what the
+            # operator actually asked for and why it failed, not only the
+            # workflow's name.
+            title=run.title or run.workflow_name,
             origin=(f"workflow · on {trigger}" if trigger else "workflow"),
             started_at=started,
-            duration=_duration(started, _epoch(run.completed_at)),
-            error="",
+            duration=_duration(started, ended),
+            error=run.error,
             session_id=run.session_name,
             run_id=run.run_id,
             tokens=usage.get("total_tokens", 0),
             cost_usd=usage.get("cost_usd", 0.0),
             est_cost_usd=usage.get("estimated_cost_usd", 0.0),
+            ended_at=ended,
+            usage=usage,
             detail={"await_event": run.await_event,
                     "suspended_at_step": run.suspended_at_step,
                     "run_key": run.run_key, "repo": run.repo,
+                    "workflow": run.workflow_name,
                     "awaiting_action": status == AWAITING_ACTION,
                     "resumable": run.status == "waiting"},
         ))
@@ -255,6 +264,7 @@ def _monitor_rows(root: Path, *, usage_by_session: dict) -> list[dict]:
     for record in run_records.load_all(root):
         failed = record.outcome == run_records.FAILED
         started = _epoch(record.started_at)
+        ended = _epoch(record.ended_at)
         schedule = schedules.get(record.monitor, "")
         usage = usage_by_session.get(record.session_ref) or {}
         note = record.reason
@@ -268,13 +278,15 @@ def _monitor_rows(root: Path, *, usage_by_session: dict) -> list[dict]:
             title=record.monitor,
             origin=f"monitor · {schedule}" if schedule else "monitor",
             started_at=started,
-            duration=_duration(started, _epoch(record.ended_at)),
+            duration=_duration(started, ended),
             error=record.reason if failed else "",
             session_id=record.session_ref,
             run_id=record.run_id,
             tokens=usage.get("total_tokens", 0),
             cost_usd=usage.get("cost_usd", 0.0),
             est_cost_usd=usage.get("estimated_cost_usd", 0.0),
+            ended_at=ended,
+            usage=usage,
             detail={"outcome": record.outcome, "note": note,
                     "flavor": record.flavor,
                     "script_cache_mode": record.script_cache_mode,
@@ -357,6 +369,93 @@ def _matches_query(row: dict, query: str) -> bool:
     )
 
 
+def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
+    """Build the de-duplicated rows once for list and usage views."""
+    from bobi.costs import session_usage
+    from bobi.sdk import ACTIVE_STATUSES, SessionRegistry
+
+    # Sessions are read once and indexed: a workflow run and a monitor record
+    # both point at a session, and neither should re-walk the registry.
+    entries = SessionRegistry(root).list_all(reap_dead=True)
+    usage_by_session = {
+        e.name: session_usage(e.model_usage, e.total_cost_usd) for e in entries
+    }
+    # Who can be spoken to right now. The same predicate `list_active` uses,
+    # off the same read - and the read reaps, so an active status with a dead
+    # pid is already `crashed` here rather than a chat target that is gone.
+    live_sessions = {e.name for e in entries if e.status in ACTIVE_STATUSES}
+
+    rows = _session_rows(entries, manager_name=manager_name,
+                         usage_by_session=usage_by_session)
+    rows += _workflow_rows(root, now=now, usage_by_session=usage_by_session)
+    rows += _monitor_rows(root, usage_by_session=usage_by_session)
+
+    # Before anything counts or sorts them: one piece of work, one row.
+    rows = _claim_sessions(rows)
+
+    # Liveness is a fact about the registry, not about a row's kind, so it is
+    # stamped once here for every shape rather than three times upstream.
+    # `status` cannot answer it: `idle` is both a live manager and a freshly
+    # suspended gate whose process has already exited.
+    for row in rows:
+        row["detail"]["live"] = row["session_id"] in live_sessions
+
+    # Live first, then newest first — a running job is what you came for.
+    attention_rank = {RUNNING: 0, AWAITING_ACTION: 1}
+    rows.sort(key=lambda r: (attention_rank.get(r["status"], 2),
+                             -r["_started"]))
+    return rows
+
+
+def build_usage_summary(root: Path, *, window_seconds: float,
+                        manager_name: str = "",
+                        now: float | None = None) -> dict:
+    """Usage for terminal jobs completed inside a rolling window.
+
+    Usage is stored per session rather than per token timestamp. A terminal
+    job therefore contributes its whole usage when its completion time falls
+    inside the window. Running and waiting work is excluded.
+    """
+    now = time.time() if now is None else now
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be positive")
+    start = now - window_seconds
+    terminal = (DONE, FAILED, CRASHED, CLOSED)
+    rows = [
+        row for row in _all_rows(root, manager_name=manager_name, now=now)
+        if row["status"] in terminal and start <= row["_ended"] <= now
+    ]
+
+    tokens = {"input": 0, "cached_input": 0, "output": 0, "total": 0}
+    cost = estimated = 0.0
+    for row in rows:
+        usage = row["_usage"]
+        tokens["input"] += int(usage.get("input_tokens") or 0)
+        tokens["cached_input"] += int(
+            usage.get("cached_input_tokens") or 0)
+        tokens["output"] += int(usage.get("output_tokens") or 0)
+        tokens["total"] += int(usage.get("total_tokens") or 0)
+        cost += float(row["cost_usd"] or 0.0)
+        estimated += float(row["est_cost_usd"] or 0.0)
+
+    return {
+        "window": {
+            "seconds": window_seconds,
+            "start_at": _iso(start),
+            "end_at": _iso(now),
+        },
+        "jobs": {
+            "total": len(rows),
+            "completed": sum(r["status"] == DONE for r in rows),
+            "failed": sum(r["status"] in FAILED_STATUSES for r in rows),
+            "closed": sum(r["status"] == CLOSED for r in rows),
+        },
+        "tokens": tokens,
+        "cost_usd": round(cost, 6),
+        "estimated_cost_usd": round(estimated, 6),
+    }
+
+
 def build_runs(root: Path, *, manager_name: str = "", status: str = "",
                query: str = "", offset: int = 0,
                limit: int = DEFAULT_LIMIT, now: float | None = None) -> dict:
@@ -368,28 +467,7 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     and the pager stay honest.
     """
     now = time.time() if now is None else now
-    from bobi.costs import session_usage
-    from bobi.sdk import SessionRegistry
-
-    # Sessions are read once and indexed: a workflow run and a monitor record
-    # both point at a session, and neither should re-walk the registry.
-    entries = SessionRegistry(root).list_all(reap_dead=True)
-    usage_by_session = {
-        e.name: session_usage(e.model_usage, e.total_cost_usd) for e in entries
-    }
-
-    rows = _session_rows(entries, manager_name=manager_name,
-                         usage_by_session=usage_by_session)
-    rows += _workflow_rows(root, now=now, usage_by_session=usage_by_session)
-    rows += _monitor_rows(root, usage_by_session=usage_by_session)
-
-    # Before anything counts or sorts them: one piece of work, one row.
-    rows = _claim_sessions(rows)
-
-    # Live first, then newest first — a running job is what you came for.
-    attention_rank = {RUNNING: 0, AWAITING_ACTION: 1}
-    rows.sort(key=lambda r: (attention_rank.get(r["status"], 2),
-                             -r["_started"]))
+    rows = _all_rows(root, manager_name=manager_name, now=now)
 
     counts = {"all": len(rows), "running": 0, "awaiting_action": 0,
               "failed": 0}
@@ -414,6 +492,8 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     truncated = offset + len(rows) < total
     for row in rows:
         row.pop("_started", None)
+        row.pop("_ended", None)
+        row.pop("_usage", None)
     return {
         "runs": rows,
         "counts": counts,

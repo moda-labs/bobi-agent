@@ -39,6 +39,7 @@ from bobi.webapp.runtime import (
     UnknownRun,
     UnknownTeam,
 )
+from bobi.webapp.slots import finalize_slot
 from bobi.webui_common.security import (
     WEBUI_TOKEN_HEADER,
     install_security,
@@ -95,11 +96,13 @@ class _SetupHost:
 
 
 def _claude_available() -> bool:
-    import shutil
+    from bobi.brain.claude import get_cli_path
 
-    from bobi.sdk import get_cli_path
-
-    return bool(shutil.which("claude")) or Path(get_cli_path()).exists()
+    # The resolver's bare-name fallback ("claude") is meant for exec via
+    # PATH; testing it with .exists() would read a stray CWD-relative file
+    # as an installed CLI. Only an absolute resolution counts.
+    resolved = Path(get_cli_path())
+    return resolved.is_absolute() and resolved.exists()
 
 
 def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
@@ -160,49 +163,58 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         return rt.fleet_spend()
 
     @app.get("/api/agents/{name}/spend")
-    def agent_spend(name: str) -> JSONResponse:
-        return JSONResponse(rt.spend_summary(name))
+    def agent_spend(name: str) -> dict:
+        return rt.spend_summary(name)
 
     # The identity header's read-only view of the team's composition:
     # description, roles, reach, automation counts, brain, spend cap.
     @app.get("/api/agents/{name}/overview")
-    def agent_overview(name: str) -> JSONResponse:
-        return JSONResponse(rt.overview(name))
+    def agent_overview(name: str) -> dict:
+        return rt.overview(name)
 
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
     # Normalized on the way out so the state keys the strip reads are present
     # whatever runtime answered — including one that predates them.
     @app.get("/api/agents/{name}/health")
-    def agent_health(name: str) -> JSONResponse:
+    def agent_health(name: str) -> dict:
         from bobi.webapp.health import normalize
 
-        return JSONResponse(normalize(rt.health_summary(name)))
+        return normalize(rt.health_summary(name))
 
     # Session logs (#733 vertical 3): the full session history with honest
     # terminal outcomes; transcripts drill in via the messages route below.
     @app.get("/api/agents/{name}/sessions")
-    def agent_sessions(name: str) -> JSONResponse:
-        return JSONResponse(rt.session_log(name))
+    def agent_sessions(name: str) -> dict:
+        return rt.session_log(name)
 
     # The unified runs view: sessions + workflow runs + monitor runs as one
     # list. Filters are applied before the page window is selected.
     @app.get("/api/agents/{name}/runs")
     def agent_runs(name: str, status: str = "", query: str = "",
-                   offset: int = 0, limit: int = 0) -> JSONResponse:
-        return JSONResponse(rt.runs(
+                   offset: int = 0, limit: int = 0) -> dict:
+        return rt.runs(
             name, status=status, query=query, offset=max(0, offset),
-            limit=limit or None))
+            limit=limit or None)
 
-    # The runs table's one write action. Resume force-continues a suspended
-    # step, so the page confirms first (naming the awaited event) — see the
-    # plan's design deltas. Sync `def`: FastAPI threadpools it, and the work
-    # here is a spawn, never the workflow itself.
+    # The runs table's one write action. Resume ANSWERS a gate: the verdict
+    # and the human's words ride the body and reach the workflow as its
+    # `event` scope, so the run takes the branch the answer chose rather than
+    # being force-continued past the step it is parked on. The body is
+    # optional and a missing verdict is not an approval — the workflow's route
+    # decides what that means, and it is written so the non-approving branch is
+    # the safe one. Sync `def`: FastAPI threadpools it, and the work here is a
+    # spawn, never the workflow itself.
     @app.post("/api/agents/{name}/workflows/runs/{run_id}/resume")
-    def resume_workflow_run(name: str, run_id: str) -> JSONResponse:
+    def resume_workflow_run(name: str, run_id: str,
+                            payload: dict | None = None) -> JSONResponse:
         if not safe_name(run_id):
             return JSONResponse({"error": "unknown run"}, status_code=404)
-        return JSONResponse(rt.resume_run(name, run_id))
+        payload = payload or {}
+        return JSONResponse(rt.resume_run(
+            name, run_id,
+            verdict=str(payload.get("verdict") or "").strip(),
+            reply=str(payload.get("reply") or "").strip()))
 
     @app.post("/api/agents/{name}/workflows/runs/{run_id}/remind")
     def remind_workflow_run(name: str, run_id: str) -> JSONResponse:
@@ -217,22 +229,22 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         return JSONResponse(rt.close_run(name, run_id))
 
     @app.get("/api/agents/{name}/status")
-    def agent_status(name: str) -> JSONResponse:
-        return JSONResponse(rt.team_status(name))
+    def agent_status(name: str) -> dict:
+        return rt.team_status(name)
 
     # Lifecycle actions are sync `def` on purpose: FastAPI runs them in a
     # threadpool so the (brief) spawn/stop work never stalls the event loop.
     @app.post("/api/agents/{name}/start")
-    def start_agent(name: str) -> JSONResponse:
-        return JSONResponse(rt.start_team(name))
+    def start_agent(name: str) -> dict:
+        return rt.start_team(name)
 
     @app.post("/api/agents/{name}/stop")
-    def stop_agent(name: str) -> JSONResponse:
-        return JSONResponse(rt.stop_team(name))
+    def stop_agent(name: str) -> dict:
+        return rt.stop_team(name)
 
     @app.post("/api/agents/{name}/restart")
-    def restart_agent(name: str) -> JSONResponse:
-        return JSONResponse(rt.restart_team(name))
+    def restart_agent(name: str) -> dict:
+        return rt.restart_team(name)
 
     # --- onboarding (the setup app, hosted) -----------------------------
 
@@ -295,30 +307,10 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
             # Release the slot so /setup/ starts clean next time.
             setup_host.release(name)
             # The slot was opened under a placeholder name but the team got
-            # its real name during setup (template pick, auto-name, rename).
-            # A slot IS its team (#526: agents/<name>/), so move the whole
-            # slot dir to match. Nothing is running yet (finish no longer
-            # launches) and the session is released, so the move is safe.
-            final = (state.team_name or "").strip()
-            if final and final != name:
-                import shutil
-
-                old_dir = paths.agent_dir(name)
-                new_dir = paths.agent_dir(final)
-                if safe_name(final) and old_dir.is_dir():
-                    if not new_dir.exists():
-                        shutil.move(str(old_dir), str(new_dir))
-                    elif (paths.agent_source_dir(final).is_dir()
-                          and Path(state.source_dir or "").resolve()
-                          == paths.agent_source_dir(final).resolve()):
-                        old_run = old_dir / "run"
-                        new_run = new_dir / "run"
-                        if old_run.is_dir() and not new_run.exists():
-                            shutil.move(str(old_run), str(new_run))
-                        try:
-                            old_dir.rmdir()
-                        except OSError:
-                            pass
+            # its real name during setup (template pick, auto-name, rename),
+            # so the slot dir moves to match — see `slots.finalize_slot` for
+            # what that move does and does not attempt.
+            finalize_slot(name, state.team_name or "", state.source_dir or "")
             return {"redirect": "/#/"}
 
         setup_base = f"/setup/{quote(name)}"
@@ -341,8 +333,8 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     # --- subagents (sessions inside one agent) + chat -------------------
 
     @app.get("/api/agents/{name}/subagents")
-    def subagents(name: str) -> JSONResponse:
-        return JSONResponse({"subagents": rt.subagents(name)})
+    def subagents(name: str) -> dict:
+        return {"subagents": rt.subagents(name)}
 
     @app.get("/api/agents/{name}/subagents/{session}/messages")
     def subagent_messages(name: str, session: str) -> JSONResponse:

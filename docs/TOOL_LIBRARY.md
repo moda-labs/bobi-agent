@@ -18,7 +18,7 @@ optional:
 | `install` | no | Explicit **pinned** steps (`apt`/`npm`/`run_root`/`run`) - "do exactly this". |
 | `host` | no | A host capability the container cannot grant itself (a kernel sysctl, a device). Runtime wiring, never baked. |
 | `mcp` | no | An MCP server's connection spec (the SDK-native `{name: spec}` shape), rendered into each brain's config and verified by an `initialize` handshake. |
-| `why` / `fix` | no | Documentation + a runtime repair hint carried to the `requires:` doctor surface. |
+| `why` / `fix` | no | Documentation + a runtime repair hint carried to the `requires:` doctor surface. Standing context, shown *alongside* what a check reported, never instead of it. |
 
 ## Declaring a dependency on a team
 
@@ -39,7 +39,10 @@ tool_library:
 
 `tool_library:` is consumed at compose time - it never appears in the frozen
 `agent.yaml`. It merges across the `from:` chain, so a base team's dependency is
-inherited by everything built on it (de-duped by name, first occurrence wins).
+inherited by everything built on it. A name declared more than once resolves to
+its **last** declaration, and layers merge base-first, so a leaf overlay
+overrides a base layer's entry - the same leaf-wins rule the rest of compose
+follows. Install ORDER still follows the first declaration.
 
 ## Two ways to declare a tool
 
@@ -114,9 +117,19 @@ inline (an explicit team `requires:` / `build:` / `host:` wins).
 
 - **`requires:`** - a `{name, why, check: success, fix}` entry (unless the team
   already declares that name), so the runtime dispatch gate and `bobi agent
-  <name> doctor` verify it.
+  <name> doctor` verify it. A failed check blocks the launch and is reported
+  three ways, all carrying the check's own detail (a timeout, a missing
+  command, its stderr): the raised error names each failing entry with that
+  detail, every failure is logged at ERROR with its `why` and `fix`, and a
+  Slack alert fires when the team has a `channels:`-configured slack service.
+  Alerting is a bonus, never the record - `channels:` also scopes event
+  subscription, so it is not a field an operator can flip just for
+  diagnosability.
 - **`build:`** - `install` steps accreted + de-duped via the one build merge.
-- **`tools/<name>.md`** - the guide, unless the team already ships that file.
+- **`tools/<name>.md`** - the guide, unless a team layer ships that file in
+  this compose run. "Ships it" is read from compose's provenance, not from the
+  file being present: the install destination is reused, so a guide left by a
+  previous install is refreshed rather than mistaken for a team file.
 - **`host:`** - emitted as a top-level list so deploy surfaces it and doctor
   checks it (see `bobi/host_caps.py`); never materialized into the image.
 - **`mcp_servers:`** - each dependency's `mcp:` spec merged into a top-level
@@ -205,6 +218,24 @@ requires:
 `success` may be **prose** (an agent judges it, as here) or **shell** (run
 directly). Use prose when the check is "the agent can actually do X"; use shell
 when a command exit code settles it.
+
+#### A shell `success` that addresses the CLI reads `$BOBI_AGENT`
+
+A check that has to call an agent-scoped command (`bobi agent <name> otel check`) gets the name from `$BOBI_AGENT`, which the runner exports from the one resolver: `paths.agent_name`, i.e. an explicit `BOBI_AGENT`/`BOBI_INSTANCE`, else the run root's layout.
+
+Never derive it in the check.
+`basename "$BOBI_ROOT"` reads `run` on the canonical `<home>/agents/<name>/run` layout every container deployment uses, so the check addresses an agent that does not exist.
+Because a failed check gates dispatch, that one line refused **every** workflow launch for a live team (#1063).
+
+The name is absent in tiers that build no probe environment, such as the image build's `verify: requires`.
+Guard for it, so a missing name is self-diagnosing rather than reported as a missing dependency:
+
+```yaml
+success: '[ -n "${BOBI_AGENT:-}" ] || { echo "BOBI_AGENT is not set" >&2; exit 1; }; bobi agent "$BOBI_AGENT" otel --help'
+```
+
+At the dispatch gate, a check that reads `$BOBI_AGENT` with no name resolved is **indeterminate**, not failed: it is reported at ERROR and the launch proceeds.
+A probe the harness could not evaluate is not evidence the dependency is missing, and treating it as such is what took dispatch down.
 
 ### 3. A non-CLI asset (font, data file, ...)
 
@@ -336,9 +367,10 @@ tool_library:
 ```
 
 The same leaf-wins rule holds for `requires:` (an explicit `requires: [{name:
-...}]` is neither duplicated nor clobbered) and for `host:` (per sysctl key). Two
-*dependencies* clashing on the same MCP server name or sysctl resolve first-wins
-in resolve order.
+...}]` is neither duplicated nor clobbered), for `host:` (per sysctl key), and
+for two dependencies declaring the same NAME (last declaration wins, so the leaf
+layer's does). Two *distinct* dependencies clashing on the same MCP server name
+or sysctl still resolve first-wins in resolve order.
 
 ## MCP servers, rendered per brain
 
@@ -382,7 +414,10 @@ uses.
    a recipe.
 3. **Preflight**: each `success` is verified in the build tier
    (`BOBI_VERIFY_PHASE=build`), per target brain. The snapshot is trusted only
-   when every dependency passes.
+   when every dependency passes. The variable is **exported** on both verify
+   surfaces - the image build's `verify: requires` step and
+   `dep_bootstrap.preflight` - so a check implemented as a program reads the
+   same phase an inline `${BOBI_VERIFY_PHASE:-}` expansion sees.
 4. **Snapshot**: the materialized layer is frozen into the team image.
 5. **Warm boot**: replay the snapshot - no agent runs in production.
 6. **Re-bootstrap**: only when the declared set changes. The image stamps the
@@ -459,8 +494,9 @@ tarball.
 
 ## Where the code lives
 
-- `bobi/tool_library.py` - the dependency model, catalog loader, `expand()`, and
-  `dependency_list_hash`.
+- `bobi/tool_library/__init__.py` - the dependency model, catalog loader,
+  `expand()`, and `dependency_list_hash`. The catalog entry directories are
+  package data sitting beside it in the same package.
 - `bobi/dep_bootstrap.py` - the bootstrap-agent harness, the `render_team_deps`
   build seam, and the CLI (`python -m bobi.dep_bootstrap <team> --render`).
 - `bobi/local_deps.py` - local materialization (`install --with-deps`): plan /

@@ -9,6 +9,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,35 @@ import yaml
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 TEST_GRANTS_SECRET = "bobi-integration-test-grants"
+
+
+def _free_port() -> int:
+    """Pick an OS-assigned free TCP port (bind, read, release).
+
+    The one definition for the integration suite — a fix to the port-picking
+    logic (SO_REUSEADDR, retry against the pick-then-close race) lands here
+    once instead of in every file (D103).
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def wait_healthy(base_url: str, timeout: float = 15) -> bool:
+    """Poll an event server's /health until it reports ok, or time out.
+
+    Loops on ``bobi.events.server.health()`` — the product's single
+    definition of "what counts as healthy" — instead of a hand-rolled
+    urllib poll per file (Q041).
+    """
+    from bobi.events.server import health
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if health(base_url):
+            return True
+        time.sleep(0.3)
+    return False
 
 
 @dataclass
@@ -49,10 +79,7 @@ def _provision_bobi_env(base: Path, *, agent_name: str, brain: str | None,
     state_dir = project_path / "state"
     sessions_dir = state_dir / "sessions"
     workflows_dir = package_dir / "workflows"
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        event_server_port = sock.getsockname()[1]
-    event_server_url = f"http://localhost:{event_server_port}"
+    event_server_url = f"http://localhost:{_free_port()}"
 
     for d in [home_dir, package_dir, state_dir, sessions_dir, workflows_dir,
               state_dir / "workflow" / "runs", state_dir / "logs"]:
@@ -310,14 +337,16 @@ async def _drain(client):
     """Drain one live brain turn; return (final_text, turn_result).
 
     Shared by the live-brain integration suites (cross-model resume, gateway,
-    effort selection) so the brain message protocol is consumed in one place.
+    effort selection). Deliberately raw: the PRODUCT drain is
+    ``bobi.brain.turns.drain_turn``; this helper consumes the protocol
+    without the bookkeeping so the suites observe the brain directly.
     """
     from bobi.brain import AssistantText, TurnResult
 
     text, result = "", None
     async for msg in client.receive_response():
         if isinstance(msg, AssistantText) and msg.text:
-            text = msg.text
+            text += msg.text
         elif isinstance(msg, TurnResult):
             result = msg
     return text, result
@@ -393,26 +422,48 @@ def dual_brain_cli_run(dual_brain_env):
     return _make_cli_run(dual_brain_env)
 
 
-@pytest.fixture
-def clean_session(bobi_env):
-    """Clean up a named session from the registry."""
+def _drop_session(name):
+    """Retire *name* from whichever install this process is bound to.
+
+    The registry is resolved per call, never cached: the bound root is pinned
+    per test, so a registry captured at fixture setup would outlive its env.
+    """
+    from bobi.sdk import get_registry
+    registry = get_registry()
+    registry.mark_done(name)
+    session_dir = registry.session_dir(name)
+    if session_dir.exists():
+        shutil.rmtree(session_dir)
+
+
+def _clean_session():
+    """Shared body for the `clean_session` fixtures - clean on both ends."""
     names = []
 
     def _register(name):
         names.append(name)
-        from bobi.sdk import get_registry, SessionRegistry
-        registry = get_registry()
-        registry.mark_done(name)
-        session_dir = registry.session_dir(name)
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
+        _drop_session(name)
 
     yield _register
 
     for name in names:
-        from bobi.sdk import get_registry, SessionRegistry
-        registry = get_registry()
-        registry.mark_done(name)
-        session_dir = registry.session_dir(name)
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
+        _drop_session(name)
+
+
+@pytest.fixture
+def clean_session(bobi_env):
+    """Clean up a named session from the registry."""
+    yield from _clean_session()
+
+
+@pytest.fixture
+def stub_clean_session(stub_bobi_env):
+    """`clean_session` for the stub-only lane.
+
+    Same body; the DEPENDENCY is the whole point. The autouse root binder
+    prefers `bobi_env` wherever it appears in a test's fixture graph, so a
+    stub-only test that reached for `clean_session` would pin this process to
+    the claude install while its CLI subprocess wrote to the stub one - and
+    then clean, and read back, the wrong registry.
+    """
+    yield from _clean_session()

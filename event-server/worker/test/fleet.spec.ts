@@ -174,7 +174,18 @@ describe("admin command view", () => {
 		expect(isAdminCommand("roster")).toBe(true);
 		// Observability (#733): the spend + session-log reads ride the same vocab.
 		expect(isAdminCommand("spend")).toBe(true);
+		expect(isAdminCommand("usage")).toBe(true);
 		expect(isAdminCommand("session_log")).toBe(true);
+		// The single-agent view: three reads and three run-scoped writes. This
+		// list is an ALLOWLIST — a verb the supervisor implements but this
+		// forgets 400s before reaching any deployment, with every Python-side
+		// test still green. tests/test_admin_command_parity.py pins the halves.
+		expect(isAdminCommand("runs")).toBe(true);
+		expect(isAdminCommand("overview")).toBe(true);
+		expect(isAdminCommand("run_details")).toBe(true);
+		expect(isAdminCommand("resume_run")).toBe(true);
+		expect(isAdminCommand("remind_run")).toBe(true);
+		expect(isAdminCommand("close_run")).toBe(true);
 		expect(isAdminCommand("rm -rf")).toBe(false);
 		expect(isAdminCommand(42)).toBe(false);
 	});

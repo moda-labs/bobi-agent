@@ -53,11 +53,16 @@ def _configure_logging() -> None:
     # <state>/manager.log inside the container. force=True drops every
     # inherited handler and installs the stdout one unconditionally, which is
     # the only outcome an orchestrator can read.
-    logging.basicConfig(
-        level=logging.INFO, stream=sys.stdout,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        force=True,
-    )
+    #
+    # The stamp is the house one (#851) so a single date-prefixed grep spans
+    # the container log and the files under state/ alike. The logger name
+    # stays: this sink carries several subsystems and stdout is where a fleet
+    # reads them apart.
+    from bobi import logs
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logs.IsoFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
 
 
 def main(argv: list[str] | None = None) -> int:

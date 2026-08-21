@@ -322,3 +322,75 @@ class TestAdversarialReviewStep:
         assert "codex_exec" not in agent_cfg, (
             "agent.yaml must not reference the retired codex_exec MCP shim (#403)"
         )
+
+
+class TestApprovalGateRouting:
+    """The shipped gate has to be able to REFUSE (#987).
+
+    The engine records `suspended_at_step = step_idx + 1`, so a resumed run
+    starts the step after its await. For this workflow that step used to be
+    `implement`: any resume, however it arrived, wrote code against a spec
+    nobody approved. The fix is a route in that slot which reads the human's
+    verdict - and the route's shape is the safety property, not the route's
+    existence.
+
+    Asserted against the SHIPPED pack, following this file's convention: a
+    gate that waves work through in a workflow we distribute is the actual
+    defect, not a hypothetical one.
+    """
+
+    def _steps(self):
+        wf = yaml.safe_load(ISSUE_LIFECYCLE.read_text())
+        return [s for s in wf["steps"] if "name" in s]
+
+    def _names(self):
+        return [s["name"] for s in self._steps()]
+
+    def _route(self):
+        return next(s for s in self._steps() if s["name"] == "approval_route")
+
+    def test_the_step_after_the_gate_is_the_route(self):
+        """Not `implement`. This is the whole mechanism: the +1 the engine
+        already writes has to land on something that reads the answer."""
+        names = self._names()
+        assert names[names.index("await_approval") + 1] == "approval_route"
+
+    def test_the_route_is_a_route_and_not_an_agent_step(self):
+        route = self._route()
+        assert "if" in route, "approval_route must be a deterministic route"
+        assert "prompt" not in route and "agent" not in route, (
+            "the gate's verdict must not be interpreted by a model")
+
+    def test_the_condition_tests_for_the_verdict_that_advances(self):
+        """The direction is the safety property.
+
+        An unset verdict resolves to "" with only a log warning, so whichever
+        branch is the `else` is the branch an unanswered resume takes. Written
+        as `if reject -> rework`, an empty verdict falls into `implement`.
+        """
+        route = self._route()
+        assert route["if"] == "${{event.verdict}} == 'approve'", route["if"]
+        assert route["goto"] == "implement"
+
+    def test_the_else_is_written_out_and_reworks(self):
+        """A route with no `else` falls through to step_idx + 1 - which here
+        is `implement`, the step this route exists to hold back."""
+        route = self._route()
+        assert "else" in route, (
+            "approval_route must name its else branch; an implicit one falls "
+            "through to the step after it")
+        assert route["else"] == "spec"
+
+    def test_the_rework_target_re_enters_the_gate(self):
+        """A rejection has to come back for another answer. The rework step
+        sits before the await, so the back edge runs spec -> plan_review ->
+        await_approval -> approval_route again."""
+        names = self._names()
+        assert names.index("spec") < names.index("await_approval")
+
+    def test_the_rework_step_can_see_why_it_was_rejected(self):
+        """A step that cannot read the verdict can only guess at what to
+        change."""
+        spec = next(s for s in self._steps() if s["name"] == "spec")
+        assert "${{event.verdict}}" in spec["prompt"]
+        assert "${{event.reply}}" in spec["prompt"]

@@ -35,6 +35,106 @@ class TestCheckCLI:
         assert r.ok
 
 
+# --- Brain CLI gating (D020) ---
+
+
+def _install_brain(tmp_path, body: str) -> None:
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    paths.agent_yaml_path(tmp_path).write_text("agent: t\n" + body)
+
+
+class TestCheckBrainCLI:
+    """The team's ENGINE decides which CLI doctor may demand.
+
+    A codex team on a host with no `claude` binary is healthy, and reporting
+    it broken (doctor exit 1) is the whole defect. Gateway mode is an
+    endpoint property, not an engine, so a `kind: claude` gateway team still
+    needs the claude CLI — it is the CLI that dials the gateway.
+    """
+
+    def _names(self, results):
+        return {r.name for r in results}
+
+    @pytest.fixture(autouse=True)
+    def _no_live_auth_probe(self):
+        """`_check_claude_auth` shells out to `claude --print hi` — a real
+        model call, never from a unit test."""
+        from bobi import doctor
+        with patch.object(doctor, "_check_claude_auth",
+                          return_value=CheckResult("Claude auth", ok=True)):
+            yield
+
+    def test_claude_team_checks_the_claude_cli(self, tmp_path):
+        _install_brain(tmp_path, "brain:\n  kind: claude\n")
+        from bobi import doctor
+        with patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert self._names(results) == {"Claude CLI", "Claude auth"}
+
+    def test_unconfigured_team_defaults_to_claude(self, tmp_path):
+        _install_brain(tmp_path, "entry_point: manager\n")
+        from bobi import doctor
+        with patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert self._names(results) == {"Claude CLI", "Claude auth"}
+
+    def test_codex_team_never_demands_the_claude_cli(self, tmp_path):
+        _install_brain(tmp_path, "brain:\n  kind: codex\n")
+        from bobi import doctor
+        with patch("shutil.which", return_value=None), \
+             patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert "Claude CLI" not in self._names(results)
+        assert "Claude auth" not in self._names(results)
+        # It still says something: the codex CLI is this team's real
+        # prerequisite, and it is missing here.
+        codex = [r for r in results if r.name == "Codex CLI"]
+        assert codex and not codex[0].ok
+
+    def test_codex_team_passes_when_the_codex_cli_is_present(self, tmp_path):
+        _install_brain(tmp_path, "brain:\n  kind: codex\n")
+        from bobi import doctor
+        with patch("shutil.which", return_value="/usr/local/bin/codex"), \
+             patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert all(r.ok for r in results)
+
+    def test_openai_gateway_team_is_a_codex_engine(self, tmp_path):
+        _install_brain(
+            tmp_path,
+            "brain:\n  kind: codex\n  base_url: http://localhost:4000\n")
+        from bobi import doctor
+        with patch("shutil.which", return_value=None), \
+             patch.object(doctor, "bound_root", return_value=tmp_path):
+            results = doctor._check_brain_cli()
+        assert "Claude CLI" not in self._names(results)
+
+    def test_claude_gateway_team_needs_the_cli_but_not_vendor_auth(self, tmp_path):
+        _install_brain(
+            tmp_path,
+            "brain:\n  kind: claude\n  base_url: http://localhost:4000\n")
+        from bobi import doctor
+        with patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch.object(doctor, "bound_root", return_value=tmp_path), \
+             patch.object(
+                 doctor, "_check_claude_auth",
+                 side_effect=AssertionError(
+                     "a gateway team's auth belongs to the gateway, and the "
+                     "ambient `claude --print hi` probe does not carry it")):
+            results = doctor._check_brain_cli()
+        assert "Claude CLI" in self._names(results)
+        assert all(r.ok for r in results)
+
+    def test_no_bound_runtime_keeps_the_default_checks(self):
+        from bobi import doctor
+        with patch.object(doctor, "bound_root", return_value=None), \
+             patch("shutil.which", return_value="/usr/local/bin/claude"), \
+             patch.object(doctor, "_check_claude_auth",
+                          return_value=CheckResult("Claude auth", ok=True)):
+            results = doctor._check_brain_cli()
+        assert self._names(results) == {"Claude CLI", "Claude auth"}
+
+
 # --- Project ---
 
 
@@ -86,8 +186,8 @@ class TestCheckPolicy:
             patch("bobi.doctor.bound_root", return_value=tmp_path),
             patch("bobi.history.messages_since", return_value=[]),
         ):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert r.ok
         assert "no long_term_memory.md yet" in r.detail
 
@@ -97,8 +197,8 @@ class TestCheckPolicy:
             patch("bobi.doctor.bound_root", return_value=tmp_path),
             patch("bobi.history.messages_since", return_value=rows),
         ):
-            from bobi.doctor import _check_policy
-            r = _check_policy()
+            from bobi.doctor import _check_long_term_memory
+            r = _check_long_term_memory()
         assert not r.ok
         assert "pending" in r.detail
         assert "sleep cycle appears stalled" in r.hint
@@ -123,7 +223,10 @@ class TestCheckIngressReachability:
         assert not r.required
         assert "slack" in r.detail
         assert "public HTTPS ingress" in r.detail
-        assert "event_server_url" in r.hint
+        # The hint names the authored spelling (`event_server:`), not the
+        # parses-but-unused `event_server_url:` alias — bobi/ingress.py (Q109).
+        assert "Set event_server in agent.yaml" in r.hint
+        assert "event_server_url" not in r.hint
 
     def test_passes_for_remote_event_server(self, tmp_path):
         paths.package_dir(tmp_path).mkdir(parents=True)
@@ -175,10 +278,10 @@ def _run_slack_socket_check(
         patch("bobi.doctor.bound_root", return_value=tmp_path),
         patch("bobi.events.server.health", health_probe),
         patch(
-            "bobi.events.server._slack_auth_info",
+            "bobi.slack.resolve_auth_info",
             return_value=("T_TEAM", "B_BOT", "U_BOT"),
         ),
-        patch("bobi.events.server._slack_app_id", return_value="A_APP"),
+        patch("bobi.slack.resolve_app_id", return_value="A_APP"),
     ):
         from bobi.doctor import _check_slack_socket_mode
         result = _check_slack_socket_mode()
@@ -250,6 +353,19 @@ class TestCheckSlackSocketMode:
         assert not result.required
         assert "connected" in result.detail.lower()
         assert "A_APP" in result.detail
+
+    def test_reports_users_read_when_app_identity_is_missing(self, tmp_path):
+        _write_slack_socket_config(tmp_path)
+        import bobi.slack
+        with patch(
+            "bobi.slack.require_app_identity",
+            side_effect=bobi.slack.SlackAppIdentityError("users:read is required"),
+        ):
+            result = _run_slack_socket_check(tmp_path, {
+                "status": "ok", "mode": "local", "slack_socket": [],
+            })
+        assert not result.ok
+        assert "users:read" in result.hint
 
     @pytest.mark.parametrize("entry", [
         pytest.param(
@@ -369,10 +485,10 @@ def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
     import bobi.doctor as doctor
 
     ordinary = CheckResult("ordinary", ok=True)
-    list_checks = {"_check_package_requires", "_check_host_caps", "_check_services"}
+    list_checks = {"_check_package_requires", "_check_host_caps",
+                   "_check_services", "_check_brain_cli"}
     for name in (
-        "_check_claude_cli",
-        "_check_claude_auth",
+        "_check_brain_cli",
         "_check_local_config",
         "_check_runtime_layout",
         "_check_runtime_write_policy",
@@ -384,6 +500,7 @@ def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
         "_check_workflows",
         "_check_bubble_auth",
         "_check_event_server",
+        "_check_running_code",
         "_check_ingress_reachability",
         "_check_recent_events",
         "_check_long_term_memory",
@@ -397,8 +514,14 @@ def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
     monkeypatch.setattr(
         doctor, "_check_slack_socket_mode", lambda: socket_check, raising=False,
     )
+    # The stale-process check is only useful if `doctor` actually runs it (#928).
+    running_code = CheckResult("Running code", ok=True, detail="sentinel")
+    monkeypatch.setattr(doctor, "_check_running_code", lambda: running_code)
 
-    assert socket_check in doctor.run_doctor()
+    results = doctor.run_doctor()
+
+    assert socket_check in results
+    assert running_code in results
 
 
 def test_event_server_check_surfaces_node_prerequisite(monkeypatch):
@@ -445,8 +568,105 @@ def test_event_server_check_skips_local_node_for_unregistered_remote(
     result = doctor._check_event_server()
 
     assert result.ok is False
-    assert result.detail == "not running"
     assert "Node.js" not in result.hint
+
+
+# --- Event server URL resolution (D019) ---
+
+
+def _install_event_server(tmp_path, url: str = "") -> None:
+    paths.package_dir(tmp_path).mkdir(parents=True)
+    body = "agent: test\n"
+    if url:
+        body += f"event_server_url: {url}\n"
+    paths.agent_yaml_path(tmp_path).write_text(body)
+
+
+def test_event_server_check_probes_the_configured_remote_url(
+    tmp_path, monkeypatch,
+):
+    """D019 — a remote-configured instance that has not registered yet.
+
+    Falling through to a hardcoded http://localhost:8080 reported the remote
+    server 'not running' (a REQUIRED failure, doctor exit 1) and told the
+    operator to start a local one that was never meant to run.
+    """
+    from bobi import doctor
+
+    _install_event_server(tmp_path, "https://events.example.com")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    probed = []
+
+    def fake_health(url, *a, **kw):
+        probed.append(url)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("bobi.events.server.health", fake_health)
+
+    result = doctor._check_event_server()
+
+    assert probed == ["https://events.example.com"]
+    assert result.ok is True
+    assert "events.example.com" in result.detail
+
+
+def test_event_server_check_names_the_remote_url_when_unreachable(
+    tmp_path, monkeypatch,
+):
+    from bobi import doctor
+
+    _install_event_server(tmp_path, "https://events.example.com")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    monkeypatch.setattr("bobi.events.server.health", lambda url, *a, **kw: None)
+
+    result = doctor._check_event_server()
+
+    assert result.ok is False
+    assert "events.example.com" in result.detail
+    # Never the local-start advice: there is no local server to start.
+    assert "event-server start" not in result.hint
+
+
+def test_event_server_check_uses_the_running_local_port(tmp_path, monkeypatch):
+    """A local server on a configured non-8080 port is not 'not running'."""
+    from bobi import doctor
+
+    _install_event_server(tmp_path)
+    state = paths.state_dir(tmp_path)
+    (state / "event-server.pid").write_text("4242")
+    (state / "event-server.port").write_text("9090")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    probed = []
+
+    def fake_health(url, *a, **kw):
+        probed.append(url)
+        return {"status": "ok"} if url.endswith(":9090") else None
+
+    monkeypatch.setattr("bobi.events.server.health", fake_health)
+
+    result = doctor._check_event_server()
+
+    assert probed == ["http://localhost:9090"]
+    assert result.ok is True
+
+
+def test_event_server_check_uses_the_configured_local_port(tmp_path, monkeypatch):
+    from bobi import doctor
+
+    _install_event_server(tmp_path, "http://localhost:9091")
+    monkeypatch.setattr(doctor, "bound_root", lambda: tmp_path)
+    probed = []
+
+    def fake_health(url, *a, **kw):
+        probed.append(url)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("bobi.events.server.health", fake_health)
+
+    result = doctor._check_event_server()
+
+    assert probed == ["http://localhost:9091"]
+    assert result.ok is True
 
 
 def test_event_server_check_keeps_normal_not_running_hint_when_node_is_ready(
@@ -565,6 +785,34 @@ class TestCheckPackageRequires:
         assert results[0].ok
         assert "good-dep" in results[0].name
 
+    def test_check_that_could_not_run_is_reported_as_such(self, tmp_path,
+                                                          monkeypatch):
+        """An unevaluable check reads as an environment fault, not a miss.
+
+        `why`/`fix` would send the operator to install a tool that may already
+        be there; the real cause is that the probe never ran (#1063). Doctor
+        also states that dispatch is not gated on it, since it is not.
+        """
+        monkeypatch.delenv("BOBI_AGENT", raising=False)
+        monkeypatch.delenv("BOBI_INSTANCE", raising=False)
+        self._write_config(tmp_path, """\
+              - name: otel
+                check: 'bobi agent "$BOBI_AGENT" otel --help'
+                why: "telemetry"
+                fix: "pip install --upgrade bobi" """)
+        # The real runner, with the one thing it needs unresolvable.
+        with patch("bobi.doctor.bound_root", return_value=tmp_path), \
+                patch("bobi.paths.agent_name", return_value=""):
+            from bobi.doctor import _check_package_requires
+            results = _check_package_requires()
+        assert len(results) == 1
+        assert not results[0].ok
+        assert "could not be evaluated" in results[0].detail
+        assert "$BOBI_AGENT" in results[0].detail
+        # Not the install hint: the tool is not what failed here.
+        assert "pip install" not in results[0].hint
+        assert "not blocked" in results[0].hint
+
     def test_check_fails(self, tmp_path):
         self._write_config(tmp_path, """\
               - name: broken-dep
@@ -577,6 +825,25 @@ class TestCheckPackageRequires:
         assert len(results) == 1
         assert not results[0].ok
         assert "run setup" in results[0].hint
+
+    def test_failure_detail_survives_a_declared_why(self, tmp_path):
+        """`why:` must not suppress what the check actually reported (#771).
+
+        A blocked dispatch tells the operator to run doctor for details, so
+        doctor showing standing context instead of the failure is the same
+        unattributability bug one surface over.
+        """
+        self._write_config(tmp_path, """\
+              - name: ga4-report
+                check: ">&2 echo 'ga4: command not found'; exit 127"
+                why: "GA4 reporting needs the CLI"
+                fix: "pipx install ga4" """)
+        with patch("bobi.doctor.bound_root", return_value=tmp_path):
+            from bobi.doctor import _check_package_requires
+            results = _check_package_requires()
+        assert not results[0].ok
+        assert "ga4: command not found" in results[0].detail
+        assert "GA4 reporting needs the CLI" in results[0].detail
 
     def test_no_requires(self, tmp_path):
         config_dir = paths.package_dir(tmp_path)
@@ -592,3 +859,96 @@ class TestCheckPackageRequires:
             from bobi.doctor import _check_package_requires
             results = _check_package_requires()
         assert results == []
+
+
+# --- Running code vs installed code (#928) ---
+
+
+class TestCheckRunningCode:
+    """`doctor` reported a six-day-old event server healthy while the bundle
+    it executes had been overwritten by an upgrade. The pack-drift check has
+    always had this instinct for FILES; this is the same question asked of
+    running PROCESSES."""
+
+    @pytest.fixture
+    def live_pid(self):
+        import subprocess
+        import sys
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            yield proc.pid
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    def _bind(self, tmp_path, monkeypatch):
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr("bobi.doctor.bound_root", lambda: tmp_path)
+
+    def test_nothing_running_passes(self, tmp_path, monkeypatch):
+        from bobi.doctor import _check_running_code
+
+        self._bind(tmp_path, monkeypatch)
+
+        result = _check_running_code()
+
+        assert result.ok
+        assert "no long-lived local processes" in result.detail
+
+    def test_matching_launch_passes_and_names_the_version(self, tmp_path,
+                                                          monkeypatch, live_pid):
+        from bobi import launch_stamp
+        from bobi.doctor import _check_running_code
+
+        self._bind(tmp_path, monkeypatch)
+        paths.manager_pid_path(tmp_path).write_text(str(live_pid))
+        launch_stamp.record_launch(tmp_path, launch_stamp.MANAGER, live_pid)
+
+        result = _check_running_code()
+
+        assert result.ok
+        assert "manager" in result.detail
+        assert launch_stamp.installed_bobi_version() in result.detail
+
+    def test_stale_processes_are_named_with_their_remedy(self, tmp_path,
+                                                        monkeypatch, live_pid):
+        """The upgrade case: both long-lived processes predate the install."""
+        from bobi.doctor import _check_running_code
+
+        self._bind(tmp_path, monkeypatch)
+        paths.manager_pid_path(tmp_path).write_text(str(live_pid))
+        paths.event_server_pid_path(tmp_path).write_text(str(live_pid))
+
+        result = _check_running_code()
+
+        assert not result.ok
+        # A warning, not a failure: the install is fine, a restart is pending.
+        assert not result.required
+        assert "manager" in result.detail and "event server" in result.detail
+        assert "restart" in result.hint
+        assert "event-server restart" in result.hint
+
+    def test_restarting_the_named_process_clears_the_check(self, tmp_path,
+                                                           monkeypatch, live_pid):
+        from bobi import launch_stamp
+        from bobi.doctor import _check_running_code
+
+        self._bind(tmp_path, monkeypatch)
+        paths.event_server_pid_path(tmp_path).write_text(str(live_pid))
+        assert not _check_running_code().ok
+
+        launch_stamp.record_launch(tmp_path, launch_stamp.EVENT_SERVER, live_pid)
+
+        assert _check_running_code().ok
+
+    def test_no_runtime_selected_says_so(self, monkeypatch):
+        from bobi.doctor import _check_running_code
+
+        monkeypatch.setattr("bobi.doctor.bound_root", lambda: None)
+
+        result = _check_running_code()
+
+        assert result.ok
+        assert result.detail == "no runtime selected"

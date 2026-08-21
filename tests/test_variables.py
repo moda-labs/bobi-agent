@@ -149,6 +149,20 @@ class TestConditionEquality:
         ctx.set_flat("complexity", "medium")
         assert ctx.evaluate_condition("complexity == large") is False
 
+    def test_count_not_equal_zero(self):
+        """D015 regression pin: route a count with `!= 0`, never `> 0`.
+
+        `>` is unsupported and falls through to the bare-truthy check, which
+        is False for every count except the accidental 1 - so a 3-issue audit
+        routed to `done`. Kept here after the pack that carried the defective
+        route was deleted; the operator semantics are the engine's, not the
+        pack's.
+        """
+        for count, nonzero in (("0", False), ("1", True), ("3", True)):
+            ctx = VariableContext()
+            ctx.set_flat("issues_count", count)
+            assert ctx.evaluate_condition("issues_count != 0") is nonzero, count
+
     def test_quoted_string_equal(self):
         ctx = VariableContext()
         ctx.set_flat("name", "hello world")

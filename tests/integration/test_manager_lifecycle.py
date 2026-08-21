@@ -217,7 +217,13 @@ class TestManagerMessaging:
 
         if not ready:
             new_content = log_file.read_text()[log_pos:] if log_file.exists() else "(no log)"
-            pytest.skip(f"Manager did not become ready: {new_content[-300:]}")
+            # fail, not skip: these are the only checks in the suite that the
+            # drain loop actually starts, and a skip turns a boot regression
+            # into green CI (D012).
+            pytest.fail(
+                "Manager did not become ready (needs Node 20 + `npm ci` in "
+                f"event-server/ for the drain loop to start): {new_content[-300:]}"
+            )
 
         yield
 

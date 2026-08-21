@@ -56,7 +56,8 @@ class TestClaudeEffortSelection:
             options={"effort": "low", "max_turns": 3},
         )
         try:
-            await session.connect("Reply with exactly: OK")
+            await session.connect()
+            await session.query("Reply with exactly: OK")
             # The persistent CLI subprocess is alive now - the ground truth
             # for "the dial reached the real session" is its own argv (the
             # claude CLI warns-and-ignores bad values and records effort
@@ -144,7 +145,8 @@ class TestCodexEffortSelection:
         )
         session._runner = recording_runner
         try:
-            await session.connect("Reply with exactly: OK")
+            await session.connect()
+            await session.query("Reply with exactly: OK")
             _, result = await _drain(session)
         finally:
             await session.disconnect()

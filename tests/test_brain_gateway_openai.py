@@ -132,7 +132,8 @@ async def test_provider_overrides_and_effort_ride_fresh_and_resume_argv(
     session._runner = _runner
     assert session.provider == "gateway"
 
-    await session.connect("first")
+    await session.connect()
+    await session.query("first")
     [m async for m in session.receive_response()]
     await session.query("second")
     [m async for m in session.receive_response()]

@@ -75,8 +75,8 @@ def ensure_running() -> int:
     _pid_path().unlink(missing_ok=True)
     _port_path().unlink(missing_ok=True)
 
-    from bobi.sdk import get_project_root
-    project_root = get_project_root()
+    from bobi.paths import bound_root
+    project_root = bound_root()
     if not project_root:
         raise RuntimeError("project root not set")
 
@@ -119,15 +119,27 @@ def _post_embed(port: int, texts: list[str]) -> list[list[float]]:
 
 def embed(texts: list[str]) -> list[list[float]]:
     """Embed a list of texts via the sidecar. Auto-starts if needed."""
+    import httpx
+
     global _verified_port
     port = _verified_port or ensure_running()
     try:
         embeddings = _post_embed(port, texts)
-    except OSError:
+    except httpx.TransportError as e:
         # Sidecar died since the last call — restart once and retry.
+        # httpx.ConnectError and its siblings are NOT OSError subclasses, so
+        # catching OSError here made this whole recovery path dead code and
+        # left _verified_port pinned to the dead port forever (D010).
         _verified_port = None
+        log.info("Embedding sidecar unreachable on port %d (%s) — "
+                 "restarting and retrying", port, e)
         port = ensure_running()
         embeddings = _post_embed(port, texts)
+    except Exception:
+        # Any other failure leaves this port unproven too: keeping it cached
+        # is what stops the next call from ever re-running ensure_running().
+        _verified_port = None
+        raise
     _verified_port = port
     return embeddings
 
@@ -138,16 +150,21 @@ def stop(root: Path | None = None) -> None:
     ``root`` selects the team whose sidecar state to read; None means the
     process's bound root (in-team callers).
     """
+    from bobi.sdk import read_pid
+
     global _verified_port
     _verified_port = None
     pid_p = _pid_path(root)
     if not pid_p.exists():
         return
-    try:
-        pid = int(pid_p.read_text().strip())
-        os.kill(pid, signal.SIGTERM)
-        log.info("Stopped embedding sidecar (pid %d)", pid)
-    except (ValueError, ProcessLookupError, OSError):
-        pass
+    # read_pid is the house's tolerant reader (0 when missing or malformed),
+    # the same one is_running() uses on this file.
+    pid = read_pid(pid_p)
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            log.info("Stopped embedding sidecar (pid %d)", pid)
+        except OSError:
+            pass
     pid_p.unlink(missing_ok=True)
     _port_path(root).unlink(missing_ok=True)

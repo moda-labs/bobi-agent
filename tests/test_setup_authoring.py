@@ -377,6 +377,41 @@ class TestNonLossyMerges:
         assert gh["credentials"] == {"token": "${GH}"}  # rich entry untouched
         assert merged["entry_point"] == "triage-lead"   # recomputed from spec
 
+    # D036 — `chat` is a setup-managed overlay key (the docstring says so), but
+    # the overlay only ever WROTE it: `if state.chat and state.chat != "cli"`.
+    # Switching an existing slack team to the command line left `chat: slack` in
+    # the merged yaml, so the team kept running the Slack adapter against the
+    # user's explicit instruction. Only slack->telegram style switches took.
+
+    def test_merge_agent_yaml_drops_chat_when_the_team_switches_to_cli(self):
+        existing = ("agent: legacy\nentry_point: lead\nchat: slack\n")
+        s = _spec_state()
+        s.team_name, s.chat = "legacy", "cli"
+
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, s))
+
+        assert "chat" not in merged, \
+            "a switch to cli must remove the inherited chat: key"
+
+    def test_merge_agent_yaml_still_overwrites_one_chat_service_with_another(self):
+        existing = ("agent: legacy\nentry_point: lead\nchat: slack\n")
+        s = _spec_state()
+        s.team_name, s.chat = "legacy", "telegram"
+
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, s))
+
+        assert merged["chat"] == "telegram"
+
+    def test_merge_agent_yaml_leaves_chat_alone_when_setup_has_no_opinion(self):
+        # state.chat unset means setup never asked — not "the user chose cli".
+        existing = ("agent: legacy\nentry_point: lead\nchat: slack\n")
+        s = _spec_state()
+        s.team_name, s.chat = "legacy", ""
+
+        merged = yaml.safe_load(authoring.merge_agent_yaml(existing, s))
+
+        assert merged["chat"] == "slack"
+
     def test_merge_agent_yaml_updates_name_on_rename(self):
         # `agent` is the team name (setup-managed) — a rename must take, even
         # though the existing file already declares the old name.

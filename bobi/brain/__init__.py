@@ -19,6 +19,8 @@ import os
 from collections.abc import MutableMapping
 
 from bobi.brain.base import (
+    ERROR_KIND_AUTHENTICATION,
+    ERROR_KIND_CREDITS_EXHAUSTED,
     ERROR_KIND_MAX_TURNS,
     AssistantText,
     BrainCapabilities,
@@ -29,6 +31,7 @@ from bobi.brain.base import (
     DeferredTool,
     StreamDelta,
     TurnResult,
+    classify_brain_unavailability,
     turn_error_text,
 )
 from bobi.brain.claude import ClaudeBrain
@@ -36,6 +39,7 @@ from bobi.brain.codex import CodexBrain
 from bobi.brain.gateway import (
     GATEWAY_BASE_URL_ENV,
     GATEWAY_SMALL_MODEL_ENV,
+    GATEWAY_UNRESOLVED_BASE_URL,
     GatewayBrain,
 )
 from bobi.brain.gateway_openai import GATEWAY_WIRE_API_ENV, GatewayOpenAIBrain
@@ -102,9 +106,6 @@ def session_brain_label(kind: str | None = None) -> str:
 # stale ambient value from another installation cannot leak across sessions.
 BRAIN_ENV = "BOBI_BRAIN"
 _BRAIN_MODEL_ENV = "BOBI_BRAIN_MODEL"
-# Compatibility for older external code that imported the constant directly.
-# Bobi internals should use the helpers below so model env handling stays here.
-BRAIN_MODEL_ENV = _BRAIN_MODEL_ENV
 _BRAIN_EFFORT_ENV = "BOBI_BRAIN_EFFORT"
 
 
@@ -269,15 +270,6 @@ def _pin_env(
         target.pop(key, None)
 
 
-# Pinned in place of a declared-but-empty gateway base URL (#789). RFC 2606
-# reserves .invalid, so a session built against it fails its first turn with a
-# resolution error naming the problem - it can never silently dial the real
-# vendor endpoint carrying the gateway's credentials (the leak the old
-# session-time guard prevented, #655). Non-session commands (doctor, stop,
-# status) keep working, and validate reports the real fix.
-GATEWAY_UNRESOLVED_BASE_URL = "http://bobi-gateway-base-url-unresolved.invalid"
-
-
 def _require_declared_gateway_url(kind: str | None, base_url: str) -> None:
     """Fail loud when a team declared a gateway but its base URL is empty.
 
@@ -419,23 +411,46 @@ def set_process_brain(
             os.environ.pop(var, None)
 
 
-def set_process_brain_from_config(cfg) -> None:
-    """``set_process_brain`` from a loaded team Config.
+def _brain_pin_kwargs(cfg) -> dict:
+    """The config-to-pins expansion, in one place.
 
-    The one config-to-pins expansion, shared by every process-startup site
-    (CLI agent binding, the manager service, ``spawn_team``'s in-process
-    preflight) so a new brain config field cannot be threaded into one site
-    and missed in another. *cfg* is duck-typed (``brain_kind`` etc.) so this
-    module stays import-free of ``bobi.config``.
+    *cfg* is duck-typed (``brain_kind`` etc.) so this module stays import-free
+    of ``bobi.config``; the ``brain_*`` properties there are the single
+    definition of every default and predicate this reads (the ``wire_api``
+    fallback, the presence-based gateway declaration), so a call site cannot
+    re-encode one and drift.
     """
-    set_process_brain(
-        cfg.brain_kind, cfg.brain_model,
+    return dict(
         effort=cfg.brain_effort,
         gateway_base_url=cfg.brain_base_url,
         gateway_small_model=cfg.brain_small_model,
         gateway_wire_api=cfg.brain_wire_api,
         gateway_declared=cfg.brain_is_gateway,
     )
+
+
+def set_process_brain_from_config(cfg) -> None:
+    """``set_process_brain`` from a loaded team Config.
+
+    One of the two config-to-pins entry points, shared by every
+    process-startup site (CLI agent binding, the manager service,
+    ``spawn_team``'s in-process preflight) so a new brain config field cannot
+    be threaded into one site and missed in another.
+    """
+    set_process_brain(cfg.brain_kind, cfg.brain_model, **_brain_pin_kwargs(cfg))
+
+
+def pin_process_brain_from_config(cfg, env=None) -> None:
+    """``pin_process_brain`` from a loaded team Config, into *env*.
+
+    The spawn-side twin of :func:`set_process_brain_from_config`
+    (``bobi.env.pin_brain_from_root``). Both expand through
+    :func:`_brain_pin_kwargs`, so the startup path and the spawn path read the
+    same fields by construction - the spawn path used to hand-roll the
+    expansion and had already re-encoded two of the defaults.
+    """
+    pin_process_brain(
+        cfg.brain_kind, cfg.brain_model, env, **_brain_pin_kwargs(cfg))
 
 
 def continuation_token(
@@ -537,11 +552,14 @@ __all__ = [
     "DEFAULT_MAX_TURNS",
     "BRAIN_ENV",
     "ERROR_KIND_MAX_TURNS",
+    "ERROR_KIND_AUTHENTICATION",
+    "ERROR_KIND_CREDITS_EXHAUSTED",
     "GATEWAY_BASE_URL_ENV",
     "GATEWAY_SMALL_MODEL_ENV",
     "GATEWAY_UNRESOLVED_BASE_URL",
     "GATEWAY_WIRE_API_ENV",
     "continuation_token",
+    "classify_brain_unavailability",
     "get_brain",
     "get_process_brain_effort",
     "get_process_brain_model",

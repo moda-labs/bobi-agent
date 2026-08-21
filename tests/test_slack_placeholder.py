@@ -418,19 +418,24 @@ class TestDrainChannelIntegration:
         assert "placeholder_ts" not in prepared[0]["fields"]
         assert passive["fields"]["placeholder_ts"] == "stale"
 
-    @patch("bobi.events.channels.SlackInputChannel.prepare")
+    @patch("bobi.events.gateway.channels_typing", return_value=True)
     def test_drain_does_not_reuse_placeholder_for_thread_reply(self,
-                                                                mock_prepare,
+                                                                mock_typing,
                                                                 monkeypatch):
-        """Passive thread replies must not inherit another event's placeholder."""
+        """Passive thread replies must not inherit another event's placeholder.
+
+        Driven through the REAL ``SlackInputChannel.prepare``: the passive
+        branch lives inside the handler, so a test that asserted the drain
+        loop skipped the handler was pinning the call shape rather than the
+        delivered result.
+        """
         from queue import SimpleQueue
         from bobi.events.drain import drain_loop
 
         e1 = _make_slack_event(ts="171.50", text="active mention")
+        e1["fields"]["placeholder_ts"] = "171.49"
         e2 = _make_slack_event(ts="171.51", text="passive chatter")
         e2["type"] = "slack.thread_reply"
-
-        mock_prepare.return_value = e1
 
         q = SimpleQueue()
         q.put(e1)
@@ -461,8 +466,8 @@ class TestDrainChannelIntegration:
         finally:
             unregister_local_inbox("test-session")
 
-        mock_prepare.assert_called_once_with(e1, PROJECT)
         assert "placeholder_ts" not in delivered[0]
+        assert "slack.mention" in delivered[0]
         assert "slack.thread_reply" in delivered[0]
 
     @patch("bobi.events.channels.SlackInputChannel.prepare")

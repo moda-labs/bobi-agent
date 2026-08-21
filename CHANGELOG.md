@@ -1,5 +1,312 @@
 # Changelog
 
+## 0.57.0 - 2026-08-11
+
+Minor release: agents can author their own OTLP telemetry, subscription login
+gets five fixes along one path (gateways, provider config dirs, stale bubbles,
+and two Slack failure modes), and the review-remediation sweep closes Lane A
+and Phase 5 and lands all five Phase 6 consolidation batches.
+
+### Added
+- **`bobi agent <name> otel` — agent-authored OTLP telemetry (#980, #978).**
+  Three commands (`metric`, `gauge`/`counter`/`histogram` kinds; `log`;
+  `check [--send]`) that let an agent record telemetry **of its own choosing**
+  to any OTLP endpoint: the agent supplies the observation, bobi supplies the
+  wire format and the fleet identity labels the agent cannot resolve for
+  itself. Opt-in per team via `tool_library: [otel]` — deliberately not in the
+  base prompt. Operator setup and the resource-attribute table are in
+  `docs/OTEL.md`.
+- **Browser-level e2e coverage for both web UIs (#990, #991).** Setup
+  back-navigation, the shared top-bar contract across `bobi setup` and
+  `bobi app` (which had already regressed once, silently), a type-rendering
+  guard, and 36 tests over the web app itself. Both surfaces now boot through
+  one `_serve()` fixture.
+
+### Fixed
+
+Subscription login, end to end:
+- **A Claude-gateway team could not use subscription login (#1002).** The
+  login guard reused the gateway-declaration predicate as an auth-mode
+  predicate and raised before selecting the PTY flow; the Docker entrypoint
+  rejected such teams before bootstrap could run; and bootstrap discarded the
+  configured base URL. A declared `base_url` with no `ANTHROPIC_AUTH_TOKEN`
+  now runs the ordinary subscription bootstrap; explicitly token-authenticated
+  Claude gateways and all OpenAI-compatible gateways still fail closed.
+- **A successful login could be reported as failed under `CLAUDE_CONFIG_DIR`
+  (#1003).** Credentials were resolved relative to `$HOME` regardless of the
+  provider's own config-dir override, so bobi missed what the CLI had just
+  written and repeated the login ceremony on every start. Claude credentials
+  now follow `CLAUDE_CONFIG_DIR` and Codex `CODEX_HOME`, with the HOME
+  fallback preserved.
+- **Stale bubble credentials wedged login bootstrap after an event-server
+  restart (#996).** Failed channel registration/JOIN is now probed to
+  distinguish a stale bubble, credentials re-mint through the compare-and-swap
+  guard, and the JOIN retries once. Stored subscription credentials are also
+  structurally validated — missing, malformed, blank, or expired refresh
+  tokens trigger bootstrap instead of being assumed healthy.
+- **Slack channel login told users to paste the code where the adapter could
+  not hear it (#1001).** A top-level channel message is not a routable inbound
+  shape, so the pasted code was dropped and bootstrap waited to timeout. The
+  prompt now says reply-in-thread or @mention the bot, matching the routes
+  that actually exist.
+- **A Slack bot token missing `users:read` looked healthy while every inbound
+  event was silently dropped (#998).** `bots.info` failing left an empty app
+  id, and subscription detection fell back to a workspace-only topic that no
+  publisher uses — exact topic matching then delivered nothing. Identity
+  resolution now fails closed, naming the missing scope.
+
+Review-remediation Lane A closes (#970, #972 — the final 20 bugs, each with a
+test proven to fail first):
+- **Codex sessions wiped each other's MCP servers (D009).** Codex re-reads
+  `config.toml` on every `codex exec`, and any session built without
+  `mcp_servers` in its options — every monitor check, gate, and workflow step
+  — read the absent key as "the team has none" and erased the bobi-managed
+  block out from under the manager and every other live session.
+- **`--project` never matched a repo with a hyphen in its name (D069).** The
+  lossy cwd decode (`-Users-z-dev-bobi-agent` → `/Users/z/dev/bobi/agent`) is
+  replaced by the transcript's real cwd, with the decode kept only as a
+  fallback.
+- Plus 18 more across the history indexer, both search paths, the doctor
+  probes, packaging, and the long-running/blocking surfaces.
+
+Test infrastructure:
+- **The container-image integration tests were unrunnable locally (#975).**
+  The fixture's fallback `docker build` used a source mode that cannot succeed
+  anywhere (`.dockerignore` drops both `.git` and the prebuilt event server,
+  and the image is deliberately Node-free), reading as "docker unavailable."
+  It now builds the wheel first, the way CI always has.
+- **A Worker MCP test measured the runner, not the code (#973).** The 3s
+  stopwatch flaked on a loaded 2-core runner; the wait contract is now
+  asserted by poll count.
+
+### Changed / Removed
+- **Dead-code purge — review-remediation Phase 5 complete, 42 items (#979,
+  #982, #983, #984).** Fourteen zero-consumer names, the expired
+  curator→sleep-cycle and policy→long_term_memory rename compat layers, dead
+  CLI helpers duplicating the live start/stop paths, and the callerless
+  terminal `run_setup` entry point (the web UI is the entry point).
+- **Consolidation — review-remediation Phase 6, all five batches (#993, #995,
+  #997, #999, #1000).** Behavior-preserving single-sourcing across `events/`,
+  `cli.py`, `setup/`, `monitors/` + `sdk.py`, and compose/build: one
+  definition each for Slack identity resolution, event-server port
+  resolution, `subscribe:` parsing, launch-admission defaults, `_parse_iso`,
+  and credential precedence (two setup screens had it in the opposite order
+  from the runtime). Two deliberate deltas: monitor `notify_channel` no
+  longer re-parses `agent.yaml` on every notification, and the hidden `ask`
+  command loses its unused `--source` option.
+- **The `dogfood-content-review` agent pack is deleted (#974)** — no
+  auto-dispatch, no CI reference, no substantive change since 2026-07-01.
+- **Docs (#985):** the single-agent page is documented in `README.md`; the
+  never-built "Edit design" affordance is cut from the single-agent-view
+  plan's scope rather than left claimed.
+
+## 0.56.0 - 2026-08-05
+
+Minor release: the single-agent page that 0.55.0 gave the local dashboard now
+works on a **hosted** fleet too — the runtime that connects the published
+pieces moves into the framework, and the six read/write commands the hosted
+page was missing are added to the admin protocol. Plus the review-remediation
+sweep's Phase 4 security and user-surface batches.
+
+### ⚠ Breaking for out-of-tree `TeamRuntime` implementations
+
+Seven `TeamRuntime` methods — `runs`, `overview`, `run_details`, `resume_run`,
+`remind_run`, `close_run` and the widened `transcript` — are now
+`@abstractmethod`, and their base-class fallbacks are deleted. A subclass that
+does not implement all seven **cannot be instantiated**. Both in-tree
+implementations (`LocalRuntime`, `EventBusRuntime`) satisfy the ABC; anyone
+carrying a private subclass must implement them or delegate to the shared
+builders, which are importable for exactly that reason.
+
+### Added
+- **`EventBusRuntime` is part of the framework (#967, #963).** This repo
+  shipped the sidecar (`bobi/supervisor/`), the Cloudflare event bus
+  (`event-server/worker/`) and the console UI (`bobi/webapp/`) while
+  withholding the ~470 lines that connect them, so every published piece could
+  be self-hosted and a hosted console still could not be assembled. The class
+  now lives at `bobi/webapp/event_bus.py` as a pure move — the only diff
+  against its former home is five docstring phrases that became false once the
+  file changed repos, and two import lines in its tests.
+- **The hosted single-agent page gains history and composition (#968, #963).**
+  `/overview` and `/runs` answered 409 on a hosted agent while `/health`,
+  `/status`, `/spend` and the lifecycle verbs answered 200 — an agent could be
+  watched and recovered, but what it had *done* and what it was *made of* were
+  missing. Six new admin commands (`runs`, `overview`, `run_details`,
+  `resume_run`, `remind_run`, `close_run`), each a thin delegate to the same
+  pure builder `LocalRuntime` already calls, so there is one read
+  implementation and the two runtimes cannot drift. `SUPERVISOR_VERSION` moves
+  **0.1.0 → 0.2.0** (additive, per the compatibility promise).
+- **`transcript` takes an optional `detail: true`.** The chat view (`messages`)
+  has already discarded every tool call, so a hosted debugging transcript built
+  by reshaping it would silently omit most of what an agent *did* between
+  speaking. The reply gains `entries` + `usage`; a supervisor too old to know
+  the argument replies without `entries`, and that is reported as unavailable
+  rather than rendered as a debugging view with the tool calls missing.
+
+### Fixed
+- **A `prune:` entry could delete host files (#961).** Prune names an item on a
+  surface, never a path, but nothing validated it: an absolute name collapsed
+  the staging join to that absolute path, and a `..` segment walked out of the
+  staging directory, so `bobi agents install` `rmtree`'d host directories.
+  Compose now raises `ComposeError`.
+- **`/api/credential/value` served ambient secrets (#961).** The setup wizard's
+  endpoint fell back to `os.environ` for any requested name, so anything
+  holding the page's per-launch nonce could read a secret merely exported in
+  the launching shell — never saved through setup and outside the endpoint's
+  own justification. `run/.env` is now the whole surface.
+- **The setup picker confined paths to the wrong tree (#961).** The boundary
+  was BOBI_HOME rather than the user's home directory that the comment,
+  DESIGN.md and the 400 message all claimed, so `/api/mcp/detect` rejected
+  every real project folder with a message the path already satisfied.
+- **An unescaped Slack app name broke the manifest (#961).** `Bobi: Staging`
+  rendered an unparseable manifest and `Bobi #1` silently created an app named
+  `Bobi`; names are now emitted through the YAML emitter, byte-identically for
+  ordinary ones.
+- **A commented-out line in `agent.yaml` took down every start/status/dispatch
+  path (#965).** A key present with an empty value is YAML null, so
+  `raw.get(key, default)` returned None and the default never applied —
+  `services:`, `requires:`, `event_server:` and `spend_cap:` all crashed with a
+  traceback naming neither the key nor the file.
+- **The setup wizard silently discarded an MCP edit made during a probe
+  (#965).** The handler captured the entry, awaited a probe of up to 60s, then
+  wrote that stale snapshot back — and a result for the *old* command would
+  have marked the *new* one connected, rendering a never-tested config green.
+- **`event-server stop` wedged on a truncated pid file (#965).** It raised on
+  garbage and on `PermissionError`, leaving the stale files behind so every
+  later stop failed identically.
+- **`agents update` exited 0 when every pack failed (#965)**, while the
+  named-pack form exited 1 for the identical failure.
+- **`agents browse` died on an unquoted `version: 1.0` (#965)**, taking down
+  the whole listing over one row; the same coercion fixes a str-vs-float
+  comparison that made an installed pack read as an upgrade to itself.
+- **One malformed session crashed a team's cost rollup (#965).** The fold's
+  comment promised it must not 500 on one bad session and the token fields were
+  guarded; the cost fields were not, and a string is truthy.
+- **Remove-then-re-add crashed `bobi agents install` (#965)** — the natural
+  idiom for wholesale-replacing an inherited keyed entry deep-merged into the
+  tombstone and raised a raw TypeError.
+- **An open-mode pack could install from unvalidated source (#965).** The
+  validation-freshness gate sat behind `if state.mode == "create":` although
+  DESIGN.md already called a fresh validation to install a hard floor.
+- **Switching a team off Slack left it running the Slack adapter (#965).**
+  `chat` is a setup-managed overlay key but the overlay only ever wrote it.
+- **One binary file 500'd the setup review viewer (#965)** — `/api/file` had no
+  decode handling while `/api/files` lists binaries with no suffix filter.
+
+### Changed
+- **`--resume` is removed from `bobi setup` (#965).** The webapp resumes an
+  unfinished session unconditionally, so the flag named the default. All four
+  documentation sites are corrected, including the disconnect overlay that
+  printed the now-erroring command to users.
+- **The public/private line is documented where it is enforced (#967).**
+  `AGENTS.md` and `docs/ADMIN_PROTOCOL.md` record which side each piece lives
+  on and point at the reference client.
+
+## 0.55.0 - 2026-08-04
+
+Minor release: the dashboard gains a real per-agent page, and the
+review-remediation sweep lands its first three Lane A phases — session
+lifecycle honesty, persistence atomicity, and agent-pack routes that had been
+failing silently.
+
+### Added
+- **The single-agent view (#948, MOD-261).** The machine-scoped dashboard
+  becomes a real per-agent page. Behind it is a **unified runs read model**: a
+  monitor firing, a chat, and a workflow run are one list of runs rather than
+  three unrelated event sprays — which is also why a monitor now records **one
+  run per firing** instead of a spray of events. Agent state becomes a
+  **tri-state** (running / stalled / stopped) rather than a bare pid check, so
+  "the process exists" stops being mistaken for "the agent is working", and the
+  page can surface a stalled workflow run and offer to resume it.
+
+  New per-agent nouns under `/api/agents/{name}`: `GET runs`, `overview`,
+  `health`, `sessions`, `details`, `spend`, and `POST
+  workflows/runs/{run_id}/resume`. The overview also reports what the script
+  cache **did not** spend. Integrates #906, #912, #913, #914, #915, #916, #919
+  and the #941 restyle, which standardizes the surface on the product palette.
+
+### Fixed
+- **A session could not be stopped while its startup turn was still in flight
+  (#949).** `_keep_alive` is created only after the startup drain, so `stop()`
+  silently no-opped, `join(15)` expired, and the thread plus its brain
+  subprocess kept running — a long-lived orchestrator leaked a live,
+  token-burning agent for every timed-out phase while reporting "session failed
+  to start". Setting an event cannot interrupt a turn parked in
+  `await client.receive_response()`, so `_run` is now a cancellable task that
+  `stop()` cancels through the loop, and teardown disconnects the client
+  explicitly rather than relying on a `finally` the startup path never reaches.
+- **`start()` waited out the full timeout after the session thread had already
+  crashed (#949).** A launch that failed in milliseconds measured **30.006s**,
+  and launch paths pass timeouts up to **3600s** — so a phase that could not
+  start stalled dispatch for an hour. Liveness is re-checked only *after*
+  re-reading `_ready`, since a thread may set it and then exit and a naive
+  `is_alive()` poll reports a perfectly good session as failed.
+- **A supervised agent's terminal failure was never persisted (#949).** The
+  `except asyncio.TimeoutError` handler was unreachable — the caller's
+  `wait_for` cancels from outside, and `CancelledError` is a `BaseException` —
+  so `TERMINAL_FAILED` never landed and `state.json` recorded neither the
+  failure nor the timeout reason, leaving the reconciler nothing to re-emit.
+- **Every durable writer now shares one atomic-write helper (#951).** The
+  serialize / write-temp-sibling / `os.replace` pattern had been
+  re-implemented in **six** places with six temp-naming schemes, while a
+  comparable set of state writers used a bare `write_text` and could be
+  truncated by exactly the crash the six copies each guarded against. Because
+  every loader here treats unparseable state as *empty*, the cost is never
+  "lose one field": a torn monitor state file re-fires every monitor, a torn
+  spend file zeroes the window the runaway-loop backstop counts, a torn
+  `setup.json` makes `bobi setup --resume` discard the whole wizard session,
+  and a torn `config.toml` loses the operator's foreign codex keys for good.
+  `bobi/fsutil.py` is now the single implementation (`atomic_write_text`,
+  `atomic_write_json`, `file_lock`); the setup wizard and the spend governor
+  additionally take a lock, and corrupt monitor state now loads as "resetting".
+- **Agent-pack routes that silently matched nothing (#957).** Three shipped
+  packs carried rules that could never fire, and all failed the same way —
+  nothing logged, nothing errored, the deterministic behavior just never
+  happened and the work fell through to whatever the LLM decided.
+  `eng-team`'s `github.issues.assigned` matches a type no adapter emits (GitHub
+  emits `github.<header>` with the action in `fields.action`), so
+  `issue-lifecycle` never fired on assignment — **this is why issue pickup has
+  needed a Slack directive**. The dogfood workflow's `issues_count > 0` used an
+  operator the condition parser does not support and fell through to a bare
+  truthy check, routing a 3-issue audit to `done` and **closing the issue as
+  having passed review**; the replacement is fail-safe, routing a missing count
+  to `fix`. The dogfood pack also declared `chat: slack` with no slack service.
+  Validation now catches this class via a **per-source** event-type table —
+  arity is only meaningful per source, since Linear emits
+  `linear.<dataType>.<action>` with the action *in* the type — and fails open on
+  any adapter it does not recognize. Both new checks are warnings, not startup
+  blockers: an unmatchable rule is inert, but refusing to start every deployed
+  team whose installed pack still carries the old spelling would turn a silent
+  dead rule into a fleet outage on upgrade. `eng-team` 1.5.2 → **1.5.3**,
+  `dogfood-content-review` 1.2.1 → **1.2.2**.
+- **A raise from `_make_session` escaped the workflow orchestrator's
+  terminal-honesty handler (#957).** The registry entry stuck at `running` with
+  no `session.failed` or `workflow.failed` until the dead-man reconciler
+  mis-reported it.
+- **The Worker deploy smoke gated on a version carrying the *previous* run's
+  credentials (#954).** `wrangler deploy` and the `wrangler secret bulk` after
+  it publish two Worker versions and Cloudflare's rollover between them is not
+  atomic — but both report the same `BOBI_RELEASE_SHA`, so a sha-only readiness
+  gate was structurally unable to tell them apart, and the deploy version
+  inherits the prior run's secrets. Readiness is now "the version carrying
+  **this run's** credentials is live, consistently": on 5 consecutive probes the
+  health sha matches, an operator-authenticated route answers 200 to the freshly
+  minted token, and `worker.version_id` holds still. The logic moved out of
+  inline shell into `scripts/await_worker_ready.py` — the gate had survived two
+  previous fixes as untestable shell — and is now driven over real HTTP against
+  a Worker that fakes the rollover. A `concurrency` group also stops two runs
+  from stomping each other's secrets on the shared smoke Worker.
+
+### Changed
+- **`AGENTS.md` states the dated plan-filename convention the repo already
+  follows (#950)** — `plans/<YYYY-MM-DD>-<slug>.md`, the shape the installed
+  stage pack validates and all 11 existing plans already use. Existing undated
+  paths stay valid.
+- **Lane C of the review-remediation plan is 2 PRs, not 3 (#947).** A dated
+  amendment records the 2026-08-04 decision to defer its six remaining web-UI
+  items, since the single-agent work above rewrites those surfaces. None of the
+  six is a security hole; Phase 7's real security cluster shipped in 0.54.0.
+
 ## 0.54.0 - 2026-08-04
 
 Minor release: the MCP fleet-control surface gains the tools that *act*, and a

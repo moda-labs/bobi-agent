@@ -119,11 +119,11 @@ bobi setup my-agent
 This opens a local web UI (on `127.0.0.1` - nothing leaves your machine) that
 takes you from an idea to an installed, runnable agent team. Name it whatever
 you like - the examples below use `my-agent`; if you pick a different name,
-substitute it in every later command. You can interrupt setup anytime and pick
-up where you left off:
+substitute it in every later command. You can interrupt setup anytime; rerunning the same
+command picks up where you left off:
 
 ```bash
-bobi setup my-agent --resume
+bobi setup my-agent
 ```
 
 The client walks you through four phases:
@@ -241,6 +241,12 @@ bobi agent my-agent subagents launch -w adhoc --role engineer --task "Fix the lo
 ```
 
 (`-w adhoc` runs an open-ended task outside any structured workflow.)
+
+(With no `--id`, the run key is derived from the launch itself - workflow,
+project, role, model, effort and the task text - so relaunching the same task
+while the first run is still going is refused as a duplicate. Pass `--id <key>`
+for work with a natural identity, or `--id-random` to run several copies of an
+identical task at once.)
 
 (Roles are defined by the team - run `bobi agent my-agent roles list` to see
 what yours has.)

@@ -86,16 +86,25 @@ class TeamRuntime(ABC):
     outcome lands on the job) so no request is held open for a minutes-long
     agent reply regardless of what transport an implementation uses.
 
-    Widening this ABC: an out-of-tree subclass lives in a private consumer
-    repo (``EventBusRuntime``), whose CI tracks this repo's
-    ``dev`` channel (auto-advanced to every green main push, #740). Adding
-    an ``@abstractmethod`` here therefore breaks that repo's CI the moment
-    this repo merges - Python rejects instantiating the subclass until it
-    implements the method. Sequencing rule: land the private subclass
-    implementation FIRST, then the abstract method here (an extra method on
-    a subclass is harmless; see the #733 system-health PR pair). Keep new
-    methods read-only-safe and document the wire shape in the docstring, as
-    below - both runtimes must emit it identically, it is rendered once.
+    Widening this ABC: both implementers now live in-tree - ``LocalRuntime``
+    below and ``EventBusRuntime`` in ``bobi/webapp/event_bus.py`` - so a new
+    ``@abstractmethod`` is caught by this repo's own CI, in the same commit
+    that adds it. Add the method and both implementations together; there is
+    no longer a sequencing rule to follow, because there is no longer an
+    implementer this repo cannot see.
+
+    What that rule protected against, and why it is gone: a private consumer
+    carried its own COPY of ``EventBusRuntime`` and tracked this repo's
+    ``dev`` channel, so an abstract method here broke it on merge - Python
+    rejects instantiating a subclass that has not implemented one. That copy
+    is being retired in favour of the in-tree class. Until it is, a consumer
+    pinning a RELEASED ``bobi`` is unaffected (it moves when it chooses to);
+    one tracking ``dev`` sees the break immediately, which is the accepted,
+    announced cost of this change rather than a surprise.
+
+    Keep new methods read-only-safe unless they are deliberate operator
+    writes, and document the wire shape in the docstring, as below - both
+    runtimes must emit it identically, it is rendered once.
     """
 
     @abstractmethod
@@ -126,6 +135,7 @@ class TeamRuntime(ABC):
     def messages(self, name: str, session: str) -> list[dict]:
         """A session's transcript messages (chat-log fallback)."""
 
+    @abstractmethod
     def transcript(self, name: str, session: str) -> dict:
         """A session's transcript as a DEBUGGING view: timestamped lines,
         tool calls included.
@@ -151,11 +161,9 @@ class TeamRuntime(ABC):
         ``at`` is empty where the on-disk format records no per-entry
         timestamp (Codex rollouts), rather than synthesized. ``usage`` feeds
         the slab header.
-
-        NOT abstract, per this class's sequencing rule.
         """
-        raise TeamLifecycleError("transcripts are not available on this runtime")
 
+    @abstractmethod
     def run_details(self, name: str, run_id: str) -> dict:
         """What to show for a run that has no transcript to open.
 
@@ -172,10 +180,7 @@ class TeamRuntime(ABC):
         what it was asked to do.
 
         Raises ``UnknownRun`` when no record carries that id.
-
-        NOT abstract, per this class's sequencing rule.
         """
-        raise TeamLifecycleError("run details are not available on this runtime")
 
     @abstractmethod
     def chat_submit(self, name: str, session: str, text: str) -> str:
@@ -214,6 +219,7 @@ class TeamRuntime(ABC):
         estimated totals above.
         """
 
+    @abstractmethod
     def overview(self, name: str) -> dict:
         """What a team IS: its description, roles, reach, automations, brain,
         and spend cap - the identity header's read-only view of composition.
@@ -233,13 +239,7 @@ class TeamRuntime(ABC):
         so nobody has to open setup to remember what a team is. Values come
         from the installed package image, never a source directory - the
         runtime runs the image, so the image is the truth.
-
-        NOT abstract, for the same reason ``runs`` is not: an out-of-tree
-        subclass in the private bobi-deploy repo implements this ABC, and
-        adding an ``@abstractmethod`` here breaks its CI the moment this
-        merges. It becomes abstract once the hosted runtime implements it.
         """
-        raise TeamLifecycleError("overview is not available on this runtime")
 
     @abstractmethod
     def fleet_spend(self) -> dict:
@@ -323,6 +323,7 @@ class TeamRuntime(ABC):
         readable as long as its registry entry exists.
         """
 
+    @abstractmethod
     def runs(self, name: str, *, status: str = "", query: str = "",
              offset: int = 0, limit: int | None = None) -> dict:
         """One team's runs: sessions, workflow runs, and monitor runs merged
@@ -349,19 +350,21 @@ class TeamRuntime(ABC):
         ``failed`` covers terminal failures; human gates use
         ``awaiting_action``.
         ``counts`` describes the whole set and ``total`` the filtered set.
-
-        NOT abstract on purpose: an out-of-tree subclass in the private
-        bobi-deploy repo implements this ABC, and adding an
-        ``@abstractmethod`` here breaks its CI the moment this merges (see
-        the class docstring's sequencing rule). This becomes abstract once
-        the hosted runtime implements it.
         """
-        raise TeamLifecycleError("runs are not available on this runtime")
 
-    def resume_run(self, name: str, run_id: str) -> dict:
-        """Resume one suspended workflow run.
+    @abstractmethod
+    def resume_run(self, name: str, run_id: str, *, verdict: str = "",
+                   reply: str = "") -> dict:
+        """Resume one suspended workflow run, answering its gate.
 
-        Returns ``{"ok", "accepted", "run_id", "workflow", "await_event"}``.
+        ``verdict`` is one of ``bobi.workflow.schema.GATE_VERDICTS`` and
+        ``reply`` is the human's own words. Both reach the workflow as the
+        ``event`` scope, so a route step after the await takes the branch the
+        answer chose. An unrecognised verdict raises ``TeamLifecycleError``
+        (409) instead of resuming; an absent one is not an approval.
+
+        Returns
+        ``{"ok", "accepted", "run_id", "workflow", "await_event", "verdict"}``.
         ``accepted`` is the honest word: a workflow run takes as long as it
         takes, so this returns once the resume is under way and the caller
         watches ``runs`` for the status to move - the same submit-then-poll
@@ -371,20 +374,25 @@ class TeamRuntime(ABC):
         ``TeamLifecycleError`` (409) when the run is not in a resumable
         state. Resuming is single-winner: exactly one resume of a given run
         proceeds even if two arrive together.
-
-        NOT abstract, per this class's sequencing rule.
         """
-        raise TeamLifecycleError("resume is not available on this runtime")
 
+    @abstractmethod
     def remind_run(self, name: str, run_id: str) -> dict:
-        """Resend a waiting workflow's user-facing gate notification."""
-        raise TeamLifecycleError(
-            "workflow reminders are not available on this runtime")
+        """Resend a waiting workflow's user-facing gate notification.
 
+        Returns ``{"ok", "delivered", "run_id", "workflow", "await_event"}``.
+        The run is untouched - this nudges the human, it does not advance the
+        workflow. Same error vocabulary as ``resume_run``, plus
+        ``TeamLifecycleError`` when the notification could not be delivered.
+        """
+
+    @abstractmethod
     def close_run(self, name: str, run_id: str) -> dict:
-        """Close a waiting workflow without advancing its gate."""
-        raise TeamLifecycleError(
-            "workflow close is not available on this runtime")
+        """Close a waiting workflow without advancing its gate.
+
+        Returns ``{"ok", "closed", "run_id", "workflow"}``, and marks the
+        run's session cancelled. Same error vocabulary as ``resume_run``.
+        """
 
 
 # --- Local implementation ----------------------------------------------------
@@ -440,6 +448,34 @@ def design_card(name: str) -> dict:
         "running": False,
         "pid": 0,
         "description": _describe(paths.agent_source_dir(name)),
+    }
+
+
+def session_usage(root: Path, session: str) -> dict:
+    """The transcript slab header's duration/tokens/cost for one session.
+
+    Module-level, like the serializers below, because the supervisor answers
+    the hosted `transcript` command from the box and must produce the SAME
+    header the local UI does. An unknown session yields the zero envelope
+    rather than raising: the entries are the payload, and a transcript that
+    outlived its registry entry still renders.
+    """
+    from bobi.sdk import SessionRegistry
+
+    entry = SessionRegistry(root).get(session)
+    if entry is None:
+        return {"started_at": 0.0, "ended_at": 0.0, "tokens": 0,
+                "cost_usd": 0.0, "status": ""}
+    return {
+        "started_at": entry.started_at or 0.0,
+        "ended_at": entry.terminal_at or 0.0,
+        "tokens": sum(
+            int(u.get("input_tokens", 0) or 0)
+            + int(u.get("output_tokens", 0) or 0)
+            for u in (entry.model_usage or {}).values()
+            if isinstance(u, dict)),
+        "cost_usd": round(entry.total_cost_usd or 0.0, 6),
+        "status": entry.status,
     }
 
 
@@ -635,28 +671,7 @@ class LocalRuntime(TeamRuntime):
             brain=load_session_brain(session, root=root),
         )
         return {"session": session, "entries": entries,
-                "usage": self._session_usage(root, session)}
-
-    @staticmethod
-    def _session_usage(root: Path, session: str) -> dict:
-        """The slab header's duration/tokens/cost for one session."""
-        from bobi.sdk import SessionRegistry
-
-        entry = SessionRegistry(root).get(session)
-        if entry is None:
-            return {"started_at": 0.0, "ended_at": 0.0, "tokens": 0,
-                    "cost_usd": 0.0, "status": ""}
-        return {
-            "started_at": entry.started_at or 0.0,
-            "ended_at": entry.terminal_at or 0.0,
-            "tokens": sum(
-                int(u.get("input_tokens", 0) or 0)
-                + int(u.get("output_tokens", 0) or 0)
-                for u in (entry.model_usage or {}).values()
-                if isinstance(u, dict)),
-            "cost_usd": round(entry.total_cost_usd or 0.0, 6),
-            "status": entry.status,
-        }
+                "usage": session_usage(root, session)}
 
     def run_details(self, name: str, run_id: str) -> dict:
         """The Details slab for a run with no transcript to open."""
@@ -688,7 +703,13 @@ class LocalRuntime(TeamRuntime):
             from bobi import service
 
             try:
-                service.ask(root, session, text,
+                # An empty session means the team manager. The route documents
+                # `subagent` as optional and the hosted runtime has always read
+                # it that way (supervisor/admin.py), so both runtimes resolve
+                # it identically rather than one answering `unknown agent ''`.
+                target = (session or "").strip() \
+                    or service.manager_session_name(root)
+                service.ask(root, target, text,
                             timeout=DEFAULT_CHAT_TIMEOUT)
                 outcome = {"team": name, "status": "done"}
             except Exception as e:  # noqa: BLE001 - job must resolve
@@ -864,95 +885,31 @@ class LocalRuntime(TeamRuntime):
             "truncated": False,
         }
 
-    def resume_run(self, name: str, run_id: str) -> dict:
-        """Resume a suspended workflow run by spawning the CLI resume.
-
-        A SPAWN, not a thread, and the orchestrator says why in its own words
-        (``try_resume_for_event``): ``resume_workflow`` re-stamps the session
-        registry entry with ``os.getpid()`` and the resume timeout, which
-        assumes a dedicated per-run process. Resuming inside this long-lived
-        process would stamp the WEB APP's pid - a reconciler timeout or a
-        ``subagents cancel`` would then signal the web app itself. It would
-        also need a bound runtime root, which this process deliberately does
-        not have.
-
-        The claim lives in the spawned command, not here: a claim held by a
-        caller that then fails to spawn strands the run. This checks the
-        status so the ordinary "not resumable" case is a clean 409 rather
-        than a child that exits in the dark.
-        """
-        import subprocess
-        import sys
-
-        from bobi.workflow.state import WorkflowRun
-
-        root = self._resolve(name)
-        run = next((r for r in WorkflowRun.list_runs(root=root)
-                    if r.run_id == run_id), None)
-        if run is None:
-            raise UnknownRun(run_id)
-        if run.status != "waiting":
-            raise TeamLifecycleError(
-                f"run {run_id} is '{run.status}', not 'waiting'")
-
-        cmd = [sys.executable, "-m", "bobi.cli", "agent",
-               paths.agent_name_for_root(root), "workflows", "resume", run_id]
-        subprocess.Popen(cmd, cwd=str(root), start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Accepted, not finished. A workflow run takes as long as it takes;
-        # the page watches the runs table for the status to move, the same
-        # submit-then-poll discipline chat uses.
-        return {"ok": True, "accepted": True, "run_id": run_id,
-                "workflow": run.workflow_name,
-                "await_event": run.await_event}
+    # The three writes delegate to bobi.webapp.run_actions, which the
+    # supervisor's admin commands call too - one implementation, both
+    # runtimes. Only the error vocabulary is mapped here: the shared module
+    # raises its own exceptions so it can stay free of this one.
+    def resume_run(self, name: str, run_id: str, *, verdict: str = "",
+                   reply: str = "") -> dict:
+        return self._run_action("resume_run", name, run_id,
+                                verdict=verdict, reply=reply)
 
     def remind_run(self, name: str, run_id: str) -> dict:
-        from bobi.workflow.orchestrator import remind_workflow
-        from bobi.workflow.state import WorkflowRun
-        from bobi.workflow.triggers import WorkflowDispatcher
-
-        root = self._resolve(name)
-        run = next((r for r in WorkflowRun.list_runs(root=root)
-                    if r.run_id == run_id), None)
-        if run is None:
-            raise UnknownRun(run_id)
-        if run.status != "waiting":
-            raise TeamLifecycleError(
-                f"run {run_id} is '{run.status}', not 'waiting'")
-        dispatcher = WorkflowDispatcher()
-        dispatcher.load_all_workflows(project_path=root)
-        workflow = dispatcher.find_workflow(run.workflow_name)
-        if workflow is None:
-            raise TeamLifecycleError(
-                f"workflow '{run.workflow_name}' is no longer installed")
-        outcome = remind_workflow(run, workflow)
-        if not outcome.delivered:
-            raise TeamLifecycleError(outcome.error)
-        return {"ok": True, "delivered": True, "run_id": run_id,
-                "workflow": run.workflow_name,
-                "await_event": run.await_event}
+        return self._run_action("remind_run", name, run_id)
 
     def close_run(self, name: str, run_id: str) -> dict:
-        from bobi.sdk import SessionRegistry
-        from bobi.workflow.state import WorkflowRun
+        return self._run_action("close_run", name, run_id)
+
+    def _run_action(self, action: str, name: str, run_id: str, **kw) -> dict:
+        from bobi.webapp import run_actions
 
         root = self._resolve(name)
-        existing = next((r for r in WorkflowRun.list_runs(root=root)
-                         if r.run_id == run_id), None)
-        if existing is None:
-            raise UnknownRun(run_id)
-        if existing.status != "waiting":
-            raise TeamLifecycleError(
-                f"run {run_id} is '{existing.status}', not 'waiting'")
-        closed = WorkflowRun.close(run_id, root=root)
-        if closed is None:
-            raise TeamLifecycleError(f"run {run_id} is no longer waiting")
-        if closed.session_name:
-            SessionRegistry(root).mark_terminal(
-                closed.session_name, "cancelled",
-                error="workflow closed by operator")
-        return {"ok": True, "closed": True, "run_id": run_id,
-                "workflow": closed.workflow_name}
+        try:
+            return getattr(run_actions, action)(root, run_id, **kw)
+        except run_actions.UnknownRun:
+            raise UnknownRun(run_id) from None
+        except (run_actions.RunNotWaiting, run_actions.ActionFailed) as e:
+            raise TeamLifecycleError(str(e)) from None
 
     def runs(self, name: str, *, status: str = "", query: str = "",
              offset: int = 0, limit: int | None = None) -> dict:

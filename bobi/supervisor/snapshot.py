@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,7 +24,15 @@ log = logging.getLogger(__name__)
 # The sidecar's own version, surfaced in supervisor.version + versions. In the
 # container this ships as bundled source with no installed distribution, so an
 # env stamp (set by the image build) or this literal is the source of truth.
-SUPERVISOR_VERSION = "0.1.0"
+#
+# 0.3.0 adds the rolling usage command used by the fleet MCP summary.
+# 0.2.0 added the single-agent view's six commands (runs / overview /
+# run_details / resume_run / remind_run / close_run) and the additive `detail`
+# arg on `transcript`. Minor, because the change is purely additive per
+# docs/ADMIN_PROTOCOL.md's compatibility promise - and readable by a consumer,
+# which is the point: an instance still on 0.1.0 drops those verbs with no
+# reply, and this is how the runtime tells "too old" from "not answering".
+SUPERVISOR_VERSION = "0.3.0"
 
 
 def _iso(now: float) -> str:
@@ -96,7 +103,8 @@ def _expectations(project_root: Path | None) -> dict:
     monitors: list[dict] = []
     try:
         from bobi.events import discover_subscriptions
-        subscriptions = sorted(set(discover_subscriptions(project_root) or []))
+        if project_root is not None:
+            subscriptions = sorted(set(discover_subscriptions(project_root) or []))
     except Exception:
         pass
     try:
@@ -151,6 +159,13 @@ def build_heartbeat(*, identity: dict, state: SupervisorState,
             "last_restart_at": state.last_restart_at,
         },
         "sessions": _sessions(health),
+        # Load grace (#903, additive): null unless a liveness verdict was
+        # deferred THIS poll because the host is pegged by the manager's own
+        # busy worker tree. A working poll clears it, so the block is an
+        # instantaneous "currently deferring" flag, not an accumulating
+        # counter: {active, since, spell_s, deferred, load1, ncpu,
+        # busy_descendants, tree_cpu_cores, tree_cpu_ratio}.
+        "load_grace": state.load_grace,
         # Phase A telemetry is a pure HTTP publish with no persistent WS client,
         # and /health does not expose the manager's bus-client stats yet, so the
         # block is reported null. Populated when the sidecar gains its own WS

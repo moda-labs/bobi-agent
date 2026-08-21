@@ -46,14 +46,35 @@ class AutoDispatchRule:
     # defers to per-step agents, which still switch only when model/effort changes.
     role: str = ""
 
-    def matches(self, event: dict) -> bool:
+    def matches(self, event: dict, self_login: str | None = None) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
         if event.get("type") != self.event:
             return False
         fields = event.get("fields", {})
         if not self.match:
             return True
-        return all(fields.get(k) == v for k, v in self.match.items())
+        for key, expected in self.match.items():
+            if expected != "$self":
+                if fields.get(key) != expected:
+                    return False
+                continue
+
+            if not self_login:
+                return False
+            if key == "assignee":
+                assignees = {
+                    login.strip()
+                    for login in str(fields.get("assignees", "")).split(",")
+                    if login.strip()
+                }
+                assignee = fields.get("assignee")
+                if assignee:
+                    assignees.add(str(assignee))
+                if self_login not in assignees:
+                    return False
+            elif fields.get(key) != self_login:
+                return False
+        return True
 
     def dedup_key(self, event: dict) -> str:
         """Build a dedup key from the event to prevent rapid duplicate dispatches.
@@ -96,9 +117,12 @@ class AutoDispatchRule:
         resulting ``session_name`` identical for two dispatches of the same
         comment, so the persisted "A run is already active" guard rejects the
         duplicate even across processes — a second, process-independent line of
-        defense behind the in-memory dedup. Returns ``None`` (→ launch_agent
-        mints its own random key) when no stable id is available, preserving the
-        prior behavior for events without a comment/review.
+        defense behind the in-memory dedup. Returns ``None`` when no stable id
+        is available, and ``_dispatch`` then launches with an explicitly random
+        key: ``_build_task`` renders every id-less review on a PR to the same
+        sentence, so letting #850's task-derived default apply here would
+        collapse two genuinely different reviews into one and drop the second
+        (#326). The in-memory ``dedup_key`` still guards redelivery.
         """
         fields = event.get("fields", {})
         number = fields.get("number")
@@ -182,7 +206,7 @@ class EventReactor:
             or ``None`` if no rule matched.
         """
         for rule in self.rules:
-            if not rule.matches(event):
+            if not rule.matches(event, self_login=self.self_login):
                 continue
 
             # Dispatch-hygiene guard (issue #411): never spin up a feedback
@@ -250,6 +274,12 @@ class EventReactor:
 
         # Deterministic per-comment launch key (issue #411) — see run_key().
         run_key = rule.run_key(event)
+        # No stable id → do NOT let launch_agent derive one from the task text.
+        # _build_task is lossy for exactly these events: two different reviews
+        # on one PR render to the same sentence, so a derived key would collapse
+        # them and drop the second - the silent-drop #326 fixed. A random key
+        # keeps the documented pre-#850 behavior for id-less events.
+        random_key = run_key is None
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
 
@@ -267,6 +297,7 @@ class EventReactor:
                     workflow_name=rule.workflow,
                     role=rule.role,
                     run_key=run_key,
+                    random_key=random_key,
                     input_fields=input_fields,
                 )
             except RuntimeError as e:
@@ -312,8 +343,12 @@ class EventReactor:
             parts.append("Address the reviewer's comments.")
             return " ".join(parts)
 
-        # Issue assigned
-        if event_type == "github.issues.assigned":
+        # Issue assigned. Keyed on type + fields.action, because the adapter
+        # emits `github.issues` and carries the action in fields — the dotted
+        # `github.issues.assigned` this branch used to test for is never a
+        # type any adapter produces, so the branch was dead and assignment
+        # fell through to the generic fallback text (D017).
+        if event_type == "github.issues" and action == "assigned":
             title = fields.get("title", "")
             return f"Issue #{number} in {repo} assigned: {title}. Begin work."
 

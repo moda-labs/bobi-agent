@@ -145,6 +145,33 @@ def test_spend_command_returns_the_cost_summary(monkeypatch):
     assert data["result"] == {"spend": spend}
 
 
+def test_usage_command_returns_the_rolling_summary(monkeypatch):
+    listener = _listener()
+    usage = {
+        "window": {"seconds": 259200},
+        "jobs": {"total": 4, "completed": 3, "failed": 1, "closed": 0},
+        "tokens": {"input": 1000, "cached_input": 200,
+                   "output": 300, "total": 1300},
+        "cost_usd": 1.25,
+        "estimated_cost_usd": 0.0,
+    }
+    monkeypatch.setattr(listener, "_read_usage", lambda args: usage)
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": 259200}))
+    _topic, _source, data = listener._published[0]
+    assert data["status"] == "done"
+    assert data["result"] == {"usage": usage}
+
+
+def test_usage_command_requires_a_positive_window():
+    listener = _listener()
+    listener._dispatch(_event("usage", command_id="u1", args={}))
+    data = listener._published[0][2]
+    assert data["status"] == "error"
+    assert data["result"]["code"] == "bad_request"
+    assert "window_seconds" in data["error"]
+
+
 def test_session_log_command_returns_history(monkeypatch):
     listener = _listener()
     log_result = {"sessions": [{"name": "boom", "status": "failed",

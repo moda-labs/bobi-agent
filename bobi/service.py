@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from bobi import paths
+from bobi import launch_stamp, paths
 from bobi.__version__ import __version__
 from bobi.fsutil import atomic_write_text
 from bobi.sdk import SessionEntry
@@ -146,7 +146,7 @@ def clear_manager_session(project_path: Path) -> None:
     """Clear persisted manager conversation and event-server bubble state."""
     import shutil
 
-    from bobi.config import clear_bubble_state
+    from bobi.events.state import clear_bubble_state
     from bobi.sdk import save_session_id
 
     save_session_id(manager_session_name(project_path), "", root=project_path)
@@ -320,7 +320,7 @@ def _wait_for_manager_transport(
     manager_name: str,
     timeout: float,
 ) -> None:
-    from bobi.config import load_bubble_state, load_deployment_state
+    from bobi.events.state import load_bubble_state, load_deployment_state
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -373,7 +373,7 @@ def spawn_team(
             manager_session_name(project_path), project_path
         )
 
-    log_file = paths.state_dir(project_path) / "manager.log"
+    log_file = paths.manager_log_path(project_path)
     from bobi.env import child_agent_env
     env = child_agent_env(project_path)
     venv_bin = str(Path(sys.executable).parent)
@@ -557,15 +557,20 @@ def run_manager_from_config(
     ensure_state_version(project_path)
 
     pid_str = str(os.getpid())
-    atomic_write_text(state_dir / "manager.pid", pid_str)
+    pid_path = paths.manager_pid_path(project_path)
+    atomic_write_text(pid_path, pid_str)
+    # Record which bobi this manager is running, so an in-place upgrade that
+    # replaces the framework underneath it is visible to doctor (#928).
+    launch_stamp.record_launch(project_path, launch_stamp.MANAGER, os.getpid())
 
     def _cleanup():
-        pid_file = state_dir / "manager.pid"
         try:
-            if pid_file.exists() and pid_file.read_text().strip() == pid_str:
-                pid_file.unlink(missing_ok=True)
+            if pid_path.exists() and pid_path.read_text().strip() == pid_str:
+                pid_path.unlink(missing_ok=True)
         except OSError:
             pass
+        launch_stamp.clear_launch(project_path, launch_stamp.MANAGER,
+                                  pid=os.getpid())
         from bobi import http as pooled_http
         from bobi import manager_health
 
@@ -631,7 +636,7 @@ def run_manager_from_config(
         log.info("Monitor scheduler started")
 
     from bobi.prompts.resolver import build_startup_prompt
-    from bobi.subagent import spawn_adhoc
+    from bobi.subagent import run_persistent_agent
 
     task = build_startup_prompt(
         role, project_path, agent_name=agent_name, session_name=session_name
@@ -654,11 +659,10 @@ def run_manager_from_config(
         "Bobi launching manager session for %s",
         paths.agent_name_for_root(project_path),
     )
-    spawn_adhoc(
+    run_persistent_agent(
         cwd=str(project_path),
         task=task,
         name=session_name,
-        persistent=True,
         role=role,
         mcp_servers=cfg.mcp_servers or None,
         subscribe=subscribe,
@@ -711,22 +715,12 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
 
     stop_embedder(project_path)
 
-    from bobi.events.server import health
+    from bobi.events.server import health, resolve_local_port
 
-    es_port = _selected_local_event_server_port(project_path)
+    es_port = resolve_local_port(project_path)
     result_kwargs["event_server_port"] = es_port
     result_kwargs["event_server_running"] = bool(health(f"http://localhost:{es_port}"))
     return StopResult(**result_kwargs)
-
-
-def restart_team(
-    project_path: Path,
-    *,
-    fresh: bool = False,
-    wait_timeout: float = 30,
-) -> LaunchResult:
-    stop_team(project_path)
-    return start_team(project_path, fresh=fresh, wait_timeout=wait_timeout)
 
 
 def team_status(project_path: Path) -> TeamStatus:
@@ -823,52 +817,3 @@ def ask(
     return result
 
 
-def _parse_local_event_server_port(url: str) -> int | None:
-    if not url:
-        return None
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return None
-    if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
-        return None
-    return parsed.port or (443 if parsed.scheme == "https" else 80)
-
-
-def _event_server_port_file(project_path: Path) -> Path:
-    return paths.state_dir(project_path) / "event-server.port"
-
-
-def _selected_local_event_server_port(
-    project_path: Path,
-    override: int | None = None,
-) -> int:
-    if override is not None:
-        return override
-
-    pid_file = paths.state_dir(project_path) / "event-server.pid"
-    port_file = _event_server_port_file(project_path)
-    if pid_file.exists() and port_file.exists():
-        try:
-            return int(port_file.read_text().strip())
-        except (OSError, ValueError):
-            pass
-
-    try:
-        from bobi.config import Config
-
-        configured = Config.load(project_path).event_server_url
-    except Exception:
-        configured = ""
-    if configured:
-        port = _parse_local_event_server_port(configured)
-        if port is not None:
-            return port
-
-    if port_file.exists():
-        try:
-            return int(port_file.read_text().strip())
-        except (OSError, ValueError):
-            pass
-    return 8080

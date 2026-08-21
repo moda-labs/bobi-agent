@@ -119,6 +119,8 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || github.event.inputs.ref || github.ref }}
 
+      # CI proves any Node 20+ host ships the same bundle (#857). This pin keeps
+      # release provenance stable; it is not an exact-major support requirement.
       - uses: actions/setup-node@v5
         with:
           node-version: "20"

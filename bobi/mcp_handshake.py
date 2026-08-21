@@ -26,6 +26,7 @@ nothing more.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import os
 
@@ -52,6 +53,65 @@ def preflight_timeout(default: float = PREFLIGHT_DEFAULT_TIMEOUT) -> float:
     except ValueError:
         return default
     return value if math.isfinite(value) and value > 0 else default
+
+
+def _mcp_http_client(headers: dict[str, str] | None):
+    """An ``httpx.AsyncClient`` carrying the MCP-recommended defaults
+    (``Timeout(30, read=300)``, ``follow_redirects=True``).
+
+    Prefers the SDK's own factory, imported from its real home
+    (``mcp.shared._httpx_utils`` — its re-export from
+    ``mcp.client.streamable_http`` is incidental and must never decide which
+    transport branch runs). If a future release moves the private module,
+    build the same client by hand — with plain ``httpx``, which is what every
+    mcp the ``<2`` pin permits types its transport against (mcp 2.0 moved to
+    ``httpx2``; the deliberate migration that lifts the pin revisits this).
+    """
+    try:
+        from mcp.shared._httpx_utils import create_mcp_http_client
+    except ImportError:
+        import httpx
+        return httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(30.0, read=300.0),
+            follow_redirects=True)
+    return create_mcp_http_client(headers=headers)
+
+
+@contextlib.asynccontextmanager
+async def open_streamable_http(url: str, headers: dict[str, str] | None = None):
+    """Open one streamable-HTTP transport across the mcp 2.0 rename.
+
+    mcp 1.25 added ``streamable_http_client`` (2.0 removes the legacy
+    ``streamablehttp_client``), moving header configuration onto a
+    caller-supplied ``httpx.AsyncClient`` (see ``_mcp_http_client``); releases
+    before 1.25 ship only the legacy spelling, which takes ``headers``
+    directly. The legacy client yields ``(read, write, get_session_id)``;
+    mcp 2.0's yields ``(read, write)`` — callers must touch only
+    ``streams[0]``/``streams[1]``. The dependency floor is ``mcp>=1.23``, so
+    both spellings stay reachable; imports stay lazy to keep the SDK off the
+    framework import path.
+
+    The branch is gated on the transport spelling ALONE: bundling another
+    import into the ``try`` would send its ImportError down the legacy branch,
+    which then fails on a symbol newer releases don't ship — reproducing the
+    #1045 breakage with an error naming the wrong spelling.
+
+    The one transport opener for every streamable-HTTP caller (this module's
+    ``_probe_http`` and the setup wizard's) - the rename must not be handled
+    twice.
+    """
+    try:
+        from mcp.client.streamable_http import streamable_http_client
+    except ImportError:  # mcp < 1.25: only the legacy spelling exists
+        from mcp.client.streamable_http import streamablehttp_client
+
+        async with streamablehttp_client(url, headers=headers) as streams:
+            yield streams
+        return
+    async with _mcp_http_client(headers) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as streams:
+            yield streams
 
 
 async def _handshake(read, write) -> list[str]:
@@ -86,13 +146,11 @@ async def _probe_stdio(spec: dict, base_env: dict | None) -> list[str]:
 
 
 async def _probe_http(spec: dict) -> list[str]:
-    from mcp.client.streamable_http import streamablehttp_client
-
     url = str(spec.get("url") or "").strip()
     if not url:
         raise ValueError("http/sse server has no url")
     headers = {k: str(v) for k, v in (spec.get("headers") or {}).items()}
-    async with streamablehttp_client(url, headers=headers) as streams:
+    async with open_streamable_http(url, headers=headers) as streams:
         return await _handshake(streams[0], streams[1])
 
 

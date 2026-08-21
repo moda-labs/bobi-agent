@@ -449,6 +449,7 @@ The fresh reviews also established these non-optional sequencing and proof const
 - [x] Add `hatch_build.py` with one isolated staging implementation for sdist and standard VCS wheel builds.
 - [x] Enable the custom build hook in `pyproject.toml` and include the hook plus generated bundle, manifest, and fixed notice artifact in the correct sdist and wheel paths.
 - [x] Validate Node 20, run lockfile-exact npm installation in staging, run the one build script, require non-empty output, generate the deterministic notice artifact and sorted input/output/audit manifest, and force-include all three shipped files through `build_data["force_include"]`.
+  - Amendment 2026-08-12 (#857 / MOD-291): the build gate validates Node 20 **or newer**, matching the documented runtime floor. Exact-major validation blocked supported Node 21+ hosts without protecting artifact bytes: pinned esbuild emits an explicit `--target=node20` bundle. CI now builds a wheel on a newer major and compares the shipped bundle with the Node 20 artifact; the event-server job therefore ends on the newer major while releases remain pinned to Node 20 for provenance.
 - [x] Keep staging alive until Hatch calls hook finalization.
   Clean initialize failures directly, clean successful builds in `finalize()`, and register an idempotent process-exit fallback before publishing staged paths.
 - [x] Force target construction to fail in a PEP 517 subprocess and prove the process-exit fallback removes staging despite Hatchling not calling `finalize()`.

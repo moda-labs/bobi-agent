@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import signal
-import socket
 import stat
 import subprocess
 import sys
@@ -19,6 +18,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+
+from .conftest import _free_port
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -54,12 +55,6 @@ RUNTIME_ENVIRONMENT_DENYLIST = frozenset(
         "WHATSAPP_VERIFY_TOKEN",
     }
 )
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _run(
@@ -288,6 +283,7 @@ RUNTIME_PROBE = textwrap.dedent(
     from bobi.events.signing import serialize_body, sign_headers
     from bobi.runtime_guard import (
         apply_runtime_write_policy,
+        check_bobi_distribution_integrity,
         check_runtime_write_policy,
     )
 
@@ -511,9 +507,16 @@ RUNTIME_PROBE = textwrap.dedent(
     event_server_dir = package_dir / "event-server"
     pid_file = runtime_root / "state" / "event-server.pid"
 
+    team_package = runtime_root / "package"
     guard = apply_runtime_write_policy(runtime_root)
     policy = check_runtime_write_policy(runtime_root)
+    integrity = check_bobi_distribution_integrity()
     before = snapshot(event_server_dir)
+    team_package_frozen = team_package.is_dir() and all(
+        not stat.S_IMODE(path.lstat().st_mode) & 0o222
+        for path in [team_package, *team_package.rglob("*")]
+        if not path.is_symlink()
+    )
     status = None
     error = None
     protocol = None
@@ -543,13 +546,10 @@ RUNTIME_PROBE = textwrap.dedent(
             "drivers": drivers,
             "error": error,
             "event_server_mode": stat.S_IMODE(event_server_dir.stat().st_mode),
-            "event_server_read_only": all(
-                not stat.S_IMODE(path.lstat().st_mode) & 0o222
-                for path in [event_server_dir, *event_server_dir.rglob("*")]
-                if not path.is_symlink()
-            ),
             "guard_kinds": [root.kind for root in guard.protected],
             "health": health_payload(base_url),
+            "integrity_detail": integrity.detail,
+            "integrity_ok": integrity.ok,
             "node_modules_exists": (event_server_dir / "node_modules").exists(),
             "npm_trace": npm_trace.read_text() if npm_trace.exists() else "",
             "policy_detail": policy.detail,
@@ -557,6 +557,7 @@ RUNTIME_PROBE = textwrap.dedent(
             "protocol": protocol,
             "snapshot_unchanged": before == snapshot(event_server_dir),
             "status": status,
+            "team_package_frozen": team_package_frozen,
         }
         result_path.write_text(json.dumps(payload, sort_keys=True))
     finally:
@@ -735,7 +736,7 @@ def test_changed_source_archive_cannot_reuse_carried_artifact(
     assert result.returncode != 0
     diagnostic = result.stdout + result.stderr
     assert "carried source-archive artifact is invalid" in diagnostic
-    assert "Node.js 20" in diagnostic
+    assert "Node.js 20 or newer" in diagnostic
 
 
 def test_installed_wheel_starts_without_mutating_frozen_event_server(
@@ -803,6 +804,17 @@ def test_installed_wheel_starts_without_mutating_frozen_event_server(
 
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
+    # The chmod guard only protects runtime_root/package when that tree exists.
+    team_package = runtime_root / "package"
+    team_package.mkdir()
+    agent_yaml = team_package / "agent.yaml"
+    agent_yaml.write_text("agent: packaged-event-server\nentry_point: manager\n")
+    roles = team_package / "roles"
+    roles.mkdir()
+    role_file = roles / "ROLE.md"
+    role_file.write_text("# Role\n")
+    for path in (team_package, agent_yaml, roles, role_file):
+        path.chmod(path.stat().st_mode | 0o222)
     npm_cache = tmp_path / "npm-cache"
     npm_cache.mkdir()
     home_dir = tmp_path / "home"
@@ -904,13 +916,23 @@ def test_installed_wheel_starts_without_mutating_frozen_event_server(
         failures.append(
             f"runtime imported {result['bobi_package']}, expected {expected_package}"
         )
-    if "bobi-package" not in result["guard_kinds"]:
-        failures.append(f"real guard did not protect Bobi: {result['guard_kinds']}")
-    if not result["policy_ok"] or not result["event_server_read_only"]:
+    if "team-package" not in result["guard_kinds"]:
+        failures.append(f"real guard did not protect team package: {result['guard_kinds']}")
+    if not result["team_package_frozen"]:
+        still_writable = [
+            str(path.relative_to(runtime_root))
+            for path in [team_package, *team_package.rglob("*")]
+            if not path.is_symlink() and path.stat().st_mode & 0o222
+        ]
         failures.append(
-            "installed event server was not frozen: "
-            f"mode={oct(result['event_server_mode'])}, "
-            f"policy={result['policy_detail']}"
+            "real guard left the team package writable: "
+            f"{still_writable or 'missing'}"
+        )
+    if not result["policy_ok"]:
+        failures.append(f"policy check failed: {result['policy_detail']}")
+    if not result["integrity_ok"]:
+        failures.append(
+            f"distribution integrity check failed: {result['integrity_detail']}"
         )
     if result["status"] != "started":
         failures.append(

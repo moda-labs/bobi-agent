@@ -1,6 +1,6 @@
 [project]
 name = "bobi"
-version = "0.54.0"
+version = "0.57.0"
 description = "Build teams of event-driven AI agents"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -30,8 +30,17 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "jinja2>=3.1",
     "claude-agent-sdk>=0.2.87",
-    "mcp>=1.23.0",
+    # <2 is deliberate: nothing else caps mcp since claude-agent-sdk lifted
+    # its own bound, and bobi has no lockfile. Lift it only as a deliberate
+    # 2.0 migration (mcp_handshake + setup/mcp_probe carry the known renames).
+    "mcp>=1.23.0,<2",
     "apsw>=3.40",
+    # OTLP wire types for `bobi agent <name> otel`. A core dependency, not an
+    # extra: no CI job installs extras, so the collector suite would skip to
+    # green. The >=1.44 floor also matters - opentelemetry-proto pinned
+    # `protobuf<7` through 1.42.x, so an older release lets pip satisfy
+    # `[kb]`'s onnxruntime by DOWNGRADING protobuf onto a different ABI.
+    "opentelemetry-proto>=1.44,<2",
 ]
 
 [project.urls]

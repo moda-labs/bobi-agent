@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -13,13 +14,18 @@ truststore.inject_into_ssl()
 
 import click
 
-from bobi import paths
+from bobi import logs, paths
 from bobi.install import (
     install_pack as _install_pack,
+    resolve_agent_pack as _resolve_agent_pack,
     write_install_gitignore as _write_install_gitignore,
 )
 
 from .__version__ import __version__
+# Module level, not lazy: `workflows resume --verdict` builds its click.Choice
+# out of this at import time, so the CLI and the workflow engine cannot drift
+# on what a gate may be answered with.
+from .workflow.schema import GATE_VERDICTS
 
 _PACKAGE_DIR = Path(__file__).parent
 
@@ -93,69 +99,6 @@ def _project_state_dir(project_path: Path) -> Path:
     return paths.state_dir(project_path)
 
 
-def _parse_local_event_server_port(url: str) -> int | None:
-    """Return the local event-server port from a URL, or None for remote URLs."""
-    if not url:
-        return None
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return None
-    if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
-        return None
-    return parsed.port or (443 if parsed.scheme == "https" else 80)
-
-
-def _event_server_port_file(project_path: Path) -> Path:
-    return _project_state_dir(project_path) / "event-server.port"
-
-
-def _selected_local_event_server_port(
-    project_path: Path,
-    override: int | None = None,
-) -> int:
-    """Port for the selected runtime's local event server.
-
-    Explicit CLI overrides win, then a live runtime's remembered start port,
-    then the configured local event_server_url, then the default 8080.
-    """
-    if override is not None:
-        return override
-
-    pid_file = _project_state_dir(project_path) / "event-server.pid"
-    port_file = _event_server_port_file(project_path)
-    if pid_file.exists() and port_file.exists():
-        try:
-            return int(port_file.read_text().strip())
-        except (OSError, ValueError):
-            pass
-
-    try:
-        from .config import Config
-        configured = Config.load(project_path).event_server_url
-    except Exception:
-        configured = ""
-    if configured:
-        port = _parse_local_event_server_port(configured)
-        if port is not None:
-            return port
-
-    if port_file.exists():
-        try:
-            return int(port_file.read_text().strip())
-        except (OSError, ValueError):
-            pass
-    return 8080
-
-
-def _ensure_root_bound() -> Path:
-    """Bind the installation root if no entry point has yet — the call is
-    for its side effect. Raises a clean UsageError outside an install."""
-    root = paths.bound_root()
-    return root if root is not None else _detect_project_root()
-
-
 def _try_detect_project_root() -> Path | None:
     """Best-effort runtime binding from inherited BOBI_ROOT only."""
     try:
@@ -201,15 +144,19 @@ def _pin_team_brain(root: Path) -> None:
 
 
 def _attach_runtime_log(root: Path) -> None:
-    state = _project_state_dir(root)
-    log_path = state / "manager.log"
-    logger = logging.getLogger()
-    if not any(
-        isinstance(h, logging.FileHandler)
-        and getattr(h, "baseFilename", "") == str(log_path)
-        for h in logger.handlers
-    ):
-        logger.addHandler(logging.FileHandler(log_path))
+    """Also send this process's logs to the runtime's manager.log.
+
+    Stands down when the root logger already reaches that file - either
+    because an earlier call attached this same handler, or because Bobi
+    spawned this process with its stderr redirected into manager.log, which
+    is how the manager and every monitor check are launched. A second writer
+    would put each record on disk twice, and a duplicated line inflates the
+    counts an operator reads back out of an incident (#851).
+    """
+    log_path = paths.manager_log_path(root)
+    if logs.root_writes_to(log_path):
+        return
+    logging.getLogger().addHandler(logs.file_handler(log_path))
 
 
 
@@ -272,12 +219,13 @@ class _PluginGroup(click.Group):
 @click.pass_context
 def main(ctx):
     """Bobi — build teams of event-driven AI agents."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler()],
-    )
+    logs.configure_root()
+    # httpx logs every request at INFO, which the root level above would put
+    # in front of the user's actual output — and `bobi app start` polls
+    # /api/ping every 0.2s while the daemon comes up, so a slow start would
+    # bury its own "running at ..." line under a stack of transport chatter.
+    # Transport logs are debugging detail, not product output.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     # Top-level commands are machine/repo scoped. Runtime identity is bound by
     # `bobi agent <name> ...` or inherited BOBI_ROOT in child processes.
     if ctx.invoked_subcommand is None:
@@ -329,53 +277,6 @@ def _systemctl(action: str) -> bool:
     return True
 
 
-
-
-def _resolve_agent_pack(name: str, project_path: Path) -> Path | None:
-    """Find a Bobi Agent source/package by name."""
-    source = paths.agent_source_dir(name)
-    if (source / "agent.yaml").is_file():
-        return source
-    cached = paths.agent_cache_dir() / name
-    if (cached / "agent.yaml").is_file():
-        return cached
-    # Repo/deploy authoring still supports local checked-in agent packages.
-    visible = project_path / "agents" / name
-    if (visible / "agent.yaml").is_file():
-        return visible
-    return None
-
-
-def _list_agent_packs(project_path: Path) -> list[tuple[str, str]]:
-    """List available agent teams with their source."""
-    packs: dict[str, str] = {}
-    for agents_dir, label in [
-        (paths.agent_cache_dir(), "cached"),
-        (paths.agents_root(), "installed"),
-        (project_path / "agents", "local"),
-    ]:
-        if agents_dir.is_dir():
-            for d in sorted(agents_dir.iterdir()):
-                if (d / "agent.yaml").is_file() or (d / "src" / "agent.yaml").is_file():
-                    packs[d.name] = label
-    return [(name, source) for name, source in sorted(packs.items())]
-
-
-
-def _run_from_config(project_path: Path, cfg: "Config",
-                     extra_subscribe: list[str] | None = None,
-                     foreground: bool = False) -> None:
-    """Start an agent from a Config object.
-
-    When *foreground* is True the process is running as PID 1 in a
-    container: logs go to stdout/stderr, the health endpoint is started,
-    and SIGTERM triggers a graceful shutdown within the container's grace
-    period.
-    """
-    from bobi.service import run_manager_from_config
-    return run_manager_from_config(
-        project_path, cfg, extra_subscribe=extra_subscribe, foreground=foreground
-    )
 
 
 @main.command(context_settings={"ignore_unknown_options": True})
@@ -594,19 +495,21 @@ def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
 
 
 @main.command("login-bootstrap")
-@click.option("--channel", default=None,
-              help="Private chat channel or gateway conversation ref to post "
-                   "the login URL into (default: $BOBI_LOGIN_CHANNEL).")
 @click.option("--timeout", default=600, type=int,
               help="Seconds to wait for the pasted auth code (default: 600).")
-def login_bootstrap(channel, timeout):
+def login_bootstrap(timeout):
     """Bootstrap subscription auth over a chat channel + the event bus.
 
     For BOBI_AUTH=subscription first boot with no credentials on the
     volume: drive `claude auth login --claudeai` under a pty, post the OAuth
-    URL to a private chat channel, and wait for the pasted code to arrive as
+    URL to $BOBI_LOGIN_CHANNEL, and wait for the pasted code to arrive as
     a chat event over the event bus. Idempotent — a no-op if credentials
     already exist. Fallback: `fly ssh console` then `claude auth login`.
+
+    The destination is $BOBI_LOGIN_CHANNEL only. This command is on the
+    `agent` group any worker can reach and the URL it posts grants
+    credentials, so it takes no caller-chosen destination; an operator
+    retargeting a one-off sets the env var on the invocation.
     """
     from bobi import auth_bootstrap
     project_path = _detect_project_root()
@@ -615,8 +518,7 @@ def login_bootstrap(channel, timeout):
         click.echo("Subscription credentials already present — nothing to do.")
         return
     try:
-        ok = auth_bootstrap.run_bootstrap(
-            project_path, channel=channel, timeout=timeout)
+        ok = auth_bootstrap.run_bootstrap(project_path, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         click.echo(f"Login bootstrap failed: {exc}", err=True)
         raise SystemExit(1)
@@ -673,7 +575,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         from bobi.registry import fetch_from_url
         try:
             click.echo(f"'{pack}' is a URL, fetching team archive...")
-            pack_dir, _ = fetch_from_url(project_path, pack_str)
+            pack_dir, _ = fetch_from_url(pack_str)
         except Exception as e:
             click.echo(f"Failed to fetch '{pack}': {e}", err=True)
             raise SystemExit(1)
@@ -684,7 +586,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         from bobi.registry import fetch_from_archive
         try:
             click.echo(f"'{pack}' is a local archive, extracting team...")
-            pack_dir, _ = fetch_from_archive(project_path, Path(pack).resolve())
+            pack_dir, _ = fetch_from_archive(Path(pack).resolve())
         except Exception as e:
             click.echo(f"Failed to install '{pack}': {e}", err=True)
             raise SystemExit(1)
@@ -701,7 +603,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
             label = f"{name}@{version}" if version else name
             click.echo(f"'{pack}' is not a local team directory, fetching "
                        f"{label} from remote...")
-            fetch(project_path, name, version=version)
+            fetch(name, version=version)
             resolved = _resolve_agent_pack(name, project_path)
             if not resolved:
                 click.echo(f"Failed to fetch '{pack}' from remote registries.", err=True)
@@ -823,22 +725,33 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
 
     click.echo(f"Run `bobi agent {agent_name} start` to launch.")
 
+    # An in-place bobi upgrade replaces the framework underneath whatever is
+    # already running, and a team reinstall does not restart it (#928). Say so
+    # here, where the operator is, instead of leaving it for doctor to be asked.
+    from bobi.launch_stamp import stale_processes
+
+    stale = stale_processes(project_path)
+    if stale:
+        click.echo("\nStill running the code this install replaced:")
+        for process in stale:
+            click.echo(f"  {process.name}: {process.detail}")
+        click.echo("Restart to pick it up: "
+                   + ", ".join(f"`{p.remedy}`" for p in stale))
+
 
 @main.command()
 @click.argument("name", required=False)
 @click.option("--model", default=None,
               help="Model for the setup session (alias or full ID).")
-@click.option("--resume", is_flag=True, help="Resume an interrupted setup.")
-def setup(name, model, resume):
+def setup(name, model):
     """Interactively design, build, and install an agent team.
 
     Opens a local web UI (on 127.0.0.1) that goes from an idea to a
     runnable agent team: describe what you want, let bobi suggest what
     it can do on its own, connect services, watch it build the pack, then
-    review and install. Interrupt anytime — `--resume` picks up where you
-    left off.
+    review and install. Interrupt anytime — reopening setup for the same
+    team resumes where you left off.
     """
-    del resume
     from urllib.parse import quote, urlencode
     import webbrowser
 
@@ -874,11 +787,27 @@ def app_start(no_browser):
 
 
 @app_group.command("stop")
-def app_stop():
+@click.option("--force", is_flag=True,
+              help="Signal the recorded pid even if it does not answer as the app")
+def app_stop(force):
     """Stop the web app daemon."""
     from bobi.webapp import daemon
 
-    st = daemon.stop()
+    st = daemon.stop(force=force)
+    if st.unverified:
+        click.echo(
+            f"Not running — cleared a stale pid file. Process {st.pid} is "
+            "alive but does not answer as the bobi app (the pid was reused "
+            "after a crash), so it was left alone. Use --force to signal it "
+            "anyway."
+        )
+        return
+    if st.not_permitted:
+        raise click.ClickException(
+            f"Process {st.pid} is the bobi app but runs as another user, so "
+            "the stop signal was refused. It is still running; stop it as "
+            "that user (or with sudo)."
+        )
     click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
 
 
@@ -963,81 +892,6 @@ def ui(ctx, deployment, app, local_port, remote_port, no_browser, check):
     click.echo(f"bobi app is running at {target} (pid {st.pid})")
 
 
-def _manager_session_name(project_path: Path, role: str | None = None) -> str:
-    """Session name of the project's entry-point agent.
-
-    The single definition of the manager naming convention — start, --fresh,
-    and transcript lookup all resolve the same name through here.
-    """
-    from bobi.service import manager_session_name
-    return manager_session_name(project_path, role)
-
-
-def _clear_manager_session(project_path: Path) -> None:
-    """Wipe saved session ID so the manager starts a fresh conversation.
-
-    Also drops the bubble credential and per-session deployment/cursor state:
-    a fresh start mints a NEW bubble, and keeping stale deployment_state (whose
-    api_key points at a now-orphaned deployment in the old bubble) would split
-    the restarted sessions across bubbles.
-    """
-    from bobi.service import clear_manager_session
-    clear_manager_session(project_path)
-    click.echo("Cleared manager session — starting fresh.")
-
-
-def _find_pid_path() -> Path | None:
-    """Find the PID file for the selected Bobi Agent's manager."""
-    project_path = _detect_project_root()
-    if project_path:
-        p = _project_state_dir(project_path) / "manager.pid"
-        if p.exists():
-            return p
-    return None
-
-
-def _stop_manager_pid(pid_path: Path, force: bool) -> None:
-    """Kill the manager process at pid_path."""
-    import signal
-    import time
-
-    try:
-        pid = int(pid_path.read_text().strip())
-    except (ValueError, OSError):
-        click.echo("Invalid PID file — cleaning up.")
-        pid_path.unlink(missing_ok=True)
-        return
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        click.echo(f"Process {pid} not found — cleaning up stale PID file.")
-        pid_path.unlink(missing_ok=True)
-        return
-    except PermissionError:
-        click.echo(f"No permission to signal process {pid}.", err=True)
-        return
-
-    sig = signal.SIGKILL if force else signal.SIGTERM
-    click.echo(f"Stopping bobi (pid {pid})...")
-    os.kill(pid, sig)
-
-    for _ in range(30):
-        time.sleep(0.2)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            pid_path.unlink(missing_ok=True)
-            click.echo("Stopped.")
-            return
-
-    if not force:
-        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
-    else:
-        pid_path.unlink(missing_ok=True)
-        click.echo("Killed.")
-
-
 @main.command()
 @click.option("--force", is_flag=True, help="Send SIGKILL if SIGTERM doesn't work")
 def stop(force):
@@ -1052,7 +906,7 @@ def stop(force):
         _systemctl("stop")
         return
 
-    project_path = _ensure_root_bound()
+    project_path = _detect_project_root()
     from bobi.service import stop_team
 
     result = stop_team(project_path, force=force)
@@ -1095,7 +949,14 @@ def restart(fresh):
         # here, not after the service has already been restarted.
         project_path = _detect_project_root()
         if fresh:
-            _clear_manager_session(project_path)
+            # Wipes the saved session ID, the bubble credential, and the
+            # per-session deployment/cursor state together: a fresh start mints
+            # a NEW bubble, and stale deployment_state (whose api_key points at
+            # a now-orphaned deployment in the old bubble) would split the
+            # restarted sessions across bubbles.
+            from bobi.service import clear_manager_session
+            clear_manager_session(project_path)
+            click.echo("Cleared manager session — starting fresh.")
         click.echo("Restarting via systemd...")
         _systemctl("restart")
         result = subprocess.run(
@@ -1103,7 +964,7 @@ def restart(fresh):
             capture_output=True, text=True, timeout=5,
         )
         pid = result.stdout.strip()
-        log_path = _project_state_dir(project_path) / "manager.log"
+        log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
 
@@ -1193,8 +1054,7 @@ def compact(to):
 @main.command(hidden=True)
 @click.argument("question", required=True)
 @click.option("--timeout", default=300, type=int, help="Timeout in seconds")
-@click.option("--source", default="engineer", help="Source identifier")
-def ask(question, timeout, source):
+def ask(question, timeout):
     """Ask the manager a question (alias for: message --wait)."""
     from bobi.service import MessageDeliveryError, send_message
 
@@ -1202,7 +1062,7 @@ def ask(question, timeout, source):
     try:
         result = send_message(
             project_path, question, wait=True, session="manager",
-            timeout=timeout, sender=source,
+            timeout=timeout, sender="engineer",
         )
         click.echo(result.response)
     except MessageDeliveryError as exc:
@@ -1445,9 +1305,12 @@ def create_slack_bot(
         # Non-interactive with nothing configured: the bobi cloud.
         event_server = DEFAULT_EVENT_SERVER
 
-    manifest_yaml = render_manifest(
-        app_name, event_server, socket_mode=socket_mode,
-    )
+    try:
+        manifest_yaml = render_manifest(
+            app_name, event_server, socket_mode=socket_mode,
+        )
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
     rendered = manifest_to_json(manifest_yaml) if fmt == "json" else manifest_yaml
 
     if output:
@@ -1501,7 +1364,7 @@ def create_slack_bot(
 @main.group()
 def transcript():
     """Session transcripts — view, search, and index conversation history."""
-    _ensure_root_bound()
+    _detect_project_root()
 
 
 @transcript.command("show")
@@ -1551,8 +1414,8 @@ def _find_transcript(session: str) -> Path | None:
     from bobi.sdk import get_registry, session_log_path
 
     if session == "manager":
-        project = _detect_project_root()
-        session = _manager_session_name(project) if project else "bobi-manager"
+        from bobi.service import manager_session_name
+        session = manager_session_name(_detect_project_root())
 
     # Primary: session dir log
     session_log = session_log_path(session)
@@ -1560,17 +1423,14 @@ def _find_transcript(session: str) -> Path | None:
         return session_log
 
     # Fallback: Claude Code transcript via session ID
+    from bobi.chat_history import find_claude_transcript
     from bobi.sdk import _sessions_dir
     id_file = _sessions_dir() / f"{session}.id"
     if id_file.exists():
         session_id = id_file.read_text().strip()
-        if session_id:
-            claude_projects = Path.home() / ".claude" / "projects"
-            if claude_projects.exists():
-                for project_dir in claude_projects.iterdir():
-                    candidate = project_dir / f"{session_id}.jsonl"
-                    if candidate.exists():
-                        return candidate
+        transcript = find_claude_transcript(session_id)
+        if transcript is not None:
+            return transcript
 
     click.echo(f"No session '{session}'.")
     registry = get_registry()
@@ -1663,10 +1523,6 @@ def status():
     """Show active agents — manager + engineer sub-agents."""
     project_path = _detect_project_root()
 
-    if not project_path:
-        click.echo("No Bobi Agent runtime selected. Use `bobi agents list`, then `bobi agent <name> status`.")
-        raise SystemExit(1)
-
     from bobi.service import team_status
 
     result = team_status(project_path)
@@ -1729,20 +1585,23 @@ def doctor(browser, fix):
     all_ok = True
     warnings = 0
     sandbox_failure = False
+    # Every result here is a bobi.doctor.CheckResult — browser.run_doctor()
+    # constructs the same dataclass, and doctor._check_services() converts
+    # bobi.validate's look-alike into it at the boundary. Both fields are
+    # declared with defaults, so plain attribute access is total.
     for r in results:
-        required = getattr(r, "required", True)
         # ✓ ok / ✗ blocking failure / ⚠ non-blocking warning (optional service),
         # with [OK]/[ERROR]/[WARN] fallback on unicode-stripped terminals.
-        mark = status_glyph(r.ok, required, unicode=unicode)
+        mark = status_glyph(r.ok, r.required, unicode=unicode)
         click.echo(f"  {mark} {r.name}: {r.detail}")
         if not r.ok:
-            if required:
+            if r.required:
                 all_ok = False
             else:
                 warnings += 1
             if r.hint:
                 click.echo(f"      → {r.hint}")
-            if browser and hasattr(r, "sandbox_error") and r.sandbox_error:
+            if browser and r.sandbox_error:
                 sandbox_failure = True
 
     if all_ok:
@@ -1828,7 +1687,7 @@ def subagents():
 @subagents.command("list")
 def subagents_list():
     """List active sub-agents from the selected Bobi Agent runtime."""
-    _ensure_root_bound()
+    _detect_project_root()
     from bobi.subagent import list_agents as _list_agents
 
     active = _list_agents()
@@ -1846,7 +1705,7 @@ def subagents_list():
 @click.argument("ref")
 def subagents_show(ref):
     """Show details for a specific sub-agent."""
-    _ensure_root_bound()
+    _detect_project_root()
     import time as _time
     from bobi.subagent import find_agent
 
@@ -1874,7 +1733,7 @@ def subagents_show(ref):
 @click.argument("ref")
 def subagents_cancel(ref):
     """Cancel a running sub-agent."""
-    _ensure_root_bound()
+    _detect_project_root()
     from bobi.subagent import cancel_agent
 
     if cancel_agent(ref):
@@ -1882,6 +1741,277 @@ def subagents_cancel(ref):
     else:
         click.echo(f"No running sub-agent for {ref}")
 
+
+# `otel` is registered directly on the `agent` group, the `subagents` pattern
+# above: no @main.group, no re-parent list entry, and therefore no window in
+# which `bobi otel` leaks as a top-level command.
+
+
+@contextmanager
+def _otel_usage_errors():
+    """Surface the library's input bounds as click's own usage errors.
+
+    The validators live in ``bobi.otel.validate`` so the abuse suite can prove
+    them without a CLI layer; this is the one place their error type is
+    translated.
+    """
+    from bobi.otel.validate import OtelUsageError
+
+    try:
+        yield
+    except OtelUsageError as exc:
+        raise click.UsageError(str(exc)) from None
+
+
+def _otel_context(ctx) -> tuple[Path, str]:
+    """The bound runtime root and the agent name the labels are stamped with."""
+    root = _detect_project_root()
+    name = (ctx.obj or {}).get("agent")
+    if not name:
+        # The group invoked outside its `agent` parent, which a CliRunner can do.
+        name = paths.agent_name_for_root(root)
+    return root, name
+
+
+def _otel_resolve(ctx, signal: str):
+    """Resolve config + resource attributes, or exit with a typed diagnosis."""
+    from bobi.otel import config as otel_config
+    from bobi.otel.resource import resource_attributes
+
+    root, name = _otel_context(ctx)
+    try:
+        cfg = otel_config.resolve_config(root, signal)
+    except otel_config.OtelUnconfigured as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
+    except otel_config.OtelMisconfigured as exc:
+        click.echo(f"OTLP configuration is unusable: {exc}", err=True)
+        raise SystemExit(1)
+    if cfg.credential_withheld:
+        click.echo(
+            f"Withheld configured OTLP headers: the endpoint in use ({cfg.safe_url}) "
+            "is not the origin run/.env's credential was configured for.",
+            err=True,
+        )
+    return cfg, resource_attributes(root, name)
+
+
+def _otel_send(export, cfg, spec, attrs) -> None:
+    """Run one export, turning any failure into a loud, bounded diagnosis."""
+    from bobi.otel.export import OtelExportError
+
+    try:
+        export(cfg, spec, attrs)
+    except OtelExportError as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1)
+
+
+@agent.group("otel")
+def otel():
+    """Record agent-authored telemetry to an OTLP endpoint.
+
+    Emits one metric or one log record per invocation, stamped with the fleet
+    identity an agent cannot resolve for itself. Configure the destination with
+    OTEL_EXPORTER_OTLP_ENDPOINT; see docs/OTEL.md.
+
+    Usage:
+        bobi agent eng otel check
+        bobi agent eng otel metric tickets.processed 42
+        bobi agent eng otel log "reconciled the backlog"
+    """
+    pass
+
+
+# `ignore_unknown_options` is what lets a leading-dash argument through the
+# parser at all: without it `otel metric queue.delta -3` dies as "No such
+# option '-3'" and the negative-value rules below are unreachable. A mistyped
+# real option still fails loudly, as "unexpected extra arguments".
+@otel.command("metric", context_settings={"ignore_unknown_options": True})
+@click.argument("name")
+@click.argument("value")
+@click.option("--kind", type=click.Choice(["counter", "gauge", "histogram"]),
+              default="counter", help="Instrument type (default: counter)")
+@click.option("--temporality", type=click.Choice(["delta", "cumulative"]),
+              default="delta",
+              help="Aggregation temporality for counter/histogram")
+@click.option("--attr", "attrs", multiple=True,
+              help="Attribute as key=value. Repeatable. Always sent as a string.")
+@click.option("--unit", default="", help="UCUM unit, e.g. s, By, 1")
+@click.option("--desc", "description", default="", help="Human-readable description")
+@click.pass_context
+def otel_metric(ctx, name, value, kind, temporality, attrs, unit, description):
+    """Record one measurement to the OTLP metrics endpoint.
+
+    `1` is sent as an integer and `1.0` as a double - different wire types, so
+    keep one series on one form. Attributes become time-series labels: keep
+    them low-cardinality and never put an id or a secret in one.
+
+    Usage:
+        bobi agent eng otel metric tickets.processed 42
+        bobi agent eng otel metric queue.depth 7 --kind gauge
+        bobi agent eng otel metric task.seconds 12.5 --kind histogram --unit s
+        bobi agent eng otel metric tickets.total 128 --temporality cumulative
+    """
+    from bobi.otel.export import MetricSpec, export_metric
+    from bobi.otel.validate import validate_attrs, validate_metric_name, validate_value
+
+    # Whether --temporality was TYPED, not what it holds: the option always
+    # carries its `delta` default, so a value check would reject every gauge.
+    if (kind == "gauge"
+            and ctx.get_parameter_source("temporality")
+            is click.core.ParameterSource.COMMANDLINE):
+        # Gauge's only field is `data_points`; there is nowhere for a
+        # temporality to go, so accepting one would silently drop it.
+        raise click.UsageError(
+            "--temporality does not apply to --kind gauge: a Gauge carries no "
+            "aggregation temporality on the wire."
+        )
+
+    with _otel_usage_errors():
+        validate_metric_name(name)
+        parsed = validate_value(value)
+        attributes = validate_attrs(attrs)
+    if kind == "counter" and parsed < 0:
+        raise click.UsageError(
+            "--kind counter is monotonic; use --kind gauge for a value that "
+            "can fall."
+        )
+
+    spec = MetricSpec(
+        name=name,
+        value=parsed,
+        kind=kind,
+        temporality=temporality,
+        unit=unit,
+        description=description,
+        attributes=attributes,
+    )
+    cfg, resource = _otel_resolve(ctx, "metrics")
+    _otel_send(export_metric, cfg, spec, resource)
+    click.echo(f"Recorded {name}={parsed} ({kind}) to {cfg.safe_url}")
+
+
+# Same reason as `metric`: an agent-authored body may legitimately start with
+# a dash, and that must not read as an option.
+@otel.command("log", context_settings={"ignore_unknown_options": True})
+@click.argument("body", required=False)
+@click.option("--severity", type=click.Choice(["debug", "info", "warn", "error", "fatal"]),
+              default="info", help="Severity (default: info)")
+@click.option("--attr", "attrs", multiple=True,
+              help="Attribute as key=value. Repeatable. Always sent as a string.")
+@click.pass_context
+def otel_log(ctx, body, severity, attrs):
+    """Record one log record to the OTLP logs endpoint.
+
+    The body is sent verbatim and is never parsed as JSON. It leaves this box
+    for a third party, so never put a secret or personal data in it. If <body>
+    is omitted it is read from stdin, so a multi-line body needs no quoting.
+
+    Usage:
+        bobi agent eng otel log "reconciled 42 tickets"
+        bobi agent eng otel log "upstream 502" --severity error
+        printf 'line one\\nline two\\n' | bobi agent eng otel log
+    """
+    from bobi.otel.export import LogSpec, export_log
+    from bobi.otel.validate import validate_attrs, validate_body
+
+    if body is None:
+        stdin = click.get_text_stream("stdin")
+        if stdin.isatty():
+            raise click.UsageError("Provide the log body as an argument or on stdin.")
+        body = stdin.read()
+
+    with _otel_usage_errors():
+        body = validate_body(body)
+        attributes = validate_attrs(attrs)
+    spec = LogSpec(body=body, severity=severity, attributes=attributes)
+    cfg, resource = _otel_resolve(ctx, "logs")
+    _otel_send(export_log, cfg, spec, resource)
+    click.echo(f"Recorded {severity} log to {cfg.safe_url}")
+
+
+@otel.command("check")
+@click.option("--send", is_flag=True,
+              help="Also export one throwaway gauge through the real path")
+@click.pass_context
+def otel_check(ctx, send):
+    """Report how OTLP export is configured on this box.
+
+    Without --send this makes NO network call and says so: OTLP has no health
+    endpoint, and a GET returns 405 from a Collector, which proves nothing.
+    Header values are never printed - only their names - because this output
+    lands in the agent's transcript and is rendered in the console.
+
+    Exit 0 when configured, 1 otherwise.
+
+    Usage:
+        bobi agent eng otel check
+        bobi agent eng otel check --send
+    """
+    from bobi.otel import config as otel_config
+    from bobi.otel.export import MetricSpec, export_metric
+    from bobi.otel.resource import resource_attributes
+
+    root, name = _otel_context(ctx)
+
+    try:
+        import opentelemetry.proto  # noqa: F401
+        click.echo("wire format:  opentelemetry.proto importable")
+    except ImportError as exc:
+        click.echo(f"wire format:  UNAVAILABLE ({exc})")
+
+    configs: dict[str, otel_config.SignalConfig] = {}
+    problems: list[str] = []
+    for signal in ("metrics", "logs"):
+        try:
+            configs[signal] = otel_config.resolve_config(root, signal)
+        except otel_config.OtelUnconfigured as exc:
+            problems.append(str(exc))
+        except otel_config.OtelMisconfigured as exc:
+            problems.append(f"{signal}: {exc}")
+
+    for signal in ("metrics", "logs"):
+        cfg = configs.get(signal)
+        click.echo(f"{signal + ' url:':<14}{cfg.safe_url if cfg else '(unresolved)'}")
+
+    metrics_cfg = configs.get("metrics")
+    if metrics_cfg is not None:
+        # Names only. A value here would leak on the BENIGN path: an agent
+        # debugging a 401 in good faith prints its own write token.
+        names = ", ".join(f"{key}=<set>" for key in sorted(metrics_cfg.headers)) or "(none)"
+        click.echo(f"headers:      {names}")
+        if metrics_cfg.credential_withheld:
+            click.echo(
+                "headers:      WITHHELD - the endpoint in use is not the "
+                "origin run/.env's credential was configured for"
+            )
+        click.echo(f"timeout:      {metrics_cfg.timeout_s:g}s")
+
+    click.echo("resource attributes:")
+    for key, value in sorted(resource_attributes(root, name).items()):
+        click.echo(f"  {key}={value}")
+
+    if problems:
+        for problem in dict.fromkeys(problems):
+            click.echo(problem, err=True)
+        raise SystemExit(1)
+
+    if not send:
+        click.echo("no request sent (pass --send to export a throwaway gauge)")
+        return
+
+    assert metrics_cfg is not None
+    spec = MetricSpec(
+        name="bobi.otel.check",
+        value=1,
+        kind="gauge",
+        unit="1",
+        description="bobi otel check probe",
+        attributes={},
+    )
+    _otel_send(export_metric, metrics_cfg, spec, resource_attributes(root, name))
+    click.echo(f"sent bobi.otel.check to {metrics_cfg.safe_url}")
 
 
 @main.command()
@@ -1982,7 +2112,11 @@ def _show_events(tail: int, decisions_only: bool) -> None:
         click.echo("No events yet.")
         return
 
-    entries.sort(key=lambda e: e[0])
+    # Sort by instant, not by string: a log can span the aware-UTC timestamp
+    # convention change, and pre-upgrade naive-LOCAL strings do not order
+    # lexicographically against aware-UTC ones.
+    from bobi.timeutil import epoch_seconds
+    entries.sort(key=lambda e: epoch_seconds(e[0]))
     for _, text in entries[-tail:]:
         click.echo(text)
 
@@ -2143,8 +2277,9 @@ def ingest_token_revoke(token_id):
 def transcript_index(project):
     """Index conversation JSONL files into searchable SQLite.
 
-    Scans ~/.claude/projects/*/conversations/ for JSONL files and indexes
-    messages into a local SQLite database for fast searching.
+    Scans the Claude Code transcript roots — $CLAUDE_CONFIG_DIR/projects when
+    set, then ~/.claude/projects — for */*.jsonl and indexes messages into a
+    local SQLite database for fast searching.
 
     Usage:
         bobi agent eng transcript index                # index all projects
@@ -2270,15 +2405,17 @@ def workflow_status():
     Usage:
         bobi agent eng workflows status
     """
-    _ensure_root_bound()
+    _detect_project_root()
     from .workflow.state import WorkflowRun
     runs = WorkflowRun.list_runs()
     if not runs:
         click.echo("No workflow runs found.")
         return
     for run in runs[:20]:
+        # The run_key FIELD is authoritative (#1048); the trigger-event copy
+        # is display fallback for records written before the field existed.
         event_data = run.trigger_event.get("data", {})
-        issue = event_data.get("run_key", run.run_key or "?")
+        issue = run.run_key or event_data.get("run_key", "?")
         suffix = ""
         if run.suspended_at_step >= 0:
             suffix = f"  step={run.suspended_at_step}"
@@ -2290,16 +2427,35 @@ def workflow_status():
 
 @workflows.command("resume")
 @click.argument("run_id")
+@click.option("--verdict", type=click.Choice(GATE_VERDICTS), default=None,
+              help="The gate's answer, carried to the workflow as "
+                   "${{event.verdict}}.")
+@click.option("--reply", default="",
+              help="The human's own words, carried as ${{event.reply}}.")
 @click.option("--timeout", default=3600, help="Max execution time in seconds")
-def workflow_resume(run_id, timeout):
+def workflow_resume(run_id, verdict, reply, timeout):
     """Resume a suspended workflow run.
 
     Picks up from the step after the await that suspended it.
 
+    ``--verdict`` and ``--reply`` are the answer the gate was waiting for.
+    They land as the ``event`` scope, so a route step placed after the await
+    reads them as ``${{event.verdict}}`` / ``${{event.reply}}`` and sends the
+    run down the branch the human chose.
+
+    Both are optional and the scope is always set, so a resume with no verdict
+    resolves ``${{event.verdict}}`` to the empty string rather than to a
+    missing scope. That is not an approval, and a workflow's route is written
+    so the non-approving branch is the safe one. An unknown verdict is
+    refused here rather than resolved to something a route might advance on.
+
     Usage:
-        bobi agent eng workflows resume abc123
+        bobi agent eng workflows resume abc123 --verdict approve
     """
-    _ensure_root_bound()
+    # `default=None` on the Choice, because click validates a default too and
+    # "" is not one of the verdicts. Absent and empty mean the same thing here.
+    verdict = verdict or ""
+    _detect_project_root()
     from .workflow.state import WorkflowRun
     from .workflow.triggers import WorkflowDispatcher
     from .workflow.orchestrator import resume_workflow
@@ -2314,6 +2470,31 @@ def workflow_resume(run_id, timeout):
         click.echo(f"Run {run_id} is '{run.status}', not 'waiting'.", err=True)
         sys.exit(1)
 
+    # Everything that can refuse resolves BEFORE the claim. `claim()` renames
+    # <id>.json to <id>.resuming.json and nothing renames it back, so exiting
+    # after claiming leaves the run findable-forever and resumable-never
+    # (state.py's D071). The workflow lookup used to sit on the wrong side of
+    # this line.
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    wf = dispatcher.find_workflow(run.workflow_name)
+    if not wf:
+        click.echo(f"Workflow '{run.workflow_name}' not found.", err=True)
+        sys.exit(1)
+
+    # The same refusal the console makes, for the same reason: without a route
+    # on the verdict, a rejection would run the next step - advancing the work
+    # the human just refused. Checked here too because this command is driven
+    # by hand as well as by the spawn the console detaches.
+    from .workflow.schema import GATE_VERDICT_REJECT, reads_gate_verdict
+    if verdict == GATE_VERDICT_REJECT and not reads_gate_verdict(
+            wf, run.suspended_at_step):
+        click.echo(
+            f"Workflow '{run.workflow_name}' has no route on the gate's "
+            f"verdict at step {run.suspended_at_step}, so a rejection cannot "
+            f"be honoured. Resuming would run that step.", err=True)
+        sys.exit(1)
+
     # Claim before resuming. The event-driven path has always done this; this
     # command never did, so two concurrent resumes of the same run both ran it.
     # That is now reachable from the web app, which spawns this command — and
@@ -2323,21 +2504,27 @@ def workflow_resume(run_id, timeout):
         click.echo(f"Run {run_id} was claimed by another process.", err=True)
         sys.exit(1)
 
-    dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
-    wf = dispatcher.find_workflow(run.workflow_name)
-    if not wf:
-        click.echo(f"Workflow '{run.workflow_name}' not found.", err=True)
-        sys.exit(1)
-
     click.echo(f"Resuming {run.workflow_name} for {run.run_key} "
-               f"from step {run.suspended_at_step}...")
-    success = resume_workflow(run, wf, timeout=timeout)
-    if success:
-        click.echo("Workflow completed.")
-    else:
+               f"from step {run.suspended_at_step}"
+               + (f" with verdict '{verdict}'" if verdict else "") + "...")
+    # Always an event, even with no verdict: the scope then exists and holds
+    # an empty verdict, which a route reads as "not an approval". Passing no
+    # event at all would leave the scope missing, which resolves the same way
+    # but only after a log warning about an unknown scope.
+    event = {"data": {"verdict": verdict, "reply": reply}}
+    if not resume_workflow(run, wf, event=event, timeout=timeout):
         click.echo("Workflow failed.", err=True)
         sys.exit(1)
+    # resume_workflow returns True for two different endings: the run finished,
+    # or it parked on a LATER await step. The second is dormant, not done - the
+    # run's own ledger entry is back to "waiting" (#1048: one run, one record)
+    # - so report it as such instead of claiming completion. A rejected gate
+    # that reworks and re-gates ends here every cycle.
+    if run.status == "waiting":
+        click.echo("Workflow suspended again on a later await step. "
+                   "Run `workflows status` for the waiting run.")
+    else:
+        click.echo("Workflow completed.")
 
 
 @workflows.command("validate")
@@ -2495,9 +2682,6 @@ def monitor_add(name, interval, at_times, tz, days, notify, description, event, 
     from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
-    if not project_path:
-        click.echo("No Bobi Agent runtime selected.", err=True)
-        raise SystemExit(1)
 
     at_list = list(at_times)
     day_list = [d for d in _re.split(r"[,\s]+", days.strip()) if d]
@@ -2561,13 +2745,10 @@ def monitor_pause(name):
     from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
-    if project_path:
-        with with_mutable_runtime_package(project_path):
-            paused = MonitorRegistry.pause(name, project_path)
-    else:
+    with with_mutable_runtime_package(project_path):
         paused = MonitorRegistry.pause(name, project_path)
     if paused:
-        where = str(paths.package_dir(project_path) / "monitors.yaml") if project_path else "package/monitors.yaml"
+        where = str(paths.package_dir(project_path) / "monitors.yaml")
         click.echo(f"Paused monitor '{name}' (enabled: false in {where})")
     else:
         click.echo(f"No monitor named '{name}' found.", err=True)
@@ -2588,10 +2769,7 @@ def monitor_remove(name):
     from .runtime_guard import with_mutable_runtime_package
 
     project_path = _detect_project_root()
-    if project_path:
-        with with_mutable_runtime_package(project_path):
-            result = MonitorRegistry.remove(name, project_path)
-    else:
+    with with_mutable_runtime_package(project_path):
         result = MonitorRegistry.remove(name, project_path)
     if result == "removed":
         click.echo(f"Removed monitor '{name}'.")
@@ -2750,13 +2928,16 @@ def event_server_cmd():
 def event_server_start(foreground, port):
     """Start the local event server."""
     project_path = _detect_project_root()
-    es_port = _selected_local_event_server_port(project_path, port)
 
     from bobi.events.server import (
         NodeRuntimePrerequisiteError,
         PackagedEventServerArtifactError,
         ensure_running,
+        resolve_local_port,
     )
+    # An explicit --port wins; everything else resolves through the shared
+    # definition, so doctor probes the same port this starts.
+    es_port = port if port is not None else resolve_local_port(project_path)
     try:
         result = ensure_running(es_port, project_path=project_path)
     except (
@@ -2788,24 +2969,43 @@ def event_server_start(foreground, port):
 def event_server_stop():
     """Stop the local event server."""
     import signal
+
+    from bobi import launch_stamp
+    from bobi.events.server import local_port_file
+
     project_path = _detect_project_root()
-    if not project_path:
-        click.echo("Not inside a bobi project.", err=True)
-        raise SystemExit(1)
-    pid_file = _project_state_dir(project_path) / "event-server.pid"
-    port_file = _event_server_port_file(project_path)
+    pid_file = paths.event_server_pid_path(project_path)
+    port_file = local_port_file(project_path)
     if not pid_file.exists():
         click.echo("Event server is not running")
         port_file.unlink(missing_ok=True)
         return
-    pid = int(pid_file.read_text().strip())
+    # The pid file is written by another process and a crash can truncate it
+    # mid-write, so every read here is defensive: an unparseable pid used to
+    # raise out of the command, print a traceback, and leave the stale files
+    # behind — which made every subsequent `stop` fail exactly the same way,
+    # with no way out but deleting the files by hand. Mirrors the manager stop
+    # path ("Invalid PID file — cleaning up.").
     try:
-        os.kill(pid, signal.SIGTERM)
-        click.echo(f"Event server stopped (pid {pid})")
-    except ProcessLookupError:
-        click.echo("Event server was not running (stale PID file)")
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, OSError):
+        click.echo("Invalid event-server PID file — cleaning up.")
+    else:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            click.echo(f"Event server stopped (pid {pid})")
+        except ProcessLookupError:
+            click.echo("Event server was not running (stale PID file)")
+        except PermissionError:
+            # The pid was reused by a process we do not own; signalling it
+            # would be wrong even if we could. Drop our stale files and say so.
+            click.echo(f"Not permitted to signal pid {pid} — it is not ours. "
+                       "Clearing the stale PID file.", err=True)
+        except OSError as e:
+            click.echo(f"Could not signal pid {pid}: {e}", err=True)
     pid_file.unlink(missing_ok=True)
     port_file.unlink(missing_ok=True)
+    launch_stamp.clear_launch(project_path, launch_stamp.EVENT_SERVER)
 
 
 @event_server_cmd.command("restart")
@@ -2822,18 +3022,18 @@ def event_server_restart(ctx, port):
 @event_server_cmd.command("status")
 def event_server_status():
     """Show event server status."""
-    from bobi.events.server import health
+    from bobi.events.server import health, local_port_from_url, resolve_local_port
     project_path = _detect_project_root()
     try:
         from .config import Config
         configured = Config.load(project_path).event_server_url
     except Exception:
         configured = ""
-    if configured and _parse_local_event_server_port(configured) is None:
+    if configured and local_port_from_url(configured) is None:
         click.echo(f"Event server: remote ({configured})")
         return
 
-    es_port = _selected_local_event_server_port(project_path)
+    es_port = resolve_local_port(project_path)
     data = health(f"http://localhost:{es_port}")
     if data:
         click.echo(f"Event server: running on port {es_port}")
@@ -2849,7 +3049,21 @@ main.add_command(event_server_cmd)
 @subagents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
 @click.option("--role", required=True, help="Agent role (see 'bobi agent <name> roles list')")
-@click.option("--id", "run_key", default=None, help="Explicit run key for correlation (e.g. issue number)")
+@click.option("--id", "run_key", default=None,
+              help="Explicit run key for correlation (e.g. an issue number). "
+                   "Relaunching the same key resumes that run. Default: a key "
+                   "derived from the launch itself - workflow, role, model, "
+                   "effort, task text - so an identical launch collides with "
+                   "the run already in flight instead of starting a second "
+                   "one.")
+@click.option("--id-random", "random_key", is_flag=True,
+              help="Mint a random run key instead of deriving one from the "
+                   "launch. Without it, an un-keyed launch derives its key "
+                   "from the workflow, role, model, effort and task text, so "
+                   "relaunching the same one while the first run is still "
+                   "going is refused as a duplicate. Use this to fan out N "
+                   "copies of an IDENTICAL launch on purpose. Cannot be "
+                   "combined with --id.")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True,
@@ -2883,10 +3097,11 @@ main.add_command(event_server_cmd)
                    "every RE-dispatch of a worker that re-orients from durable "
                    "state — a committed checklist, the branch's commits — "
                    "since re-running the same --task otherwise resumes the "
-                   "dead session.")
-def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
-                     post_event, requested_by, non_interactive, persistent,
-                     subscribe, model, effort, fresh):
+                   "dead session. Implied when the run key is derived (no "
+                   "--id), where there is no run the caller meant to continue.")
+def subagents_launch(workflow, role, run_key, random_key, task, timeout, wait,
+                     as_check, post_event, requested_by, non_interactive,
+                     persistent, subscribe, model, effort, fresh):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -2899,6 +3114,7 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
     if subscribe:
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
+                    random_key=random_key,
                     timeout=timeout, wait=wait, as_check=as_check,
                     post_event=post_event, requested_by=requested_by,
                     interactive=not non_interactive,
@@ -2907,7 +3123,28 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
                     model=model, effort=effort, fresh=fresh)
 
 
-def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
+def _parse_requested_by(requested_by: str | None) -> dict:
+    """Decode `--requested-by`, exiting with its own message on bad input.
+
+    Both dispatch paths need this: `_dispatch_agent` hands the RAW string to
+    `_run_agent_wait` rather than a decoded dict, so the wait path parses it
+    for itself.
+    """
+    if not requested_by:
+        return {}
+    try:
+        parsed = json.loads(requested_by)
+    except json.JSONDecodeError:
+        click.echo("--requested-by must be valid JSON", err=True)
+        raise SystemExit(1)
+    if not isinstance(parsed, dict):
+        click.echo("--requested-by must be a JSON object", err=True)
+        raise SystemExit(1)
+    return parsed
+
+
+def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
+                    timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
                     model="", effort="", fresh=False):
@@ -2935,6 +3172,10 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     if post_event and not as_check:
         click.echo("--post-event requires --as-check", err=True)
         raise SystemExit(1)
+    if run_key and random_key:
+        click.echo("--id-random cannot be combined with --id (an explicit run "
+                   "key already opts out of task-derived dedup)", err=True)
+        raise SystemExit(1)
 
     if as_check:
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
@@ -2949,29 +3190,19 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         raise SystemExit(1)
 
     if wait:
-        with _launch_refusal_is_readable():
+        with _launch_refusal_is_readable(project_path):
             _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
-                            run_key=run_key, timeout=timeout,
+                            run_key=run_key, random_key=random_key,
+                            timeout=timeout,
                             requested_by=requested_by, interactive=interactive,
                             persistent=persistent, subscribe=subscribe or [],
                             model=model, effort=effort, fresh=fresh)
         return
 
-    requester: dict = {}
-    if requested_by:
-        try:
-            parsed = json.loads(requested_by)
-            if isinstance(parsed, dict):
-                requester = parsed
-            else:
-                click.echo("--requested-by must be a JSON object", err=True)
-                raise SystemExit(1)
-        except json.JSONDecodeError:
-            click.echo("--requested-by must be valid JSON", err=True)
-            raise SystemExit(1)
+    requester = _parse_requested_by(requested_by)
 
     from .subagent import launch_agent
-    with _launch_refusal_is_readable():
+    with _launch_refusal_is_readable(project_path):
         session_name = launch_agent(
             task=task, cwd=cwd, workflow_name=workflow,
             timeout=timeout, requested_by=requester,
@@ -2980,6 +3211,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
             persistent=persistent,
             subscribe=subscribe or [],
             run_key=run_key,
+            random_key=random_key,
             model=model,
             effort=effort,
             fresh=fresh,
@@ -2988,21 +3220,44 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
 
 
 @contextmanager
-def _launch_refusal_is_readable():
-    """Surface a blocked launch as one line on stderr, never a traceback.
+def _launch_refusal_is_readable(project_path: Path):
+    """Surface a refused launch as one line on stderr, never a traceback.
 
-    The highest-stakes surface in the lineage guard, because the reader is an
+    The highest-stakes surface in either launch guard, because the reader is an
     LLM. A raw traceback reads as a transient crash, and the natural recovery
     is to retry with a fresh run key or ``-w adhoc`` - turning one refusal into
-    the launch storm the guard exists to stop. The message itself (built in
-    ``bobi/launch_lineage.py``) says the block is deterministic and names each
-    retry vector; all this does is make sure the agent sees it and nothing else.
+    the launch storm the guards exist to stop. Both refusals land here so that
+    property holds once rather than per call site:
+
+    - ``LaunchBlockedError`` (lineage, #849) carries its own message, built in
+      ``bobi/launch_lineage.py``, which says the block is deterministic and
+      names each retry vector.
+    - ``DuplicateRunError`` (derived run key, #850) needs the remediation
+      spelled out here, where the agent name is resolvable.
     """
     from .launch_lineage import LaunchBlockedError
+    from .sdk import ACTIVE_STATUSES
+    from .subagent import DuplicateRunError
     try:
         yield
     except LaunchBlockedError as exc:
         click.echo(str(exc), err=True)
+        raise SystemExit(1) from None
+    except DuplicateRunError as exc:
+        # Render the real agent name: an LLM pastes a `<name>` placeholder
+        # verbatim and the remediation fails.
+        agent_name = paths.agent_name_for_root(project_path)
+        click.echo(f"Launch refused: {exc}", err=True)
+        click.echo(f"  Watch it:  bobi agent {agent_name} subagents show "
+                   f"{exc.session_name}", err=True)
+        # Only offer the cancel when it would do something. `cancel_agent`
+        # ignores anything outside ACTIVE_STATUSES, so printing it for a
+        # suspended run sends the reader to a command that reports "no running
+        # sub-agent" and teaches them the refusal is bogus. The exception's own
+        # message carries the remedy that fits that case.
+        if exc.status in ACTIVE_STATUSES:
+            click.echo(f"  Cancel it: bobi agent {agent_name} subagents cancel "
+                       f"{exc.session_name}", err=True)
         raise SystemExit(1) from None
 
 
@@ -3011,19 +3266,18 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
                     interactive: bool, persistent: bool, subscribe: list[str],
                     model: str = "", effort: str = "",
-                    fresh: bool = False) -> None:
+                    fresh: bool = False, random_key: bool = False) -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
-        # Deliberate limit, not an oversight: --wait blocks by running the task
-        # as ONE prompt through spawn_adhoc. A multi-step workflow goes through
-        # the orchestrator, which returns once the run is dispatched, so there
-        # is no in-process handle to join. Fan-out-and-block therefore uses
-        # adhoc units (#845; see the engineer role's "Parallel Work" section).
+        # Deliberate limit, not an oversight: --wait is the fan-out-and-block
+        # delegation idiom (#845; see the engineer role's "Parallel Work"
+        # section), and an ad-hoc unit is its unit of work. Widening --wait to
+        # multi-step workflows is a contract change to make on purpose, not a
+        # side effect of the executor consolidation (#1057).
         click.echo(
-            f"--wait requires '-w adhoc' (got '{workflow}'). A multi-step "
-            f"workflow returns as soon as it is dispatched, so there is "
-            f"nothing to block on. To fan out and join, launch adhoc units in "
-            f"the background and 'wait' for them in a single shell command.",
+            f"--wait requires '-w adhoc' (got '{workflow}'). To fan out and "
+            f"join, launch adhoc units in the background and 'wait' for them "
+            f"in a single shell command.",
             err=True,
         )
         raise SystemExit(1)
@@ -3031,40 +3285,30 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
         click.echo("--wait cannot be used with --persistent", err=True)
         raise SystemExit(1)
 
-    requester: dict = {}
-    if requested_by:
-        try:
-            parsed = json.loads(requested_by)
-            if isinstance(parsed, dict):
-                requester = parsed
-            else:
-                click.echo("--requested-by must be a JSON object", err=True)
-                raise SystemExit(1)
-        except json.JSONDecodeError:
-            click.echo("--requested-by must be valid JSON", err=True)
-            raise SystemExit(1)
+    requester = _parse_requested_by(requested_by)
 
-    # --wait runs the agent IN THIS PROCESS, so there is no child env to stamp:
-    # the chain goes into our own environment, which is what any `bobi` command
-    # the agent runs from its shell inherits. Admission happens here for the
-    # same reason it does in launch_agent - this path chains just as deeply,
-    # and `-w adhoc --wait` is the delegation idiom the role prompts teach, so
-    # it is the shape most likely to run away.
-    from .launch_lineage import ADHOC_WORKFLOW, admit, stamp
-    from .subagent import adhoc_session_name, spawn_adhoc
-    session_name = adhoc_session_name(task, run_key)
-    stamp(os.environ, admit(
-        _detect_project_root(), session=session_name,
-        workflow=ADHOC_WORKFLOW, run_key=session_name,
-    ))
-
-    result = spawn_adhoc(
-        cwd=cwd, task=task, timeout=timeout, name=run_key,
-        requested_by=requester, persistent=False, role=role,
-        subscribe=subscribe, model=model, effort=effort, fresh=fresh,
+    # One launch path (#1057): launch_agent owns the derivation, preflights,
+    # admission and lineage for EVERY run, and wait=True just runs the
+    # workflow in this process instead of detaching it. The ad-hoc task is
+    # literally a one-step workflow execution, with the same ledger entry,
+    # checkpoints and period dedupe every other run gets.
+    from .subagent import launch_agent
+    result = launch_agent(
+        task=task, cwd=cwd, workflow_name=workflow, timeout=timeout,
+        requested_by=requester, interactive=interactive, role=role,
+        subscribe=subscribe, run_key=run_key, random_key=random_key,
+        model=model, effort=effort, fresh=fresh, wait=True,
     )
     if result.final_text:
         click.echo(result.final_text)
+    if result.error_kind == "suspended":
+        # A pack may override `adhoc` with a gated workflow. Parked is
+        # dormant, not done - exiting silently as a success would report
+        # work finished that never ran past the gate.
+        click.echo(
+            "Run suspended at an approval gate; it resumes when its event "
+            "arrives (see the console runs view).", err=True,
+        )
     if not result.success:
         if result.error:
             click.echo(f"Agent failed: {result.error}", err=True)
@@ -3102,18 +3346,14 @@ def _run_check(cwd: str, task: str, timeout: int, post_event: str | None) -> Non
         raise SystemExit(1)
 
     if post_event and result.finding:
+        from bobi.events.publish import post_event as publish_event
+
         data = {"summary": result.summary, "text": result.summary, **result.details}
-        if _post_event(post_event, data):
+        if publish_event(post_event, data, project_path=_detect_project_root()):
             click.echo(f"Posted event: {post_event}")
         else:
             click.echo(f"Could not post event: {post_event}", err=True)
             raise SystemExit(1)
-
-
-def _post_event(event_type: str, data: dict) -> bool:
-    """Post a synthetic event to the event server (see events/publish.py)."""
-    from bobi.events.publish import post_event
-    return post_event(event_type, data, project_path=_detect_project_root())
 
 
 @agents.command("update")
@@ -3129,24 +3369,22 @@ def agents_update(name):
     from bobi.registry import (fetch, list_cached, check_update,
                                     split_team_ref, _read_local_version)
 
-    project_path = paths.home_dir()
-
     if name:
         pkg_name, version = split_team_ref(name)  # D-6: split on the last `@`
         try:
             if version:
                 # A pin targets an immutable asset — fetch directly (idempotent),
                 # no latest-vs-local short-circuit.
-                fetch(project_path, pkg_name, version=version)
-                new_v = _read_local_version(project_path, pkg_name) or version
+                fetch(pkg_name, version=version)
+                new_v = _read_local_version(pkg_name) or version
                 click.echo(f"Pinned {pkg_name} to v{new_v}")
                 return
-            local_v, remote_v = check_update(project_path, pkg_name)
+            local_v, remote_v = check_update(pkg_name)
             if local_v and remote_v and remote_v == local_v:
                 click.echo(f"{pkg_name} v{local_v} is already up to date.")
                 return
-            path = fetch(project_path, pkg_name)
-            new_v = _read_local_version(project_path, pkg_name) or "unknown"
+            path = fetch(pkg_name)
+            new_v = _read_local_version(pkg_name) or "unknown"
             if local_v:
                 click.echo(f"Updated {pkg_name}: v{local_v} → v{new_v}")
             else:
@@ -3155,22 +3393,30 @@ def agents_update(name):
             click.echo(f"Failed: {e}", err=True)
             raise SystemExit(1)
     else:
-        cached = list_cached(project_path)
+        cached = list_cached()
         if not cached:
             click.echo("No cached agent teams to update.")
             return
+        failed = 0
         for pack in cached:
             try:
-                local_v, remote_v = check_update(project_path, pack["name"])
+                local_v, remote_v = check_update(pack["name"])
                 if local_v and remote_v and remote_v == local_v:
                     click.echo(f"  {pack['name']} v{local_v} — up to date")
                 elif remote_v:
-                    fetch(project_path, pack["name"])
+                    fetch(pack["name"])
                     click.echo(f"  {pack['name']} v{local_v} → v{remote_v}")
                 else:
                     click.echo(f"  {pack['name']} v{local_v} — could not check remote")
             except Exception as e:
                 click.echo(f"  {pack['name']} — failed: {e}", err=True)
+                failed += 1
+        # Keep going through every pack (one bad registry must not hide the
+        # rest), but report the failure. Without this the update-all form
+        # exited 0 while the named-pack form above exited 1 for the identical
+        # failure, so nothing scripted could tell an update from a no-op.
+        if failed:
+            raise SystemExit(1)
 
 
 @agents.command("add-registry")
@@ -3237,19 +3483,23 @@ def agents_browse():
     """
     from bobi.registry import list_remote, list_cached, DEFAULT_REPO
 
-    project_path = paths.home_dir()
-    remote = list_remote(project_path)
+    remote = list_remote()
     if not remote:
         click.echo("Could not fetch remote registry.", err=True)
         raise SystemExit(1)
 
-    cached_packs = list_cached(project_path) if project_path else []
-    cached = {p["name"]: p["version"] for p in cached_packs}
+    cached_packs = list_cached()
+    cached = {p["name"]: str(p["version"]) for p in cached_packs}
 
     click.echo("Available agent teams:\n")
     for pack in remote:
         name = pack["name"]
-        version = pack.get("version", "?")
+        # A registry.yaml is third-party YAML: `version: 1.0` parses as a float,
+        # which `:8s` below rejects with "Unknown format code 's'" — taking down
+        # the whole listing over one row. It also made the local-vs-remote
+        # comparison a silent str-vs-float mismatch, so an installed pack read
+        # as an available upgrade to itself.
+        version = str(pack.get("version", "?"))
         desc = pack.get("description", "")
         registry = pack.get("registry", DEFAULT_REPO)
         local_v = cached.get(name)
@@ -3289,7 +3539,7 @@ def kb_create(name):
         bobi agent <name> kb create docs
     """
     from bobi.kb.store import KBStore
-    _ensure_root_bound()
+    _detect_project_root()
     try:
         store = KBStore.create(name)
         click.echo(f"Created KB '{name}'")
@@ -3312,7 +3562,7 @@ def kb_add(name, file_path, text):
     """
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
-    _ensure_root_bound()
+    _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -3350,7 +3600,7 @@ def kb_search(name, query, limit, mode):
     """
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
-    _ensure_root_bound()
+    _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -3382,7 +3632,7 @@ def kb_list():
         bobi agent <name> kb list
     """
     from bobi.kb.store import KBStore
-    _ensure_root_bound()
+    _detect_project_root()
 
     kbs = KBStore.list_kbs()
     if not kbs:
@@ -3401,7 +3651,7 @@ def kb_info(name):
         bobi agent <name> kb info docs
     """
     from bobi.kb.store import KBStore
-    _ensure_root_bound()
+    _detect_project_root()
 
     try:
         store = KBStore(name)
@@ -3431,7 +3681,7 @@ def kb_remove(name):
         bobi agent <name> kb remove docs
     """
     from bobi.kb.store import KBStore
-    _ensure_root_bound()
+    _detect_project_root()
 
     try:
         KBStore.remove(name)
@@ -3452,12 +3702,11 @@ def recall_memory(query, limit):
     """Search the cold long-term memory reference KB."""
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
-    from bobi.memory import cold_memory_kb_name
+    from bobi.memory import COLD_MEMORY_KB_NAME
 
-    _ensure_root_bound()
-    name = cold_memory_kb_name()
+    _detect_project_root()
     try:
-        store = KBStore(name)
+        store = KBStore(COLD_MEMORY_KB_NAME)
     except FileNotFoundError:
         click.echo("No cold memory index yet.")
         return
@@ -3507,7 +3756,7 @@ def costs(ctx, group_by):
 
     project_path = _detect_project_root()
     sessions_dir = paths.sessions_dir(project_path)
-    summary = rollup_costs(sessions_dir, group_by=group_by)
+    summary = rollup_costs(sessions_dir)
 
     if summary.sessions_counted == 0:
         click.echo("No cost data found. Costs are recorded as sessions run.")

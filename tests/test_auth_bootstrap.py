@@ -7,6 +7,7 @@ integration concern (deployed env, alongside C10/C12).
 """
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -19,6 +20,8 @@ def default_claude_brain(monkeypatch):
     from bobi.brain import BRAIN_ENV
 
     monkeypatch.setenv(BRAIN_ENV, "claude")
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
 # --- credentials / needs_bootstrap ------------------------------------------
@@ -27,12 +30,36 @@ def test_credentials_path_follows_home(tmp_path):
     assert ab.credentials_path(tmp_path) == tmp_path / ".claude" / ".credentials.json"
 
 
-def test_credentials_exist(tmp_path):
+def test_credentials_exist_requires_structurally_valid_claude_oauth(tmp_path):
     assert not ab.credentials_exist(tmp_path)
     creds = tmp_path / ".claude" / ".credentials.json"
     creds.parent.mkdir(parents=True)
     creds.write_text("{}")
+    assert not ab.credentials_exist(tmp_path)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {
+            "accessToken": "access",
+            "refreshToken": "refresh",
+        },
+    }))
     assert ab.credentials_exist(tmp_path)
+
+
+def test_credentials_exist_honors_claude_config_dir(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    config_dir = tmp_path / "claude-volume"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    creds = config_dir / ".credentials.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {"accessToken": "access", "refreshToken": "refresh"},
+    }))
+
+    assert ab.credentials_path(home) == creds
+    assert ab.credentials_exist(home) is True
+    monkeypatch.setenv("BOBI_AUTH", "subscription")
+    assert ab.needs_bootstrap(home) is False
 
 
 def test_needs_bootstrap_only_in_subscription_mode(tmp_path, monkeypatch):
@@ -42,7 +69,164 @@ def test_needs_bootstrap_only_in_subscription_mode(tmp_path, monkeypatch):
     assert ab.needs_bootstrap(tmp_path) is True
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / ".credentials.json").write_text("{}")
+    assert ab.needs_bootstrap(tmp_path) is True
+    (tmp_path / ".claude" / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {"refreshToken": "refresh"},
+    }))
     assert ab.needs_bootstrap(tmp_path) is False
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (None, "credential file is missing"),
+        ("{not-json", "credential JSON is malformed"),
+        ("[]", "credential JSON root is not an object"),
+        ("{}", "claudeAiOauth is missing or malformed"),
+        (json.dumps({"claudeAiOauth": {}}),
+         "refresh token is missing or blank"),
+        (json.dumps({"claudeAiOauth": {"refreshToken": "   "}}),
+         "refresh token is missing or blank"),
+        (json.dumps({
+            "claudeAiOauth": {
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": "tomorrow",
+            },
+        }), "refresh token expiry is malformed"),
+        ('{"claudeAiOauth":{"refreshToken":"refresh",'
+         '"refreshTokenExpiresAt":NaN}}',
+         "refresh token expiry is malformed"),
+        (json.dumps({
+            "claudeAiOauth": {
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": 1_699_999_999_999,
+            },
+        }), "refresh token is expired"),
+    ],
+)
+def test_claude_subscription_credentials_reject_unusable_shapes(
+    tmp_path, payload, reason,
+):
+    path = tmp_path / ".claude" / ".credentials.json"
+    if payload is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(payload)
+
+    status = ab.subscription_credentials_status(
+        path, "claude", now_ms=1_700_000_000_000,
+    )
+
+    assert status.valid is False
+    assert status.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("oauth", "reason"),
+    [
+        (
+            {"accessToken": "", "refreshToken": "refresh"},
+            "refresh token is present",
+        ),
+        (
+            {
+                "accessToken": "access",
+                "refreshToken": "refresh",
+                "refreshTokenExpiresAt": 1_700_000_000_001,
+            },
+            "refresh token is present and unexpired",
+        ),
+    ],
+)
+def test_claude_subscription_credentials_accept_recoverable_shapes(
+    tmp_path, oauth, reason,
+):
+    path = tmp_path / ".claude" / ".credentials.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"claudeAiOauth": oauth}))
+
+    status = ab.subscription_credentials_status(
+        path, "claude", now_ms=1_700_000_000_000,
+    )
+
+    assert status.valid is True
+    assert status.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (None, "credential file is missing"),
+        ("{not-json", "credential JSON is malformed"),
+        ("[]", "credential JSON root is not an object"),
+        ("{}", "tokens is missing or malformed"),
+        (json.dumps({"tokens": {}}), "refresh token is missing or blank"),
+        (json.dumps({"tokens": {"refresh_token": "  "}}),
+         "refresh token is missing or blank"),
+    ],
+)
+def test_codex_subscription_credentials_reject_unusable_shapes(
+    tmp_path, payload, reason,
+):
+    path = tmp_path / ".codex" / "auth.json"
+    if payload is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(payload)
+
+    status = ab.subscription_credentials_status(path, "codex")
+
+    assert status.valid is False
+    assert status.reason == reason
+
+
+def test_codex_subscription_credentials_accept_real_oauth_shape(tmp_path):
+    path = tmp_path / ".codex" / "auth.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "OPENAI_API_KEY": None,
+        "auth_mode": "apikey",
+        "tokens": {
+            "id_token": "id",
+            "access_token": "",
+            "refresh_token": "refresh",
+            "account_id": "account",
+        },
+        "last_refresh": "2026-08-06T00:00:00Z",
+    }))
+
+    status = ab.subscription_credentials_status(path, "codex")
+
+    assert status.valid is True
+    assert status.reason == "refresh token is present"
+
+
+def test_credential_status_cli_reports_invalid_reason(tmp_path, capsys):
+    path = tmp_path / ".claude" / ".credentials.json"
+
+    exit_code = ab._credential_status_cli([
+        "credential-status", "claude", str(path),
+    ])
+
+    assert exit_code == 1
+    assert capsys.readouterr().out.strip() == (
+        "credentials invalid: credential file is missing"
+    )
+
+
+def test_credential_status_cli_reports_valid_reason(tmp_path, capsys):
+    path = tmp_path / ".codex" / "auth.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "tokens": {"refresh_token": "refresh"},
+    }))
+
+    exit_code = ab._credential_status_cli([
+        "credential-status", "codex", str(path),
+    ])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out.strip() == (
+        "credentials valid: refresh token is present"
+    )
 
 
 # --- URL scraping -----------------------------------------------------------
@@ -216,6 +400,40 @@ def test_paste_back_instruction_for_discord_server_channel_mentions_reply():
     assert "@mention the bot" in instruction
 
 
+@pytest.mark.parametrize(
+    "channel",
+    [
+        ab.LoginChannel(
+            destination="slack:T123:channel:C456",
+            source="slack",
+            topic="slack:T123:app:A123",
+        ),
+        ab.LoginChannel(
+            destination="C456",
+            source="slack",
+            topic="slack:T123:app:A123",
+            legacy_slack_channel="C456",
+        ),
+    ],
+)
+def test_paste_back_instruction_for_slack_channel_mentions_reply(channel):
+    instruction = ab._paste_back_instruction(channel)
+    assert "reply to this message" in instruction
+    assert "@mention the bot" in instruction
+    assert "in this channel" not in instruction
+
+
+def test_paste_back_instruction_for_slack_dm_stays_in_channel():
+    channel = ab.LoginChannel(
+        destination="slack:T123:dm:D456",
+        source="slack",
+        topic="slack:T123:app:A123",
+    )
+    instruction = ab._paste_back_instruction(channel)
+    assert "in this channel" in instruction
+    assert "@mention the bot" not in instruction
+
+
 def test_extract_code_from_real_adapter_dm_shape():
     """Reproduces the prod bug: the Slack adapter (event-server/core/src/
     adapters/chat-sdk-slack.ts) emits `text` at the TOP LEVEL and in `payload`, with `fields`
@@ -339,13 +557,38 @@ def whatsapp_config(tmp_path, monkeypatch):
     return project
 
 
-def test_run_bootstrap_happy_path(slack_config, monkeypatch):
+@pytest.mark.parametrize(
+    ("brain_block", "expected_gateway_url"),
+    [
+        ("", ""),
+        (
+            "brain:\n  kind: claude\n  base_url: https://gateway.example\n",
+            "https://gateway.example",
+        ),
+        (
+            "brain:\n  kind: gateway\n  base_url: https://gateway.example\n",
+            "https://gateway.example",
+        ),
+    ],
+    ids=["native-claude", "gateway-base-url-subscription", "gateway-alias-subscription"],
+)
+def test_run_bootstrap_happy_path(
+    slack_config, monkeypatch, brain_block, expected_gateway_url,
+):
+    from bobi.brain.gateway import gateway_base_url
+    from bobi import paths
+
+    if brain_block:
+        agent_yaml = paths.agent_yaml_path(slack_config)
+        agent_yaml.write_text(agent_yaml.read_text() + brain_block)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
     posts = []
     written = []
-    home = slack_config  # unused; creds keyed off $HOME
 
-    home_dir = os.environ["HOME"]
-    creds = os.path.join(home_dir, ".claude", ".credentials.json")
+    config_dir = slack_config.parent / "claude-volume"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    creds = config_dir / ".credentials.json"
 
     class FakeProc:
         def poll(self):
@@ -367,9 +610,10 @@ def test_run_bootstrap_happy_path(slack_config, monkeypatch):
 
     def fake_wait(project_path, channel, timeout):
         # Simulate the human pasting the code; claude then writes creds.
-        os.makedirs(os.path.dirname(creds), exist_ok=True)
-        with open(creds, "w") as f:
-            f.write("{}")
+        creds.parent.mkdir(parents=True)
+        creds.write_text(json.dumps({
+            "claudeAiOauth": {"refreshToken": "refresh"},
+        }))
         return "the-code"
 
     ok = ab.run_bootstrap(
@@ -381,9 +625,13 @@ def test_run_bootstrap_happy_path(slack_config, monkeypatch):
     assert ok is True
     assert written == ["the-code"]
     # First post = URL prompt; final post = success.
-    assert any("oauth/authorize" in p[2] for p in posts)
+    prompt = next(p[2] for p in posts if "oauth/authorize" in p[2])
+    assert "reply to this message" in prompt
+    assert "@mention the bot" in prompt
+    assert "in this channel" not in prompt
     assert any("complete" in p[2] for p in posts)
     assert all(p[1] == "C0LOGIN42" for p in posts)
+    assert gateway_base_url() == expected_gateway_url
 
 
 def test_run_bootstrap_posts_to_discord_conversation(discord_config, monkeypatch):
@@ -434,7 +682,9 @@ def test_run_bootstrap_posts_to_discord_conversation(discord_config, monkeypatch
         )
         os.makedirs(os.path.dirname(creds), exist_ok=True)
         with open(creds, "w") as f:
-            f.write("{}")
+            f.write(json.dumps({
+                "claudeAiOauth": {"refreshToken": "refresh"},
+            }))
         return "the-code"
 
     ok = ab.run_bootstrap(
@@ -544,10 +794,13 @@ def test_ensure_discord_paste_back_ready_allows_internal_local_hostname(
 
 
 def test_run_bootstrap_skips_when_creds_present(slack_config, monkeypatch):
-    creds = os.path.join(os.environ["HOME"], ".claude", ".credentials.json")
-    os.makedirs(os.path.dirname(creds), exist_ok=True)
-    with open(creds, "w") as f:
-        f.write("{}")
+    config_dir = slack_config.parent / "claude-volume"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    creds = config_dir / ".credentials.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {"refreshToken": "refresh"},
+    }))
 
     called = {"spawn": False}
 
@@ -565,26 +818,32 @@ def test_run_bootstrap_refuses_with_api_key_set(slack_config, monkeypatch):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 
-def test_run_bootstrap_refuses_gateway_brain(slack_config, monkeypatch):
-    """A gateway team has no subscription login; the claude-spec fallback
-    would silently drive a real `claude auth login` for it (#655)."""
+@pytest.mark.parametrize("kind", ["claude", "gateway"])
+def test_run_bootstrap_refuses_gateway_brain_with_auth_token(
+    slack_config, monkeypatch, kind,
+):
+    """An explicit gateway token must not be replaced by subscription auth."""
     from bobi import paths
 
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token")
     paths.agent_yaml_path(slack_config).write_text(
         paths.agent_yaml_path(slack_config).read_text()
-        + "brain:\n  kind: gateway\n  base_url: http://localhost:4000\n"
+        + f"brain:\n  kind: {kind}\n  base_url: http://localhost:4000\n"
     )
-    with pytest.raises(RuntimeError, match="gateway"):
+    with pytest.raises(RuntimeError, match="ANTHROPIC_AUTH_TOKEN"):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 
-def test_run_bootstrap_refuses_gateway_openai_brain(slack_config, monkeypatch):
+@pytest.mark.parametrize("kind", ["codex", "gateway-openai"])
+def test_run_bootstrap_refuses_gateway_openai_brain(
+    slack_config, monkeypatch, kind,
+):
     """An OpenAI-compatible gateway team has no subscription login either."""
     from bobi import paths
 
     paths.agent_yaml_path(slack_config).write_text(
         paths.agent_yaml_path(slack_config).read_text()
-        + "brain:\n  kind: gateway-openai\n  base_url: http://localhost:9000/v1\n"
+        + f"brain:\n  kind: {kind}\n  base_url: http://localhost:9000/v1\n"
     )
     with pytest.raises(RuntimeError, match="gateway"):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
@@ -599,6 +858,7 @@ def test_run_bootstrap_requires_channel(slack_config, monkeypatch):
 def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, monkeypatch):
     import bobi.events.client as client_mod
     import bobi.events.server as server_mod
+    import bobi.slack as slack_mod
 
     registered = {}
 
@@ -608,8 +868,8 @@ def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, mon
         lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
     )
     monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T123"])
-    monkeypatch.setattr(server_mod, "_slack_auth_info", lambda token: ("T123", "B123", "U123"))
-    monkeypatch.setattr(server_mod, "_slack_app_id", lambda token, bot_id: "A123")
+    monkeypatch.setattr(slack_mod, "resolve_auth_info", lambda token: ("T123", "B123", "U123"))
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "A123")
 
     def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
         registered["topics"] = topics
@@ -638,6 +898,121 @@ def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, mon
 
     assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
     assert registered["topics"] == ["slack:T123:app:A123"]
+
+
+def test_register_login_channel_remints_after_stale_bubble_rejection(
+    slack_config,
+    monkeypatch,
+):
+    """An empty channel registration only permits a re-mint after a signed
+    JOIN proves that the persisted bubble is stale (#868 / MOD-307)."""
+    import bobi.events.server as server_mod
+
+    ensure_calls = []
+    workspace_bubbles = []
+
+    def fake_ensure(es_url, project_path, force_remint_of=""):
+        ensure_calls.append(force_remint_of)
+        if force_remint_of:
+            assert force_remint_of == "bub-old"
+            return {"bubble_id": "bub-new", "bubble_key": "key-new"}
+        return {"bubble_id": "bub-old", "bubble_key": "key-old"}
+
+    def fake_register_workspaces(es_url, cfg, bubble_id="", bubble_key=""):
+        workspace_bubbles.append((bubble_id, bubble_key))
+        return [] if bubble_id == "bub-old" else ["T123"]
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        assert topics == []
+        assert (bubble_id, bubble_key) == ("bub-old", "key-old")
+        raise server_mod.BubbleRejected("stale bubble")
+
+    monkeypatch.setattr(server_mod, "ensure_bubble", fake_ensure)
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", fake_register_workspaces)
+    monkeypatch.setattr(server_mod, "register", fake_register)
+
+    bubble = ab._register_login_channel(
+        slack_config,
+        ab.Config.load(slack_config),
+        ab.LoginChannel(
+            destination="slack:T123:dm:D0LOGIN",
+            source="slack",
+            topic="slack:T123:app:A123",
+        ),
+    )
+
+    assert bubble == {"bubble_id": "bub-new", "bubble_key": "key-new"}
+    assert ensure_calls == ["", "bub-old"]
+    assert workspace_bubbles == [
+        ("bub-old", "key-old"),
+        ("bub-new", "key-new"),
+    ]
+
+
+def test_wait_for_code_recovers_if_bubble_stales_after_channel_registration(
+    slack_config,
+    monkeypatch,
+):
+    """If the server restarts between channel registration and listener JOIN,
+    re-mint, recreate the channel grant, and retry the listener once."""
+    import bobi.events.client as client_mod
+    import bobi.events.server as server_mod
+
+    current_bubble = {"id": "bub-old", "key": "key-old"}
+    workspace_bubbles = []
+    listener_bubbles = []
+
+    def fake_ensure(es_url, project_path, force_remint_of=""):
+        if force_remint_of:
+            assert force_remint_of == "bub-old"
+            current_bubble.update(id="bub-new", key="key-new")
+        return {
+            "bubble_id": current_bubble["id"],
+            "bubble_key": current_bubble["key"],
+        }
+
+    def fake_register_workspaces(es_url, cfg, bubble_id="", bubble_key=""):
+        workspace_bubbles.append((bubble_id, bubble_key))
+        return ["T123"]
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        listener_bubbles.append((bubble_id, bubble_key, list(topics)))
+        if bubble_id == "bub-old":
+            raise server_mod.BubbleRejected("stale bubble")
+        return "dep", "api-key"
+
+    class FakeClient:
+        def __init__(self, es_url, deployment_id, api_key, queue):
+            self.queue = queue
+
+        def start(self):
+            self.queue.put({
+                "source": "slack",
+                "text": "the-code",
+                "fields": {"channel": "D0LOGIN"},
+            })
+
+        def wait_connected(self, timeout):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(server_mod, "ensure_bubble", fake_ensure)
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", fake_register_workspaces)
+    monkeypatch.setattr(server_mod, "register", fake_register)
+    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
+    monkeypatch.setattr(ab, "_slack_topic", lambda cfg: "slack:T123:app:A123")
+
+    assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
+    assert workspace_bubbles == [
+        ("bub-old", "key-old"),
+        ("bub-new", "key-new"),
+    ]
+    assert listener_bubbles == [
+        ("bub-old", "key-old", ["slack:T123:app:A123"]),
+        ("bub-new", "key-new", ["slack:T123:app:A123"]),
+    ]
 
 
 def test_wait_for_code_subscribes_to_discord_app_topic(discord_config, monkeypatch):
@@ -740,48 +1115,14 @@ def test_wait_for_code_subscribes_to_whatsapp_number_topic(whatsapp_config, monk
     assert registered["topics"] == ["whatsapp:111222333444555666"]
 
 
-def test_wait_for_code_falls_back_to_legacy_slack_topic(slack_config, monkeypatch):
-    import bobi.events.client as client_mod
-    import bobi.events.server as server_mod
+def test_wait_for_code_refuses_missing_slack_app_identity(slack_config, monkeypatch):
+    import bobi.slack as slack_mod
 
-    registered = {}
+    monkeypatch.setattr(slack_mod, "resolve_auth_info", lambda token: ("T123", "B123", "U123"))
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "")
 
-    monkeypatch.setattr(
-        server_mod,
-        "ensure_bubble",
-        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"},
-    )
-    monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T123"])
-    monkeypatch.setattr(server_mod, "_slack_auth_info", lambda token: ("T123", "", ""))
-    monkeypatch.setattr(server_mod, "_slack_app_id", lambda token, bot_id: "")
-
-    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
-        registered["topics"] = topics
-        return "dep", "api-key"
-
-    monkeypatch.setattr(server_mod, "register", fake_register)
-
-    class FakeClient:
-        def __init__(self, es_url, deployment_id, api_key, queue):
-            self.queue = queue
-
-        def start(self):
-            self.queue.put({
-                "source": "slack",
-                "text": "the-code",
-                "fields": {"channel": "D0LOGIN"},
-            })
-
-        def wait_connected(self, timeout):
-            return None
-
-        def stop(self):
-            return None
-
-    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
-
-    assert ab._wait_for_code(slack_config, "D0LOGIN", timeout=1) == "the-code"
-    assert registered["topics"] == ["slack:T123"]
+    with pytest.raises(slack_mod.SlackAppIdentityError, match="users:read"):
+        ab._wait_for_code(slack_config, "D0LOGIN", timeout=1)
 
 
 # --- Codex brain: device-auth (poll) flow (#485) ----------------------------
@@ -791,6 +1132,15 @@ def test_credentials_path_for_codex(tmp_path, monkeypatch):
 
     monkeypatch.setenv(BRAIN_ENV, "codex")
     assert ab.credentials_path(tmp_path) == tmp_path / ".codex" / "auth.json"
+
+
+def test_credentials_path_for_codex_honors_codex_home(tmp_path, monkeypatch):
+    from bobi.brain import BRAIN_ENV
+
+    monkeypatch.setenv(BRAIN_ENV, "codex")
+    codex_home = tmp_path / "codex-volume"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    assert ab.credentials_path(tmp_path) == codex_home / "auth.json"
 
 
 def test_scrape_login_codex_gets_url_and_code():
@@ -840,7 +1190,9 @@ def test_run_bootstrap_codex_device_poll(slack_config, monkeypatch):
             # The CLI polls, the human authorizes, codex writes auth.json.
             os.makedirs(os.path.dirname(creds), exist_ok=True)
             with open(creds, "w") as f:
-                f.write("{}")
+                f.write(json.dumps({
+                    "tokens": {"refresh_token": "refresh"},
+                }))
             return 0
 
     def fake_spawn(home):
@@ -873,3 +1225,176 @@ def test_run_bootstrap_codex_refuses_with_openai_key(slack_config, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-x")
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
+
+
+# --- the login destination is configuration, not an argument ----------------
+#
+# `login-bootstrap` is registered on the `agent` group (bobi/cli.py), which is
+# the surface any worker's shell reaches, and worker sessions run with
+# `permission_mode="bypassPermissions"` (bobi/brain/claude.py). These drive the
+# REAL CLI on that real group - not run_bootstrap directly - so the worker's
+# own invocation is what is under test. Only the three seams that leave the
+# process are faked: the login pty, the chat post, and the event-bus wait.
+
+OPERATOR_CHANNEL = "C0LOGIN42"      # what $BOBI_LOGIN_CHANNEL is configured to
+ATTACKER_CHANNEL = "D0ATTACKER99"   # a Slack DM the caller picked
+# Synthetic stand-in. A real sign-in URL is a live credential-granting link and
+# never belongs in a fixture, a log, or a PR.
+FAKE_LOGIN_URL = "https://login.invalid/oauth/authorize?synthetic=1"
+
+
+@pytest.fixture
+def cli_login_install(bobi_install, tmp_path, monkeypatch):
+    """An installed team with no credentials, whose login channel is configured."""
+    import yaml
+
+    agent_yaml = bobi_install.repo_path / "package" / "agent.yaml"
+    cfg = yaml.safe_load(agent_yaml.read_text())
+    cfg["event_server_url"] = "wss://example"
+    cfg["services"] = [{
+        "name": "slack",
+        "events": True,
+        "credentials": {"bot_token": "xoxb-test"},
+    }]
+    agent_yaml.write_text(yaml.dump(cfg))
+
+    monkeypatch.setenv("HOME", str(tmp_path / "login-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-volume"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv(ab.LOGIN_CHANNEL_ENV, OPERATOR_CHANNEL)
+    return bobi_install
+
+
+def _fake_login_seams(monkeypatch, tmp_path) -> list[tuple[str, str]]:
+    """Fake the pty, the chat post, and the bus wait. Returns the posts made."""
+    posts: list[tuple[str, str]] = []
+    creds = tmp_path / "claude-volume" / ".credentials.json"
+
+    class FakeProc:
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_wait(project_path, channel, timeout):
+        # Stand in for the human pasting the code back; claude writes creds.
+        creds.parent.mkdir(parents=True, exist_ok=True)
+        creds.write_text(json.dumps({
+            "claudeAiOauth": {"refreshToken": "refresh"},
+        }))
+        return "synthetic-code"
+
+    monkeypatch.setattr(ab, "_spawn_login", lambda home: (FakeProc(), -1))
+    monkeypatch.setattr(ab, "_read_until_url", lambda fd, timeout: FAKE_LOGIN_URL)
+    monkeypatch.setattr(ab, "_write_line", lambda fd, text: None)
+    monkeypatch.setattr(ab, "post_slack_message",
+                        lambda token, channel, text: posts.append((channel, text)))
+    monkeypatch.setattr(ab, "_wait_for_code", fake_wait)
+    return posts
+
+
+def test_login_bootstrap_refuses_a_caller_chosen_destination(
+    cli_login_install, tmp_path, monkeypatch,
+):
+    """A worker must not be able to redirect the brain's OAuth login flow.
+
+    Regression for the `--channel` hole: the flag outranked
+    $BOBI_LOGIN_CHANNEL, so `bobi agent <name> login-bootstrap --channel
+    D<attacker>` posted the live sign-in URL (and, on codex, the one-time
+    device code) wherever the caller said - then read the pasted code back
+    from that same caller-chosen destination and wrote it into the login
+    CLI's stdin.
+    """
+    from click.testing import CliRunner
+
+    from bobi.cli import main
+    from tests.conftest import TEST_AGENT_NAME
+
+    posts = _fake_login_seams(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(main, [
+        "agent", TEST_AGENT_NAME, "login-bootstrap",
+        "--channel", ATTACKER_CHANNEL,
+    ])
+
+    # Pin the *reason* for the refusal, not just its exit code - a broken
+    # fixture would otherwise satisfy both assertions below vacuously.
+    assert result.exit_code == 2, (
+        "a caller-chosen login destination must be refused as a usage error:\n"
+        + result.output
+    )
+    assert "No such option" in result.output and "--channel" in result.output, (
+        result.output
+    )
+    assert posts == [], (
+        f"the login flow ran for a refused invocation and posted: {posts}"
+    )
+
+
+def test_login_bootstrap_posts_only_to_the_configured_channel(
+    cli_login_install, tmp_path, monkeypatch,
+):
+    """First boot still works: docker-entrypoint.sh's exact bare invocation.
+
+    This is the flow the command exists for, and the reason the fix removes the
+    override rather than the destination - $BOBI_LOGIN_CHANNEL still drives it.
+    """
+    from click.testing import CliRunner
+
+    from bobi.cli import main
+    from tests.conftest import TEST_AGENT_NAME
+
+    posts = _fake_login_seams(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, "login-bootstrap"])
+
+    assert result.exit_code == 0, result.output
+    assert posts, "the login URL must still reach the configured channel"
+    assert {channel for channel, _text in posts} == {OPERATOR_CHANNEL}
+    assert any("oauth/authorize" in text for _channel, text in posts)
+
+
+# ---------------------------------------------------------------------------
+# _resolve_login_channel — the conversation-ref grammar
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ref,expected_topic", [
+    ("discord:guild1:channel:123", "discord:guild1"),
+    # The 6-part threaded form is part of the shared grammar; the private
+    # parser this now delegates to (Q012) accepted it too, so a ref that used
+    # to resolve must still resolve.
+    ("discord:guild1:channel:123:thread:456", "discord:guild1"),
+    ("whatsapp:acct1:dm:15551234567", "whatsapp:acct1"),
+])
+def test_resolve_login_channel_accepts_shared_grammar_refs(ref, expected_topic):
+    from bobi.config import Config
+
+    ch = ab._resolve_login_channel(Config(), ref)
+    assert ch.destination == ref
+    assert ch.topic == expected_topic
+    assert ch.legacy_slack_channel == ""
+
+
+@pytest.mark.parametrize("ref", [
+    "discord:guild1:channel",             # too few segments
+    "discord::channel:123",               # empty segment
+    "discord:guild1:voice:123",           # chat_type outside CHAT_TYPES
+    "discord:guild1:channel:123:reply:4",  # 6 parts but not 'thread'
+])
+def test_resolve_login_channel_rejects_non_conversation_refs(ref):
+    """A ref the shared grammar rejects must fall through to the legacy Slack
+    path — which, with no bot_token configured, is a clear RuntimeError rather
+    than a silent mis-parse."""
+    from bobi.config import Config
+
+    with pytest.raises(RuntimeError, match="not a conversation ref"):
+        ab._resolve_login_channel(Config(), ref)
+
+
+def test_auth_bootstrap_keeps_no_private_copy_of_the_grammar():
+    """Q012: the grammar has one Python implementation. A re-inlined private
+    parser here is the drift this guards against."""
+    assert not hasattr(ab, "_parse_conversation")
