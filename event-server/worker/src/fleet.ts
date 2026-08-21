@@ -340,6 +340,8 @@ export async function buildFleetStatus(
 //   transcript  args {session?}         -> {messages: [...]}
 //   roster      (no args)               -> {subagents: [...]}
 //   spend       (no args)               -> {spend: {total_cost_usd, ...}}
+//   usage       args {window_seconds, end_at?} -> {usage: {jobs, tokens,
+//                                                   cost_usd, ...}}
 //   session_log (no args)               -> {sessions: [...], counts: {...},
 //                                           truncated: bool} (#733 vertical 3)
 // MUST match bobi/supervisor/admin.py's ADMIN_COMMANDS exactly. This list is
@@ -356,6 +358,7 @@ export const ADMIN_COMMANDS = [
 	"transcript",
 	"roster",
 	"spend",
+	"usage",
 	"session_log",
 	// The single-agent view's read model + the three operator writes it
 	// offers on a waiting workflow run.

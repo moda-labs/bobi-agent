@@ -1,9 +1,9 @@
 """The three things an operator can DO to a suspended workflow run.
 
 The runs table is read-only except here. A run that stopped at a human gate can
-be resumed (re-deliver the awaited event and let the workflow continue),
-reminded (re-send the gate's notification without touching the run), or closed
-(abandon it, and mark its session cancelled).
+be resumed (answer the gate with a verdict and let the workflow take the branch
+that answer chose), reminded (re-send the gate's notification without touching
+the run), or closed (abandon it, and mark its session cancelled).
 
 Extracted from ``LocalRuntime`` so the supervisor's admin commands call the
 SAME function rather than a second copy. That is the anti-drift property the
@@ -64,8 +64,19 @@ def _waiting_run(root: Path, run_id: str):
     return run
 
 
-def resume_run(root: Path, run_id: str) -> dict:
+def resume_run(root: Path, run_id: str, *, verdict: str = "",
+               reply: str = "") -> dict:
     """Resume a suspended workflow run by spawning the CLI resume.
+
+    *verdict* and *reply* are the human's answer to the gate. They reach the
+    workflow as the ``event`` scope, so a route step after the await branches
+    on ``${{event.verdict}}`` - which is what makes a resume an answer rather
+    than a force-continue.
+
+    An unrecognised verdict is refused here rather than passed on. The CLI
+    would refuse it too, but that refusal happens in a detached child whose
+    output goes to /dev/null, so the operator would see an accepted resume
+    that silently did nothing.
 
     A SPAWN, not a thread, and the orchestrator says why in its own words
     (``try_resume_for_event``): ``resume_workflow`` re-stamps the session
@@ -85,10 +96,41 @@ def resume_run(root: Path, run_id: str) -> dict:
     import sys
 
     from bobi import paths
+    from bobi.workflow.schema import (
+        GATE_VERDICT_REJECT, GATE_VERDICTS, reads_gate_verdict,
+    )
+    from bobi.workflow.triggers import WorkflowDispatcher
+
+    verdict = (verdict or "").strip()
+    if verdict and verdict not in GATE_VERDICTS:
+        raise ActionFailed(
+            f"unknown verdict '{verdict}'; expected one of "
+            f"{', '.join(GATE_VERDICTS)}")
 
     run = _waiting_run(root, run_id)
+
+    # A rejection only means something if the workflow reads it. Without a
+    # route in the slot a resume lands on, rejecting would run the next step -
+    # advancing the very work the human just refused. Refuse instead, and say
+    # which workflow cannot honour it.
+    if verdict == GATE_VERDICT_REJECT:
+        dispatcher = WorkflowDispatcher()
+        dispatcher.load_all_workflows(project_path=root)
+        workflow = dispatcher.find_workflow(run.workflow_name)
+        if workflow is None:
+            raise ActionFailed(
+                f"workflow '{run.workflow_name}' is no longer installed")
+        if not reads_gate_verdict(workflow, run.suspended_at_step):
+            raise ActionFailed(
+                f"workflow '{run.workflow_name}' has no route on the gate's "
+                f"verdict, so a rejection cannot be honoured; resuming it "
+                f"would run its next step")
     cmd = [sys.executable, "-m", "bobi.cli", "agent",
            paths.agent_name_for_root(root), "workflows", "resume", run_id]
+    if verdict:
+        cmd += ["--verdict", verdict]
+    if reply:
+        cmd += ["--reply", reply]
     subprocess.Popen(cmd, cwd=str(root), start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Accepted, not finished. A workflow run takes as long as it takes; the
@@ -96,7 +138,8 @@ def resume_run(root: Path, run_id: str) -> dict:
     # submit-then-poll discipline chat uses.
     return {"ok": True, "accepted": True, "run_id": run_id,
             "workflow": run.workflow_name,
-            "await_event": run.await_event}
+            "await_event": run.await_event,
+            "verdict": verdict}
 
 
 def remind_run(root: Path, run_id: str) -> dict:

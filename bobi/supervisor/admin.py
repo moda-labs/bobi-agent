@@ -19,13 +19,14 @@ Command semantics:
   manager status, stopped/started) surfaces on the tier-1 heartbeat read model,
   which is where an operator confirms it landed.
 - ``status`` echoes the latest heartbeat snapshot.
-- ``transcript`` / ``roster`` / ``spend`` / ``session_log`` are tier-3
+- ``transcript`` / ``roster`` / ``spend`` / ``usage`` / ``session_log`` are tier-3
   on-demand reads answered INLINE from the local ``$BOBI_HOME`` via the same
   public ``bobi`` surfaces the local web UI uses (``read_transcript_messages``
-  / ``list_agents`` / ``rollup_costs`` / ``SessionRegistry.list_all``); the
+  / ``list_agents`` / ``rollup_costs`` / ``build_usage_summary`` /
+  ``SessionRegistry.list_all``); the
   sidecar shares the manager's host, state dir, and Claude config, so these
   are plain filesystem reads. Result: ``{"messages": [...]}`` /
-  ``{"subagents": [...]}`` / ``{"spend": {...}}`` /
+  ``{"subagents": [...]}`` / ``{"spend": {...}}`` / ``{"usage": {...}}`` /
   ``{"sessions": [...], "counts": {...}, "truncated": bool}``.
 - ``chat`` (Phase C data plane) is the ONLY async command: a real turn can take
   minutes, and the dispatch worker is single-threaded and strictly ordered (a
@@ -42,7 +43,9 @@ take the supervisor down.
 from __future__ import annotations
 
 import logging
+import math
 import threading
+import time
 from queue import Queue, SimpleQueue
 
 from .bus import default_publish as _default_publish
@@ -53,7 +56,7 @@ log = logging.getLogger(__name__)
 # byte-for-byte - the topic string is the producer/consumer contract.
 COMMAND_RESULT_TOPIC = "fleet/command_result"
 ADMIN_COMMANDS = frozenset({"restart", "stop", "start", "status",
-                            "chat", "transcript", "roster", "spend",
+                            "chat", "transcript", "roster", "spend", "usage",
                             "session_log",
                             # The single-agent view's read model + the three
                             # operator writes it offers on a waiting run.
@@ -110,6 +113,16 @@ def _int_arg(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _float_arg(value) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _require_run_id(value) -> str:
@@ -253,7 +266,7 @@ class AdminListener:
         status, result, error = "done", None, None
         try:
             if command in _RUN_ACTIONS:
-                result = self._run_action(command, args.get("run_id"))
+                result = self._run_action(command, args.get("run_id"), args)
             elif command == "restart":
                 self.supervisor.request_manager_restart()
                 result = {"accepted": True, "action": "restart"}
@@ -280,6 +293,8 @@ class AdminListener:
                 result = {"subagents": self._read_roster()}
             elif command == "spend":
                 result = {"spend": self._read_spend()}
+            elif command == "usage":
+                result = {"usage": self._read_usage(args)}
             elif command == "session_log":
                 result = self._read_session_log()
             elif command == "runs":
@@ -386,6 +401,31 @@ class AdminListener:
         payload["script_cache"] = script_cache_savings(self.project_root)
         return payload
 
+    def _read_usage(self, args: dict) -> dict:
+        """Rolling usage over terminal jobs in the unified runs ledger."""
+        from bobi import service
+        from bobi.webapp.runs import build_usage_summary
+
+        window = _float_arg(args.get("window_seconds"))
+        if window is None or window <= 0:
+            raise AdminCommandError(
+                "window_seconds must be a positive number",
+                "bad_request",
+            )
+        raw_end = args.get("end_at")
+        end = time.time() if raw_end is None else _float_arg(raw_end)
+        if end is None:
+            raise AdminCommandError(
+                "end_at must be a finite epoch timestamp",
+                "bad_request",
+            )
+        return build_usage_summary(
+            self.project_root,
+            manager_name=service.manager_session_name(self.project_root),
+            window_seconds=window,
+            now=end,
+        )
+
     def _read_session_log(self) -> dict:
         """The team's whole session history with honest terminal outcomes -
         the same fold ``LocalRuntime.session_log`` does (#733 vertical 3),
@@ -467,7 +507,7 @@ class AdminListener:
             raise AdminCommandError(f"unknown run '{target}'",
                                     "unknown_run", run_id=target) from None
 
-    def _run_action(self, command: str, run_id) -> dict:
+    def _run_action(self, command: str, run_id, args: dict | None = None) -> dict:
         """One of the three operator writes on a waiting workflow run.
 
         Delegates to ``bobi.webapp.run_actions``, the same module
@@ -475,12 +515,22 @@ class AdminListener:
         whose reasoning applies here verbatim: resuming inside this process
         would stamp the SUPERVISOR's pid on the run's registry entry, and a
         later reconciler timeout would then signal the supervisor.
+
+        ``resume_run`` additionally carries the gate's answer. Both extra args
+        are optional and additive, so an older console that sends only a
+        ``run_id`` still resumes - with no verdict, which is not an approval.
         """
         from bobi.webapp import run_actions
 
+        args = args or {}
         target = _require_run_id(run_id)
+        extra: dict = {}
+        if command == "resume_run":
+            extra = {"verdict": str(args.get("verdict") or ""),
+                     "reply": str(args.get("reply") or "")}
         try:
-            return getattr(run_actions, command)(self.project_root, target)
+            return getattr(run_actions, command)(
+                self.project_root, target, **extra)
         except run_actions.UnknownRun as e:
             raise AdminCommandError(str(e), "unknown_run",
                                     run_id=target) from None

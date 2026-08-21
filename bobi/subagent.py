@@ -8,6 +8,7 @@ from the dashboard, or cancelled.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -20,12 +21,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bobi.sdk import (
-    save_session_id, load_resumable_session_id, log_activity,
+    save_session_id, load_resumable_session_id,
     session_handoff_path, session_log_path,
-    get_registry, SessionEntry,
+    get_registry, SessionEntry, ACTIVE_STATUSES,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
+from bobi.brain.turns import drain_turn, timeout_error, tool_crash_error
 from bobi.transient import is_transient_api_error
 from bobi.env import (
     agent_spawn_env,
@@ -38,6 +40,23 @@ InputHandler = Callable[[str, dict[str, Any]], str]
 log = logging.getLogger(__name__)
 
 _LAUNCH_ADMISSION_LOCK = threading.Lock()
+
+class DuplicateRunError(RuntimeError):
+    """A launch was refused because an identical run is already in flight.
+
+    Distinct from the other RuntimeErrors ``launch_agent`` raises (a failed
+    requires preflight, the spend governor, a semaphore timeout) so callers can
+    tell "this work is already happening" from "the launch could not proceed".
+    Since #850 made un-keyed launches collide by default, this is a routine
+    outcome rather than an error, and rendering it as one misleads.
+    """
+
+    def __init__(self, message: str, *, session_name: str, status: str,
+                 derived_key: bool):
+        super().__init__(message)
+        self.session_name = session_name
+        self.status = status
+        self.derived_key = derived_key
 
 PHASE_TIMEOUT = {
     "pickup": 1800,
@@ -69,24 +88,6 @@ class AgentResult:
     # persistent session agree on "transient" — the launcher's re-dispatch
     # decision can consult it. Survival/retry stays at the #444 layer (§4.3).
     transient: bool = False
-
-
-def _network_drop_error(detail: str = "") -> str:
-    base = "network drop: response stream ended before turn result"
-    return f"{base} ({detail})" if detail else base
-
-
-def _timeout_error(timeout: int | None = None) -> str:
-    if timeout is None:
-        return "subprocess timeout while draining response"
-    return f"subprocess timeout after {timeout}s"
-
-
-def _tool_crash_error(error: BaseException | str) -> str:
-    message = str(error).strip() or error.__class__.__name__
-    if message.startswith("tool crash:"):
-        return message
-    return f"tool crash: {message}"
 
 
 def _build_prompt(phase: str, run_key: str, role: str = "", context: str = "") -> str:
@@ -400,7 +401,7 @@ async def _run_agent_supervised(
     agents that no one needs to message mid-run. Any agent that must be
     reachable goes through ``Session`` instead.
     """
-    from bobi.brain import AssistantText, TurnResult, get_brain
+    from bobi.brain import get_brain
 
     name = _session_name(run_key, role=role, phase=phase)
     _cfg = _load_team_config()
@@ -454,10 +455,7 @@ async def _run_agent_supervised(
         # `except asyncio.TimeoutError` (until now unreachable) and is recorded.
         async with asyncio.timeout(timeout if timeout and timeout > 0 else None):
             try:
-                connect_prompt = prompt if not saved_id else None
-                await client.connect(connect_prompt)
-                if saved_id:
-                    await client.query(prompt)
+                await client.connect()
             except Exception as e:
                 if not saved_id:
                     raise
@@ -475,27 +473,29 @@ async def _run_agent_supervised(
                 except Exception:
                     pass
                 client = _build_client("")
-                await client.connect(prompt)
+                await client.connect()
+            # The task is turn 1, explicitly — connect() is never a turn
+            # (#1016). Fresh and resumed sessions now take one identical path.
+            await client.query(prompt)
 
             while True:
-                result_msg = None
-                async for msg in client.receive_response():
-                    if isinstance(msg, AssistantText):
-                        if msg.text:
-                            result.final_text = msg.text
-                            log_activity("response", {
-                                "text": msg.text[:500],
-                            }, session=name)
-                    elif isinstance(msg, TurnResult):
-                        result_msg = msg
+                outcome = await drain_turn(client, name, model=model)
+                if outcome.final_text:
+                    result.final_text = outcome.final_text
+                result_msg = outcome.result
 
                 if result_msg is None:
-                    result.error = _network_drop_error("no ResultMessage")
-                    _persist_terminal(registry, name, TERMINAL_FAILED,
+                    # The drain itself died. A crash mid-stream is a crash
+                    # here exactly as it was when the exception reached the
+                    # outer handler; a broken/silent stream is a failed run.
+                    result.error = outcome.failure
+                    terminal = (TERMINAL_CRASHED
+                                if outcome.failure_kind == "tool_crash"
+                                else TERMINAL_FAILED)
+                    _persist_terminal(registry, name, terminal,
                                       error=result.error, phase=phase)
                     return result
 
-                save_session_id(name, result_msg.session_id, model=model)
                 result.session_id = result_msg.session_id
                 result.duration_ms += result_msg.duration_ms
                 result.total_cost_usd += result_msg.total_cost_usd or 0.0
@@ -537,16 +537,14 @@ async def _run_agent_supervised(
                 terminal = TERMINAL_COMPLETED if result.success else TERMINAL_FAILED
                 _persist_terminal(registry, name, terminal, error=result.error,
                                   session_id=result_msg.session_id, phase=phase)
-                log_activity("stop", {"session_id": result_msg.session_id,
-                                      "status": terminal}, session=name)
                 return result
 
     except asyncio.TimeoutError:
-        result.error = _timeout_error(timeout)
+        result.error = timeout_error(timeout)
         _persist_terminal(registry, name, TERMINAL_FAILED, error=result.error,
                           phase=phase)
     except Exception as e:
-        result.error = _tool_crash_error(e)
+        result.error = tool_crash_error(e)
         # An unhandled executor exception is a crash, not a clean failure.
         _persist_terminal(registry, name, TERMINAL_CRASHED, error=result.error,
                           phase=phase)
@@ -691,29 +689,94 @@ def _load_long_term_memory_prompt() -> str:
         return ""
 
 
-def adhoc_session_name(task: str, name: str | None = None) -> str:
-    """The session name :func:`spawn_adhoc` will use for this task.
+def derive_run_key(workflow_name: str, task: str, *, project: str = "",
+                   role: str = "", model: str = "", effort: str = "") -> str:
+    """The default run key for a launch that carries no explicit one (#850).
 
-    Extracted so a caller that must know the name BEFORE spawning - the
-    ``--wait`` path, which stamps the launch chain into its own environment -
-    shares one derivation with ``spawn_adhoc`` instead of recomputing it. A
-    recomputed name that drifts would stamp a link naming a session that never
-    exists, which is the lineage invariant (see ``bobi/launch_lineage.py``).
+    Duplicate-run suppression keys off the session name, and the session name
+    keys off the run key - so two launches only collide if they agree on it.
+    When the key was random, they never agreed, the guard was dead code, and
+    nothing said so: a role file that documented the launch command without
+    ``--id`` turned one trigger into 50 runs against the spend cap. Deriving
+    the key makes the safe path the default rather than the remembered one.
+
+    EVERY dial that decides what the launch is takes part, not just the task.
+    One task handed to an engineer and to a reviewer is two runs, and
+    ``skills/bobi.md`` documents varying model and effort per delegation the
+    same way - deriving from task text alone would refuse the second as a
+    duplicate of the first. The dials are the values as PASSED: two launches
+    that both omit ``--model`` agree on ``""`` and still collide, while an
+    explicit override that happens to equal the role default reads as
+    different. That errs toward launching, and a false refusal is the worse
+    failure.
+
+    Whitespace in the task is normalized, so a task re-emitted with different
+    wrapping is still the same task. Nothing else is: folding case or stripping
+    punctuation would let a genuinely different task be refused. 48 bits of
+    digest keeps an accidental collision negligible, and the ``adhoc-`` prefix
+    is what makes an un-keyed run recognizable at a glance in
+    ``subagents list``.
+
+    ``project`` is in there because a persistent launch uses the key AS the
+    session name, with no ``wf-<workflow>-<project>-`` wrapper to scope it. Two
+    working dirs under one installation running the same task would otherwise
+    land on one session - a worse outcome than a duplicate refusal, since the
+    second silently takes over the first. The key and the name agree about what
+    identifies a run.
     """
-    import hashlib
-
-    if name:
-        return name
-    return f"adhoc-{hashlib.sha256(task.encode()).hexdigest()[:8]}"
+    dials = "\n".join([workflow_name, project, role, model, effort,
+                       " ".join(task.split())])
+    return f"adhoc-{hashlib.sha256(dials.encode()).hexdigest()[:12]}"
 
 
-def spawn_adhoc(
+def _workflow_period_key(workflow_name: str) -> str:
+    """The period run key for *workflow_name*, or "" when it is not periodic.
+
+    Derived HERE, at launch admission, and nowhere later (#1048): the launcher
+    and its detached child can straddle a period boundary, and two derivations
+    would mint two identities for one dispatch. A workflow that cannot be
+    found resolves to "" - the child reports the missing workflow itself.
+    """
+    from bobi.workflow.triggers import find_installed_workflow
+
+    workflow = find_installed_workflow(workflow_name)
+    if workflow is None or not workflow.period:
+        return ""
+    return workflow.period_run_key()
+
+
+def _resolve_run_key(workflow_name: str, task: str, run_key: str | None,
+                     random_key: bool, *, project: str = "", role: str = "",
+                     model: str = "", effort: str = "") -> tuple[str, bool]:
+    """Resolve a launch's run key. Returns ``(run_key, derived)``.
+
+    ``derived`` tells the caller the key was inferred rather than chosen, which
+    changes three things: the transcript starts clean (a derived key names a
+    slot for collision detection, not a conversation to continue), a suspended
+    run under that name is not taken over, and a rejection can name the opt-out.
+    """
+    if random_key:
+        if run_key:
+            raise ValueError(
+                "random_key cannot be combined with an explicit run key - "
+                "an explicit key already opts out of task-derived dedup"
+            )
+        # `rand-`, not `adhoc-`: a screen of dedup-disabled runs in
+        # `subagents list` should be greppable, not a hash-length comparison.
+        import uuid
+        return f"rand-{uuid.uuid4().hex[:8]}", False
+    if run_key:
+        return run_key, False
+    return derive_run_key(workflow_name, task, project=project, role=role,
+                          model=model, effort=effort), True
+
+
+def run_persistent_agent(
     cwd: str,
     task: str,
+    name: str,
     timeout: int = 3600,
-    name: str | None = None,
     requested_by: dict | None = None,
-    persistent: bool = False,
     role: str = "",
     mcp_servers: dict | None = None,
     subscribe: list[str] | None = None,
@@ -721,10 +784,17 @@ def spawn_adhoc(
     effort: str = "",
     fresh: bool = False,
 ) -> AgentResult:
-    """Spawn an agent with a freeform task prompt.
+    """Bootstrap a persistent agent session and block for its lifetime.
 
-    Creates a Session with the task as the startup prompt. The session
-    has an inbox so other sessions can message it during execution.
+    Persistent agents are sessions, not runs (#1057): an inbox loop has no
+    run identity, so this path deliberately stays outside the workflow
+    executor and its run ledger. Every RUN - ad-hoc included - goes through
+    ``launch_agent`` / ``run_workflow``; this bootstrap is the one surviving
+    caller of a bare Session with a startup prompt.
+
+    ``name`` is the session name and is caller-chosen, always: the manager
+    bootstrap passes its own session name, and ``launch_agent``'s persistent
+    branch passes the run key it already admitted.
 
     ``subscribe`` adds event topics beyond the session's own ``inbox/<self>``
     (the manager passes its external resource topics here).
@@ -732,26 +802,16 @@ def spawn_adhoc(
     ``model`` and ``effort`` are explicit overrides (e.g. the launch flags);
     when empty the role's configured value or the team default applies.
 
-    With ``persistent=True`` the session stays alive after the initial
-    task completes, accepting messages via its inbox until explicitly
-    stopped. The caller blocks for the lifetime of the session.
-
     ``fresh=True`` starts a new transcript instead of resuming this name's
-    saved one. It matters here more than anywhere else: the default
-    ``run_key`` is ``adhoc-<sha256(task)[:8]>``, so dispatching the SAME task
-    text twice collides by construction and the second run would silently
-    continue the first's dead session. A re-dispatched worker that re-orients
-    from durable state (a committed checklist, the branch's commits) wants the
-    stable name and a clean transcript, which is exactly this flag.
+    saved one.
     """
     from bobi.session import Session
 
-    run_key = adhoc_session_name(task, name)
     project = _resolve_project_name(cwd)
     requested_by = requested_by or {}
 
     started_at = time.time()
-    _emit_session_started(run_key, project, task, run_key, phase="adhoc",
+    _emit_session_started(name, project, task, name, phase="adhoc",
                           requested_by=requested_by, role=role)
 
     from bobi.paths import bobi_root
@@ -761,13 +821,10 @@ def spawn_adhoc(
     label = role or "agent"
     append_parts = [
         f"You are a {label} agent working on an adhoc task. "
-        f"Complete the task described in your initial prompt."
+        f"Complete the task described in your initial prompt.",
+        "After completing the initial task, stay available — "
+        "you will receive follow-up messages via your inbox.",
     ]
-    if persistent:
-        append_parts.append(
-            "After completing the initial task, stay available — "
-            "you will receive follow-up messages via your inbox."
-        )
     if role_prompt:
         append_parts.append(role_prompt)
 
@@ -794,7 +851,7 @@ def spawn_adhoc(
     effort = _resolve_launch_effort(role, explicit=effort, cfg=_cfg)
 
     session = Session(
-        name=run_key,
+        name=name,
         cwd=cwd,
         system_prompt={
             "type": "preset",
@@ -815,7 +872,7 @@ def spawn_adhoc(
 
     ok = session.start(startup_prompt=task, timeout=timeout)
 
-    if persistent and ok:
+    if ok:
         try:
             session._thread.join()
         except KeyboardInterrupt:
@@ -825,7 +882,7 @@ def spawn_adhoc(
 
         result = AgentResult(
             session_id=session.get_session_id(),
-            run_key=run_key,
+            run_key=name,
             phase="adhoc",
             success=True,
             duration_ms=session._total_duration_ms,
@@ -833,33 +890,14 @@ def spawn_adhoc(
             num_turns=session._total_turns,
             final_text=session._last_response,
         )
-        _emit_session_finished(result, project, run_key, started_at,
-                               requested_by=requested_by, role=role)
-        return result
-
-    if ok:
-        result = AgentResult(
-            session_id=session.get_session_id(),
-            run_key=run_key,
-            phase="adhoc",
-            success=not session._last_is_error,
-            duration_ms=session._total_duration_ms,
-            total_cost_usd=session._total_cost_usd,
-            num_turns=session._total_turns,
-            final_text=session._last_response,
-            # A failed adhoc run carried NO error at all before #845, so the
-            # launcher reported it as "unknown error".
-            error_kind=session._last_error_kind,
-            error=session.last_error(),
-        )
     else:
+        session.stop()
         result = AgentResult(
-            session_id="", run_key=run_key, phase="adhoc",
+            session_id="", run_key=name, phase="adhoc",
             success=False, error=f"session failed to start within {timeout}s",
         )
 
-    session.stop()
-    _emit_session_finished(result, project, run_key, started_at,
+    _emit_session_finished(result, project, name, started_at,
                            requested_by=requested_by, role=role)
     return result
 
@@ -886,7 +924,9 @@ _REQUIRES_TTL = 120  # seconds
 def check_requires(project_path: Path) -> list[tuple]:
     """Run package requires checks with a short-TTL cache.
 
-    Returns list of (RequiresEntry, passed, detail) tuples.
+    Returns list of (RequiresEntry, passed, detail) tuples. ``passed`` is
+    tri-state (see `config.run_requires_checks`); ``None`` means the check
+    could not be evaluated, which is not evidence the dependency is missing.
     Cached results are reused within the TTL to avoid latency
     growth when multiple agents dispatch in quick succession.
     """
@@ -904,36 +944,84 @@ def check_requires(project_path: Path) -> list[tuple]:
     if not cfg.requires:
         return []
 
-    results = run_requires_checks(cfg.requires)
+    results = run_requires_checks(cfg.requires, root=project_path)
     _requires_cache[key] = (now, results)
     return results
+
+
+_REQUIRES_DETAIL_MAX = 160
+
+
+def _log_requires_failure(failures: list[tuple]) -> None:
+    """Record every failed requires check at ERROR, with its full detail.
+
+    This is the report that always happens. The Slack alert needs a
+    configured channel and the raised error is truncated for readability;
+    without this line a preflight failure is unattributable (#771) - a
+    timeout, a missing command, and an auth error all read identically.
+    """
+    from bobi.config import requires_detail
+    for entry, detail in failures:
+        line = f"Requires check failed: {entry.name}: {requires_detail(detail)}"
+        if entry.why:
+            line += f" | why: {entry.why}"
+        if entry.fix:
+            line += f" | fix: {entry.fix}"
+        log.error(line)
+
+
+def _log_requires_unevaluated(unknown: list[tuple]) -> None:
+    """Record every check that could not RUN, and say the launch went ahead.
+
+    These do not block: a probe the harness could not evaluate says nothing
+    about the dependency, and treating it as absent refused every launch for a
+    live team with no signal beyond the skipped-launch line (#1063). Failing
+    open is only safe if it is loud, so this is ERROR, names the check, and
+    states plainly that the dependency went unverified.
+    """
+    from bobi.config import requires_detail
+    for entry, detail in unknown:
+        line = (f"Requires check could not be evaluated: {entry.name}: "
+                f"{requires_detail(detail)} | dispatch proceeded with "
+                f"{entry.name} unverified")
+        if entry.fix:
+            line += f" | fix: {entry.fix}"
+        log.error(line)
 
 
 def _alert_requires_failure(
     project_path: Path,
     failures: list[tuple],
 ) -> None:
-    """Post a Slack alert about failed requires checks. Best-effort."""
+    """Post a Slack alert about failed requires checks. Best-effort.
+
+    Alerting is a bonus surface, not the record: callers log the same
+    failures at ERROR first, so a team without `channels:` still gets the
+    detail. `channels:` also scopes event subscription, so it is not a
+    field an operator can set just to turn alerting on.
+    """
     try:
-        from bobi.config import Config
+        from bobi.config import Config, requires_detail
         cfg = Config.load(project_path)
         slack_svc = next(
             (s for s in cfg.services if s.name == "slack" and s.channels),
             None,
         )
         if not slack_svc:
-            log.warning("No Slack service with channels configured — "
-                        "cannot alert on requires failure")
+            log.warning("No Slack service with channels configured; "
+                        "requires failure reported to the log only")
             return
         token = slack_svc.credentials.get("bot_token", "")
         if not token:
-            log.warning("Slack bot_token not configured — "
-                        "cannot alert on requires failure")
+            log.warning("Slack bot_token not configured; "
+                        "requires failure reported to the log only")
             return
         channel = slack_svc.channels[0]
         lines = []
         for entry, detail in failures:
-            line = f"*{entry.name}*: {entry.why or detail}"
+            line = f"*{entry.name}*: {requires_detail(detail)}"
+            if entry.why:
+                line += f"\nWhy: {entry.why}"
             if entry.fix:
                 line += f"\nFix: `{entry.fix}`"
             lines.append(line)
@@ -1038,33 +1126,91 @@ def launch_agent(
     model: str = "",
     effort: str = "",
     fresh: bool = False,
-) -> str:
+    random_key: bool = False,
+    wait: bool = False,
+) -> "str | AgentResult":
     """Launch an agent as a detached subprocess and return immediately.
+
+    ``wait=True`` is the synchronous mode (#1057): the same derivation,
+    preflights, admission and registration as a detached launch, but the
+    workflow then runs IN THIS PROCESS via ``run_workflow`` and the call
+    returns an :class:`AgentResult` carrying the last step's final text -
+    the CLI ``--wait`` contract. A detached launch returns the session name.
+    Incompatible with ``persistent`` (a persistent session has no run to
+    wait out).
+
+    ``subscribe`` applies to PERSISTENT sessions only - workflow runs
+    (detached or wait) self-subscribe to their own inbox and ignore it.
 
     Session name is deterministic: wf-{workflow}-{project}-{run_key}.
     - If an active run exists for the same session → reject
     - If a failed/stale run exists → resume (same session ID)
     - If completed or new → fresh start
 
+    Without ``run_key`` the key is DERIVED from the workflow and task
+    (:func:`derive_run_key`), so an identical launch collides with the one
+    already in flight and is rejected by the first rule. It used to be random,
+    which made that rule unreachable and duplicate suppression contingent on
+    every caller remembering to pass a key (#850). ``random_key=True`` restores
+    a random key for genuinely parallel fan-out of identical work.
+
     ``fresh=True`` overrides the second rule for this launch only: the run
     keeps its deterministic name (so the worktree branch, the admission
     dedupe and the registry entry are unchanged) but starts a NEW transcript
     rather than continuing the failed run's. The default stays resume —
-    that is the engine's retry contract and callers depend on it.
+    that is the engine's retry contract and callers depend on it. A DERIVED
+    key implies ``fresh``: it is an inference about task text, not a caller
+    asserting "this is that run again", and before #850 such a launch always
+    got a brand-new name and so a clean transcript.
 
     With ``persistent=True``, the agent stays alive after its initial
-    task, accepting messages via its inbox. Uses spawn_adhoc() directly
-    instead of the workflow orchestrator.
+    task, accepting messages via its inbox. Uses run_persistent_agent()
+    directly instead of the workflow orchestrator.
     """
-    import uuid
-    run_key = run_key or f"adhoc-{uuid.uuid4().hex[:8]}"
+    if wait and persistent:
+        raise ValueError("wait=True cannot be combined with persistent=True")
     project = _resolve_project_name(cwd)
+    period_key = "" if persistent else _workflow_period_key(workflow_name)
+    if period_key:
+        # The workflow field owns the period (#1048): every dispatch path -
+        # scheduled tick, manual catch-up, event reaction - lands on the same
+        # run identity, so the admission below can dedupe them. A caller's
+        # key AND --id-random are deliberately overridden, not refused:
+        # honoring either is exactly the two-identities-one-period shape
+        # behind the #1016 double-publish, and refusing would break the
+        # reactor, which passes random_key for every id-less event.
+        if run_key and run_key != period_key:
+            log.info(
+                "Workflow %s declares a period; overriding run key %r with "
+                "the period key %s", workflow_name, run_key, period_key,
+            )
+        elif random_key:
+            log.info(
+                "Workflow %s declares a period; a random key would run the "
+                "same period twice, using the period key %s",
+                workflow_name, period_key,
+            )
+        run_key, derived_key = period_key, False
+    else:
+        run_key, derived_key = _resolve_run_key(workflow_name, task, run_key,
+                                                random_key, project=project,
+                                                role=role, model=model,
+                                                effort=effort)
+    fresh = fresh or derived_key
 
     if persistent:
         session_name = run_key
     else:
         from bobi.workflow.orchestrator import make_session_name
         session_name = make_session_name(workflow_name, project, run_key)
+
+    if derived_key:
+        # The un-keyed launch that used to be invisible. Saying so at launch is
+        # what turns "50 runs of one task" from a spend-cap surprise into a
+        # readable log (#850).
+        log.info("No run key given - derived %s from the launch; an "
+                 "identical launch will be refused while this one runs",
+                 run_key)
 
     registry = get_registry()
 
@@ -1077,14 +1223,30 @@ def launch_agent(
     from bobi.paths import bobi_root
     root = bobi_root()
 
-    # Preflight: check host-level dependencies declared in agent.yaml
+    # Preflight: check host-level dependencies declared in agent.yaml.
+    # `ok` is tri-state: only a check that RAN and failed blocks the launch. A
+    # check that could not be evaluated is a harness fault and is reported
+    # without gating, so one unevaluable probe cannot take all dispatch down
+    # (#1063).
     req_results = check_requires(root)
-    req_failures = [(entry, detail) for entry, ok, detail in req_results if not ok]
+    req_failures = [(entry, detail)
+                    for entry, ok, detail in req_results if ok is False]
+    req_unevaluated = [(entry, detail)
+                       for entry, ok, detail in req_results if ok is None]
+    if req_unevaluated:
+        _log_requires_unevaluated(req_unevaluated)
     if req_failures:
+        # Log before alerting: the log is the one surface that is always
+        # there, and the alert is best-effort by design.
+        _log_requires_failure(req_failures)
         _alert_requires_failure(root, req_failures)
-        names = ", ".join(e.name for e, _ in req_failures)
+        from bobi.config import requires_detail
+        summary = "; ".join(
+            f"{e.name}: {requires_detail(d, _REQUIRES_DETAIL_MAX)}"
+            for e, d in req_failures
+        )
         raise RuntimeError(
-            f"Required dependency check failed: {names}. "
+            f"Required dependency check failed: {summary}. "
             f"Run `bobi agent <name> doctor` for details and fix commands."
         )
 
@@ -1124,14 +1286,145 @@ def launch_agent(
         "_run_agent_entry(json.loads(sys.argv[1]))"
     )
 
-    with _LAUNCH_ADMISSION_LOCK:
+    from bobi.workflow.state import WorkflowRun, ledger_lock
+
+    def _admit() -> None:
+        """One admission pass: reap, ledger checks, registry guard.
+
+        Runs under ledger_lock so the decision cannot interleave with
+        another process's - and runs TWICE, because the concurrency
+        semaphore between the passes can wait minutes, during which a
+        concurrent launcher may have registered or the period completed.
+        Raises DuplicateRunError on refusal; every step is idempotent.
+        """
+        nonlocal existing
+        from bobi.reconcile import close_dead_run, is_dead_run
         existing = registry.get(session_name)
-        if existing and existing.status in ("starting", "running", "idle"):
-            raise RuntimeError(
-                f"A run is already active: {session_name} "
-                f"(status={existing.status}). Cancel it first or wait for it "
-                "to complete."
+        if existing and is_dead_run(existing):
+            # A run killed without reporting a terminal status leaves an
+            # active-looking entry behind. That was harmless while un-keyed
+            # launches minted a new name every time; now they land on the same
+            # one, so an unreaped corpse would refuse its own relaunch until
+            # the next manager start (#850). Closing it HERE, not in a later
+            # sweep, is also the only chance to emit: register() below replaces
+            # the entry wholesale a few lines down.
+            existing, _ = close_dead_run(existing, registry)
+
+        # The run ledger (#1048): a periodic workflow admits ONE run per
+        # period, across every dispatch path. The registry only remembers the
+        # latest holder of a session name, so "this period already completed"
+        # must be answered by the durable run record instead. Consulted after
+        # the dead-run reap above so a run that died without a terminal
+        # status has already been closed - its ledger entry is then flipped
+        # to failed rather than left "running" to block the period forever
+        # (the liveness check the naive period-key design lacked).
+        if period_key:
+            prior_run = WorkflowRun.find_by_run_key(workflow_name, run_key,
+                                                    repo=project)
+            if prior_run and prior_run.status == "completed" and not fresh:
+                # ``fresh`` is the deliberate escape hatch: an operator who
+                # KNOWS the completed run did nothing useful re-runs the
+                # period explicitly. Automatic dispatchers never pass it.
+                raise DuplicateRunError(
+                    f"This period already ran: {run_key} completed at "
+                    f"{prior_run.completed_at}. The next period admits the "
+                    f"next run; pass --fresh to deliberately run it again.",
+                    session_name=session_name, status="completed",
+                    derived_key=False,
+                )
+            if prior_run and prior_run.status == "waiting":
+                raise DuplicateRunError(
+                    f"This period's run is suspended: {run_key} is awaiting "
+                    f"{prior_run.await_event or 'an event'}. It resumes on "
+                    f"that event; to release the period instead, close the "
+                    f"run from the console runs view.",
+                    session_name=session_name, status=prior_run.status,
+                    derived_key=False,
+                )
+            if (prior_run and prior_run.status in ("running", "resuming")
+                    and not (existing and existing.status in ACTIVE_STATUSES)):
+                # The ledger says running (or stuck mid-claim at "resuming",
+                # the D071 orphan) but no live process holds the session -
+                # reaped above, or the registry entry is gone. Registry-gone
+                # is ambiguous (a state-dir restore could orphan a live
+                # process), but refusing on it would let a wiped registry
+                # block the period forever, which is the exact failure the
+                # liveness check exists to prevent. Close the entry honestly;
+                # the relaunch below adopts its checkpoint. A LIVE run falls
+                # through to the active-run refusal below.
+                prior_run.status = "failed"
+                prior_run.save()
+
+        # A DERIVED key also refuses a suspended run. "waiting" is dormant, not
+        # free: the process exited and an await event resumes it. An explicit
+        # --id may legitimately re-dispatch onto that name; a launch that only
+        # matched by task text cannot mean that, and would take over the
+        # suspended run's session, worktree branch and registry entry. A
+        # PERIOD key refuses one too: the period is in flight at a gate, and
+        # its ledger refusal above already said so - this is the registry's
+        # matching backstop.
+        blocking = ACTIVE_STATUSES + (
+            ("waiting",) if (derived_key or period_key) else ())
+        if existing and existing.status in blocking:
+            # A caller that never chose this key cannot act on the session name
+            # alone - it has to be told the key came from its own task text,
+            # and how to launch both on purpose.
+            hint = (
+                " Its run key was derived from the launch, so this is a repeat "
+                "of one already in flight; pass --id-random to run both."
+                if derived_key else ""
             )
+            # The remedy has to be one that WORKS for this status. A suspended
+            # run will not finish on its own - it is parked until its await
+            # event arrives - and `subagents cancel` refuses it outright
+            # (cancel_agent only touches ACTIVE_STATUSES). Naming a remedy that
+            # does nothing would leave --id-random as the only move with an
+            # effect, i.e. duplicate the parked work, which is the storm this
+            # guard exists to stop. Re-dispatching onto it under its own key is
+            # both permitted and what the caller most likely meant.
+            if existing.status == "waiting":
+                # Not "already active": `waiting` is deliberately outside
+                # ACTIVE_STATUSES, and telling an LLM a run is active when the
+                # status it is shown says otherwise invites it to disbelieve
+                # the whole refusal.
+                lead = "A suspended run already holds this name"
+                if period_key:
+                    # --id cannot be the remedy here: a period key overrides
+                    # any caller key, so that re-dispatch lands right back on
+                    # this refusal.
+                    remedy = (
+                        "It is this period's run, parked at an await step; "
+                        "it resumes when its event arrives (or from the "
+                        "console runs view)."
+                    )
+                else:
+                    remedy = (
+                        f"It is awaiting an event, so it will not finish on "
+                        f"its own and cannot be cancelled; re-dispatch onto "
+                        f"it with --id {existing.run_key!r} if that is what "
+                        f"you mean."
+                    )
+            else:
+                lead = "A run is already active"
+                remedy = "Cancel it first or wait for it to complete."
+            raise DuplicateRunError(
+                f"{lead}: {session_name} "
+                f"(status={existing.status}, task: {existing.title!r}). "
+                f"{remedy}{hint}",
+                session_name=session_name, status=existing.status,
+                derived_key=derived_key,
+            )
+
+    existing = None
+    with _LAUNCH_ADMISSION_LOCK:
+        # The ledger file lock serializes the admission DECISION across
+        # processes (a monitor tick and a manual CLI catch-up are different
+        # processes). It is deliberately NOT held across the semaphore wait
+        # below - that can block for minutes, and every spawned child takes
+        # this same lock to open its ledger entry, so holding it there would
+        # stall the whole host's workflow starts behind one queued launch.
+        with ledger_lock():
+            _admit()
 
         # Preflight: concurrency semaphore — queue if too many agents running
         _check_concurrency_semaphore(root)
@@ -1140,37 +1433,143 @@ def launch_agent(
         from bobi.sdk import check_image_rotation, compute_manifest_hash
         check_image_rotation(session_name, root)
 
-        # Register first so the session dir exists for the log file. This write
-        # stays in the same critical section as admission so parallel dispatch
-        # threads cannot all pass on the same stale active/starting count.
-        registry.register(SessionEntry(
-            name=session_name, session_id="", role=role,
-            run_key=run_key, title=task[:80], phase=workflow_name,
-            project=project, cwd=cwd, status="starting",
-            requested_by=requested_by or {},
-            image_hash=compute_manifest_hash(root),
-            # Persist the declared timeout so the dead-man reconciler knows this
-            # run's deadline (MDS-65 §4.6).
-            timeout=timeout,
-        ))
+        with ledger_lock():
+            # Second pass: the wait above may have been minutes - a
+            # concurrent launcher may hold the name now, or the period may
+            # have completed. Register in the SAME critical section as the
+            # re-check so parallel dispatchers cannot both pass on the same
+            # stale read; registering first also creates the session dir the
+            # log file needs.
+            _admit()
+            registry.register(SessionEntry(
+                name=session_name, session_id="", role=role,
+                run_key=run_key, title=task[:80], phase=workflow_name,
+                project=project, cwd=cwd, status="starting",
+                requested_by=requested_by or {},
+                image_hash=compute_manifest_hash(root),
+                # Persist the declared timeout so the dead-man reconciler knows
+                # this run's deadline (MDS-65 §4.6).
+                timeout=timeout,
+            ))
 
-    log_file = session_log_path(session_name)
-    # child_agent_env() is the single parent-to-child propagation contract:
-    # identity, brain selection, tool PATH, and credential material all flow
-    # through one helper instead of one-off launch-site patches. It strips the
-    # launch chain (see its docstring); this launch site - the only caller that
-    # is an agent launch - stamps the child's own chain back in.
-    child_env = child_agent_env(root)
-    from bobi.launch_lineage import stamp as stamp_launch_lineage
-    stamp_launch_lineage(child_env, child_lineage)
+    if wait:
+        # Synchronous mode (#1057): the run executes IN THIS PROCESS. The
+        # detached child's entry re-pins the brain and re-renders the team
+        # AGENTS.md at startup; the wait form does the same here so the two
+        # forms of one launch run under the same team selection - a stale
+        # BOBI_BRAIN inherited from the delegating agent's environment must
+        # not pick this run's brain.
+        pin_brain_from_root(root, os.environ)
+        from bobi.brain.instructions import render_team_instructions
+        render_team_instructions(root)
+
+        # The chain goes into our own environment - that is what any `bobi`
+        # command the agent runs from its shell inherits (#849) - and is
+        # RESTORED afterwards: a long-lived caller (webapp, manager) that
+        # launched N wait runs would otherwise deepen its own chain until
+        # the depth guard refused it everything.
+        from bobi.launch_lineage import LINEAGE_ENV_VAR
+        from bobi.launch_lineage import stamp as stamp_launch_lineage
+        prior_chain = os.environ.get(LINEAGE_ENV_VAR)
+        stamp_launch_lineage(os.environ, child_lineage)
+        try:
+            registry.update(session_name, pid=os.getpid())
+            # The invocation happened either way - the detached branch
+            # records right after its spawn, before the child's outcome is
+            # known.
+            from bobi.spend_governor import record_invocation
+            record_invocation(root)
+
+            from bobi.sdk import load_session_id
+            from bobi.workflow.orchestrator import run_workflow
+            from bobi.workflow.triggers import find_installed_workflow
+            workflow = find_installed_workflow(workflow_name)
+            if workflow is None:
+                # Terminal-close the entry registered above: a `starting`
+                # corpse holding this name would refuse its own relaunch
+                # until the reconciler's deadline branch fires (#850).
+                error = f"Workflow '{workflow_name}' not found"
+                registry.mark_terminal(session_name, TERMINAL_FAILED,
+                                       error=error)
+                raise RuntimeError(error)
+            collect: dict = {}
+            run_started = time.time()
+            try:
+                # run_workflow's own register() replaces the `starting`
+                # entry with the running one, and its finally records the
+                # honest terminal status - this handler covers only the
+                # window before that finally engages (mirrors the detached
+                # branch's spawn handler).
+                ok = run_workflow(
+                    workflow=workflow, task=task, repo=project, cwd=cwd,
+                    run_key=run_key, requested_by=requested_by or {},
+                    timeout=timeout, interactive=interactive, role=role,
+                    input_fields=input_fields, model=model, effort=effort,
+                    fresh=fresh, collect=collect,
+                )
+            except BaseException as exc:
+                try:
+                    # Only when the entry is still active: the executor's
+                    # own finally usually recorded the honest terminal (or
+                    # waiting) status before the exception reached us, and
+                    # this backstop must not overwrite it.
+                    entry = registry.get(session_name)
+                    if entry and entry.status in ACTIVE_STATUSES:
+                        registry.mark_terminal(
+                            session_name, TERMINAL_CRASHED,
+                            error=f"wait-mode run died: {exc}",
+                        )
+                except Exception:
+                    log.warning("Failed to mark wait-run failure for %s",
+                                session_name, exc_info=True)
+                raise
+        finally:
+            if prior_chain is None:
+                os.environ.pop(LINEAGE_ENV_VAR, None)
+            else:
+                os.environ[LINEAGE_ENV_VAR] = prior_chain
+        # Cost/turn telemetry deliberately stays unset here: the workflow
+        # executor accounts spend per step in its own records, and nothing
+        # consumes these fields on the wait path. ``error_kind`` carries
+        # "suspended" for a run parked at an await step - dormant, not
+        # done, and the caller has to be able to say so.
+        return AgentResult(
+            session_id=load_session_id(session_name),
+            run_key=session_name,
+            phase=workflow_name,
+            success=ok,
+            duration_ms=int((time.time() - run_started) * 1000),
+            final_text=collect.get("final_text", ""),
+            error=collect.get("error", ""),
+            error_kind="suspended" if collect.get("suspended") else "",
+        )
+
+    # Everything from here to the pid write is inside the try: the entry is
+    # already registered `starting` with pid 0, and `is_dead_run` cannot tell
+    # that corpse from a launch that is merely a few milliseconds from having a
+    # pid - so nothing reaps it. That was survivable while un-keyed launches
+    # minted a new name every time; now the relaunch lands on the same name and
+    # would be refused until the reconciler's deadline branch fires at the next
+    # manager start, `timeout + grace` later (#850). Reading the team env and
+    # stamping the chain both raise on real misconfiguration, so they belong
+    # under the same handler as the spawn.
     try:
+        log_file = session_log_path(session_name)
+        # child_agent_env() is the single parent-to-child propagation contract:
+        # identity, brain selection, tool PATH, and credential material all flow
+        # through one helper instead of one-off launch-site patches. It strips
+        # the launch chain (see its docstring); this launch site - the only
+        # caller that is an agent launch - stamps the child's own chain back in.
+        child_env = child_agent_env(root)
+        from bobi.launch_lineage import stamp as stamp_launch_lineage
+        stamp_launch_lineage(child_env, child_lineage)
         pid = _launch_detached(script, [args_json], log_file, env=child_env)
     except Exception as exc:
         try:
             registry.mark_terminal(
                 session_name,
                 TERMINAL_CRASHED,
-                error=f"failed to launch detached agent process: {exc}",
+                error=f"failed to launch detached agent: {exc}",
             )
         except Exception:
             log.warning("Failed to mark launch failure for %s", session_name,
@@ -1220,9 +1619,8 @@ def _resolve_self_github_login() -> str | None:
     """Best-effort lookup of the bot's own GitHub login via ``gh api user``.
 
     Cached for the process lifetime. Returns None when ``gh`` is unavailable or
-    unauthenticated — the reactor's self-author guard then stays inactive
-    (fail open) rather than dropping events. Used to skip auto-dispatching
-    pr-feedback on the bot's own comments (issue #411).
+    unauthenticated. The self-author guard then stays inactive (fail open),
+    while rules that explicitly match ``$self`` fail closed.
     """
     global _self_github_login, _self_github_login_resolved
     if _self_github_login_resolved:
@@ -1241,6 +1639,15 @@ def _resolve_self_github_login() -> str | None:
     except (OSError, sp.SubprocessError) as e:
         log.info("Could not resolve bot GitHub login (self-author guard off): %s", e)
     return _self_github_login
+
+
+def _auto_dispatch_needs_self_login(rules: list[dict]) -> bool:
+    """Return whether dispatch matching or hygiene needs the GitHub identity."""
+    return any(
+        not rule.get("allow_self_authored")
+        or "$self" in (rule.get("match") or {}).values()
+        for rule in rules
+    )
 
 
 def _start_event_subscription(session_name: str, subscribe: list[str],
@@ -1263,8 +1670,9 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     where every project lead received and answered the user's Slack DMs
     to the director).
     """
-    from bobi.config import (
-        Config, load_deployment_state, save_deployment_state,
+    from bobi.config import Config
+    from bobi.events.state import (
+        load_deployment_state, save_deployment_state,
         session_cursor_path, bubble_state_path,
     )
     from bobi.events.client import EventServerClient
@@ -1375,7 +1783,57 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             f"after {attempts} attempts: {last_err}"
         ) from last_err
 
+    def _sync_or_reregister(dep: str, key: str) -> tuple[str, str]:
+        """Sync this session's current subscribe list onto its saved deployment.
+
+        Authorize resource grants first (#488) so a global topic added since the
+        last start is not hard-rejected. A topic we cannot authorize is kept
+        anyway (``filter_unauthorized=False``): the server may already hold a
+        no-expiry grant from an earlier start, and dropping the topic would
+        silently unsubscribe a valid deployment. The server stays authoritative
+        and rejects the update if the grant is truly absent — at which point
+        re-registering is the recovery.
+        """
+        nonlocal active_subscriptions
+        try:
+            bubble = ensure_bubble(es_url, project_path)
+            registered = (
+                _register_channel_credentials(es_url, bubble)
+                if has_external else {}
+            )
+            authorized = authorize_resources(
+                es_url, cfg, subscribe,
+                bubble["bubble_id"], bubble["bubble_key"],
+                filter_unauthorized=False,
+                whatsapp_registered=registered.get("whatsapp"),
+                discord_registered=registered.get("discord"),
+            )
+        except Exception as e:
+            log.info("Pre-PUT resource authorization unavailable (%s)", e)
+            authorized = subscribe
+        from bobi import http as pooled
+        try:
+            resp = pooled.put(
+                f"{es_url}/deployments/{dep}/subscriptions",
+                json={"replace": authorized},
+                headers={
+                    "Authorization": f"Bearer {key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            active_subscriptions = list(authorized)
+            return dep, key
+        except Exception as e:
+            log.info("Subscription update failed (%s) — re-registering", e)
+            return _register_with_retry(es_url)
+
     if not es_url:
+        # Nothing configured: default to a local server on 8080 and always
+        # register fresh against it. Saved deployment state is deliberately
+        # NOT reused here — an unconfigured local server is ephemeral, so the
+        # deployment it once issued is not something to sync onto.
         es_port = 8080
         es_url = f"http://localhost:{es_port}"
         result = ensure_running(es_port, project_path=project_path)
@@ -1384,98 +1842,34 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
         es_deployment, es_key = _register_with_retry(es_url)
-    elif (es_port := local_port_from_url(es_url)) is not None:
-        result = ensure_running(es_port, project_path=project_path)
-        if result == "started":
-            log.info("Configured local event server started on port %d", es_port)
-        elif result == "connected":
-            log.info("Connected to configured local event server on port %d", es_port)
+    else:
+        # A configured local URL additionally starts/attaches the server; from
+        # there the decision is identical for local and remote, so it is made
+        # once rather than mirrored per transport.
+        if (es_port := local_port_from_url(es_url)) is not None:
+            result = ensure_running(es_port, project_path=project_path)
+            if result == "started":
+                log.info("Configured local event server started on port %d", es_port)
+            elif result == "connected":
+                log.info("Connected to configured local event server on port %d", es_port)
+
         if not (es_deployment and es_key):
+            # No saved deployment for this session — register fresh rather
+            # than PUT to a guaranteed-400 empty deployment URL.
             es_deployment, es_key = _register_with_retry(es_url)
         elif not bubble_state_path(project_path).exists():
+            # Pre-bubble upgrade: saved deployment_state from a version that
+            # predates auth bubbles. The old api_key can't sign publishes
+            # against a v0.21+ server → 403. Drop the stale state and
+            # re-register through ensure_bubble to mint/join a bubble.
             log.info("Saved deployment but no bubble.json — pre-bubble upgrade, re-registering")
             cursor_path.unlink(missing_ok=True)
             es_deployment, es_key = _register_with_retry(es_url)
         else:
-            try:
-                _bubble = ensure_bubble(es_url, project_path)
-                _registered = (
-                    _register_channel_credentials(es_url, _bubble)
-                    if has_external else {}
-                )
-                authorized = authorize_resources(
-                    es_url, cfg, subscribe,
-                    _bubble["bubble_id"], _bubble["bubble_key"],
-                    filter_unauthorized=False,
-                    whatsapp_registered=_registered.get("whatsapp"),
-                    discord_registered=_registered.get("discord"),
-                )
-                from bobi import http as pooled
-                resp = pooled.put(
-                    f"{es_url}/deployments/{es_deployment}/subscriptions",
-                    json={"replace": authorized},
-                    headers={
-                        "Authorization": f"Bearer {es_key}",
-                        "Content-Type": "application/json",
-                    },
-                    timeout=10.0,
-                )
-                resp.raise_for_status()
-                active_subscriptions = list(authorized)
-            except Exception as e:
-                log.warning("Subscription sync failed, re-registering: %s", e)
-                cursor_path.unlink(missing_ok=True)
-                es_deployment, es_key = _register_with_retry(es_url)
-    elif not (es_deployment and es_key):
-        # No saved deployment for this session — register fresh rather
-        # than PUT to a guaranteed-400 empty deployment URL.
-        es_deployment, es_key = _register_with_retry(es_url)
-    elif not bubble_state_path(project_path).exists():
-        # Pre-bubble upgrade: saved deployment_state from a version that
-        # predates auth bubbles. The old api_key can't sign publishes
-        # against a v0.21+ server → 403. Drop the stale state and
-        # re-register through ensure_bubble to mint/join a bubble.
-        log.info("Saved deployment but no bubble.json — pre-bubble upgrade, re-registering")
-        cursor_path.unlink(missing_ok=True)
-        es_deployment, es_key = _register_with_retry(es_url)
-    else:
-        # This session restarting with its own saved deployment — sync any
-        # new subscription keys onto it. Never PUT to another session's
-        # deployment; state is per-session by construction. Authorize resource
-        # grants first (#488) so a global topic added here is not hard-rejected;
-        # a github/linear topic we can't authorize is dropped from the PUT.
-        try:
-            _bubble = ensure_bubble(es_url, project_path)
-            _registered = (
-                _register_channel_credentials(es_url, _bubble)
-                if has_external else {}
-            )
-            authorized = authorize_resources(
-                es_url, cfg, subscribe,
-                _bubble["bubble_id"], _bubble["bubble_key"],
-                filter_unauthorized=False,
-                whatsapp_registered=_registered.get("whatsapp"),
-                discord_registered=_registered.get("discord"),
-            )
-        except Exception as e:
-            log.info("Pre-PUT resource authorization unavailable (%s)", e)
-            authorized = subscribe
-        from bobi import http as pooled
-        try:
-            resp = pooled.put(
-                f"{es_url}/deployments/{es_deployment}/subscriptions",
-                json={"replace": authorized},
-                headers={
-                    "Authorization": f"Bearer {es_key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-            active_subscriptions = list(authorized)
-        except Exception as e:
-            log.info("Subscription update failed (%s) — re-registering", e)
-            es_deployment, es_key = _register_with_retry(es_url)
+            # This session restarting with its own saved deployment — sync any
+            # new subscription keys onto it. Never PUT to another session's
+            # deployment; state is per-session by construction.
+            es_deployment, es_key = _sync_or_reregister(es_deployment, es_key)
 
     # Note: Slack-bot registration (signed, also writing the #487 outbound record
     # and the #488 slack grant) now happens in `_authorize_subscriptions` BEFORE
@@ -1522,12 +1916,9 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     reactor = None
     if has_external and cfg.auto_dispatch:
         from bobi.events.reactor import EventReactor
-        # Resolve the bot's own GitHub login so the reactor can skip
-        # auto-dispatching on the bot's own events (issue #411). Self-author
-        # skip is the default, so we need the login unless EVERY rule opts back
-        # in via allow_self_authored.
+        # Resolve identity for both self-author hygiene and `$self` match values.
         self_login = None
-        if any(not r.get("allow_self_authored") for r in cfg.auto_dispatch):
+        if _auto_dispatch_needs_self_login(cfg.auto_dispatch):
             self_login = _resolve_self_github_login()
         reactor = EventReactor.from_config(
             cfg.auto_dispatch, cwd=str(project_path), self_login=self_login)
@@ -1603,13 +1994,12 @@ def _run_agent_entry(args: dict) -> None:
     # --subscribe list) flow in via the Session's `subscribe` argument. The
     # workflow path's phase Sessions each self-subscribe to their own inbox.
     if persistent:
-        spawn_adhoc(
+        run_persistent_agent(
             cwd=cwd,
             task=task,
             timeout=timeout,
             name=run_key,
             requested_by=requested_by,
-            persistent=True,
             role=role,
             subscribe=subscribe,
             model=model,
@@ -1619,13 +2009,22 @@ def _run_agent_entry(args: dict) -> None:
         return
 
     from bobi.workflow.orchestrator import run_workflow
-    from bobi.workflow.triggers import WorkflowDispatcher
+    from bobi.workflow.triggers import find_installed_workflow
 
-    dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
-    workflow = dispatcher.find_workflow(workflow_name)
+    workflow = find_installed_workflow(workflow_name)
     if not workflow:
+        # Terminal-close the entry the launcher registered, exactly as the
+        # wait branch does: a `starting` corpse holding this name would
+        # refuse its own relaunch until the reconciler's deadline branch
+        # fires (#850) - and this print lands only in the detached child's
+        # log, so the corpse used to be the only visible symptom.
+        from bobi.workflow.orchestrator import make_session_name
         print(f"Workflow '{workflow_name}' not found")
+        get_registry().mark_terminal(
+            make_session_name(workflow_name, _resolve_project_name(cwd),
+                              run_key),
+            TERMINAL_FAILED, error=f"Workflow '{workflow_name}' not found",
+        )
         return
 
     project = _resolve_project_name(cwd)
@@ -1790,6 +2189,27 @@ def _parse_check_verdict(text: str) -> dict | None:
     return _last_verdict_object(text, lambda p: "finding" in p)
 
 
+def _register_verdict_session(
+    seed: str, name: str | None, *,
+    role: str, phase: str, title: str, cwd: str,
+) -> tuple[str, str]:
+    """Derive a one-shot verdict agent's run key + session name, and register it.
+
+    The three blocking verdict runners (check, gate, curator) differ only in
+    role, phase, the string they hash for a default slug, and the registry
+    title. The slug's prefix IS the phase in all three, so it is derived rather
+    than passed. Returns ``(slug, session)``.
+    """
+    slug = name or f"{phase}-{hashlib.sha256(seed.encode()).hexdigest()[:8]}"
+    session = _session_name(slug, role=role, phase=phase)
+    get_registry().register(SessionEntry(
+        name=session, session_id="", role=role,
+        run_key=slug, title=title, phase=phase,
+        cwd=cwd, status="starting",
+    ))
+    return slug, session
+
+
 def run_check_blocking(
     description: str,
     cwd: str,
@@ -1814,21 +2234,13 @@ def run_check_blocking(
     ``success=False`` so the scheduler treats it as a failed check, not a
     healthy one.
     """
-    import hashlib
-
-    short_hash = hashlib.sha256(description.encode()).hexdigest()[:8]
-    slug = name or f"check-{short_hash}"
     phase = "check"
-    session = _session_name(slug, role="monitor", phase=phase)
+    slug, session = _register_verdict_session(
+        description, name,
+        role="monitor", phase=phase, title=description[:80], cwd=cwd,
+    )
 
     prompt = _build_check_prompt(description, extra)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="monitor",
-        run_key=slug, title=description[:80], phase=phase,
-        cwd=cwd, status="starting",
-    ))
 
     verdict, result, error = _run_verdict_agent_blocking(
         prompt, cwd, slug, phase, session, _parse_check_verdict,
@@ -2033,23 +2445,14 @@ def run_gate_blocking(
     the context (and cost) every interval and let stale items pollute the
     verdict.
     """
-    import hashlib
-
     presented = {str(i.get("key", "")) for i in items}
-    short_hash = hashlib.sha256(
-        (criterion + "".join(sorted(presented))).encode()).hexdigest()[:8]
-    slug = name or f"gate-{short_hash}"
     phase = "gate"
-    session = _session_name(slug, role="monitor", phase=phase)
+    slug, session = _register_verdict_session(
+        criterion + "".join(sorted(presented)), name,
+        role="monitor", phase=phase, title=criterion[:80], cwd=cwd,
+    )
 
     prompt = _build_gate_prompt(criterion, items)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="monitor",
-        run_key=slug, title=criterion[:80], phase=phase,
-        cwd=cwd, status="starting",
-    ))
 
     relevant, result, error = _run_verdict_agent_blocking(
         prompt, cwd, slug, phase, session,
@@ -2107,21 +2510,13 @@ def run_curator_blocking(
     or ``(None, error)`` after exhausting attempts - indeterminate, never
     "all clear", so the caller must not advance the cursor.
     """
-    import hashlib
-
     from bobi.monitors import curator as curator_mod
 
-    short_hash = hashlib.sha256(task.encode()).hexdigest()[:8]
-    slug = name or f"curator-{short_hash}"
     phase = "curator"
-    session = _session_name(slug, role="curator", phase=phase)
-
-    registry = get_registry()
-    registry.register(SessionEntry(
-        name=session, session_id="", role="curator",
-        run_key=slug, title="policy curator", phase=phase,
-        cwd=cwd, status="starting",
-    ))
+    slug, session = _register_verdict_session(
+        task, name,
+        role="curator", phase=phase, title="policy curator", cwd=cwd,
+    )
 
     summary, _result, error = _run_verdict_agent_blocking(
         task, cwd, slug, phase, session, curator_mod.parse_result,

@@ -32,7 +32,7 @@ survive it: a file someone had chmod-ed to 0600 comes back at the process
 umask, and a path that was a symlink becomes a regular file. Two rules
 follow. A secret whose confidentiality depends on its mode must be created
 with that mode rather than fixed up afterwards — see
-``bobi/config.py:save_bubble_state``, which opens with ``0o600`` for exactly
+``bobi/events/state.py:save_bubble_state``, which opens with ``0o600`` for exactly
 this reason and deliberately does NOT use this helper. And a mode-based
 write guard is not a defense against an atomic write at all: replacing a
 file needs write permission on its *directory*, not on the file.

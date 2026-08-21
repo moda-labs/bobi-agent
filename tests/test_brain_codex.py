@@ -10,7 +10,11 @@ import sys
 
 import pytest
 
-from bobi.brain import get_brain
+from bobi.brain import (
+    ERROR_KIND_AUTHENTICATION,
+    ERROR_KIND_CREDITS_EXHAUSTED,
+    get_brain,
+)
 from bobi.brain.base import AssistantText, TurnResult
 from bobi.brain.codex import (
     CodexBrain,
@@ -73,7 +77,8 @@ async def test_turn_converts_messages_and_captures_thread():
                    "output_tokens": 9}},
     ]
     s = _CodexSession(cwd="/tmp/x", instructions="SYS", runner=_runner_of(events))
-    await s.connect("hello")
+    await s.connect()
+    await s.query("hello")
     out = await _drain(s)
 
     texts = [m.text for m in out if isinstance(m, AssistantText) and m.text]
@@ -94,6 +99,61 @@ async def test_turn_converts_messages_and_captures_thread():
 
 
 @pytest.mark.asyncio
+async def test_usage_limit_failure_is_classified_as_exhausted_credits():
+    events = [
+        {"type": "thread.started", "thread_id": "th-limit"},
+        {
+            "type": "turn.failed",
+            "error": {"message": "You've hit your usage limit"},
+        },
+    ]
+    session = _CodexSession(
+        cwd="/tmp/x", instructions="", runner=_runner_of(events)
+    )
+    await session.connect()
+    await session.query("hello")
+
+    result = (await _drain(session))[-1]
+
+    assert result.error_kind == ERROR_KIND_CREDITS_EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_not_logged_in_failure_is_classified_as_authentication():
+    events = [
+        {"type": "error", "message": "Not logged in"},
+    ]
+    session = _CodexSession(
+        cwd="/tmp/x", instructions="", runner=_runner_of(events)
+    )
+    await session.connect()
+    await session.query("hello")
+
+    result = (await _drain(session))[-1]
+
+    assert result.error_kind == ERROR_KIND_AUTHENTICATION
+
+
+@pytest.mark.asyncio
+async def test_generic_codex_rate_limit_is_not_credit_exhaustion():
+    events = [
+        {
+            "type": "turn.failed",
+            "error": {"message": "429 rate limit exceeded; retry later"},
+        },
+    ]
+    session = _CodexSession(
+        cwd="/tmp/x", instructions="", runner=_runner_of(events)
+    )
+    await session.connect()
+    await session.query("hello")
+
+    result = (await _drain(session))[-1]
+
+    assert result.error_kind == ""
+
+
+@pytest.mark.asyncio
 async def test_fresh_turn_prepends_instructions_then_resume_does_not():
     sink = []
     events = [
@@ -101,7 +161,8 @@ async def test_fresh_turn_prepends_instructions_then_resume_does_not():
         {"type": "turn.completed", "usage": {}},
     ]
     s = _CodexSession(cwd="/w", instructions="SYSTEM", runner=_runner_of(events, sink))
-    await s.connect("first")
+    await s.connect()
+    await s.query("first")
     await _drain(s)
     # Fresh thread: instructions prepended, plain `codex exec` (no resume).
     fresh_argv = sink[0][0]
@@ -127,7 +188,8 @@ async def test_large_fresh_prompt_uses_stdin_not_argv():
     prompt = "x" * (MAX_ARG_STRLEN + 1)
     s = _CodexSession(cwd="/w", instructions="SYSTEM", runner=_runner_of(events, sink))
 
-    await s.connect(prompt)
+    await s.connect()
+    await s.query(prompt)
     await _drain(s)
 
     argv, _cwd, stdin_text = sink[0]
@@ -177,7 +239,8 @@ async def test_turn_failed_surfaces_error():
         {"type": "turn.failed", "error": {"message": "model overloaded"}},
     ]
     s = _CodexSession(cwd="/w", instructions="", runner=_runner_of(events))
-    await s.connect("go")
+    await s.connect()
+    await s.query("go")
     out = await _drain(s)
     assert isinstance(out[-1], TurnResult)
     assert out[-1].is_error is True
@@ -264,7 +327,8 @@ async def test_spawn_codex_close_kills_sigterm_resistant_child(tmp_path):
 async def test_stream_ends_without_terminal_is_error():
     events = [{"type": "thread.started", "thread_id": "th-x"}]  # no turn.completed
     s = _CodexSession(cwd="/w", instructions="", runner=_runner_of(events))
-    await s.connect("go")
+    await s.connect()
+    await s.query("go")
     out = await _drain(s)
     assert out[-1].is_error is True
     assert "without completing" in out[-1].result_text
@@ -278,7 +342,8 @@ async def test_env_model_default_adds_flag(monkeypatch):
 
     s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"})
     s._runner = _runner_of(events, sink)
-    await s.connect("hi")
+    await s.connect()
+    await s.query("hi")
     await _drain(s)
 
     assert "-m" in sink[0][0] and "gpt-5-codex" in sink[0][0]
@@ -292,7 +357,8 @@ async def test_model_override_adds_flag(monkeypatch):
     s = b.make_session(cwd="/w", system_prompt={"append": "S"},
                        options={"model": "o3"})
     s._runner = _runner_of(events, sink)
-    await s.connect("hi")
+    await s.connect()
+    await s.query("hi")
     await _drain(s)
     assert "-m" in sink[0][0] and "o3" in sink[0][0]
     assert "gpt-5-codex" not in sink[0][0]
@@ -306,7 +372,8 @@ async def test_env_effort_default_adds_config_flag(monkeypatch):
 
     s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"})
     s._runner = _runner_of(events, sink)
-    await s.connect("hi")
+    await s.connect()
+    await s.query("hi")
     await _drain(s)
 
     argv = sink[0][0]
@@ -321,7 +388,8 @@ async def test_effort_override_adds_config_flag(monkeypatch):
     s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"},
                                   options={"effort": "xhigh"})
     s._runner = _runner_of(events, sink)
-    await s.connect("hi")
+    await s.connect()
+    await s.query("hi")
     await _drain(s)
     argv = sink[0][0]
     assert "model_reasoning_effort=xhigh" in argv
@@ -335,7 +403,8 @@ async def test_no_effort_omits_config_flag(monkeypatch):
     monkeypatch.delenv("BOBI_BRAIN_EFFORT", raising=False)
     s = CodexBrain().make_session(cwd="/w", system_prompt={"append": "S"})
     s._runner = _runner_of(events, sink)
-    await s.connect("hi")
+    await s.connect()
+    await s.query("hi")
     await _drain(s)
     assert not any(
         str(a).startswith("model_reasoning_effort=") for a in sink[0][0]
@@ -433,7 +502,7 @@ def test_make_session_without_mcp_leaves_a_live_block_alone(tmp_path, monkeypatc
     assert data["mcp_servers"]["weather"]["command"] == "/opt/weather"
 
 
-def test_spawn_adhoc_passes_an_empty_set_explicitly(bobi_install, monkeypatch):
+def test_persistent_bootstrap_passes_an_empty_set_explicitly(bobi_install, monkeypatch):
     """The clearing path still has a real trigger.
 
     With an absent key now meaning "no opinion", something has to say "this
@@ -461,7 +530,7 @@ def test_spawn_adhoc_passes_an_empty_set_explicitly(bobi_install, monkeypatch):
                         })())
     monkeypatch.setattr(subagent, "_load_long_term_memory_prompt", lambda: "")
 
-    subagent.spawn_adhoc(cwd=".", task="t", name="n")
+    subagent.run_persistent_agent(cwd=".", task="t", name="n")
 
     assert "mcp_servers" in captured, (
         "an empty set must be passed explicitly, or a team that dropped its "

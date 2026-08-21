@@ -7,14 +7,14 @@ import logging
 import shutil
 import tarfile
 import tempfile
-from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
 import httpx
 import yaml
 
-from bobi import paths
+from bobi import fsutil, paths
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -49,26 +49,26 @@ def _asset_url(repo: str, name: str, version: str | None) -> str:
     return f"https://github.com/{repo}/releases/download/{RELEASE_TAG}/{fname}"
 
 
-def _cache_dir(project_path: Path) -> Path:
+def _cache_dir() -> Path:
     d = paths.agent_cache_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def cache_path(project_path: Path, name: str) -> Path:
+def cache_path(name: str) -> Path:
     """The install/deploy cache directory for a team (shared cache, D-3)."""
-    return _cache_dir(project_path) / name
+    return _cache_dir() / name
 
 
-def cached_version(project_path: Path, name: str) -> str | None:
+def cached_version(name: str) -> str | None:
     """The version recorded in the cached pack's `.meta.json`, if any.
 
     Lets a pinned deploy reuse an already-installed `name@version` with no
     second download (§3.4) — the resolver checks this before fetching."""
-    return _read_meta(project_path, name).get("version")
+    return _read_meta(name).get("version")
 
 
-def _all_registries(project_path: Path) -> list[str]:
+def _all_registries() -> list[str]:
     """Get all configured registries (default + user-added)."""
     user_registries = []
     cfg_path = paths.ensure_global_config()
@@ -90,19 +90,9 @@ def _all_registries(project_path: Path) -> list[str]:
 
 def _github_token() -> str:
     """Get a GitHub token from env or gh CLI."""
-    import os
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if not token:
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["gh", "auth", "token"], capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                token = result.stdout.strip()
-        except Exception:
-            pass
-    return token
+    from bobi.gitutil import github_token
+
+    return github_token()
 
 
 def _urlopen(url: str, timeout: int = 10) -> httpx.Response:
@@ -117,12 +107,12 @@ def _urlopen(url: str, timeout: int = 10) -> httpx.Response:
     return resp
 
 
-def _meta_path(project_path: Path, name: str) -> Path:
-    return _cache_dir(project_path) / name / ".meta.json"
+def _meta_path(name: str) -> Path:
+    return _cache_dir() / name / ".meta.json"
 
 
-def _read_meta(project_path: Path, name: str) -> dict:
-    p = _meta_path(project_path, name)
+def _read_meta(name: str) -> dict:
+    p = _meta_path(name)
     if not p.exists():
         return {}
     try:
@@ -131,13 +121,15 @@ def _read_meta(project_path: Path, name: str) -> dict:
         return {}
 
 
-def _write_meta(project_path: Path, name: str, version: str, source: str) -> None:
+def _write_meta(name: str, version: str, source: str) -> None:
     meta = {
         "version": version,
         "source": source,
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": now_iso(),
     }
-    _meta_path(project_path, name).write_text(json.dumps(meta, indent=2))
+    # Atomic: _read_meta treats an unparseable file as {}, so a torn write
+    # would drop the whole record, not one field.
+    fsutil.atomic_write_json(_meta_path(name), meta)
 
 
 class RemoteVersionUnavailable(RuntimeError):
@@ -176,9 +168,9 @@ def _read_remote_version(name: str, repo: str = DEFAULT_REPO) -> str | None:
     return data.get("version") if data else None
 
 
-def _read_local_version(project_path: Path, name: str) -> str | None:
+def _read_local_version(name: str) -> str | None:
     """Read version from cached pack's agent.yaml."""
-    defaults = _cache_dir(project_path) / name / "agent.yaml"
+    defaults = _cache_dir() / name / "agent.yaml"
     if not defaults.exists():
         return None
     try:
@@ -188,15 +180,15 @@ def _read_local_version(project_path: Path, name: str) -> str | None:
         return None
 
 
-def is_cached(project_path: Path, name: str) -> bool:
-    """Check if a pack exists in the project cache."""
-    return (_cache_dir(project_path) / name / "agent.yaml").exists()
+def is_cached(name: str) -> bool:
+    """Check if a pack exists in the shared cache."""
+    return (_cache_dir() / name / "agent.yaml").exists()
 
 
-def check_update(project_path: Path, name: str, repo: str | None = None) -> tuple[str | None, str | None]:
+def check_update(name: str, repo: str | None = None) -> tuple[str | None, str | None]:
     """Compare local vs remote version. Returns (local_version, remote_version)."""
-    local = _read_local_version(project_path, name)
-    registries = [repo] if repo else _all_registries(project_path)
+    local = _read_local_version(name)
+    registries = [repo] if repo else _all_registries()
     for r in registries:
         try:
             remote = _read_remote_version(name, r)
@@ -207,22 +199,22 @@ def check_update(project_path: Path, name: str, repo: str | None = None) -> tupl
     return local, None
 
 
-def _repo_for(project_path: Path, name: str) -> str | None:
+def _repo_for(name: str) -> str | None:
     """The first configured registry whose `registry.yaml` lists `name`.
 
     Membership-based (not version-based) so version-less teams resolve too —
     `_read_remote_version` returns None for them, which would otherwise hide
     them from repo resolution."""
-    for r in _all_registries(project_path):
+    for r in _all_registries():
         for pack in _list_remote_single(r):
             if pack.get("name") == name:
                 return r
     return None
 
 
-def fetch(project_path: Path, name: str, *, version: str | None = None,
+def fetch(name: str, *, version: str | None = None,
           repo: str | None = None) -> Path:
-    """Download an agent team from GitHub and install it to the project cache.
+    """Download an agent team from GitHub and install it to the shared cache.
 
     Resolution (#440 Phase 2):
       - `version` given → download the immutable per-team asset
@@ -236,11 +228,11 @@ def fetch(project_path: Path, name: str, *, version: str | None = None,
     """
     pinned = version is not None
     if not repo:
-        repo = _repo_for(project_path, name)
+        repo = _repo_for(name)
         if not repo:
             raise RuntimeError(
                 f"Agent team '{name}' not found in any registry. "
-                f"Searched: {', '.join(_all_registries(project_path))}"
+                f"Searched: {', '.join(_all_registries())}"
             )
 
     # The concrete version to fetch. For an explicit pin it's `version`; for
@@ -249,7 +241,7 @@ def fetch(project_path: Path, name: str, *, version: str | None = None,
     target = version if pinned else _read_remote_version(name, repo)
     asset_url = _asset_url(repo, name, target)
     try:
-        return _fetch_asset(project_path, repo, name, target, asset_url)
+        return _fetch_asset(repo, name, target, asset_url)
     except httpx.HTTPStatusError as e:
         if e.response.status_code != 404:
             raise RuntimeError(f"Failed to fetch '{name}' from {asset_url}: {e}") from e
@@ -259,7 +251,7 @@ def fetch(project_path: Path, name: str, *, version: str | None = None,
         ) from e
 
 
-def _fetch_asset(project_path: Path, repo: str, name: str,
+def _fetch_asset(repo: str, name: str,
                  version: str | None, url: str) -> Path:
     """Download + install one per-team release asset. Returns the cache dir.
 
@@ -272,7 +264,7 @@ def _fetch_asset(project_path: Path, repo: str, name: str,
              f"@{version}" if version else " (latest)", url)
     resp = _urlopen(url, timeout=30)
     tar = tarfile.open(fileobj=BytesIO(resp.content), mode="r:gz")
-    dest, _ = _install_team_tar(project_path, tar, source=url,
+    dest, _ = _install_team_tar(tar, source=url,
                                 source_meta=f"asset:{url}", name=name)
     return dest
 
@@ -299,10 +291,10 @@ def _safe_members(tar: tarfile.TarFile, root: str) -> list[tarfile.TarInfo]:
     return safe
 
 
-def fetch_from_url(project_path: Path, url: str,
+def fetch_from_url(url: str,
                    name: str | None = None) -> tuple[Path, str]:
     """Download an agent team from a public `.tar.gz` URL and install it to the
-    project cache. Returns (install_dir, team_name).
+    shared cache. Returns (install_dir, team_name).
 
     The archive must contain exactly one team: a directory holding an
     `agent.yaml` (optionally nested under a wrapper directory, as GitHub's
@@ -335,11 +327,11 @@ def fetch_from_url(project_path: Path, url: str,
             "gzipped tarball of one team directory."
         ) from e
 
-    return _install_team_tar(project_path, tar, source=url,
+    return _install_team_tar(tar, source=url,
                              source_meta=f"url:{url}", name=name)
 
 
-def fetch_from_archive(project_path: Path, archive: Path,
+def fetch_from_archive(archive: Path,
                        name: str | None = None) -> tuple[Path, str]:
     """Install an agent team from a LOCAL `.tar.gz`/`.tgz` archive file.
 
@@ -359,14 +351,14 @@ def fetch_from_archive(project_path: Path, archive: Path,
             "tarball of one team directory."
         ) from e
 
-    return _install_team_tar(project_path, tar, source=str(archive),
+    return _install_team_tar(tar, source=str(archive),
                              source_meta=f"archive:{archive.name}", name=name)
 
 
-def _install_team_tar(project_path: Path, tar: "tarfile.TarFile", *,
+def _install_team_tar(tar: "tarfile.TarFile", *,
                       source: str, source_meta: str,
                       name: str | None) -> tuple[Path, str]:
-    """Extract one team from an open tarfile into the project cache.
+    """Extract one team from an open tarfile into the shared cache.
 
     Shared core of `fetch_from_url` and `fetch_from_archive`: find the shallowest
     `agent.yaml`, safely extract its team dir, resolve the team name, copy into
@@ -388,7 +380,7 @@ def _install_team_tar(project_path: Path, tar: "tarfile.TarFile", *,
         team_root = agent_yaml.name.rsplit("/", 1)[0] if "/" in agent_yaml.name else ""
         members = _safe_members(tar, team_root)
 
-        cache = _cache_dir(project_path)
+        cache = _cache_dir()
         with tempfile.TemporaryDirectory() as tmp:
             # `_safe_members` already rejected traversal/abs/links; the `data`
             # filter (Python 3.12+, backported to 3.11.4) is belt-and-suspenders
@@ -400,6 +392,17 @@ def _install_team_tar(project_path: Path, tar: "tarfile.TarFile", *,
             extracted = Path(tmp) / team_root if team_root else Path(tmp)
             if not (extracted / "agent.yaml").is_file():
                 raise RuntimeError(f"Extraction failed for the team at {source}")
+
+            from bobi.install import verify_install_manifest
+            failures = verify_install_manifest(extracted)
+            if failures:
+                shown = ", ".join(failures[:3])
+                suffix = "..." if len(failures) > 3 else ""
+                raise RuntimeError(
+                    f"Package verification failed for {source}: "
+                    f"{len(failures)} file(s) differ from install-manifest.json: "
+                    f"{shown}{suffix}"
+                )
 
             resolved = (
                 name
@@ -417,8 +420,8 @@ def _install_team_tar(project_path: Path, tar: "tarfile.TarFile", *,
             dest.mkdir(parents=True, exist_ok=True)
             shutil.copytree(extracted, dest, dirs_exist_ok=True)
 
-    version = _read_local_version(project_path, resolved) or "unknown"
-    _write_meta(project_path, resolved, version, source_meta)
+    version = _read_local_version(resolved) or "unknown"
+    _write_meta(resolved, version, source_meta)
     log.info("Installed %s v%s from %s to %s", resolved, version, source, dest)
     return dest, resolved
 
@@ -449,14 +452,13 @@ def _list_remote_single(repo: str) -> list[dict]:
     ]
 
 
-def list_remote(project_path: Path | None = None, repo: str | None = None) -> list[dict]:
+def list_remote(repo: str | None = None) -> list[dict]:
     """List agent teams available across all registries."""
     if repo:
         return _list_remote_single(repo)
     seen: set[str] = set()
     results: list[dict] = []
-    registries = _all_registries(project_path) if project_path else [DEFAULT_REPO]
-    for r in registries:
+    for r in _all_registries():
         for pack in _list_remote_single(r):
             if pack["name"] not in seen:
                 seen.add(pack["name"])
@@ -464,16 +466,14 @@ def list_remote(project_path: Path | None = None, repo: str | None = None) -> li
     return results
 
 
-def list_cached(project_path: Path) -> list[dict]:
-    """List agent teams in the project cache with version info."""
-    cache = _cache_dir(project_path)
-    if not cache.is_dir():
-        return []
+def list_cached() -> list[dict]:
+    """List agent teams in the shared cache with version info."""
+    cache = _cache_dir()
     packs = []
     for d in sorted(cache.iterdir()):
         if d.is_dir() and (d / "agent.yaml").exists():
-            meta = _read_meta(project_path, d.name)
-            version = _read_local_version(project_path, d.name) or "unknown"
+            meta = _read_meta(d.name)
+            version = _read_local_version(d.name) or "unknown"
             packs.append({
                 "name": d.name,
                 "version": version,

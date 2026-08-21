@@ -13,19 +13,32 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bobi.config import Config
 
 
 def _configured_brain(
     root: Path, env: dict[str, str] | None = None,
-) -> dict[str, str]:
-    """Return the team's interpolated ``brain`` mapping from the installation
-    root, or ``{}`` when absent/unreadable.
+) -> "Config":
+    """Return the team's ``brain`` config from the installation root as a
+    :class:`bobi.config.Config`, or an empty one when absent/unreadable.
 
     Interpolation is ``bobi.config._interpolate_env`` - the same resolver
     ``Config.load`` applies to this mapping - so ``${VAR:-default}`` resolves
     identically here and in the validate/manager paths (a divergence would
     pass validate yet pin an empty gateway base URL into every child).
+
+    Only the ``brain`` key is read, rather than running the whole file through
+    ``Config._parse``: this is the SPAWN path, and ``_parse`` raises on a
+    malformed ``services:``/``requires:`` section, which would turn a
+    surviving-but-broken team's gateway pin into a silent native session.
+    Wrapping the mapping in a ``Config`` still routes every default and
+    predicate through the ``brain_*`` properties, which is the duplication
+    that mattered.
     """
+    from bobi.config import Config
     try:
         import yaml
         from bobi import paths
@@ -34,15 +47,15 @@ def _configured_brain(
             paths.agent_yaml_path(root).read_text()
         ) or {}
     except Exception:
-        return {}
+        return Config()
     brain = raw.get("brain", {})
     if not isinstance(brain, dict):
-        return {}
+        return Config()
     lookup = dict(os.environ) if env is None else env
-    return {
+    return Config(brain={
         str(key): _interpolate_env(str(value or ""), lookup)
         for key, value in brain.items()
-    }
+    })
 
 
 def pin_brain_from_root(
@@ -54,21 +67,14 @@ def pin_brain_from_root(
     / ``BOBI_BRAIN_MODEL`` / ``BOBI_BRAIN_EFFORT`` / the gateway pins, #655), shared by
     ``child_agent_env`` and the spawned child's own re-pin at startup
     (``subagent.py``).
-    """
-    from bobi.brain import pin_process_brain
 
-    brain = _configured_brain(root, env)
-    pin_process_brain(
-        brain.get("kind", ""), brain.get("model", ""), env,
-        effort=brain.get("effort", ""),
-        gateway_base_url=brain.get("base_url", ""),
-        gateway_small_model=brain.get("small_model", ""),
-        gateway_wire_api=brain.get("wire_api", "") or "responses",
-        # Presence-based, mirroring Config.brain_is_gateway: a base_url key
-        # whose ${VAR} resolved empty must fail the spawn loud, not pin a
-        # native session that dials the real vendor with gateway credentials.
-        gateway_declared="base_url" in brain,
-    )
+    The expansion is ``pin_process_brain_from_config``, the same one the
+    process-startup path takes, so the spawn path cannot fall behind a new
+    ``brain.*`` field.
+    """
+    from bobi.brain import pin_process_brain_from_config
+
+    pin_process_brain_from_config(_configured_brain(root, env), env)
 
 
 def _load_dotenv_into(env: dict[str, str], root: Path) -> None:

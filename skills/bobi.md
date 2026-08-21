@@ -23,6 +23,29 @@ $BOBI_HOME/
             └── .env          # runtime credentials
 ```
 
+### Runtime logs
+
+`state/` holds append-only logs retained across days: `manager.log` (the
+manager and everything it spawns) and `embedding-sidecar.log` (the knowledge
+base's embedding server). Every line carries a full ISO-8601 local timestamp
+with its UTC offset, and each record appears exactly once:
+
+```text
+2026-07-25T15:00:19.417-07:00 [INFO] Monitor sales-call-manager due - spawning non-interactive check
+```
+
+Read the date, not just the clock. Adjacent lines in these files are routinely
+days apart - a monitor that fires once daily puts four `15:00` lines next to
+each other - so a bare wall clock reads as a burst that never happened. For how
+often a monitor actually ran, `state/monitor_state.json` is authoritative; the
+log shows only what was retained.
+
+Two logs nearby are NOT in this format. `state/event-server.log` is written by
+the Node event server through bare `console` calls and carries no timestamp at
+all, so it cannot be read for timing the way the two above can. The web app's
+`app.log` is not under `state/` at all: it lives at `$BOBI_HOME/webapp/app.log`,
+and its uvicorn lines carry their own timestamp-free format.
+
 Runtime commands are scoped to one installed Bobi Agent:
 
 ```bash
@@ -103,6 +126,25 @@ bobi read-conversation <conversation> [-n 50] [--json-output]
 Use `bobi reply` and `bobi read-conversation` for Slack and any other
 chat channel delivered through the channel gateway.
 
+## Upgrading Bobi In Place
+
+A local upgrade replaces bobi's files underneath whatever is already
+running, and neither the team reinstall nor `bobi agent <name> restart`
+restarts the local event server. Restart both:
+
+```bash
+uv tool install --upgrade bobi
+bobi agents install ./agents/<team> --name <name>
+bobi agent <name> restart
+bobi agent <name> event-server restart
+```
+
+Each long-lived process records the bobi it launched from, so anything
+still on the replaced code is named - by the install itself, and by the
+`Running code` check in `bobi agent <name> doctor`, with the restart
+command to clear it. Containers cannot drift this way: the image is the
+unit of update, so a new version is a new process.
+
 ## Sub-Agents
 
 Sub-agents are child executions launched by a Bobi Agent runtime. Use
@@ -117,12 +159,53 @@ bobi agent <name> subagents show <id>
 bobi agent <name> subagents cancel <id>
 ```
 
-`--wait` blocks until the launched adhoc agent completes. It requires
-`-w adhoc`: waiting works by running the task as one prompt, while a multi-step
-workflow returns as soon as it is dispatched, so there is no run to join.
+### Run keys and duplicate suppression
+
+Every launch has a run key. It names the session
+(`wf-<workflow>-<project>-<key>`), so two launches that agree on it are the same
+run: the second is refused while the first is active, and resumes it once it is
+not.
+
+- `--id <key>` sets it explicitly. Use it for work with a natural identity - an
+  issue number, a checklist unit. Relaunching that key resumes that run.
+- With no `--id` the key is **derived** from the launch itself - workflow,
+  project, role, model, effort and the task text - so relaunching an identical
+  one while the first is still running is refused. That is the guardrail
+  against a dispatch chain that keeps launching itself; rewording the task to
+  get past it defeats it. Fanning one task across two roles is fine: they
+  derive different keys.
+- `--id-random` mints a random key, for deliberately running N copies of an
+  identical task at once. It cannot be combined with `--id`, and its keys are
+  prefixed `rand-` so `subagents list` shows which runs opted out.
+- A workflow that declares `period:` overrides all of the above: the key is
+  always `<workflow>-<period bucket>` (e.g. `daily-standup-2026-08-10`), one
+  run per period per repo across every dispatch path. `--id` and
+  `--id-random` are overridden, and a completed period refuses relaunch -
+  `--fresh` is the deliberate escape hatch to run a period again.
+
+Relaunching a key whose previous run **failed** resumes from its step
+checkpoint rather than replaying completed steps, with the new `--task` and
+`--input` values taking effect from the resumed step onward. `--fresh`
+replays from step 0.
+
+A derived key also implies `--fresh`: it is an inference about the launch, not a
+caller pointing at a run to continue. It additionally refuses to land on a
+**suspended** (`waiting`) run - only an explicit `--id` may re-dispatch onto one.
+
+`--wait` blocks until the launched adhoc agent completes and prints its final
+text. It still requires `-w adhoc` (the fan-out unit shape), but it is the
+same launch as a detached one (#1057): an ad-hoc task runs as a one-step
+workflow, so a `--wait` run gets a run-ledger entry, checkpoint retry, and
+every rule above - the derived key, the active-run guard, and period
+override included. Two identical `--wait` launches therefore refuse each
+other; fan identical copies out with `--id-random`, exactly as detached.
+`--timeout` is the run's declared deadline for the dead-man reconciler, the
+same as a detached run - the in-process bound on a runaway agent is the
+role's turn cap, not a wall clock.
 `--as-check` is the explicit short-lived monitoring-check harness; it prints
 verdict JSON and is the only `subagents launch` mode that accepts
-`--post-event`.
+`--post-event`. It never reaches the launch admission path, so run keys do not
+apply to it.
 
 To fan out and join without burning a turn per check, start the units in the
 background and block on all of them in a **single** shell command:

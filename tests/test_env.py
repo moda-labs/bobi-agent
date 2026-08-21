@@ -330,3 +330,128 @@ class TestProbeAndSpawnUseSameHelper:
 
         assert validate_mod.child_agent_env is env_mod.child_agent_env
         assert subagent_mod.agent_spawn_env is env_mod.agent_spawn_env
+
+
+class TestBrainPinReadsThroughConfig:
+    """Q034: the spawn path expands brain config through Config's properties.
+
+    ``pin_brain_from_root`` used to re-encode two things ``bobi.config``
+    already defined - the ``wire_api`` default and the presence-based gateway
+    declaration - so a change to either had to be made twice or the spawned
+    child pinned something the manager did not.
+    """
+
+    def _install(self, tmp_path, brain_yaml: str):
+        root = tmp_path / "install"
+        paths.package_dir(root).mkdir(parents=True)
+        paths.agent_yaml_path(root).write_text(brain_yaml)
+        return root
+
+    def test_wire_api_default_comes_from_config(self, tmp_path, monkeypatch):
+        """Move Config's default, and the pin moves with it."""
+        from bobi.config import Config
+        from bobi.env import pin_brain_from_root
+
+        root = self._install(
+            tmp_path, "brain:\n  kind: codex\n  base_url: http://gw\n")
+
+        env = {}
+        pin_brain_from_root(root, env)
+        assert env["BOBI_GATEWAY_WIRE_API"] == "responses"
+
+        monkeypatch.setattr(
+            Config, "brain_wire_api",
+            property(lambda self: "moved-with-the-property"))
+        env = {}
+        pin_brain_from_root(root, env)
+        assert env["BOBI_GATEWAY_WIRE_API"] == "moved-with-the-property"
+
+    def test_gateway_declaration_comes_from_config(self, tmp_path, monkeypatch):
+        """A base_url key that resolved empty fails the spawn loud.
+
+        The predicate is Config.brain_is_gateway; flipping it flips the pin,
+        which is what proves the spawn path is not carrying its own copy.
+        """
+        from bobi.config import Config
+        from bobi.env import pin_brain_from_root
+
+        root = self._install(
+            tmp_path, "brain:\n  kind: codex\n  base_url: ${MISSING_GW:-}\n")
+
+        with pytest.raises(RuntimeError, match="base_url"):
+            pin_brain_from_root(root, {})
+
+        monkeypatch.setattr(
+            Config, "brain_is_gateway", property(lambda self: False))
+        env = {}
+        pin_brain_from_root(root, env)  # no declaration -> no fail-loud
+        assert not env.get("BOBI_GATEWAY_BASE_URL")
+
+    def test_alias_kind_still_declares_a_gateway(self, tmp_path):
+        """Config.brain_is_gateway also covers the alias spellings."""
+        from bobi.env import pin_brain_from_root
+
+        root = self._install(tmp_path, "brain:\n  kind: gateway\n")
+
+        with pytest.raises(RuntimeError, match="base_url"):
+            pin_brain_from_root(root, {})
+
+    def test_broken_sibling_section_still_pins_the_brain(self, tmp_path):
+        """Why this reads only `brain:` rather than running Config._parse.
+
+        This is the SPAWN path. ``Config._parse`` raises on a malformed
+        ``services:``/``requires:`` block, which would turn a broken-but-live
+        team's gateway pin into a silent native session dialing the real
+        vendor with gateway credentials - the #789 leak.
+        """
+        import pytest as _pytest
+
+        from bobi.config import Config
+        from bobi.env import pin_brain_from_root
+
+        root = self._install(
+            tmp_path,
+            "brain:\n  kind: codex\n  base_url: http://gw\nservices: 7\n")
+
+        with _pytest.raises(TypeError):
+            Config._parse(paths.agent_yaml_path(root), env={})
+
+        env = {}
+        pin_brain_from_root(root, env)
+        assert env["BOBI_GATEWAY_BASE_URL"] == "http://gw"
+
+    def test_startup_and_spawn_pin_identically(self, tmp_path, monkeypatch):
+        """The two entry points must expand the same cfg the same way.
+
+        A new ``brain.*`` field threaded into one and missed in the other is
+        the drift this consolidation exists to prevent, so compare the pins
+        the startup path writes to os.environ against the ones the spawn path
+        writes into a child env.
+        """
+        import os
+
+        from bobi.brain import set_process_brain_from_config
+        from bobi.config import Config
+        from bobi.env import pin_brain_from_root
+
+        yaml = ("brain:\n  kind: codex\n  model: gpt-5.6\n  effort: high\n"
+                "  base_url: http://gw\n  small_model: mini\n"
+                "  wire_api: chat\n")
+        root = self._install(tmp_path, yaml)
+        cfg = Config._parse(paths.agent_yaml_path(root), env={})
+
+        pins = ("BOBI_BRAIN", "BOBI_BRAIN_MODEL", "BOBI_BRAIN_EFFORT",
+                "BOBI_GATEWAY_BASE_URL", "BOBI_GATEWAY_SMALL_MODEL",
+                "BOBI_GATEWAY_WIRE_API")
+        for var in pins:
+            monkeypatch.delenv(var, raising=False)
+
+        spawn_env = {}
+        pin_brain_from_root(root, spawn_env)
+        set_process_brain_from_config(cfg)
+
+        startup = {v: os.environ.get(v) for v in pins}
+        assert startup == {v: spawn_env.get(v) for v in pins}
+        # and the values are the configured ones, not silently empty
+        assert startup["BOBI_GATEWAY_WIRE_API"] == "chat"
+        assert startup["BOBI_GATEWAY_BASE_URL"] == "http://gw"

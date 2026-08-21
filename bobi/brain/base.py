@@ -96,6 +96,54 @@ class TurnResult:
         )
 
 
+# Provider-neutral cause emitted when the brain cannot authenticate.
+ERROR_KIND_AUTHENTICATION = "authentication_failed"
+
+# Provider-neutral cause emitted when an account cannot start another turn
+# until its credits, quota, or workspace spend allowance is replenished.
+ERROR_KIND_CREDITS_EXHAUSTED = "credits_exhausted"
+
+_AUTH_ERROR_KINDS = frozenset({ERROR_KIND_AUTHENTICATION, "not_logged_in"})
+_CREDIT_ERROR_KINDS = frozenset({
+    ERROR_KIND_CREDITS_EXHAUSTED,
+    "out_of_credits",
+    "usage_limit_reached",
+})
+_AUTH_ERROR_TEXT = (
+    "failed to authenticate: oauth session expired",
+    "not logged in",
+    "authentication required",
+    "not signed in",
+)
+_CREDIT_ERROR_TEXT = (
+    "you're out of usage credits",
+    "you are out of usage credits",
+    "usage credits exhausted",
+    "you've hit your usage limit",
+    "you have hit your usage limit",
+    "workspace is out of credits",
+    "workspace credit limit",
+    "usage limit reached",
+)
+
+
+def classify_brain_unavailability(error_kind: str, error_text: str) -> str:
+    """Normalize verified provider auth and credit failures.
+
+    Text matching is intentionally narrow. Generic 429/rate-limit and overload
+    errors remain transient; only messages that say the operator must sign in
+    or replenish an account are classified as terminal availability failures.
+    """
+    kind = str(error_kind or "").strip().lower()
+    text = str(error_text or "").strip().lower()
+    if kind in _AUTH_ERROR_KINDS or any(marker in text for marker in _AUTH_ERROR_TEXT):
+        return ERROR_KIND_AUTHENTICATION
+    if kind in _CREDIT_ERROR_KINDS or any(
+        marker in text for marker in _CREDIT_ERROR_TEXT
+    ):
+        return ERROR_KIND_CREDITS_EXHAUSTED
+    return ""
+
 # The brain-neutral error kind for a turn the harness cut off at its turn cap.
 # One constant so the cap's terminal handling (resume, retry-vs-give-up) keys
 # off the same string the adapters set.
@@ -186,8 +234,15 @@ class BrainSession(Protocol):
 
     provider: str
 
-    async def connect(self, prompt: str | None = None) -> None:
-        """Open the session, optionally sending an initial prompt."""
+    async def connect(self) -> None:
+        """Open the session. Pure setup — never a turn.
+
+        connect() deliberately takes no prompt (#1016): a connect-time prompt
+        was an executable agent turn that no driver owned, which is how a
+        workflow's dispatch text ran before step 0 and how a reconnect once
+        drained a turn that did not exist (#799). All text enters a session
+        through ``query()``, as an explicit turn.
+        """
 
     async def query(self, text: str) -> None:
         """Send a message into the live session."""
@@ -224,4 +279,24 @@ class BrainFactory(Protocol):
         Phase 2 work). ``options`` carries brain-specific extras (the kwargs
         the call site used to hand the SDK: ``max_turns``, ``skills``,
         ``hooks``, ``mcp_servers``, …).
+        """
+
+    def stream_once(
+        self,
+        *,
+        system_prompt: Any,
+        user_prompt: str,
+        model: str | None = None,
+        cwd: str | None = None,
+        options: dict | None = None,
+    ) -> AsyncIterator["BrainMessage"]:
+        """One-shot streaming completion — no session, no resume.
+
+        The stateless setup/digestion transport (``bobi.setup.llm``) calls this
+        on whatever brain the process is bound to, so it is part of the factory
+        contract, not a Claude extra. Declared here because it was a de facto
+        requirement for years while only some factories implemented it: a brain
+        without it failed with ``AttributeError`` at the call site instead of
+        saying which brain lacked the capability. A factory that cannot serve
+        the path raises :class:`NotImplementedError` naming itself.
         """

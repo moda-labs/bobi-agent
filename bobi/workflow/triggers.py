@@ -9,9 +9,45 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .schema import Workflow, load_workflow
+from .schema import StepDef, Workflow, load_workflow
 
 log = logging.getLogger(__name__)
+
+
+def builtin_adhoc_workflow() -> Workflow:
+    """The framework's own one-step ``adhoc`` definition.
+
+    An ad-hoc task IS a one-step workflow (#1057), so the definition is
+    framework-owned rather than pack-dependent: a pack that ships no
+    ``adhoc.yaml`` still dispatches ad-hoc units. A shipped yaml wins when
+    present — packs override this to carry their own trigger/description
+    text for the manager's semantic matching.
+    """
+    return Workflow(
+        name="adhoc",
+        steps=[StepDef(name="task", prompt="${{input.task}}")],
+        description=(
+            "Open-ended task with no structured lifecycle. Use for "
+            "investigations, questions, one-off fixes, or anything that "
+            "doesn't fit a specific workflow."
+        ),
+    )
+
+
+def find_installed_workflow(name: str) -> Workflow | None:
+    """Load the installed pack's workflows and return *name*, or None.
+
+    The one spelling of the load-and-find triple the launch paths need -
+    launch admission (period derivation) and the spawned child both resolve
+    a workflow by name from the bound root. ``adhoc`` alone falls back to
+    the built-in definition, so ad-hoc dispatch never depends on the pack.
+    """
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    found = dispatcher.find_workflow(name)
+    if found is None and name == "adhoc":
+        return builtin_adhoc_workflow()
+    return found
 
 
 class WorkflowDispatcher:

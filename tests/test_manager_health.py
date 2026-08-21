@@ -301,3 +301,26 @@ class TestManagerBlock:
         assert block["status"] == "running"
         assert block["last_activity"] == 100.0
         assert block["idle_seconds"] == 600.0
+
+    def test_manager_block_surfaces_persisted_auth_failure(self, monkeypatch):
+        from bobi import sdk
+
+        class _Entry:
+            name = "moda-mgr-p"
+            status = "error"
+            last_activity = 100.0
+            error = "brain authentication failed"
+            terminal_at = 120.0
+
+        class _Reg:
+            def get(self, name):
+                return _Entry()
+
+        monkeypatch.setattr(sdk, "get_registry", lambda: _Reg())
+        monkeypatch.setattr(manager_health.time, "time", lambda: 700.0)
+
+        block = manager_health._manager_block_from_registry("moda-mgr-p")
+
+        assert block["status"] == "error"
+        assert block["error"] == "brain authentication failed"
+        assert block["terminal_at"] == 120.0

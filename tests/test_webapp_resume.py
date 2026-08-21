@@ -60,6 +60,26 @@ def _client():
     return c
 
 
+def _install_gated_workflow(install, name="await-review"):
+    """A workflow whose gate is followed by a route on the verdict.
+
+    `_seed_run` parks at `suspended_at_step=3`, so index 3 is the route - the
+    slot a resume lands on, and the only place a rejection can be honoured.
+    """
+    directory = paths.workflows_dir(install.repo_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{name}.yaml").write_text(
+        f"name: {name}\nsteps:\n"
+        "  - name: draft\n    prompt: draft\n"
+        "  - name: notify_review\n    notify: slack\n"
+        "    message: Review this\n"
+        "  - name: await_review\n    await: approval\n"
+        "  - name: verdict_route\n"
+        "    if: \"${{event.verdict}} == 'approve'\"\n"
+        "    goto: finish\n    else: draft\n"
+        "  - name: finish\n    prompt: finish\n")
+
+
 def _install_workflow(install, name="await-review"):
     directory = paths.workflows_dir(install.repo_path)
     directory.mkdir(parents=True, exist_ok=True)
@@ -80,8 +100,10 @@ class TestResumeAction:
         body = LocalRuntime().resume_run(bobi_install.agent_name, "wf-1")
         assert body == {"ok": True, "accepted": True, "run_id": "wf-1",
                         "workflow": "await-review",
-                        "await_event": "pr.merged"}
+                        "await_event": "pr.merged", "verdict": ""}
         [call] = spawned
+        # No --verdict when none was given: an absent verdict and an empty one
+        # are the same answer, and the CLI supplies the empty scope itself.
         assert call["cmd"][1:] == [
             "-m", "bobi.cli", "agent", bobi_install.agent_name,
             "workflows", "resume", "wf-1"]
@@ -124,6 +146,113 @@ class TestResumeAction:
         runs_dir = paths.state_path(bobi_install.repo_path) / "workflow" / "runs"
         assert (runs_dir / "wf-1.json").exists()
         assert not (runs_dir / "wf-1.resuming.json").exists()
+
+
+class TestVerdictReachesTheSpawn:
+    """The gate's answer has to survive every hop (#987).
+
+    Console -> endpoint -> runtime -> run_actions -> the spawned CLI, which
+    turns it into the run's ``event`` scope. Every hop is somewhere a verdict
+    could be dropped, and a dropped one does not fail: it resumes with no
+    answer, which the workflow reads as "not an approval" and quietly reworks.
+    """
+
+    @pytest.mark.parametrize("verdict", ["approve", "reject"])
+    def test_the_verdict_and_reason_ride_the_spawned_command(
+            self, bobi_install, spawned, verdict):
+        _install_gated_workflow(bobi_install)
+        _seed_run()
+        body = LocalRuntime().resume_run(
+            bobi_install.agent_name, "wf-1", verdict=verdict, reply="because")
+        assert body["verdict"] == verdict
+        assert spawned[0]["cmd"][-4:] == [
+            "--verdict", verdict, "--reply", "because"]
+
+    def test_the_reason_is_optional(self, bobi_install, spawned):
+        _seed_run()
+        LocalRuntime().resume_run(
+            bobi_install.agent_name, "wf-1", verdict="approve")
+        assert spawned[0]["cmd"][-2:] == ["--verdict", "approve"]
+
+    def test_an_unknown_verdict_is_refused_before_the_spawn(
+            self, bobi_install, spawned):
+        """The CLI would refuse it too, but that refusal happens in a detached
+        child whose output goes to /dev/null - so the operator would see an
+        accepted resume that silently did nothing."""
+        _seed_run()
+        with pytest.raises(TeamLifecycleError):
+            LocalRuntime().resume_run(
+                bobi_install.agent_name, "wf-1", verdict="lgtm")
+        assert spawned == []
+
+    def test_the_endpoint_carries_the_body_through(self, bobi_install,
+                                                   spawned):
+        _install_gated_workflow(bobi_install)
+        _seed_run()
+        r = _client().post(
+            f"/api/agents/{bobi_install.agent_name}/workflows/runs/wf-1/resume",
+            json={"verdict": "reject", "reply": "widen the scope"})
+        assert r.status_code == 200, r.text
+        assert r.json()["verdict"] == "reject"
+        assert spawned[0]["cmd"][-4:] == [
+            "--verdict", "reject", "--reply", "widen the scope"]
+
+    def test_the_endpoint_refuses_an_unknown_verdict(self, bobi_install,
+                                                     spawned):
+        _seed_run()
+        r = _client().post(
+            f"/api/agents/{bobi_install.agent_name}/workflows/runs/wf-1/resume",
+            json={"verdict": "sure"})
+        assert r.status_code == 409, r.text
+        assert "unknown verdict" in r.json()["error"]
+        assert spawned == []
+
+    def test_a_rejection_a_workflow_cannot_honour_is_refused(
+            self, bobi_install, spawned):
+        """The button must not be able to do the opposite of its label.
+
+        `approve` means "continue", which is what a bare resume does anyway.
+        `reject` means "do NOT run the next step" - and without a route on the
+        verdict in the slot the resume lands on, that is exactly what resuming
+        would do. The seeded workflow's step 3 is `finish`, an ordinary prompt.
+        """
+        _install_workflow(bobi_install)
+        _seed_run()
+        with pytest.raises(TeamLifecycleError) as exc:
+            LocalRuntime().resume_run(
+                bobi_install.agent_name, "wf-1", verdict="reject")
+        assert "no route on the gate's verdict" in str(exc.value)
+        assert spawned == []
+
+    def test_an_approval_needs_no_route(self, bobi_install, spawned):
+        """The other half of the same rule: continuing is what a resume has
+        always done, so a workflow with no route still takes an approval."""
+        _install_workflow(bobi_install)
+        _seed_run()
+        out = LocalRuntime().resume_run(
+            bobi_install.agent_name, "wf-1", verdict="approve")
+        assert out["accepted"] is True
+        assert spawned[0]["cmd"][-2:] == ["--verdict", "approve"]
+
+    def test_a_rejection_a_workflow_can_honour_is_accepted(
+            self, bobi_install, spawned):
+        _install_gated_workflow(bobi_install)
+        _seed_run()
+        out = LocalRuntime().resume_run(
+            bobi_install.agent_name, "wf-1", verdict="reject")
+        assert out["verdict"] == "reject"
+        assert spawned[0]["cmd"][-2:] == ["--verdict", "reject"]
+
+    def test_a_bodyless_resume_still_works(self, bobi_install, spawned):
+        """The route predates the verdict, and `bobi app`'s own close action
+        still posts a bare `{}`. A resume with no body is an unanswered gate,
+        not a 422."""
+        _seed_run()
+        r = _client().post(
+            f"/api/agents/{bobi_install.agent_name}/workflows/runs/wf-1/resume")
+        assert r.status_code == 200, r.text
+        assert r.json()["verdict"] == ""
+        assert "--verdict" not in spawned[0]["cmd"]
 
 
 class TestClaimIsSingleWinner:
@@ -207,15 +336,14 @@ class TestReminderReconstruction:
         ])
         calls = []
 
-        def _notify(step, ctx, cwd, run_key, workflow_name):
-            calls.append((step.name, ctx.resolve(step.message), cwd))
+        def _notify(step, ctx, run_key, workflow_name):
+            calls.append((step.name, ctx.resolve(step.message)))
             return SimpleNamespace(delivered=True, error="")
 
         monkeypatch.setattr(orchestrator, "_execute_notify_step", _notify)
         outcome = orchestrator.remind_workflow(run, workflow)
         assert outcome.delivered is True
-        assert calls == [("notify_review", "Review this",
-                          str(bobi_install.repo_path))]
+        assert calls == [("notify_review", "Review this")]
         assert run.status == "waiting"
         assert run.await_event == "approval"
 
@@ -257,7 +385,7 @@ class TestReminderReconstruction:
         ])
         messages = []
 
-        def _notify(step, ctx, cwd, run_key, workflow_name):
+        def _notify(step, ctx, run_key, workflow_name):
             messages.append(step.message)
             return SimpleNamespace(delivered=True, error="")
 

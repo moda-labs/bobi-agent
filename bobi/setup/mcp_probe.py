@@ -118,12 +118,42 @@ def _is_read_only(name: str) -> bool:
     return any(t in _READ_VERBS for t in toks[:2])
 
 
+def _input_schema(tool) -> dict | None:
+    """The tool's input schema across the mcp 2.0 field rename
+    (``inputSchema`` → ``input_schema``; camelCase survives only as the wire
+    alias). ``None`` means neither spelling exists — the caller must treat the
+    schema as unknown, never as "no required arguments".
+
+    camelCase is checked FIRST: on 1.x it is the declared field (always
+    present, so the snake spelling is never consulted), while 2.0 never
+    exposes it as an attribute. Snake-first would let a server-supplied extra
+    wire key shadow the real field — 1.x models are ``extra="allow"``."""
+    for attr in ("inputSchema", "input_schema"):
+        if hasattr(tool, attr):
+            return getattr(tool, attr) or {}
+    return None
+
+
+def _call_errored(out) -> bool:
+    """Whether a tool call reported an error, across the mcp 2.0 field rename
+    (``isError`` → ``is_error``). Fails loud when neither spelling exists —
+    a silent default here reported an ERRORED call as live under mcp 2.0.
+    camelCase first, for the same shadowing reason as ``_input_schema``."""
+    for attr in ("isError", "is_error"):
+        if hasattr(out, attr):
+            return bool(getattr(out, attr))
+    raise AttributeError("tool result has neither is_error nor isError")
+
+
 def _pick_safe_tool(tools):
     """A no-required-args, read-only tool to exercise the connection — or None
     if there isn't an obviously safe one (then we skip the live call)."""
-    cands = [t for t in tools
-             if not ((t.inputSchema or {}).get("required"))
-             and _is_read_only(t.name)]
+    cands = []
+    for t in tools:
+        schema = _input_schema(t)
+        if schema is not None and not schema.get("required") \
+                and _is_read_only(t.name):
+            cands.append(t)
     if not cands:
         return None
     for pref in _PREFERRED:
@@ -172,7 +202,7 @@ async def _handshake(read, write, call_name) -> dict:
         res["called"] = call_name
         try:
             out = await session.call_tool(call_name, {})
-            if getattr(out, "isError", False):
+            if _call_errored(out):
                 res["live_ok"], res["live_error"] = False, _tool_error_text(out)
             else:
                 res["live_ok"], res["output"] = True, _result_text(out)
@@ -213,7 +243,7 @@ async def _probe_stdio(entry: dict, project: Path, timeout: float,
 
 async def _probe_http(entry: dict, project: Path, timeout: float,
                       call_name) -> dict:
-    from mcp.client.streamable_http import streamablehttp_client
+    from bobi.mcp_handshake import open_streamable_http
     from bobi.setup.actions import env_value
     url = (entry.get("url") or "").strip()
     headers: dict = {}
@@ -223,7 +253,7 @@ async def _probe_http(entry: dict, project: Path, timeout: float,
             headers["Authorization"] = f"Bearer {v}"
     try:
         with anyio.fail_after(timeout):
-            async with streamablehttp_client(url, headers=headers) as streams:
+            async with open_streamable_http(url, headers=headers) as streams:
                 return await _handshake(streams[0], streams[1], call_name)
     except TimeoutError:
         return {"ok": False, "error": f"timed out after {int(timeout)}s."}

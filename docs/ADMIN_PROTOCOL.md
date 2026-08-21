@@ -17,7 +17,7 @@ the reference implementation if you are writing your own operator surface —
 including the parts a first attempt gets wrong, like which poll failures are
 transient and which are not.
 
-- **Version:** `SUPERVISOR_VERSION = "0.2.0"` (`bobi/supervisor/snapshot.py`),
+- **Version:** `SUPERVISOR_VERSION = "0.3.0"` (`bobi/supervisor/snapshot.py`),
   reported on every heartbeat at `supervisor.version`.
 - **Transport:** the bobi event bus. See `docs/EVENT_SERVER.md` for the server,
   `docs/SELF_HOSTED_EVENT_SERVER.md` for running your own.
@@ -122,7 +122,7 @@ A command is published to the deployment's admin topic:
 
 `command_id` is caller-supplied and opaque to the supervisor; it is echoed on
 the result so a caller can correlate. A command whose `command` is not one of
-the fifteen below, or which carries no `command_id`, is **dropped without a
+the sixteen below, or which carries no `command_id`, is **dropped without a
 reply** (the supervisor logs it locally). An unrecognized command has no
 command to acknowledge, so a consumer must not wait on a result for one — it
 never executes and never answers.
@@ -210,6 +210,7 @@ an incident.
 | `transcript` | `{"session": "<name>", "detail": bool}` (both optional) | `{"messages": [...]}`, plus `{"session", "entries": [...], "usage": {...}}` when `detail` is set |
 | `roster` | — | `{"subagents": [...]}` |
 | `spend` | — | `{"spend": {...}}` |
+| `usage` | `{"window_seconds": number, "end_at": epoch?}` | `{"usage": {"window", "jobs", "tokens", "cost_usd", "estimated_cost_usd"}}` |
 | `session_log` | — | `{"sessions": [...], "counts": {...}, "truncated": bool}` |
 | `runs` | `{"status", "query", "offset", "limit"}` (all optional) | `{"runs": [...], "counts": {...}, "total", "offset", "limit", "query", "truncated"}` |
 | `overview` | — | `{"overview": {...}}` |
@@ -235,6 +236,12 @@ the full set, not the capped rows.
 `runs` coerces its pagination args the way the local runtime does: a
 non-positive or unparseable `limit` falls back to the builder default rather
 than failing the command.
+
+`usage` folds the same de-duplicated rows as `runs`. It includes terminal jobs
+whose completion time falls in `[end_at - window_seconds, end_at]`; running and
+waiting work is excluded. Usage is recorded per session, not as a token-level
+time series, so a matching job contributes its whole recorded usage. Recorded
+and estimated dollars remain separate.
 
 **`transcript` and its `detail` arg.** Without `detail`, the reply is
 unchanged: `messages` is the **chat** view — two roles, prose only, tool calls
@@ -302,7 +309,7 @@ renders.
 ```json
 {
   "deployment":  { "fleet": "...", "instance": "...", "platform": "..." },
-  "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.1.0" },
+  "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.3.0" },
   "manager": {
     "status": "running" | "idle" | "starting" | "wedged" | "down" | "stopped",
     "pid": 42,
@@ -313,6 +320,7 @@ renders.
     "last_restart_at": null
   },
   "sessions":     [ { "name": "...", "role": "...", "status": "..." } ],
+  "load_grace": null,
   "resources":    { "disk_free_mb": 8120, "mem_free_mb": 512, "mem_pct": 68.0 },
   "versions":     { "image": "...", "team_package": "...", "bobi": "0.50.0" },
   "expectations": { "subscriptions": [...], "monitors": [ { "name": "...", "schedule": "..." } ] },
@@ -344,6 +352,15 @@ not the same field. There is no `"healthy"` or `"dead"` status value — switch 
 subscriptions and monitors), which is what makes a "configured but not running"
 gap visible to a consumer that never reads the team's config.
 
+`load_grace` is an additive block (see [Load grace](#load-grace)): it
+is `null` unless a liveness verdict was deferred this poll, in which case it
+carries `{active, since, spell_s, deferred, load1, ncpu, busy_descendants,
+tree_cpu_cores, tree_cpu_ratio}`.
+`ncpu` is the CPU capacity usable by the manager (host count constrained by
+process affinity and cgroup quota); `tree_cpu_cores` and `tree_cpu_ratio`
+quantify the descendant tree's aggregate consumption over the poll interval.
+Old consumers that predate the block simply never see it.
+
 ## Lifecycle events
 
 Published to `fleet/lifecycle` on edges only, and appended to a bounded 48-hour
@@ -356,12 +373,89 @@ trail. Each carries the deployment identity plus event-specific fields.
 | `manager_restarted` | the supervisor restarted a failing manager, with `reason` |
 | `probe_failing` | the derived status crossed into a failing verdict |
 | `probe_recovered` | it crossed back out |
+| `load_grace_active` | a verdict was first deferred for load (`deferred`, `load1`, `ncpu`, `busy_descendants`, `tree_cpu_cores`, `tree_cpu_ratio`) |
+| `load_grace_cleared` | the deferral ended (`duration_s` covers the stretch) |
 | `budget_exhausted` | the restart budget ran out; the supervisor exits `70` |
 
 `budget_exhausted` is terminal and deliberately loud: it means the supervisor
 gave up restarting a manager that kept failing, and the orchestrator's own
 restart policy (Fly machine restart, Kubernetes `CrashLoopBackOff`, `docker
 --restart`) takes over from the non-zero exit.
+
+While a `load_grace_active` stretch is open, `probe_failing` / `probe_recovered`
+are frozen: the manager's liveness signals are known-starved, so a wedged read
+there is not recorded as a failure (nor is the working poll that ends the
+deferral recorded as a recovery).
+
+## Load grace
+
+The supervisor restarts a manager whose liveness signals fail. Under a
+saturated host those signals fail for starvation reasons, not failure reasons:
+issue #903 saw full test-suite runs on a shared 2-vCPU instance charge the
+restart budget three ways (probe misses, a stalled-turn wedge, a load-induced
+`status=error`) and restart a healthy, productive instance.
+
+Load grace defers those ambiguous verdicts while BOTH hold:
+
+- the host is pegged: `load1 >= ratio * ncpu`, from `/proc/loadavg`
+  (`WATCHDOG_LOAD_PEGGED_RATIO`, default `1.0`), where `ncpu` is constrained
+  by process affinity and cgroup v1/v2 CPU quota rather than blindly using the
+  host's logical CPU count; and
+- the manager's own worker tree materially consumed that capacity: aggregate
+  descendant `utime + stime` delta from `/proc/<pid>/stat`, normalized by the
+  monotonic poll interval and kernel clock tick rate, is at least
+  `WATCHDOG_LOAD_TREE_CPU_RATIO` (default `0.8`). A descendant that merely woke
+  for one tick while unrelated node work pegged the host does not qualify.
+
+No declaration is needed anywhere. The supervisor derives "legitimately busy"
+from the live process table every poll, so there is no impact flag, no CLI
+change, no lease file, and nothing persisted that could outlive the busy
+processes: when they finish or die, the gate reopens on the next poll.
+Attribution is by ancestry from the managed pid, so only the supervised
+manager's own tree can count.
+
+What is deferred, and what never is:
+
+| Signal | Without load grace | With load grace |
+|---|---|---|
+| `confirm_polls` consecutive probe misses | charged + restart | deferred (`probe_miss`) |
+| stalled active turn past `stall_threshold` | charged + restart | deferred (`stalled_turn`) |
+| `status=error` (dead director) | charged + restart | deferred (`dead_director`) |
+| the manager process really exits | charged + restart | charged + restart, always |
+
+The crash path stays authoritative: a real child exit is never deferred, and
+the restart budget keeps its full power against crash loops. Incident alerting
+is unaffected too - it opens only on a charged restart, and a deferred verdict
+charges nothing.
+
+Bounds. The deferral is a *spell*, not a state: one continuous unresponsive
+stretch. Any working poll - a live, non-stalled health response - resets the
+spell, and the evidence dropping (load falls, the busy processes finish)
+reopens the gate immediately. `WATCHDOG_LOAD_GRACE_MAX` (default `900`s) caps
+a single spell so a genuinely dead manager still escalates; set it to `0` to
+let deferral continue as long as the evidence holds. Unreadable evidence fails
+closed: uncertainty never defers a restart.
+
+Platform scope. The evidence sources are Linux procfs. On hosts without
+`/proc` (macOS, Windows) both reads fail closed, so the gate never defers and
+the supervisor behaves exactly as it did before this feature: no new crash
+surface, no new dependency, and the pre-existing #903 shape (a false restart
+under saturation) remains possible there. The production fleet runs the Linux
+reference image, which is where that shape occurs; dev machines get the
+unchanged behavior rather than the exemption. A Darwin reader
+(`os.getloadavg()` plus `ps -axo pid,ppid,time` behind the same supervisor
+seam) is planned as follow-up work, gated on a real dev-machine false-kill
+report; until it lands, macOS keeps the pre-feature behavior. Windows stays
+out of scope (no load-average concept).
+
+Knobs (`WATCHDOG_*`, read at supervisor start):
+
+| Env | Default | Meaning |
+|---|---|---|
+| `WATCHDOG_LOAD_GRACE` | `1` | `0` disables the gate entirely |
+| `WATCHDOG_LOAD_PEGGED_RATIO` | `1.0` | `load1` / usable CPU capacity ratio that counts as saturated |
+| `WATCHDOG_LOAD_TREE_CPU_RATIO` | `0.8` | minimum aggregate descendant CPU / usable CPU capacity required to attribute saturation to the manager tree |
+| `WATCHDOG_LOAD_GRACE_MAX` | `900` | max seconds of one continuous unresponsive spell before the verdict fires anyway |
 
 ## Failure behavior
 
@@ -413,24 +507,26 @@ state read from KV. Browser clients are not supported and CORS is off.
 |---|---|---|
 | `bobi_fleet_status` | none | Every instance: reachability, manager state, sessions, versions |
 | `bobi_instance_detail` | `fleet`, `instance` | One instance's full heartbeat plus its lifecycle trail |
+| `bobi_usage_summary` | `days`, `fleet?` | Rolling job/token/cost totals per fleet with per-instance detail and explicit partial failures |
 | `bobi_command_result` | `fleet`, `instance`, `command_id` | One command's folded view (`pending` / `done` / `error`) |
 | `bobi_read_transcript` | `fleet`, `instance`, `session?` | One session's recent messages, framed as untrusted content |
 | `bobi_send_message` | `fleet`, `instance`, `message`, `session?` | A `command_id`. **Never the reply** |
 | `bobi_lifecycle` | `fleet`, `instance`, `action`, `reason` | The `restart`/`stop`/`start` command's view |
 
-Six tools over fifteen admin commands, because the vocabulary is deliberately
+Seven tools over sixteen admin commands, because the vocabulary is deliberately
 **not** one tool per command: `bobi_lifecycle` folds `restart`/`stop`/`start`
 behind an `action` enum, and `status` is already covered by the heartbeat that
 `bobi_instance_detail` returns.
 
-Nine commands are **not** exposed as tools in v1 — `roster`, `spend`,
+Nine commands are **not** exposed as tools — `roster`, `spend`,
 `session_log`, and the six that back the single-agent view (`runs`,
 `overview`, `run_details`, `resume_run`, `remind_run`, `close_run`). The three
 writes are the notable omission and a deliberate one: acting on a suspended
 workflow run is an operator decision made while looking at the runs table, and
-v1 of the MCP surface does not put that table in front of an agent. Whatever the heartbeat happens to carry (sessions, and spend
-when the supervisor reports it) is readable through `bobi_instance_detail`;
-the commands themselves are not callable from MCP. They remain available over
+the MCP surface does not put that table in front of an agent. Whatever the
+heartbeat carries, including sessions, is readable through
+`bobi_instance_detail`; the remaining commands are not callable from MCP. They
+remain available over
 `POST /fleet/instances/:fleet/:instance/commands`, which the hosted console
 uses. Exposing them is a sizing question — whether their responses belong
 inline in `bobi_instance_detail` or as separate tools — and that needs

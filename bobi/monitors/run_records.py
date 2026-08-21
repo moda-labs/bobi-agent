@@ -13,6 +13,11 @@ existed only in an "open" state would strand as permanently-running whenever a
 manager died mid-firing, and live monitor work is already visible through its
 session, not through this ledger.
 
+One other thing writes here, and it is not a firing: when the scheduler's
+retry drain finishes recovering a park — the deliveries a failed firing owed
+the bus (#1006) — it records that as its own run, so the delivery sits in the
+ledger next to the firing that failed to make it.
+
 Records are per-monitor files under `run/state/monitor_runs/`, newest first,
 capped at `RETENTION_PER_MONITOR`. The cap is the whole retention policy: this
 is a debugging ledger, not an audit log.
@@ -26,8 +31,9 @@ import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
+
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -72,28 +78,6 @@ def _safe_name(monitor_name: str) -> str:
     nothing reads one subsystem's stems with the other's rule.
     """
     return re.sub(r"[^A-Za-z0-9_.-]", "_", monitor_name) or "monitor"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    """Read back a timestamp written in this package, defaulting naive to UTC.
-
-    The reader lives next to :func:`_now_iso`, the writer, so the accepted
-    format has one definition. Anything unparseable reads as absent — including
-    a non-string pulled out of a JSON state document, which is why
-    ``AttributeError`` is caught alongside ``ValueError``: state files in this
-    package are treated as empty when they do not parse, never as fatal.
-    """
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 @dataclass
@@ -212,11 +196,13 @@ class RunTracker:
     when the firing resolves — synchronously for the in-thread flavors, from a
     waiter thread for the out-of-band ones. Closing twice is a no-op, so a
     flavor that can resolve down two paths (a spawn that fails before it
-    starts, then its callback) records exactly one run.
+    starts, then its callback) records exactly one run. The retry drain builds
+    one too, for a recovery rather than a firing, and closes it only once the
+    park it was recovering is empty.
     """
 
     def __init__(self, monitor_name: str, flavor: str = "", *, now=None):
-        self._now = now or _now_iso
+        self._now = now or now_iso
         self.run = MonitorRun(
             run_id=new_run_id(monitor_name),
             monitor=monitor_name,
@@ -227,6 +213,7 @@ class RunTracker:
         )
         self._closed = False
         self._failure = ""
+        self._warning = ""
         self._published = 0
 
     @property
@@ -246,6 +233,18 @@ class RunTracker:
         the one nearest the root cause; later ones are its consequences."""
         if reason and not self._failure:
             self._failure = reason
+
+    def note_warning(self, warning: str) -> None:
+        """Record a condition worth surfacing on an otherwise-good firing.
+
+        Distinct from :meth:`note_failure`: a warning never makes the run
+        `failed`, it only supplies the reason text when nothing failed. The
+        sleep cycle's over-working-budget memory is the case this exists for —
+        real, worth seeing in the runs table, and explicitly NOT a failure
+        (#1066). First warning wins, matching note_failure.
+        """
+        if warning and not self._warning:
+            self._warning = warning
 
     def add_published(self, count: int) -> None:
         """Count events this firing actually got onto the bus."""
@@ -269,6 +268,6 @@ class RunTracker:
                        else NOTIFIED if self._published else QUIET)
         self.run.ended_at = self._now()
         self.run.outcome = outcome
-        self.run.reason = reason or self._failure
+        self.run.reason = reason or self._failure or self._warning
         self.run.published = self._published
         record(self.run)

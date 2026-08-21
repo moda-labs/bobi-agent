@@ -189,12 +189,18 @@ wait; tail -20 /tmp/r1.log /tmp/r2.log /tmp/suite.log
 the launches and the `wait` are one Bash invocation, the whole fan-out costs two
 turns total: one to start, one to collect.
 
-**`--wait` only supports `-w adhoc`.** It blocks on the launched agent (#753) by
-running the task as a single prompt; a multi-step workflow launch returns as
-soon as it is dispatched and there is nothing to join. So fan-out units must be
-`adhoc`. If you need a multi-step workflow to finish before you continue,
-restructure the work rather than polling for it — dispatch it and let the event
-that reports its completion drive the next step.
+**`--wait` only supports `-w adhoc`.** It blocks on the launched agent (#753);
+a multi-step workflow launch returns as soon as it is dispatched and there is
+nothing to join. So fan-out units must be `adhoc`. If you need a multi-step
+workflow to finish before you continue, restructure the work rather than
+polling for it — dispatch it and let the event that reports its completion
+drive the next step.
+
+**Identical fan-out units need `--id-random`.** A `--wait` launch takes the
+same admission as any other (#1057): two launches of byte-identical task text
+derive the same run key and the second is refused while the first runs. The
+example above is fine because each unit's task differs; N deliberate copies of
+one task opt out of dedup with `--id-random`.
 
 **Do not fan out work you cannot describe self-containedly.** Each unit gets a
 freeform prompt and its own session with no access to your context, so a unit
@@ -336,9 +342,14 @@ is already set to the worktree path — you do not need to create one manually.
 The worktree lives at `.claude/worktrees/<session-name>` inside the repo root.
 The branch name follows the `agent/<issue-id>` convention.
 
-**Cleanup is automatic.** When a PR is closed (merged or abandoned), the
-`pr-closed` workflow removes the worktree and branch deterministically.
-You never need to clean up worktrees manually.
+**Cleanup is automatic for merged PRs.** When a PR is merged, the `pr-closed`
+workflow removes the worktree and branch deterministically. You never need to
+clean up worktrees manually.
+
+A PR closed **without** merging keeps its branch and worktree: that head may be
+the only copy of the work, so the workflow re-reads the PR's state from GitHub
+and preserves everything unless GitHub says it merged. Deleting an abandoned
+PR's branch is a human decision.
 
 ### Push
 

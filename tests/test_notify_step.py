@@ -4,7 +4,6 @@ import json
 import textwrap
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from dataclasses import dataclass
 
 import httpx
 import pytest
@@ -315,7 +314,7 @@ class TestExecuteNotifyStep:
         ctx = self._make_ctx()
 
         outcome = _execute_notify_step(
-            step, ctx, str(tmp_path), "42", "issue-lifecycle",
+            step, ctx, "42", "issue-lifecycle",
         )
 
         mock_post.assert_called_once_with(
@@ -339,7 +338,7 @@ class TestExecuteNotifyStep:
         ctx.set_scope("input", {"task": "t", "repo": "r", "run_key": "1"})
         # No requested_by scope → no channel
 
-        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, "1", "test-wf")
 
         mock_post.assert_not_called()
         assert outcome.delivered is False
@@ -358,7 +357,7 @@ class TestExecuteNotifyStep:
         step = StepDef(name="notify_start", notify="slack", message="Hello")
         ctx = self._make_ctx()
 
-        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, "1", "test-wf")
 
         mock_post.assert_not_called()
         assert outcome.delivered is False
@@ -374,7 +373,7 @@ class TestExecuteNotifyStep:
         step = StepDef(name="notify_start", notify="email", message="Hello")
         ctx = self._make_ctx()
 
-        outcome = _execute_notify_step(step, ctx, str(tmp_path), "1", "test-wf")
+        outcome = _execute_notify_step(step, ctx, "1", "test-wf")
 
         mock_post.assert_not_called()
         assert outcome.delivered is False
@@ -392,7 +391,7 @@ class TestExecuteNotifyStep:
         ctx = self._make_ctx()
 
         # Should not raise
-        outcome = _execute_notify_step(step, ctx, str(tmp_path), "42", "test-wf")
+        outcome = _execute_notify_step(step, ctx, "42", "test-wf")
 
         # Failure event emitted
         assert outcome.delivered is False
@@ -418,27 +417,6 @@ class TestExecuteNotifyStep:
 # ---------------------------------------------------------------------------
 # Orchestrator integration — notify steps are skipped by the LLM loop
 # ---------------------------------------------------------------------------
-
-@dataclass
-class FakeResultMessage:
-    session_id: str = "test-session-id"
-    duration_ms: int = 1000
-    total_cost_usd: float = 0.01
-    num_turns: int = 1
-    is_error: bool = False
-    result: str = ""
-    deferred_tool_use: object = None
-
-
-@dataclass
-class FakeTextBlock:
-    text: str
-
-
-@dataclass
-class FakeAssistantMessage:
-    content: list
-
 
 class FakeClient:
     def __init__(self):
@@ -481,7 +459,9 @@ class TestNotifyStepInWorkflow:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"), \
              patch("bobi.brain.get_brain", return_value=FakeBrain()), \
              patch("bobi.workflow.orchestrator._execute_notify_step") as mock_notify, \
              patch("bobi.workflow.orchestrator._find_project_root", return_value=Path(tmp_path or "/tmp")):

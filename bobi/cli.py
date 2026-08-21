@@ -14,7 +14,7 @@ truststore.inject_into_ssl()
 
 import click
 
-from bobi import paths
+from bobi import logs, paths
 from bobi.install import (
     install_pack as _install_pack,
     resolve_agent_pack as _resolve_agent_pack,
@@ -22,6 +22,10 @@ from bobi.install import (
 )
 
 from .__version__ import __version__
+# Module level, not lazy: `workflows resume --verdict` builds its click.Choice
+# out of this at import time, so the CLI and the workflow engine cannot drift
+# on what a gate may be answered with.
+from .workflow.schema import GATE_VERDICTS
 
 _PACKAGE_DIR = Path(__file__).parent
 
@@ -140,15 +144,19 @@ def _pin_team_brain(root: Path) -> None:
 
 
 def _attach_runtime_log(root: Path) -> None:
-    state = _project_state_dir(root)
-    log_path = state / "manager.log"
-    logger = logging.getLogger()
-    if not any(
-        isinstance(h, logging.FileHandler)
-        and getattr(h, "baseFilename", "") == str(log_path)
-        for h in logger.handlers
-    ):
-        logger.addHandler(logging.FileHandler(log_path))
+    """Also send this process's logs to the runtime's manager.log.
+
+    Stands down when the root logger already reaches that file - either
+    because an earlier call attached this same handler, or because Bobi
+    spawned this process with its stderr redirected into manager.log, which
+    is how the manager and every monitor check are launched. A second writer
+    would put each record on disk twice, and a duplicated line inflates the
+    counts an operator reads back out of an incident (#851).
+    """
+    log_path = paths.manager_log_path(root)
+    if logs.root_writes_to(log_path):
+        return
+    logging.getLogger().addHandler(logs.file_handler(log_path))
 
 
 
@@ -211,12 +219,13 @@ class _PluginGroup(click.Group):
 @click.pass_context
 def main(ctx):
     """Bobi — build teams of event-driven AI agents."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler()],
-    )
+    logs.configure_root()
+    # httpx logs every request at INFO, which the root level above would put
+    # in front of the user's actual output — and `bobi app start` polls
+    # /api/ping every 0.2s while the daemon comes up, so a slow start would
+    # bury its own "running at ..." line under a stack of transport chatter.
+    # Transport logs are debugging detail, not product output.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     # Top-level commands are machine/repo scoped. Runtime identity is bound by
     # `bobi agent <name> ...` or inherited BOBI_ROOT in child processes.
     if ctx.invoked_subcommand is None:
@@ -486,19 +495,21 @@ def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
 
 
 @main.command("login-bootstrap")
-@click.option("--channel", default=None,
-              help="Private chat channel or gateway conversation ref to post "
-                   "the login URL into (default: $BOBI_LOGIN_CHANNEL).")
 @click.option("--timeout", default=600, type=int,
               help="Seconds to wait for the pasted auth code (default: 600).")
-def login_bootstrap(channel, timeout):
+def login_bootstrap(timeout):
     """Bootstrap subscription auth over a chat channel + the event bus.
 
     For BOBI_AUTH=subscription first boot with no credentials on the
     volume: drive `claude auth login --claudeai` under a pty, post the OAuth
-    URL to a private chat channel, and wait for the pasted code to arrive as
+    URL to $BOBI_LOGIN_CHANNEL, and wait for the pasted code to arrive as
     a chat event over the event bus. Idempotent — a no-op if credentials
     already exist. Fallback: `fly ssh console` then `claude auth login`.
+
+    The destination is $BOBI_LOGIN_CHANNEL only. This command is on the
+    `agent` group any worker can reach and the URL it posts grants
+    credentials, so it takes no caller-chosen destination; an operator
+    retargeting a one-off sets the env var on the invocation.
     """
     from bobi import auth_bootstrap
     project_path = _detect_project_root()
@@ -507,8 +518,7 @@ def login_bootstrap(channel, timeout):
         click.echo("Subscription credentials already present — nothing to do.")
         return
     try:
-        ok = auth_bootstrap.run_bootstrap(
-            project_path, channel=channel, timeout=timeout)
+        ok = auth_bootstrap.run_bootstrap(project_path, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         click.echo(f"Login bootstrap failed: {exc}", err=True)
         raise SystemExit(1)
@@ -565,7 +575,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         from bobi.registry import fetch_from_url
         try:
             click.echo(f"'{pack}' is a URL, fetching team archive...")
-            pack_dir, _ = fetch_from_url(project_path, pack_str)
+            pack_dir, _ = fetch_from_url(pack_str)
         except Exception as e:
             click.echo(f"Failed to fetch '{pack}': {e}", err=True)
             raise SystemExit(1)
@@ -576,7 +586,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
         from bobi.registry import fetch_from_archive
         try:
             click.echo(f"'{pack}' is a local archive, extracting team...")
-            pack_dir, _ = fetch_from_archive(project_path, Path(pack).resolve())
+            pack_dir, _ = fetch_from_archive(Path(pack).resolve())
         except Exception as e:
             click.echo(f"Failed to install '{pack}': {e}", err=True)
             raise SystemExit(1)
@@ -593,7 +603,7 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
             label = f"{name}@{version}" if version else name
             click.echo(f"'{pack}' is not a local team directory, fetching "
                        f"{label} from remote...")
-            fetch(project_path, name, version=version)
+            fetch(name, version=version)
             resolved = _resolve_agent_pack(name, project_path)
             if not resolved:
                 click.echo(f"Failed to fetch '{pack}' from remote registries.", err=True)
@@ -715,6 +725,19 @@ def install(pack, slot_name, non_interactive, pinned, with_deps):
 
     click.echo(f"Run `bobi agent {agent_name} start` to launch.")
 
+    # An in-place bobi upgrade replaces the framework underneath whatever is
+    # already running, and a team reinstall does not restart it (#928). Say so
+    # here, where the operator is, instead of leaving it for doctor to be asked.
+    from bobi.launch_stamp import stale_processes
+
+    stale = stale_processes(project_path)
+    if stale:
+        click.echo("\nStill running the code this install replaced:")
+        for process in stale:
+            click.echo(f"  {process.name}: {process.detail}")
+        click.echo("Restart to pick it up: "
+                   + ", ".join(f"`{p.remedy}`" for p in stale))
+
 
 @main.command()
 @click.argument("name", required=False)
@@ -779,6 +802,12 @@ def app_stop(force):
             "anyway."
         )
         return
+    if st.not_permitted:
+        raise click.ClickException(
+            f"Process {st.pid} is the bobi app but runs as another user, so "
+            "the stop signal was refused. It is still running; stop it as "
+            "that user (or with sudo)."
+        )
     click.echo(f"Stopped (pid {st.pid})." if st.pid else "Not running.")
 
 
@@ -935,7 +964,7 @@ def restart(fresh):
             capture_output=True, text=True, timeout=5,
         )
         pid = result.stdout.strip()
-        log_path = _project_state_dir(project_path) / "manager.log"
+        log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
 
@@ -1394,17 +1423,14 @@ def _find_transcript(session: str) -> Path | None:
         return session_log
 
     # Fallback: Claude Code transcript via session ID
+    from bobi.chat_history import find_claude_transcript
     from bobi.sdk import _sessions_dir
     id_file = _sessions_dir() / f"{session}.id"
     if id_file.exists():
         session_id = id_file.read_text().strip()
-        if session_id:
-            claude_projects = Path.home() / ".claude" / "projects"
-            if claude_projects.exists():
-                for project_dir in claude_projects.iterdir():
-                    candidate = project_dir / f"{session_id}.jsonl"
-                    if candidate.exists():
-                        return candidate
+        transcript = find_claude_transcript(session_id)
+        if transcript is not None:
+            return transcript
 
     click.echo(f"No session '{session}'.")
     registry = get_registry()
@@ -2086,7 +2112,11 @@ def _show_events(tail: int, decisions_only: bool) -> None:
         click.echo("No events yet.")
         return
 
-    entries.sort(key=lambda e: e[0])
+    # Sort by instant, not by string: a log can span the aware-UTC timestamp
+    # convention change, and pre-upgrade naive-LOCAL strings do not order
+    # lexicographically against aware-UTC ones.
+    from bobi.timeutil import epoch_seconds
+    entries.sort(key=lambda e: epoch_seconds(e[0]))
     for _, text in entries[-tail:]:
         click.echo(text)
 
@@ -2247,8 +2277,9 @@ def ingest_token_revoke(token_id):
 def transcript_index(project):
     """Index conversation JSONL files into searchable SQLite.
 
-    Scans ~/.claude/projects/*/conversations/ for JSONL files and indexes
-    messages into a local SQLite database for fast searching.
+    Scans the Claude Code transcript roots — $CLAUDE_CONFIG_DIR/projects when
+    set, then ~/.claude/projects — for */*.jsonl and indexes messages into a
+    local SQLite database for fast searching.
 
     Usage:
         bobi agent eng transcript index                # index all projects
@@ -2381,8 +2412,10 @@ def workflow_status():
         click.echo("No workflow runs found.")
         return
     for run in runs[:20]:
+        # The run_key FIELD is authoritative (#1048); the trigger-event copy
+        # is display fallback for records written before the field existed.
         event_data = run.trigger_event.get("data", {})
-        issue = event_data.get("run_key", run.run_key or "?")
+        issue = run.run_key or event_data.get("run_key", "?")
         suffix = ""
         if run.suspended_at_step >= 0:
             suffix = f"  step={run.suspended_at_step}"
@@ -2394,15 +2427,34 @@ def workflow_status():
 
 @workflows.command("resume")
 @click.argument("run_id")
+@click.option("--verdict", type=click.Choice(GATE_VERDICTS), default=None,
+              help="The gate's answer, carried to the workflow as "
+                   "${{event.verdict}}.")
+@click.option("--reply", default="",
+              help="The human's own words, carried as ${{event.reply}}.")
 @click.option("--timeout", default=3600, help="Max execution time in seconds")
-def workflow_resume(run_id, timeout):
+def workflow_resume(run_id, verdict, reply, timeout):
     """Resume a suspended workflow run.
 
     Picks up from the step after the await that suspended it.
 
+    ``--verdict`` and ``--reply`` are the answer the gate was waiting for.
+    They land as the ``event`` scope, so a route step placed after the await
+    reads them as ``${{event.verdict}}`` / ``${{event.reply}}`` and sends the
+    run down the branch the human chose.
+
+    Both are optional and the scope is always set, so a resume with no verdict
+    resolves ``${{event.verdict}}`` to the empty string rather than to a
+    missing scope. That is not an approval, and a workflow's route is written
+    so the non-approving branch is the safe one. An unknown verdict is
+    refused here rather than resolved to something a route might advance on.
+
     Usage:
-        bobi agent eng workflows resume abc123
+        bobi agent eng workflows resume abc123 --verdict approve
     """
+    # `default=None` on the Choice, because click validates a default too and
+    # "" is not one of the verdicts. Absent and empty mean the same thing here.
+    verdict = verdict or ""
     _detect_project_root()
     from .workflow.state import WorkflowRun
     from .workflow.triggers import WorkflowDispatcher
@@ -2418,6 +2470,31 @@ def workflow_resume(run_id, timeout):
         click.echo(f"Run {run_id} is '{run.status}', not 'waiting'.", err=True)
         sys.exit(1)
 
+    # Everything that can refuse resolves BEFORE the claim. `claim()` renames
+    # <id>.json to <id>.resuming.json and nothing renames it back, so exiting
+    # after claiming leaves the run findable-forever and resumable-never
+    # (state.py's D071). The workflow lookup used to sit on the wrong side of
+    # this line.
+    dispatcher = WorkflowDispatcher()
+    dispatcher.load_all_workflows()
+    wf = dispatcher.find_workflow(run.workflow_name)
+    if not wf:
+        click.echo(f"Workflow '{run.workflow_name}' not found.", err=True)
+        sys.exit(1)
+
+    # The same refusal the console makes, for the same reason: without a route
+    # on the verdict, a rejection would run the next step - advancing the work
+    # the human just refused. Checked here too because this command is driven
+    # by hand as well as by the spawn the console detaches.
+    from .workflow.schema import GATE_VERDICT_REJECT, reads_gate_verdict
+    if verdict == GATE_VERDICT_REJECT and not reads_gate_verdict(
+            wf, run.suspended_at_step):
+        click.echo(
+            f"Workflow '{run.workflow_name}' has no route on the gate's "
+            f"verdict at step {run.suspended_at_step}, so a rejection cannot "
+            f"be honoured. Resuming would run that step.", err=True)
+        sys.exit(1)
+
     # Claim before resuming. The event-driven path has always done this; this
     # command never did, so two concurrent resumes of the same run both ran it.
     # That is now reachable from the web app, which spawns this command — and
@@ -2427,21 +2504,27 @@ def workflow_resume(run_id, timeout):
         click.echo(f"Run {run_id} was claimed by another process.", err=True)
         sys.exit(1)
 
-    dispatcher = WorkflowDispatcher()
-    dispatcher.load_all_workflows()
-    wf = dispatcher.find_workflow(run.workflow_name)
-    if not wf:
-        click.echo(f"Workflow '{run.workflow_name}' not found.", err=True)
-        sys.exit(1)
-
     click.echo(f"Resuming {run.workflow_name} for {run.run_key} "
-               f"from step {run.suspended_at_step}...")
-    success = resume_workflow(run, wf, timeout=timeout)
-    if success:
-        click.echo("Workflow completed.")
-    else:
+               f"from step {run.suspended_at_step}"
+               + (f" with verdict '{verdict}'" if verdict else "") + "...")
+    # Always an event, even with no verdict: the scope then exists and holds
+    # an empty verdict, which a route reads as "not an approval". Passing no
+    # event at all would leave the scope missing, which resolves the same way
+    # but only after a log warning about an unknown scope.
+    event = {"data": {"verdict": verdict, "reply": reply}}
+    if not resume_workflow(run, wf, event=event, timeout=timeout):
         click.echo("Workflow failed.", err=True)
         sys.exit(1)
+    # resume_workflow returns True for two different endings: the run finished,
+    # or it parked on a LATER await step. The second is dormant, not done - the
+    # run's own ledger entry is back to "waiting" (#1048: one run, one record)
+    # - so report it as such instead of claiming completion. A rejected gate
+    # that reworks and re-gates ends here every cycle.
+    if run.status == "waiting":
+        click.echo("Workflow suspended again on a later await step. "
+                   "Run `workflows status` for the waiting run.")
+    else:
+        click.echo("Workflow completed.")
 
 
 @workflows.command("validate")
@@ -2886,10 +2969,12 @@ def event_server_start(foreground, port):
 def event_server_stop():
     """Stop the local event server."""
     import signal
+
+    from bobi import launch_stamp
     from bobi.events.server import local_port_file
 
     project_path = _detect_project_root()
-    pid_file = _project_state_dir(project_path) / "event-server.pid"
+    pid_file = paths.event_server_pid_path(project_path)
     port_file = local_port_file(project_path)
     if not pid_file.exists():
         click.echo("Event server is not running")
@@ -2920,6 +3005,7 @@ def event_server_stop():
             click.echo(f"Could not signal pid {pid}: {e}", err=True)
     pid_file.unlink(missing_ok=True)
     port_file.unlink(missing_ok=True)
+    launch_stamp.clear_launch(project_path, launch_stamp.EVENT_SERVER)
 
 
 @event_server_cmd.command("restart")
@@ -2963,7 +3049,21 @@ main.add_command(event_server_cmd)
 @subagents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
 @click.option("--role", required=True, help="Agent role (see 'bobi agent <name> roles list')")
-@click.option("--id", "run_key", default=None, help="Explicit run key for correlation (e.g. issue number)")
+@click.option("--id", "run_key", default=None,
+              help="Explicit run key for correlation (e.g. an issue number). "
+                   "Relaunching the same key resumes that run. Default: a key "
+                   "derived from the launch itself - workflow, role, model, "
+                   "effort, task text - so an identical launch collides with "
+                   "the run already in flight instead of starting a second "
+                   "one.")
+@click.option("--id-random", "random_key", is_flag=True,
+              help="Mint a random run key instead of deriving one from the "
+                   "launch. Without it, an un-keyed launch derives its key "
+                   "from the workflow, role, model, effort and task text, so "
+                   "relaunching the same one while the first run is still "
+                   "going is refused as a duplicate. Use this to fan out N "
+                   "copies of an IDENTICAL launch on purpose. Cannot be "
+                   "combined with --id.")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
 @click.option("--wait", is_flag=True,
@@ -2997,10 +3097,11 @@ main.add_command(event_server_cmd)
                    "every RE-dispatch of a worker that re-orients from durable "
                    "state — a committed checklist, the branch's commits — "
                    "since re-running the same --task otherwise resumes the "
-                   "dead session.")
-def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
-                     post_event, requested_by, non_interactive, persistent,
-                     subscribe, model, effort, fresh):
+                   "dead session. Implied when the run key is derived (no "
+                   "--id), where there is no run the caller meant to continue.")
+def subagents_launch(workflow, role, run_key, random_key, task, timeout, wait,
+                     as_check, post_event, requested_by, non_interactive,
+                     persistent, subscribe, model, effort, fresh):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -3013,6 +3114,7 @@ def subagents_launch(workflow, role, run_key, task, timeout, wait, as_check,
     if subscribe:
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
+                    random_key=random_key,
                     timeout=timeout, wait=wait, as_check=as_check,
                     post_event=post_event, requested_by=requested_by,
                     interactive=not non_interactive,
@@ -3041,7 +3143,8 @@ def _parse_requested_by(requested_by: str | None) -> dict:
     return parsed
 
 
-def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
+def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
+                    timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
                     model="", effort="", fresh=False):
@@ -3069,6 +3172,10 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     if post_event and not as_check:
         click.echo("--post-event requires --as-check", err=True)
         raise SystemExit(1)
+    if run_key and random_key:
+        click.echo("--id-random cannot be combined with --id (an explicit run "
+                   "key already opts out of task-derived dedup)", err=True)
+        raise SystemExit(1)
 
     if as_check:
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
@@ -3083,9 +3190,10 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
         raise SystemExit(1)
 
     if wait:
-        with _launch_refusal_is_readable():
+        with _launch_refusal_is_readable(project_path):
             _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
-                            run_key=run_key, timeout=timeout,
+                            run_key=run_key, random_key=random_key,
+                            timeout=timeout,
                             requested_by=requested_by, interactive=interactive,
                             persistent=persistent, subscribe=subscribe or [],
                             model=model, effort=effort, fresh=fresh)
@@ -3094,7 +3202,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
     requester = _parse_requested_by(requested_by)
 
     from .subagent import launch_agent
-    with _launch_refusal_is_readable():
+    with _launch_refusal_is_readable(project_path):
         session_name = launch_agent(
             task=task, cwd=cwd, workflow_name=workflow,
             timeout=timeout, requested_by=requester,
@@ -3103,6 +3211,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
             persistent=persistent,
             subscribe=subscribe or [],
             run_key=run_key,
+            random_key=random_key,
             model=model,
             effort=effort,
             fresh=fresh,
@@ -3111,21 +3220,44 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, timeout, wait,
 
 
 @contextmanager
-def _launch_refusal_is_readable():
-    """Surface a blocked launch as one line on stderr, never a traceback.
+def _launch_refusal_is_readable(project_path: Path):
+    """Surface a refused launch as one line on stderr, never a traceback.
 
-    The highest-stakes surface in the lineage guard, because the reader is an
+    The highest-stakes surface in either launch guard, because the reader is an
     LLM. A raw traceback reads as a transient crash, and the natural recovery
     is to retry with a fresh run key or ``-w adhoc`` - turning one refusal into
-    the launch storm the guard exists to stop. The message itself (built in
-    ``bobi/launch_lineage.py``) says the block is deterministic and names each
-    retry vector; all this does is make sure the agent sees it and nothing else.
+    the launch storm the guards exist to stop. Both refusals land here so that
+    property holds once rather than per call site:
+
+    - ``LaunchBlockedError`` (lineage, #849) carries its own message, built in
+      ``bobi/launch_lineage.py``, which says the block is deterministic and
+      names each retry vector.
+    - ``DuplicateRunError`` (derived run key, #850) needs the remediation
+      spelled out here, where the agent name is resolvable.
     """
     from .launch_lineage import LaunchBlockedError
+    from .sdk import ACTIVE_STATUSES
+    from .subagent import DuplicateRunError
     try:
         yield
     except LaunchBlockedError as exc:
         click.echo(str(exc), err=True)
+        raise SystemExit(1) from None
+    except DuplicateRunError as exc:
+        # Render the real agent name: an LLM pastes a `<name>` placeholder
+        # verbatim and the remediation fails.
+        agent_name = paths.agent_name_for_root(project_path)
+        click.echo(f"Launch refused: {exc}", err=True)
+        click.echo(f"  Watch it:  bobi agent {agent_name} subagents show "
+                   f"{exc.session_name}", err=True)
+        # Only offer the cancel when it would do something. `cancel_agent`
+        # ignores anything outside ACTIVE_STATUSES, so printing it for a
+        # suspended run sends the reader to a command that reports "no running
+        # sub-agent" and teaches them the refusal is bogus. The exception's own
+        # message carries the remedy that fits that case.
+        if exc.status in ACTIVE_STATUSES:
+            click.echo(f"  Cancel it: bobi agent {agent_name} subagents cancel "
+                       f"{exc.session_name}", err=True)
         raise SystemExit(1) from None
 
 
@@ -3134,19 +3266,18 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
                     interactive: bool, persistent: bool, subscribe: list[str],
                     model: str = "", effort: str = "",
-                    fresh: bool = False) -> None:
+                    fresh: bool = False, random_key: bool = False) -> None:
     """Run a real agent synchronously and print its final text."""
     if workflow != "adhoc":
-        # Deliberate limit, not an oversight: --wait blocks by running the task
-        # as ONE prompt through spawn_adhoc. A multi-step workflow goes through
-        # the orchestrator, which returns once the run is dispatched, so there
-        # is no in-process handle to join. Fan-out-and-block therefore uses
-        # adhoc units (#845; see the engineer role's "Parallel Work" section).
+        # Deliberate limit, not an oversight: --wait is the fan-out-and-block
+        # delegation idiom (#845; see the engineer role's "Parallel Work"
+        # section), and an ad-hoc unit is its unit of work. Widening --wait to
+        # multi-step workflows is a contract change to make on purpose, not a
+        # side effect of the executor consolidation (#1057).
         click.echo(
-            f"--wait requires '-w adhoc' (got '{workflow}'). A multi-step "
-            f"workflow returns as soon as it is dispatched, so there is "
-            f"nothing to block on. To fan out and join, launch adhoc units in "
-            f"the background and 'wait' for them in a single shell command.",
+            f"--wait requires '-w adhoc' (got '{workflow}'). To fan out and "
+            f"join, launch adhoc units in the background and 'wait' for them "
+            f"in a single shell command.",
             err=True,
         )
         raise SystemExit(1)
@@ -3156,27 +3287,28 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
 
     requester = _parse_requested_by(requested_by)
 
-    # --wait runs the agent IN THIS PROCESS, so there is no child env to stamp:
-    # the chain goes into our own environment, which is what any `bobi` command
-    # the agent runs from its shell inherits. Admission happens here for the
-    # same reason it does in launch_agent - this path chains just as deeply,
-    # and `-w adhoc --wait` is the delegation idiom the role prompts teach, so
-    # it is the shape most likely to run away.
-    from .launch_lineage import ADHOC_WORKFLOW, admit, stamp
-    from .subagent import adhoc_session_name, spawn_adhoc
-    session_name = adhoc_session_name(task, run_key)
-    stamp(os.environ, admit(
-        _detect_project_root(), session=session_name,
-        workflow=ADHOC_WORKFLOW, run_key=session_name,
-    ))
-
-    result = spawn_adhoc(
-        cwd=cwd, task=task, timeout=timeout, name=run_key,
-        requested_by=requester, persistent=False, role=role,
-        subscribe=subscribe, model=model, effort=effort, fresh=fresh,
+    # One launch path (#1057): launch_agent owns the derivation, preflights,
+    # admission and lineage for EVERY run, and wait=True just runs the
+    # workflow in this process instead of detaching it. The ad-hoc task is
+    # literally a one-step workflow execution, with the same ledger entry,
+    # checkpoints and period dedupe every other run gets.
+    from .subagent import launch_agent
+    result = launch_agent(
+        task=task, cwd=cwd, workflow_name=workflow, timeout=timeout,
+        requested_by=requester, interactive=interactive, role=role,
+        subscribe=subscribe, run_key=run_key, random_key=random_key,
+        model=model, effort=effort, fresh=fresh, wait=True,
     )
     if result.final_text:
         click.echo(result.final_text)
+    if result.error_kind == "suspended":
+        # A pack may override `adhoc` with a gated workflow. Parked is
+        # dormant, not done - exiting silently as a success would report
+        # work finished that never ran past the gate.
+        click.echo(
+            "Run suspended at an approval gate; it resumes when its event "
+            "arrives (see the console runs view).", err=True,
+        )
     if not result.success:
         if result.error:
             click.echo(f"Agent failed: {result.error}", err=True)
@@ -3237,24 +3369,22 @@ def agents_update(name):
     from bobi.registry import (fetch, list_cached, check_update,
                                     split_team_ref, _read_local_version)
 
-    project_path = paths.home_dir()
-
     if name:
         pkg_name, version = split_team_ref(name)  # D-6: split on the last `@`
         try:
             if version:
                 # A pin targets an immutable asset — fetch directly (idempotent),
                 # no latest-vs-local short-circuit.
-                fetch(project_path, pkg_name, version=version)
-                new_v = _read_local_version(project_path, pkg_name) or version
+                fetch(pkg_name, version=version)
+                new_v = _read_local_version(pkg_name) or version
                 click.echo(f"Pinned {pkg_name} to v{new_v}")
                 return
-            local_v, remote_v = check_update(project_path, pkg_name)
+            local_v, remote_v = check_update(pkg_name)
             if local_v and remote_v and remote_v == local_v:
                 click.echo(f"{pkg_name} v{local_v} is already up to date.")
                 return
-            path = fetch(project_path, pkg_name)
-            new_v = _read_local_version(project_path, pkg_name) or "unknown"
+            path = fetch(pkg_name)
+            new_v = _read_local_version(pkg_name) or "unknown"
             if local_v:
                 click.echo(f"Updated {pkg_name}: v{local_v} → v{new_v}")
             else:
@@ -3263,18 +3393,18 @@ def agents_update(name):
             click.echo(f"Failed: {e}", err=True)
             raise SystemExit(1)
     else:
-        cached = list_cached(project_path)
+        cached = list_cached()
         if not cached:
             click.echo("No cached agent teams to update.")
             return
         failed = 0
         for pack in cached:
             try:
-                local_v, remote_v = check_update(project_path, pack["name"])
+                local_v, remote_v = check_update(pack["name"])
                 if local_v and remote_v and remote_v == local_v:
                     click.echo(f"  {pack['name']} v{local_v} — up to date")
                 elif remote_v:
-                    fetch(project_path, pack["name"])
+                    fetch(pack["name"])
                     click.echo(f"  {pack['name']} v{local_v} → v{remote_v}")
                 else:
                     click.echo(f"  {pack['name']} v{local_v} — could not check remote")
@@ -3353,13 +3483,12 @@ def agents_browse():
     """
     from bobi.registry import list_remote, list_cached, DEFAULT_REPO
 
-    project_path = paths.home_dir()
-    remote = list_remote(project_path)
+    remote = list_remote()
     if not remote:
         click.echo("Could not fetch remote registry.", err=True)
         raise SystemExit(1)
 
-    cached_packs = list_cached(project_path)
+    cached_packs = list_cached()
     cached = {p["name"]: str(p["version"]) for p in cached_packs}
 
     click.echo("Available agent teams:\n")
@@ -3573,12 +3702,11 @@ def recall_memory(query, limit):
     """Search the cold long-term memory reference KB."""
     from bobi.kb.store import KBStore
     from bobi.kb.embedder import embed
-    from bobi.memory import cold_memory_kb_name
+    from bobi.memory import COLD_MEMORY_KB_NAME
 
     _detect_project_root()
-    name = cold_memory_kb_name()
     try:
-        store = KBStore(name)
+        store = KBStore(COLD_MEMORY_KB_NAME)
     except FileNotFoundError:
         click.echo("No cold memory index yet.")
         return
@@ -3628,7 +3756,7 @@ def costs(ctx, group_by):
 
     project_path = _detect_project_root()
     sessions_dir = paths.sessions_dir(project_path)
-    summary = rollup_costs(sessions_dir, group_by=group_by)
+    summary = rollup_costs(sessions_dir)
 
     if summary.sessions_counted == 0:
         click.echo("No cost data found. Costs are recorded as sessions run.")

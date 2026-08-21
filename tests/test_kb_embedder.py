@@ -29,16 +29,6 @@ def state_dir(tmp_path, monkeypatch):
     return sd
 
 
-@pytest.fixture
-def mock_project_root(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "bobi.kb.embedder._state_dir",
-        lambda root=None: tmp_path / ".bobi" / "state",
-    )
-    (tmp_path / ".bobi" / "state").mkdir(parents=True, exist_ok=True)
-    return tmp_path
-
-
 # ---------------------------------------------------------------------------
 # _check_health
 # ---------------------------------------------------------------------------
@@ -244,6 +234,23 @@ class TestStop:
 
     def test_stop_no_pid_file(self, state_dir):
         embedder.stop()
+
+    def test_stop_tolerates_a_malformed_pid_file(self, state_dir):
+        """A garbage pid file must not raise, and must still clear both files.
+
+        stop() reads through sdk.read_pid (0 when missing or malformed), the
+        same tolerant reader is_running() uses — so there is no int()/ValueError
+        handling of its own left to drift (Q097).
+        """
+        (state_dir / "embedding-sidecar.pid").write_text("not-a-pid\n")
+        (state_dir / "embedding-sidecar.port").write_text("8000")
+
+        with patch("os.kill") as mock_kill:
+            embedder.stop()
+            mock_kill.assert_not_called()
+
+        assert not (state_dir / "embedding-sidecar.pid").exists()
+        assert not (state_dir / "embedding-sidecar.port").exists()
 
     def test_stop_stale_pid(self, state_dir):
         (state_dir / "embedding-sidecar.pid").write_text("999999")

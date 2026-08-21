@@ -3,6 +3,8 @@ action step support in the orchestrator.
 
 Covers issue #227: worktree + branch removal on pull_request.closed.
 Covers issue #246: cleanup must resolve repo from input, not installation root.
+Covers issue #1004: the delete is gated on a LIVE read of the PR's merge
+state, and a PR closed without merging keeps its branch and worktree.
 """
 
 import os
@@ -52,7 +54,7 @@ class TestCleanupWorktree:
         wt = self._create_worktree(git_repo, "agent/issue-99", "session-99")
         assert wt.exists()
 
-        result = cleanup_worktree(str(git_repo), "agent/issue-99")
+        result = cleanup_worktree(str(git_repo), "agent/issue-99", merged=True)
 
         assert result["status"] == "cleaned"
         assert not wt.exists()
@@ -67,7 +69,7 @@ class TestCleanupWorktree:
     def test_not_found_returns_status(self, git_repo):
         from bobi.workflow.cleanup import cleanup_worktree
 
-        result = cleanup_worktree(str(git_repo), "agent/nonexistent")
+        result = cleanup_worktree(str(git_repo), "agent/nonexistent", merged=True)
         assert result["status"] == "not_found"
 
     def test_removes_worktree_at_nonstandard_path(self, git_repo):
@@ -83,7 +85,7 @@ class TestCleanupWorktree:
         )
         assert wt_dir.exists()
 
-        result = cleanup_worktree(str(git_repo), "agent/old-99")
+        result = cleanup_worktree(str(git_repo), "agent/old-99", merged=True)
         assert result["status"] == "cleaned"
         assert not wt_dir.exists()
 
@@ -96,7 +98,7 @@ class TestCleanupWorktree:
         # Manually nuke the directory (simulating partial cleanup)
         shutil.rmtree(wt)
 
-        result = cleanup_worktree(str(git_repo), "agent/ghost-1")
+        result = cleanup_worktree(str(git_repo), "agent/ghost-1", merged=True)
         # Should succeed — prune handles the stale entry, branch gets deleted
         assert result["status"] == "cleaned"
 
@@ -117,7 +119,7 @@ class TestCleanupWorktree:
             check=True,
         )
 
-        result = cleanup_worktree(str(checkout), "agent/editable")
+        result = cleanup_worktree(str(checkout), "agent/editable", merged=True)
 
         assert result["status"] == "cleaned"
         assert result["paths_removed"] == []
@@ -140,6 +142,252 @@ class TestCleanupWorktree:
             text=True,
         )
         assert "agent/editable" in branches.stdout
+
+
+# ---------------------------------------------------------------------------
+# Issue #1004 - the merge verdict gates the delete
+# ---------------------------------------------------------------------------
+
+class TestCleanupWorktreeMergeGuard:
+    """cleanup_worktree deletes nothing unless the caller says the PR merged.
+
+    For a PR closed WITHOUT merging, the head branch is the only copy of the
+    work - deleting it destroys it.
+    """
+
+    @pytest.fixture
+    def git_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, capture_output=True)
+        (repo / "README.md").write_text("init")
+        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo, capture_output=True)
+        return repo
+
+    def test_unmerged_preserves_worktree_and_branch(self, git_repo):
+        from bobi.workflow.cleanup import cleanup_worktree
+
+        wt = git_repo / ".claude" / "worktrees" / "session-1004"
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "agent/issue-1004", str(wt)],
+            cwd=git_repo, capture_output=True, check=True,
+        )
+
+        result = cleanup_worktree(str(git_repo), "agent/issue-1004", merged=False)
+
+        assert result["status"] == "preserved"
+        assert result["branch"] == "agent/issue-1004"
+        assert wt.exists()
+        branches = subprocess.run(
+            ["git", "branch", "--list", "agent/issue-1004"],
+            cwd=git_repo, capture_output=True, text=True,
+        )
+        assert "agent/issue-1004" in branches.stdout
+
+    def test_merged_is_keyword_required(self, git_repo):
+        """No call site can delete a branch without stating the verdict."""
+        from bobi.workflow.cleanup import cleanup_worktree
+
+        with pytest.raises(TypeError):
+            cleanup_worktree(str(git_repo), "agent/issue-1004")
+
+    def test_unmerged_does_not_touch_a_non_git_dir(self, tmp_path):
+        """The guard runs before any filesystem probe - preserved, not error."""
+        from bobi.workflow.cleanup import cleanup_worktree
+
+        result = cleanup_worktree(str(tmp_path), "agent/issue-1004", merged=False)
+        assert result["status"] == "preserved"
+
+
+class TestPrMergeState:
+    """pr_merge_state reads the PR's merge state from GitHub, right now."""
+
+    def _response(self, payload):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = payload
+        return resp
+
+    def test_reads_merged_true(self):
+        from bobi.workflow.cleanup import pr_merge_state
+
+        with patch("bobi.http.get") as mock_get:
+            mock_get.return_value = self._response(
+                {"number": 7, "state": "closed", "merged": True}
+            )
+            state = pr_merge_state("org/repo", 7)
+
+        assert state == {"merged": True, "state": "closed"}
+        url = mock_get.call_args[0][0]
+        assert url == "https://api.github.com/repos/org/repo/pulls/7"
+
+    def test_reads_merged_false(self):
+        from bobi.workflow.cleanup import pr_merge_state
+
+        with patch("bobi.http.get") as mock_get:
+            mock_get.return_value = self._response(
+                {"number": 7, "state": "closed", "merged": False}
+            )
+            assert pr_merge_state("org/repo", "7") == {
+                "merged": False, "state": "closed",
+            }
+
+    def test_http_failure_reports_error_and_no_verdict(self):
+        """An unreadable PR yields no merge verdict - never a default of True."""
+        import httpx
+
+        from bobi.workflow.cleanup import pr_merge_state
+
+        with patch("bobi.http.get", side_effect=httpx.ConnectError("boom")):
+            state = pr_merge_state("org/repo", 7)
+
+        assert "merged" not in state
+        assert "boom" in state["error"]
+
+    @pytest.mark.parametrize("slug", [
+        "not-a-slug",       # no owner/name split
+        "",                 # nothing at all
+        "org/repo/extra",   # too many segments
+        "/repo",            # empty owner
+        "org/",             # empty name
+        "org/..",           # would walk the API path once httpx normalizes it
+        "../repo",
+        "org/re po",        # whitespace
+    ])
+    def test_unusable_slug_reports_error(self, slug):
+        from bobi.workflow.cleanup import pr_merge_state
+
+        with patch("bobi.http.get") as mock_get:
+            state = pr_merge_state(slug, 7)
+
+        assert "merged" not in state, f"{slug!r} must not yield a verdict"
+        assert "error" in state
+        mock_get.assert_not_called()
+
+    def test_unusable_pr_number_reports_error(self):
+        from bobi.workflow.cleanup import pr_merge_state
+
+        with patch("bobi.http.get") as mock_get:
+            state = pr_merge_state("org/repo", "?")
+
+        assert "merged" not in state
+        assert "error" in state
+        mock_get.assert_not_called()
+
+    def test_sends_the_token_when_one_is_available(self):
+        from bobi.workflow.cleanup import pr_merge_state
+
+        with patch("bobi.gitutil.github_token", return_value="tok-abc"), \
+             patch("bobi.http.get") as mock_get:
+            mock_get.return_value = self._response({"merged": True, "state": "closed"})
+            pr_merge_state("org/repo", 7)
+
+        headers = mock_get.call_args[1]["headers"]
+        assert headers["Authorization"] == "token tok-abc"
+
+
+class TestCleanupActionLiveMergeRead:
+    """_cleanup_worktree_action takes its verdict from a LIVE read of the PR,
+    not from the event payload that started the run."""
+
+    def _ctx(self, **input_overrides):
+        from bobi.workflow.variables import VariableContext
+
+        ctx = VariableContext()
+        ctx.set_scope("input", {
+            "repo": "org/testrepo",
+            "pr_number": 1004,
+            "head_branch": "agent/issue-1004",
+            **input_overrides,
+        })
+        return ctx
+
+    @pytest.fixture
+    def install_root(self, tmp_path):
+        child = tmp_path / "testrepo"
+        child.mkdir()
+        subprocess.run(["git", "init"], cwd=child, capture_output=True)
+        return tmp_path
+
+    def test_stale_payload_saying_merged_does_not_authorize_the_delete(
+        self, install_root,
+    ):
+        """The webhook snapshot said merged; GitHub says otherwise right now."""
+        from bobi.workflow.orchestrator import _cleanup_worktree_action
+
+        ctx = self._ctx(merged=True)
+        with patch("bobi.paths.bobi_root", return_value=install_root), \
+             patch("bobi.workflow.cleanup.pr_merge_state") as mock_state:
+            mock_state.return_value = {"merged": False, "state": "closed"}
+            result = _cleanup_worktree_action(ctx, str(install_root))
+
+        mock_state.assert_called_once_with("org/testrepo", "1004")
+        assert result["status"] == "preserved"
+        assert result["merged_live"] is False
+
+    def test_live_merged_authorizes_the_delete(self, install_root):
+        from bobi.workflow.orchestrator import _cleanup_worktree_action
+
+        ctx = self._ctx(merged=False)
+        with patch("bobi.paths.bobi_root", return_value=install_root), \
+             patch("bobi.workflow.cleanup.pr_merge_state") as mock_state, \
+             patch("bobi.workflow.cleanup.cleanup_worktree") as mock_cleanup:
+            mock_state.return_value = {"merged": True, "state": "closed"}
+            mock_cleanup.return_value = {
+                "status": "cleaned", "paths_removed": [], "branch": "agent/issue-1004",
+            }
+            result = _cleanup_worktree_action(ctx, str(install_root))
+
+        assert mock_cleanup.call_args[1]["merged"] is True
+        assert result["merged_live"] is True
+
+    def test_unreadable_merge_state_preserves(self, install_root):
+        """Fail closed: a verdict we could not read is not a licence to delete."""
+        from bobi.workflow.orchestrator import _cleanup_worktree_action
+
+        ctx = self._ctx(merged=True)
+        with patch("bobi.paths.bobi_root", return_value=install_root), \
+             patch("bobi.workflow.cleanup.pr_merge_state") as mock_state:
+            mock_state.return_value = {"error": "connection refused"}
+            result = _cleanup_worktree_action(ctx, str(install_root))
+
+        assert result["status"] == "preserved"
+        assert result["merged_live"] is False
+        assert result["merge_state_error"] == "connection refused"
+        # The human-facing reason must not claim the PR did not merge - we
+        # could not read it at all, which is a different statement.
+        assert "could not read" in result["reason"]
+        assert "connection refused" in result["reason"]
+
+    def test_missing_head_branch_reads_no_verdict(self):
+        """Nothing to delete - do not spend a GitHub call finding that out."""
+        from bobi.workflow.orchestrator import _cleanup_worktree_action
+        from bobi.workflow.variables import VariableContext
+
+        ctx = VariableContext()
+        ctx.set_scope("input", {"repo": "org/testrepo", "pr_number": 1004})
+        with patch("bobi.workflow.cleanup.pr_merge_state") as mock_state:
+            result = _cleanup_worktree_action(ctx, "/tmp")
+
+        mock_state.assert_not_called()
+        assert result["status"] == "skipped"
+        assert result["merged_live"] is False
+
+    def test_every_outcome_carries_a_merged_live_verdict(self, install_root):
+        """`merged_live` is what the workflow routes on - it must always be set,
+        or an unresolvable repo would route as if the PR had merged."""
+        from bobi.workflow.orchestrator import _cleanup_worktree_action
+
+        ctx = self._ctx(repo="org/nonexistent")
+        with patch("bobi.paths.bobi_root", return_value=install_root):
+            result = _cleanup_worktree_action(ctx, str(install_root))
+
+        assert result["status"] == "error"
+        assert result["merged_live"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -310,16 +558,45 @@ class TestReactorPrClosedDispatch:
 class TestPrClosedWorkflow:
     """The pr-closed.yaml workflow parses correctly."""
 
-    def test_pr_closed_workflow_loads(self):
-        wf_path = Path(__file__).parent.parent / "agents" / "eng-team" / "workflows" / "pr-closed.yaml"
-        if not wf_path.exists():
+    WF_PATH = (
+        Path(__file__).parent.parent
+        / "agents" / "eng-team" / "workflows" / "pr-closed.yaml"
+    )
+
+    def _workflow(self):
+        if not self.WF_PATH.exists():
             pytest.skip("pr-closed.yaml not yet created")
-        wf = load_workflow(wf_path)
+        return load_workflow(self.WF_PATH)
+
+    def test_pr_closed_workflow_loads(self):
+        wf = self._workflow()
         assert wf.name == "pr-closed"
         # Must have a cleanup step with action
         cleanup = wf.step_by_name("cleanup")
         assert cleanup is not None
         assert cleanup.action == "cleanup_worktree"
+
+    def test_routes_on_the_live_verdict_not_the_event_payload(self):
+        """`input.merged` is the webhook's snapshot; `merged_live` is what the
+        cleanup step actually read from GitHub. Routing on the snapshot is the
+        #1004 defect."""
+        wf = self._workflow()
+        conditions = [s.condition for s in wf.steps if s.condition]
+
+        assert conditions, "pr-closed must still route on the merge verdict"
+        for condition in conditions:
+            assert "merged_live" in condition
+            assert "input.merged" not in condition
+
+    def test_no_step_closes_the_issue_without_the_merge_verdict(self):
+        """close-issue must sit behind a route, never on the fall-through path."""
+        wf = self._workflow()
+        close_issue = wf.step_by_name("close-issue")
+
+        assert close_issue is not None
+        assert wf.steps[wf.step_index("close-issue") - 1].condition, (
+            "close-issue must be preceded by the route that guards it"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +636,7 @@ class TestCleanupWorktreeRejectsNonGitDir:
         from bobi.workflow.cleanup import cleanup_worktree
 
         # tmp_path is a plain directory, not a git repo
-        result = cleanup_worktree(str(tmp_path), "agent/issue-99")
+        result = cleanup_worktree(str(tmp_path), "agent/issue-99", merged=True)
         assert result["status"] == "error"
         assert "not a git repository" in result["reason"]
 
@@ -390,6 +667,47 @@ class TestResolveRepoRoot:
             result = _resolve_repo_root(ctx)
 
         assert result == str(child)
+
+    def test_checkouts_layout_finds_repo(self, tmp_path):
+        """Deployed-team layout (#1016 §5.2): <root>/checkouts/<name>. Before
+        this branch existed every pr-closed run on a deployed team resolved to
+        None and the gated cleanup action was inert."""
+        from bobi.workflow.orchestrator import _resolve_repo_root
+
+        checkout = tmp_path / "checkouts" / "myrepo"
+        checkout.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=checkout, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin",
+             "https://github.com/org/myrepo.git"],
+            cwd=checkout, capture_output=True,
+        )
+
+        ctx = self._make_ctx("org/myrepo")
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result == str(checkout)
+
+    def test_checkouts_layout_slug_mismatch_returns_none(self, tmp_path):
+        """A checkouts dir holding a same-named repo from ANOTHER org must not
+        resolve — git ops against it would hit the wrong repo."""
+        from bobi.workflow.orchestrator import _resolve_repo_root
+
+        checkout = tmp_path / "checkouts" / "myrepo"
+        checkout.mkdir(parents=True)
+        subprocess.run(["git", "init"], cwd=checkout, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin",
+             "https://github.com/other-org/myrepo.git"],
+            cwd=checkout, capture_output=True,
+        )
+
+        ctx = self._make_ctx("org/myrepo")
+        with patch("bobi.paths.bobi_root", return_value=tmp_path):
+            result = _resolve_repo_root(ctx)
+
+        assert result is None
 
     def test_single_repo_layout(self, tmp_path):
         """When the installation root itself is a git repo whose remote
@@ -544,16 +862,21 @@ class TestCleanupActionUsesInputRepo:
         ctx = VariableContext()
         ctx.set_scope("input", {
             "repo": "org/testrepo",
+            "pr_number": 246,
             "head_branch": "agent/issue-246",
         })
 
         with patch("bobi.paths.bobi_root", return_value=tmp_path), \
+             patch("bobi.workflow.cleanup.pr_merge_state",
+                   return_value={"merged": True, "state": "closed"}), \
              patch("bobi.workflow.cleanup.cleanup_worktree") as mock_cleanup:
             mock_cleanup.return_value = {"status": "cleaned", "paths_removed": [], "branch": "agent/issue-246"}
             result = _cleanup_worktree_action(ctx, str(tmp_path))
 
         # cleanup_worktree must be called with the child repo, not tmp_path
-        mock_cleanup.assert_called_once_with(str(child), "agent/issue-246")
+        mock_cleanup.assert_called_once_with(
+            str(child), "agent/issue-246", merged=True,
+        )
         assert result["status"] == "cleaned"
 
     def test_action_returns_error_when_repo_unresolvable(self):

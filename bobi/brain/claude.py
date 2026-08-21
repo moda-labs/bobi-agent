@@ -18,9 +18,10 @@ import asyncio
 import json
 import logging
 import os
+import platform
+import shutil
 from collections import deque
 from contextlib import suppress
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -32,6 +33,7 @@ from bobi.brain.base import (
     DeferredTool,
     StreamDelta,
     TurnResult,
+    classify_brain_unavailability,
 )
 from bobi.brain.gateway import (
     GatewayAwareEngine,
@@ -57,11 +59,33 @@ DEFAULT_MAX_BUFFER_SIZE = 64 * 1024 * 1024  # 64 MB
 _SDK_DEFAULT_MAX_BUFFER_SIZE = 1024 * 1024  # 1 MB
 
 
+def get_cli_path() -> str:
+    """Locate the ``claude`` CLI at call time, container-safe.
+
+    Prefer ``PATH`` — the only thing that works in the Linux container image,
+    where the pinned CLI is installed on ``PATH`` (the private deploy repo's
+    CONTAINERIZED_DEPLOYMENT.md, The image). When it isn't found, fall
+    back to the Homebrew location *only* on
+    macOS dev machines; on every other platform fall back to the bare name so
+    exec still resolves it via ``PATH`` at spawn time rather than a
+    macOS-specific absolute path that doesn't exist in the container.
+
+    Re-resolves on every call so a CLI that lands on ``PATH`` after import —
+    or a test that patches the environment — is picked up.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    if platform.system() == "Darwin":
+        return "/opt/homebrew/bin/claude"
+    return "claude"
+
+
 def _delta_text(event: Any) -> str:
     """Pull the text out of one raw Anthropic streaming event, or ''.
 
     The canonical home for the vendor-specific partial-stream shape
-    (``content_block_delta`` / ``text_delta``); ``setup.llm`` re-exports it.
+    (``content_block_delta`` / ``text_delta``).
     """
     if not isinstance(event, dict):
         return ""
@@ -90,7 +114,7 @@ class _ClaudeSession:
 
         return ClaudeSDKClient(self._options)
 
-    async def connect(self, prompt: str | None = None) -> None:
+    async def connect(self) -> None:
         _configure_initialize_timeout()
         attempts = _env_int("BOBI_CLAUDE_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)
         backoff = _env_float(
@@ -102,7 +126,9 @@ class _ClaudeSession:
             if attempt > 1:
                 self._client = self._new_client()
             try:
-                await self._connect_once(prompt)
+                # Bare connect: setup only, no turn (#1016). The SDK defaults
+                # prompt to None, which keeps no-arg fakes/clients working.
+                await self._client.connect()
                 return
             except Exception as exc:
                 should_retry = attempt < attempts and _is_initialize_timeout(exc)
@@ -120,15 +146,6 @@ class _ClaudeSession:
                 )
                 if backoff > 0:
                     await asyncio.sleep(backoff * attempt)
-
-    async def _connect_once(self, prompt: str | None = None) -> None:
-        # Match the historical call shape: a bare connect() when there is no
-        # connect-prompt (the SDK defaults prompt to None), an explicit
-        # connect(prompt) otherwise. Keeps no-arg fakes/clients working.
-        if prompt is None:
-            await self._client.connect()
-        else:
-            await self._client.connect(prompt)
 
     async def query(self, text: str) -> None:
         await self._client.query(text)
@@ -171,21 +188,37 @@ class _ClaudeSession:
         """Translate one turn's SDK messages into normalized brain messages."""
         from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
+        assistant_error_kind = ""
+        assistant_error_message = ""
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
                 text_parts = [
                     b.text for b in msg.content if isinstance(b, TextBlock)
                 ]
+                text = "\n".join(text_parts) if text_parts else ""
+                error_kind = str(getattr(msg, "error", "") or "")
+                if error_kind:
+                    assistant_error_kind = error_kind
+                    assistant_error_message = text
                 yield AssistantText(
-                    text="\n".join(text_parts) if text_parts else "",
+                    text=text,
                     usage=getattr(msg, "usage", None),
                 )
             elif isinstance(msg, ResultMessage):
-                yield _result_to_turn(msg)
+                yield _result_to_turn(
+                    msg,
+                    assistant_error_kind=assistant_error_kind,
+                    assistant_error_message=assistant_error_message,
+                )
             # Other SDK message types carry no signal the call sites consume.
 
 
-def _result_to_turn(msg: Any) -> TurnResult:
+def _result_to_turn(
+    msg: Any,
+    *,
+    assistant_error_kind: str = "",
+    assistant_error_message: str = "",
+) -> TurnResult:
     """Normalize an SDK ``ResultMessage`` into a :class:`TurnResult`."""
     costs = _model_usage_to_costs(getattr(msg, "model_usage", None))
 
@@ -197,6 +230,18 @@ def _result_to_turn(msg: Any) -> TurnResult:
         )
 
     error_kind, error_message, max_turns, turn_count = _terminal_error(msg)
+    if not error_kind and assistant_error_kind:
+        error_kind = assistant_error_kind
+        error_message = assistant_error_message
+
+    result_text = getattr(msg, "result", "") or ""
+    unavailable_kind = classify_brain_unavailability(
+        error_kind,
+        error_message or result_text,
+    )
+    if unavailable_kind:
+        error_kind = unavailable_kind
+        error_message = error_message or result_text
 
     is_error = bool(getattr(msg, "is_error", False) or error_kind)
 
@@ -211,7 +256,7 @@ def _result_to_turn(msg: Any) -> TurnResult:
         total_cost_usd=getattr(msg, "total_cost_usd", 0.0) or 0.0,
         duration_ms=getattr(msg, "duration_ms", 0) or 0,
         num_turns=getattr(msg, "num_turns", 0) or 0,
-        result_text=getattr(msg, "result", "") or "",
+        result_text=result_text,
         deferred_tool=deferred,
         costs=costs,
     )
@@ -341,7 +386,9 @@ def _max_turns_from_transcript(
     session_id: str,
 ) -> tuple[bool, int | None, int | None]:
     """Fallback for Claude SDK runs whose JSONL has terminal metadata only."""
-    transcript = _claude_transcript_path(session_id)
+    from bobi.chat_history import find_claude_transcript
+
+    transcript = find_claude_transcript(session_id)
     if transcript is None:
         return False, None, None
     try:
@@ -358,34 +405,6 @@ def _max_turns_from_transcript(
         if found:
             return found, max_turns, turn_count
     return False, None, None
-
-
-def _claude_transcript_path(session_id: str) -> Path | None:
-    if not session_id:
-        return None
-    projects_dirs = []
-    if os.environ.get("CLAUDE_CONFIG_DIR"):
-        projects_dirs.append(Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects")
-    projects_dirs.append(Path.home() / ".claude" / "projects")
-
-    seen: set[str] = set()
-    for projects in projects_dirs:
-        key = str(projects)
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            if not projects.is_dir():
-                continue
-            for project_dir in projects.iterdir():
-                if not project_dir.is_dir():
-                    continue
-                candidate = project_dir / f"{session_id}.jsonl"
-                if candidate.exists():
-                    return candidate
-        except OSError:
-            continue
-    return None
 
 
 def _render_max_turns_error(max_turns: int | None,
@@ -499,8 +518,6 @@ class ClaudeBrain(GatewayAwareEngine):
     ) -> BrainSession:
         from claude_agent_sdk import ClaudeAgentOptions
 
-        from bobi.sdk import get_cli_path
-
         from bobi.brain import with_default_effort_option, with_default_model_option
 
         extra = with_default_effort_option(with_default_model_option(options))
@@ -543,8 +560,6 @@ class ClaudeBrain(GatewayAwareEngine):
             query,
         )
 
-        from bobi.sdk import get_cli_path
-
         _configure_initialize_timeout()
         attempts = _env_int("BOBI_CLAUDE_CONNECT_ATTEMPTS", DEFAULT_CONNECT_ATTEMPTS)
         backoff = _env_float(
@@ -572,20 +587,31 @@ class ClaudeBrain(GatewayAwareEngine):
 
         for attempt in range(1, attempts + 1):
             yielded_message = False
+            assistant_error_kind = ""
+            assistant_error_message = ""
             try:
                 async for msg in query(prompt=user_prompt, options=opts):
                     yielded_message = True
                     if isinstance(msg, StreamEvent):
                         yield StreamDelta(text=_delta_text(msg.event))
                     elif isinstance(msg, AssistantMessage):
+                        text = "\n".join(
+                            b.text for b in msg.content if isinstance(b, TextBlock)
+                        )
+                        error_kind = str(getattr(msg, "error", "") or "")
+                        if error_kind:
+                            assistant_error_kind = error_kind
+                            assistant_error_message = text
                         yield AssistantText(
-                            text="\n".join(
-                                b.text for b in msg.content if isinstance(b, TextBlock)
-                            ),
+                            text=text,
                             usage=getattr(msg, "usage", None),
                         )
                     elif isinstance(msg, ResultMessage):
-                        yield _result_to_turn(msg)
+                        yield _result_to_turn(
+                            msg,
+                            assistant_error_kind=assistant_error_kind,
+                            assistant_error_message=assistant_error_message,
+                        )
                 return
             except Exception as exc:
                 should_retry = (

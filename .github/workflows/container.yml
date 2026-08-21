@@ -25,6 +25,7 @@ on:
       - ".dockerignore"
       - "docker/**"
       - "tests/integration/test_container_image.py"
+      - "tests/fixtures/team-deps-bake/**"
       - ".github/workflows/container.yml"
       # Regained at the reorg: the public inputs that define what the image
       # installs. Under the split these lived in another repo and could not
@@ -35,7 +36,14 @@ on:
       - "bobi/registry.py"
       - "bobi/build.py"
       - "bobi/build_render.py"
-      - "bobi/tool_library.py"
+      # `bobi/tool_library/**`, not the old `bobi/tool_library.py`: the module
+      # moved into the package it used to shadow. A stale `.py` filter here
+      # would match nothing and silently stop triggering this lane - the #909
+      # vacuous-lane shape the note above warns about. The glob also newly
+      # covers the catalog entries themselves (`codex/tool.yaml` et al), which
+      # is a deliberate widening: those pins bake INTO the image (#486), so a
+      # version bump there is exactly an image change.
+      - "bobi/tool_library/**"
       - "bobi/dep_bootstrap.py"
       - "bobi/supervisor/**"
       # The OTLP exporter and its collector proof (#978). Without these four

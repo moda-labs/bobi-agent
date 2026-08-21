@@ -11,7 +11,7 @@ process does not actually reflect.
   a live agent keeps burning tokens for the life of the orchestrator process.
 * **D021** — ``start()`` waits the *full* timeout on ``_ready`` even after the
   session thread has already crashed and exited. With the launch timeouts
-  ``run_phase_blocking``/``spawn_adhoc`` actually pass (up to 3600s), a launch
+  ``run_phase_blocking``/``run_persistent_agent`` actually pass (up to 3600s), a launch
   that fails in milliseconds stalls dispatch for an hour.
 
 Both tests fail on the pre-fix tree: D003's thread stays alive past ``stop()``,

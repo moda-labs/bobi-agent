@@ -19,6 +19,7 @@ from bobi.brain import (
     BrainSession,
     ClaudeBrain,
     DEFAULT_BRAIN,
+    ERROR_KIND_CREDITS_EXHAUSTED,
     TurnResult,
     get_brain,
 )
@@ -520,7 +521,7 @@ async def test_stream_once_sets_generous_max_buffer_size(monkeypatch):
     from bobi.brain.claude import DEFAULT_MAX_BUFFER_SIZE
 
     monkeypatch.delenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", raising=False)
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     captured = {}
 
     def _options(**kwargs):
@@ -884,6 +885,59 @@ async def test_receive_response_converts_assistant_and_result():
 
 
 @pytest.mark.asyncio
+async def test_receive_response_preserves_structured_auth_failure():
+    """Claude's assistant error field is the stable auth classifier."""
+    text = "Not logged in - Please run /login"
+    assistant = AssistantMessage(
+        content=[TextBlock(text=text)],
+        model="<synthetic>",
+        error="authentication_failed",
+    )
+    result = _result(is_error=True, result=text)
+
+    out = [
+        message
+        async for message in _claude_session_over(
+            [assistant, result]
+        ).receive_response()
+    ]
+
+    assert isinstance(out[-1], TurnResult)
+    assert out[-1].is_error is True
+    assert out[-1].error_kind == "authentication_failed"
+    assert out[-1].error_message == text
+
+
+@pytest.mark.asyncio
+async def test_receive_response_normalizes_structured_credit_exhaustion():
+    text = "You're out of usage credits"
+    assistant = AssistantMessage(
+        content=[TextBlock(text=text)],
+        model="<synthetic>",
+        error="out_of_credits",
+    )
+    result = _result(is_error=True, result=text)
+
+    out = [
+        message
+        async for message in _claude_session_over(
+            [assistant, result]
+        ).receive_response()
+    ]
+
+    assert out[-1].error_kind == ERROR_KIND_CREDITS_EXHAUSTED
+    assert out[-1].error_message == text
+
+
+def test_result_normalizes_text_only_credit_exhaustion():
+    result = _result_to_turn(
+        _result(is_error=True, result="Usage credits exhausted"),
+    )
+
+    assert result.error_kind == ERROR_KIND_CREDITS_EXHAUSTED
+
+
+@pytest.mark.asyncio
 async def test_assistant_without_text_still_carries_usage():
     """An assistant message with no TextBlocks yields empty text but keeps usage
     (the rotation metric reads usage even on a text-less step)."""
@@ -1020,7 +1074,7 @@ async def test_claude_stream_once_sets_default_initialize_timeout(monkeypatch):
         yield _result(result="ok")
 
     monkeypatch.setattr("claude_agent_sdk.query", _query)
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     monkeypatch.delenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", raising=False)
     monkeypatch.delenv("BOBI_CLAUDE_INITIALIZE_TIMEOUT_MS", raising=False)
 
@@ -1033,6 +1087,35 @@ async def test_claude_stream_once_sets_default_initialize_timeout(monkeypatch):
         out.append(msg)
 
     assert isinstance(out[-1], TurnResult)
+
+
+@pytest.mark.asyncio
+async def test_claude_stream_once_preserves_structured_auth_failure(monkeypatch):
+    text = "Not logged in - Please run /login"
+
+    async def _query(*, prompt, options):
+        yield AssistantMessage(
+            content=[TextBlock(text=text)],
+            model="<synthetic>",
+            error="authentication_failed",
+        )
+        yield _result(is_error=True, result=text)
+
+    monkeypatch.setattr("claude_agent_sdk.query", _query)
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
+
+    out = [
+        message
+        async for message in ClaudeBrain().stream_once(
+            system_prompt="sys",
+            user_prompt="hello",
+            cwd="/tmp",
+        )
+    ]
+
+    assert isinstance(out[-1], TurnResult)
+    assert out[-1].error_kind == "authentication_failed"
+    assert out[-1].error_message == text
 
 
 @pytest.mark.asyncio
@@ -1049,7 +1132,7 @@ async def test_claude_stream_once_retries_initialize_timeout_before_output(
         yield _result(result="ok")
 
     monkeypatch.setattr("claude_agent_sdk.query", _query)
-    monkeypatch.setattr("bobi.sdk.get_cli_path", lambda: "/usr/bin/claude")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     monkeypatch.setenv("BOBI_CLAUDE_CONNECT_ATTEMPTS", "2")
     monkeypatch.setenv("BOBI_CLAUDE_CONNECT_BACKOFF_SECONDS", "0")
 
@@ -1122,3 +1205,57 @@ def test_continuation_token_tolerates_capability_less_factory():
     assert continuation_token(
         Bare(), session_id="sid", from_model="a", to_model="a",
     ) == "sid"
+
+
+class TestBrainFactoryContract:
+    """Q026: the BrainFactory protocol says what the call sites require.
+
+    ``stream_once`` was a de facto requirement for years - ``bobi.setup.llm``
+    calls it on whatever brain the process is bound to - while the protocol
+    declared only ``make_session``. A brain without it failed with a bare
+    ``AttributeError``, laundered into ``LLMError``, naming nothing.
+    """
+
+    def test_every_registered_brain_implements_the_protocol(self):
+        import inspect
+
+        from bobi.brain import _BRAINS
+        from bobi.brain.base import BrainFactory
+
+        required = [n for n, v in vars(BrainFactory).items()
+                    if not n.startswith("_") and inspect.isfunction(v)]
+        assert "stream_once" in required, "the protocol must declare it"
+        assert "make_session" in required
+
+        for kind, factory in _BRAINS.items():
+            for method in required:
+                assert callable(getattr(factory, method, None)), (
+                    f"brain {kind!r} does not implement {method}")
+
+    @pytest.mark.asyncio
+    async def test_codex_stream_once_names_itself(self):
+        from bobi.brain.codex import CodexBrain
+
+        with pytest.raises(NotImplementedError) as exc:
+            async for _ in CodexBrain().stream_once(
+                    system_prompt="s", user_prompt="u"):
+                pass  # pragma: no cover - the first step raises
+
+        assert "codex" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_setup_pour_surfaces_the_named_gap(self, monkeypatch):
+        """The transport still raises LLMError - with a message that helps."""
+        import bobi.brain as brain_mod
+        from bobi.brain.codex import CodexBrain
+        from bobi.setup import llm
+
+        monkeypatch.setattr(brain_mod, "get_brain", lambda *a, **k: CodexBrain())
+        monkeypatch.setattr("bobi.runtime_guard.prepare_brain_runtime", lambda: None)
+
+        with pytest.raises(llm.LLMError) as exc:
+            async for _ in llm._sdk_stream(system_prompt="s", user_prompt="u"):
+                pass  # pragma: no cover - the first step raises
+
+        assert "codex" in str(exc.value)
+        assert "AttributeError" not in str(exc.value)

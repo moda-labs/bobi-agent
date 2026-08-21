@@ -720,6 +720,23 @@ this line supersedes it.)
 
 ## Amendments
 
+*(The header's `Last amended:` placeholder predates the amendments below and
+the plan-artifact check is insertion-only, so it stays as written rather than
+being replaced; this line supersedes it. Last amended: **2026-08-20**.)*
+
+- **2026-08-20** (bug fix #1063): the `success:` probe recorded above is
+  superseded. Two of its claims were wrong in production. `bobi agent
+  "${BOBI_AGENT:-$(basename "$BOBI_ROOT")}" otel --help` resolves the agent
+  `run` on the canonical `<home>/agents/<name>/run` layout, so on a live k8s
+  deployment the probe addressed a nonexistent agent, the `requires:` gate
+  failed, and every workflow launch for that team was refused. And `otel
+  --help` does not import `opentelemetry.proto` at all (click renders group
+  help without touching the command bodies), so the probe never proved "the
+  proto import resolves under the CLI's own interpreter" - only that the CLI
+  runs and the group is registered. The agent name now comes from
+  `$BOBI_AGENT`, exported by `config.probe_env` from the one resolver
+  (`paths.agent_name`); the entry guards for it so a missing name is
+  self-diagnosing rather than reported as a missing dependency.
 - **2026-08-05** (create): plan drafted.
 - **2026-08-05** (review): revised in draft after three adversarial lenses
   (red-team, staff engineer, implementer). Eleven must-fix findings folded in;

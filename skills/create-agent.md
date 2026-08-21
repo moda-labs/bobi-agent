@@ -18,7 +18,7 @@ agents/<pack-name>/
 ├── tools/                # Service interaction guides (loaded into all roles)
 │   └── <service>.md
 ├── workflows/            # DAG definitions for multi-step processes
-│   ├── adhoc.yaml        # Always include — open-ended task handler
+│   ├── adhoc.yaml        # Recommended — trigger text for the manager's menu
 │   └── <workflow>.yaml
 ├── monitors/             # Optional: background polling checks
 │   └── defaults.yaml
@@ -108,8 +108,14 @@ auto_dispatch:
   - event: github.issues           # NOT github.issues.assigned
     match:
       action: assigned             # the action is a FIELD, not part of the type
+      assignee: $self              # this deployment's resolved GitHub login
     workflow: issue-lifecycle
 ```
+
+`$self` is a reserved match value resolved from the deployment's own GitHub
+login. For `assignee`, it checks both the single assignee field and membership
+in the adapter's comma-separated `assignees` field. If the login cannot be
+resolved, the rule does not match; it must not dispatch someone else's issue.
 
 The distinction is per source and there is no universal rule: GitHub emits
 `github.<webhook-event>` and carries the action in `fields.action`, while
@@ -226,6 +232,8 @@ trigger: >
   When [condition]. One sentence.
 description: >
   What this workflow does end-to-end.
+period: daily        # optional: hourly/daily/weekly/monthly - one run per
+                     # period, deduped across every dispatch path (#1048)
 
 steps:
   - name: step-name
@@ -372,7 +380,11 @@ both do), carrying the full transcript into the new model's context. A step
 that moves a long conversation onto a pricier model pays for that history in
 input tokens; a step that also changes `agent:` always starts fresh instead.
 
-Always include `adhoc.yaml`:
+Include `adhoc.yaml` so the manager's workflow menu can offer ad-hoc dispatch
+with your team's own trigger wording. Launching `-w adhoc` works even without
+it — the framework carries a built-in one-step definition (#1057) — but the
+built-in never appears in the manager's semantic menu, and a shipped yaml
+overrides it:
 ```yaml
 name: adhoc
 trigger: >

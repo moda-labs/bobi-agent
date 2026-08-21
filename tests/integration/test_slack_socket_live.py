@@ -13,20 +13,22 @@ Run with output visible so the mention instruction can be followed:
 import json
 import os
 import signal
-import socket
 import time
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from bobi.config import Config, save_bubble_state
+from bobi.config import Config
+from bobi.events.state import save_bubble_state
 from bobi.events.server import (
     _post_register,
     ensure_running,
     register_slack_workspaces,
 )
 from bobi.events.signing import signed_request
+
+from .conftest import _free_port
 
 pytestmark = [
     pytest.mark.live,
@@ -40,12 +42,6 @@ pytestmark = [
                "(SLACK_APP_TOKEN, SLACK_BOT_TOKEN)",
     ),
 ]
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _stop_event_server(project) -> None:

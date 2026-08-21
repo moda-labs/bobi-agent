@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from .conftest import _drain
+
 
 def _codex_meets_version_floor() -> bool:
     exe = shutil.which("codex")
@@ -241,18 +243,6 @@ def responses_stub():
         thread.join(timeout=5)
 
 
-async def _drain(session):
-    from bobi.brain import AssistantText, TurnResult
-
-    text, result = "", None
-    async for msg in session.receive_response():
-        if isinstance(msg, AssistantText) and msg.text:
-            text += msg.text
-        elif isinstance(msg, TurnResult):
-            result = msg
-    return text, result
-
-
 @requires_codex_responses_gateway
 @pytest.mark.timeout(120)
 async def test_gateway_openai_session_routes_default_responses_to_stub(
@@ -275,7 +265,8 @@ async def test_gateway_openai_session_routes_default_responses_to_stub(
         system_prompt="Reply exactly STUB-REPLY and stop.",
     )
     try:
-        await session.connect("First turn.")
+        await session.connect()
+        await session.query("First turn.")
         first_text, first_result = await _drain(session)
         await session.query("Second turn.")
         second_text, second_result = await _drain(session)
@@ -327,7 +318,8 @@ async def test_gateway_openai_session_routes_fresh_and_resume_to_stub(
         system_prompt="Reply exactly STUB-REPLY and stop.",
     )
     try:
-        await session.connect("First turn.")
+        await session.connect()
+        await session.query("First turn.")
         first_text, first_result = await _drain(session)
         await session.query("Second turn.")
         second_text, second_result = await _drain(session)

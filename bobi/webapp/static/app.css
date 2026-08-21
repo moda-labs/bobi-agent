@@ -598,16 +598,6 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
 .placeholder .mark.big { color: var(--border-strong); }
 .placeholder p { margin: 0; color: var(--text-secondary); }
 
-/* --- chat --- */
-.chat { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.chat-head {
-  display: flex; align-items: center; gap: 10px;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--border-hairline);
-  background: var(--surface-card);
-  flex: none;
-}
-.chat-name { font-family: var(--font-mono); font-weight: var(--weight-medium); font-size: 14px; }
 .chip {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -617,120 +607,91 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   border-radius: var(--radius-sm);
   padding: 1px 7px;
 }
-.agent-hint { font-family: var(--font-mono); font-size: 12px; color: var(--text-faint); }
+/* composer - the reply box at the foot of the run slab (#987).
 
-/* The transcript slab — the one cool surface in the system, where the machine
-   writes. A document: square-cornered and flat. */
-.slab {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  background: var(--surface-terminal);
-  color: var(--slab-text);
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.msg { max-width: 760px; }
-.msg .who {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--slab-muted);
-  margin-bottom: 4px;
-}
-.msg .body { white-space: pre-wrap; word-wrap: break-word; }
-/* rendered markdown (agent replies) reflows, so drop pre-wrap on those */
-.msg.agent .body { white-space: normal; }
-.msg .body p { margin: 0 0 8px; }
-.msg .body > :last-child { margin-bottom: 0; }
-.msg .body ul, .msg .body ol { margin: 6px 0; padding-left: 20px; }
-.msg .body li { margin: 2px 0; }
-.msg .body li > p { margin: 0; }
-.msg .body strong { font-weight: var(--weight-semibold); color: var(--bobi-paper); }
-.msg .body em { font-style: italic; }
-.msg .body a { color: var(--bobi-acc-bright); text-decoration: underline; }
-.msg .body h3, .msg .body h4, .msg .body h5, .msg .body h6 {
-  font-family: var(--font-display);
-  font-size: 1.0em; font-weight: var(--weight-semibold);
-  letter-spacing: var(--track-tightest);
-  margin: 12px 0 4px; color: var(--bobi-paper);
-}
-.msg .body code {
-  font-family: var(--font-mono); font-size: 0.86em;
-  background: var(--slab-surface); border: 1px solid var(--slab-border);
-  border-radius: var(--radius-sm); padding: 1px 5px; color: var(--bobi-term-ok);
-}
-.msg .body pre {
-  background: var(--slab-surface); border: 1px solid var(--slab-border);
-  border-radius: var(--radius-sm); padding: 10px 12px; overflow-x: auto; margin: 8px 0;
-}
-.msg .body pre code {
-  background: none; border: none; padding: 0; color: var(--slab-text);
-  font-size: 0.86em; white-space: pre;
-}
-.msg .body blockquote {
-  border-left: 2px solid var(--slab-border); margin: 6px 0;
-  padding-left: 10px; color: var(--slab-muted);
-}
-.msg .body hr { border: none; border-top: 1px solid var(--slab-border); margin: 10px 0; }
-.msg.user { align-self: flex-end; text-align: right; }
-.msg.user .who { color: var(--bobi-acc-bright); }
-.msg.user .body { color: var(--bobi-paper); }
-.msg.agent .body { color: var(--slab-text); }
-.msg.error .who { color: var(--bobi-clay); }
-.msg.error .body { color: color-mix(in srgb, var(--bobi-clay) 70%, var(--bobi-paper)); }
-
-.pending .body::after {
-  content: "\258B";
-  color: var(--bobi-acc-bright);
-  animation: blink 1s steps(2, start) infinite;
-}
-@keyframes blink { to { visibility: hidden; } }
-
-/* composer (light chrome — author in daylight) */
+   It sits on the slab's dark terminal surface, so it takes the --slab-*
+   ramp rather than the page's daylight chrome. The typed message joins a
+   transcript rendered in mono, so the field is mono; the note and the
+   button are chrome, and stay sans. */
 .composer {
-  display: flex;
-  gap: 10px;
-  padding: 12px 14px;
-  border-top: 1px solid var(--border-hairline);
-  background: var(--surface-card);
   flex: none;
+  padding: 12px 18px 14px;
+  border-top: 1px solid var(--slab-border);
+  background: var(--slab-surface);
 }
 .composer textarea {
-  flex: 1;
-  resize: none;
-  font-family: var(--font-sans);
-  font-size: 15px;
-  color: var(--text-primary);
-  background: var(--surface-card);
-  border: 1px solid var(--border-strong);
+  display: block;
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--slab-text);
+  background: var(--slab-bg);
+  border: 1px solid var(--slab-border);
   border-radius: var(--radius-md);
   padding: 9px 12px;
-  max-height: 160px;
-  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+  max-height: 180px;
+  transition: border-color var(--dur-fast) var(--ease),
+              box-shadow var(--dur-fast) var(--ease);
 }
-.composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.composer button {
-  font-family: var(--font-sans);
-  font-size: 14.5px;
-  font-weight: var(--weight-medium);
-  letter-spacing: var(--track-button);
-  color: var(--bobi-paper);
-  background: var(--accent);
-  border: none;
-  border-radius: var(--radius-sm);
-  height: 38px;
-  padding: 0 20px;
-  align-self: flex-end;
-  white-space: nowrap;
-  flex: none;
-  cursor: pointer;
-  transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+/* A human gate is state, and state is violet: the rail says this row is
+   waiting on a person, and the note beside the buttons names what for. */
+.composer.gate {
+  border-left: 2px solid var(--slab-accent);
+  padding-left: 16px;
 }
-.composer button:hover:not(:disabled) { opacity: .9; }
-.composer button:active:not(:disabled) { transform: scale(.97); }
-.composer button:disabled { opacity: .45; cursor: default; }
+/* The ended branch is a sentence, not a form - no field, no buttons. */
+.composer.ended > .composer-note { margin: 0; }
+.composer textarea::placeholder { color: var(--slab-muted); }
+/* Focus is one of violet's four meanings, so the ring is the accent. */
+.composer textarea:focus {
+  outline: none;
+  border-color: var(--slab-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--slab-accent) 22%, transparent);
+}
+.composer textarea:disabled { opacity: .55; }
+.composer-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  margin-top: 10px;
+}
+.composer-note {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--slab-muted);
+}
+.composer .btn {
+  background: transparent;
+  border-color: var(--slab-border);
+  color: var(--slab-muted);
+}
+.composer .btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--slab-accent) 12%, transparent);
+  border-color: var(--slab-accent);
+}
+.composer .btn.primary {
+  color: var(--slab-bg);
+  background: var(--slab-accent);
+  border-color: var(--slab-accent);
+}
+.composer .btn.primary:hover:not(:disabled) {
+  opacity: .9;
+  background: var(--slab-accent);
+  border-color: var(--slab-accent);
+}
+.composer-status {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--slab-muted);
+}
+.composer-status.bad {
+  color: color-mix(in srgb, var(--status-failed) 55%, var(--bobi-paper));
+}
 
 @media (max-width: 620px) {
   .sidebar { width: 168px; }
@@ -757,7 +718,6 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
     animation-iteration-count: 1 !important;
     transition-duration: .01ms !important;
   }
-  .pending .body::after { animation: none; }
   .status.starting::before, .status.stopping::before { animation: none; opacity: 1; }
 }
 
@@ -853,6 +813,14 @@ button.attention-row:hover .attention-label { color: var(--text-primary); }
   border-radius: var(--radius-xl); box-shadow: var(--elev-4);
 }
 .pop-card .eyebrow { margin-bottom: 10px; }
+/* The window the card's figures cover. Regular weight is what makes it read
+   as a qualifier rather than a second heading, so the colour does not also
+   have to recede: --text-faint is 3.75:1 here, under AA, and this label
+   changes how every figure below it is read. --text-secondary matches the kv
+   keys it sits above. */
+.pop-card .eyebrow .scope {
+  color: var(--text-secondary); font-weight: var(--weight-regular);
+}
 .agent-page .eyebrow {
   font-family: var(--font-sans); font-size: 13.5px;
   color: var(--text-primary); font-weight: var(--weight-medium);
@@ -1013,10 +981,6 @@ table.runs { width: 100%; border-collapse: collapse; }
 .r-tok { text-align: right; }
 .runs td.r-act { text-align: right; white-space: nowrap; }
 .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
-.row-actions .btn.remind {
-  border-color: var(--status-waiting-edge); background: var(--status-waiting-soft);
-  color: var(--status-waiting);
-}
 .row-actions .btn[disabled] { opacity: .45; cursor: default; }
 .runs-empty { padding: 28px 18px; color: var(--text-secondary); font-size: 14px; text-align: center; }
 .runs-pager {

@@ -7,8 +7,7 @@ from textwrap import dedent
 import pytest
 
 from bobi.config import (Config, ServiceConfig, find_env_var_refs,
-                         find_required_env_vars, load_deployment_state,
-                         load_dotenv, save_deployment_state)
+                         find_required_env_vars, load_dotenv)
 
 
 def test_defaults_when_no_config(tmp_path):
@@ -66,29 +65,6 @@ def test_service_channels_from_env_csv(tmp_path):
         assert slack.channels == ["C0AAA", "C0BBB"]
     finally:
         del os.environ["SLACK_CHANNELS"]
-
-
-def test_deployment_state_roundtrip(tmp_path):
-    save_deployment_state(tmp_path, "sess-a", "dep-123", "moda_key456")
-    state = load_deployment_state(tmp_path, "sess-a")
-
-    assert state["deployment_id"] == "dep-123"
-    assert state["api_key"] == "moda_key456"
-
-
-def test_deployment_state_missing_returns_empty(tmp_path):
-    state = load_deployment_state(tmp_path, "sess-a")
-    assert state == {}
-
-
-def test_deployment_state_is_per_session(tmp_path):
-    """Sessions must never share a deployment — the shared-deployment bug
-    delivered every agent the union of all sessions' subscriptions."""
-    save_deployment_state(tmp_path, "director", "dep-1", "key-1")
-    save_deployment_state(tmp_path, "lead", "dep-2", "key-2")
-
-    assert load_deployment_state(tmp_path, "director")["deployment_id"] == "dep-1"
-    assert load_deployment_state(tmp_path, "lead")["deployment_id"] == "dep-2"
 
 
 # --- agent.yaml ---
@@ -806,6 +782,65 @@ def test_run_requires_checks_command_not_found():
 def test_run_requires_checks_empty():
     from bobi.config import run_requires_checks
     assert run_requires_checks([]) == []
+
+
+def test_run_requires_checks_exports_the_resolved_agent_name(tmp_path,
+                                                             monkeypatch):
+    """The runner resolves the agent name; a probe just reads $BOBI_AGENT.
+
+    Keeping the resolution here is what makes it ONE code path (#1063): every
+    probe that addresses `bobi agent <name> ...` inherits the same answer the
+    entrypoint and `paths.agent_name_for_root` give, rather than each one
+    hand-rolling a `basename` that misreads the `<name>/run` layout.
+    """
+    from bobi.config import RequiresEntry, run_requires_checks
+    monkeypatch.delenv("BOBI_AGENT", raising=False)
+    monkeypatch.delenv("BOBI_INSTANCE", raising=False)
+    run = tmp_path / "home" / "agents" / "eng-team" / "run"
+    run.mkdir(parents=True)
+    seen = tmp_path / "seen"
+    entries = [RequiresEntry(name="probe",
+                             check=f'printenv BOBI_AGENT > "{seen}"')]
+
+    entry, ok, detail = run_requires_checks(entries, root=run)[0]
+
+    assert ok is True, detail
+    assert seen.read_text().strip() == "eng-team"
+
+
+def test_run_requires_checks_marks_an_unresolvable_agent_indeterminate(
+        tmp_path, monkeypatch):
+    """A probe that could not be EVALUATED is not a missing dependency.
+
+    Collapsing the two is what took a live deployment's dispatch down (#1063):
+    a probe that misresolved the agent reported as "otel missing" and the
+    preflight refused every workflow launch. `passed is None` says the check
+    never ran, and names the real cause.
+    """
+    from bobi.config import RequiresEntry, run_requires_checks
+    monkeypatch.delenv("BOBI_AGENT", raising=False)
+    monkeypatch.delenv("BOBI_INSTANCE", raising=False)
+    entries = [RequiresEntry(name="otel",
+                             check='bobi agent "$BOBI_AGENT" otel --help')]
+
+    entry, ok, detail = run_requires_checks(entries, root=Path("/"))[0]
+
+    assert ok is None
+    assert "BOBI_AGENT" in detail
+
+
+def test_run_requires_checks_still_runs_probes_that_need_no_agent(
+        tmp_path, monkeypatch):
+    """An unresolvable agent only stops the probes that actually need one."""
+    from bobi.config import RequiresEntry, run_requires_checks
+    monkeypatch.delenv("BOBI_AGENT", raising=False)
+    monkeypatch.delenv("BOBI_INSTANCE", raising=False)
+    entries = [RequiresEntry(name="gh", check="true"),
+               RequiresEntry(name="missing", check="false")]
+
+    results = run_requires_checks(entries, root=Path("/"))
+
+    assert [ok for _, ok, _ in results] == [True, False]
 
 
 # --- package-file env-ref scanning (scan_* — the not-yet-installed variant) ---

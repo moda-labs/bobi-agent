@@ -46,9 +46,16 @@ Two things hold across the entire run:
 
 Workflows are YAML files. They ship inside an agent team package under
 `workflows/` and resolve at runtime exclusively from the installed pack image at
-`$BOBI_HOME/agents/<name>/run/package/workflows/` (see `triggers.py`). A
-workflow has a name, a human-readable `trigger`, an optional `description`, and
-an ordered list of `steps`:
+`$BOBI_HOME/agents/<name>/run/package/workflows/` (see `triggers.py`). The one
+exception is `adhoc`: since #1057 an ad-hoc task IS a one-step workflow
+execution, so the framework carries a built-in `adhoc` definition in code
+(`triggers.builtin_adhoc_workflow`) that the launch path falls back to when the
+pack ships no `adhoc.yaml`. A shipped `adhoc.yaml` wins, and the manager's
+workflow menu still lists only what the pack ships. A
+workflow has a name, a human-readable `trigger`, an optional `description`, an
+optional `period` (`hourly` / `daily` / `weekly` / `monthly` - one run per
+period across every dispatch path, see **Execution model**), and an ordered
+list of `steps`:
 
 ```yaml
 name: issue-lifecycle
@@ -283,6 +290,16 @@ the step's outputs. Actions are registered in `_NATIVE_ACTIONS` in
     timeout: 120
 ```
 
+A route step's `if:` cannot guard an action step: the engine checks `condition`
+before `action`, so a step carrying both is treated as a route and its action
+never runs. A destructive action therefore carries its own guard rather than
+relying on where it sits in the step list. `cleanup_worktree` is the worked
+example (#1004): it re-reads the PR's merge state from GitHub and deletes
+nothing unless that live read says merged - never the `input.merged` the run
+was launched with, which is the webhook's snapshot and stale by arrival. It
+publishes the verdict it acted on as `merged_live`, and downstream routes key
+off that, so the branch taken cannot disagree with what happened on disk.
+
 ## Variables and templating
 
 Steps reference data with `${{scope.key}}`. Resolution and condition parsing
@@ -311,6 +328,15 @@ quoted string literals, list literals, and `true` / `false`:
     if: "complexity == 'large' and needs_spec != false"
 ```
 
+That flat namespace holds **step outputs only** - handoff fields and native
+action results. `input.*` is NOT in it, so a bare `merged` does not reach
+`input.merged`; reference it as `${{input.merged}}` or route on a step output
+instead. An unresolved bare name is not an error: the parser treats it as a
+string literal, so `if: "merged == true"` quietly compares `"merged"` to
+`"true"` and takes the `else` branch forever. This is what left `pr-closed`'s
+`close-issue` step dead until #1004. When a route never seems to fire, check
+that its names are step outputs.
+
 ## The handoff contract
 
 A prompt step's `handoff` block is the contract between the engine and the
@@ -337,22 +363,79 @@ the step's output scope and feed downstream routing and templating.
    (`wf-<workflow>-<repo>-<run_key>`), create a git worktree if any step
    declares `worktree: true`, and register one `SessionEntry` in the registry
    with status `running`. Emit `agent/workflow.started`.
+
+   The run key is the launch's `--id`. Without one, `launch_agent` derives it
+   from the launch's own dials: workflow, project, role, model, effort and task
+   text (`subagent.derive_run_key`). An identical launch therefore lands on the
+   same session name and is refused by the admission check while the first is
+   active, so duplicate suppression is the default rather than something each
+   caller opts into (#850). A derived key also starts a fresh transcript, and
+   refuses to take over a suspended (`waiting`) run; `--id-random` opts out of
+   the derivation entirely for deliberate parallel fan-out.
+
+   A workflow that declares `period:` (`hourly` / `daily` / `weekly` /
+   `monthly`) owns its run key outright (#1048). Admission derives the key
+   from the workflow name and the current period bucket -
+   `daily-standup-2026-08-10` - and **overrides** any caller `--id` or
+   `--id-random`, so a scheduled tick, a manual catch-up, and an event
+   reaction all land on ONE run identity per period. Buckets use the host's
+   local time, deliberately (monitor `at:` schedules are local); every
+   dispatcher is assumed to share the host clock. The period is scoped per
+   repo, like the session name: two repos served by one installation each
+   get their own run per period.
+
+   The run ledger (below) is then consulted, under a cross-process file
+   lock: a completed entry for the period refuses a relaunch (`--fresh` is
+   the deliberate operator escape hatch to run a period again); a `running`
+   or torn-`resuming` entry blocks only while a live process actually holds
+   the session - a run that died without a terminal status is closed and
+   its entry flipped to `failed`, so a dead run can never block the period.
+   A `waiting` entry DOES hold the period: it is a healthy parked gate, and
+   the refusal says so - it resumes on its event, or the operator closes
+   the run from the console runs view to release the period.
 2. **Seed context.** Build the `VariableContext` with the `input`,
    `requested_by`, and (if used) `worktree` scopes.
-3. **Run the step loop** in `_run_workflow_async`. Walk steps by index.
+3. **Open the run's ledger entry.** Every run gets a `WorkflowRun` record
+   (`bobi/workflow/state.py`) at start, not only the ones that later suspend
+   (#1048). If the previous run under this key **failed** at a checkpoint, the
+   entry is adopted instead: the persisted scopes are restored and the step
+   loop starts at `checkpoint_step`, so a retry resumes where the failure
+   happened rather than replaying completed steps (`fresh` opts out, exactly
+   as it does for the transcript).
+4. **Run the step loop** in `_run_workflow_async`. Walk steps by index.
    Route/action/notify steps execute inline and advance. Prompt steps inject,
-   drain the response, validate the handoff, and capture outputs. Await steps
-   persist and return.
-4. **Terminate honestly.** A `finally` block emits the truthful terminal event,
+   drain the response, validate the handoff, and capture outputs. After each
+   completed prompt/action/notify step the ledger entry is checkpointed - the
+   next step index plus the full variable scopes. Await steps flip the same
+   entry to `waiting` and return.
+5. **Terminate honestly.** A `finally` block emits the truthful terminal event,
    `agent/session.completed` on success or `agent/session.failed` (carrying the
    error) on any failure path, and durably records the matching terminal status
-   in the registry. A suspended run is *not* terminal: it skips this entirely
-   and stays `waiting`.
+   in the registry. The ledger entry is closed the same way - `completed`, or
+   `failed` with its checkpoint kept for the next retry. A suspended run is
+   *not* terminal: it skips this entirely and stays `waiting`.
 
-The session is created once and reused across all prompt steps, so the agent
-keeps full context. The engine drains exactly one turn per prompt
-(`_drain_response`) and saves the returned session ID so a resumed run can pick
-the same conversation back up.
+The brain session opens **lazily, at the first prompt step that executes**, and
+is then reused across all prompt steps, so the agent keeps full context. The
+engine drains exactly one turn per prompt (`_drain_response`, a thin adapter
+over the shared `bobi/brain/turns.py` drain primitive, #1048) and saves the
+returned session ID so a resumed run can pick the same conversation back up. A
+workflow whose reachable steps are all deterministic opens no brain session at
+all.
+
+**`connect()` is never a turn (#1016).** Opening a session delivers no text, so
+no execution point exists before step 0. The launch task is not an instruction
+the agent acts on directly: it reaches the agent as a labelled YAML context
+block (`input.task`, alongside the other scopes) prepended to the **first
+prompt step's** prompt — on a fresh transcript, and on a resumed transcript
+when a new dispatch arrives. The same fold delivers the persisted scopes when a
+mid-run model/agent switch starts a fresh session; no turn is spent on context
+injection anywhere. Before this invariant, the raw task text drained as a full
+tool-enabled agent turn *before* step 0, which is how one catch-up dispatch of
+`daily-standup` published two standups. If a run completes without any prompt
+step executing, the engine says so — it emits
+`agent/workflow.brief_undelivered` rather than letting the launch brief vanish
+silently.
 
 A launch is admitted before any of this runs. `max_launch_depth` bounds how
 deep a chain of runs launching runs can go, and a run launching a named
@@ -365,12 +448,14 @@ launch pipeline, alongside `max_concurrent_agents` and `spend_cap`.
 Await steps make workflows durable across long waits (a human approval, a CI
 build, a downstream PR event) without holding a live process.
 
-**On suspend**, the engine writes a `WorkflowRun` record
-(`bobi/workflow/state.py`) to `$BOBI_HOME/state/workflow/runs/<run_id>.json`. It
-captures everything needed to continue: `workflow_name`, `suspended_at_step`
-(the index of the *next* step), `await_event`, `session_name`, the full
-`variable_scopes`, `repo`, `cwd`, and `run_key`. Writes are atomic (temp file
-then rename) so a process killed mid-write cannot leave a truncated record.
+**On suspend**, the engine flips the run's own ledger entry - the
+`WorkflowRun` record opened at launch (#1048) - to `waiting` at
+`$BOBI_HOME/state/workflow/runs/<run_id>.json`. Suspension is a state of the
+run, not a second record. The entry captures everything needed to continue:
+`workflow_name`, `suspended_at_step` (the index of the *next* step),
+`await_event`, `session_name`, the full `variable_scopes`, `repo`, `cwd`, and
+`run_key`. Writes are atomic (temp file then rename) so a process killed
+mid-write cannot leave a truncated record.
 
 **On resume**, a suspended run is picked up by
 `bobi agent <name> workflows resume <run_id>`. Resume is **manual today**: the
@@ -399,6 +484,46 @@ budget rather than the long-dead launch process's. It then restores the variable
 context, injects the triggering event under the `event` scope, and re-enters
 `_run_workflow_async` at `suspended_at_step`. Execution continues as if the await
 never paused.
+
+### Answering a gate
+
+`suspended_at_step` is the index of the step AFTER the await, so a resume runs
+whatever sits there. That slot is where a workflow reads its answer.
+
+`bobi agent <name> workflows resume <run_id> --verdict approve|reject
+--reply "<words>"` puts the answer into the `event` scope, and a **route step**
+placed immediately after the await branches on it:
+
+```yaml
+  - name: await_approval
+    await: approval
+
+  - name: approval_route
+    if: "${{event.verdict}} == 'approve'"
+    goto: implement
+    else: spec
+```
+
+Two rules make this safe, and both come from behaviour documented elsewhere on
+this page:
+
+1. **The condition tests for the verdict that ADVANCES.** A missing scope or a
+   missing key resolves to `""` with a log warning (see *Variables*), so an
+   unanswered resume - or one whose verdict was dropped in a hop - evaluates
+   false and takes the `else`. Whichever branch is the `else` is the branch an
+   unanswered gate gets, so it has to be the safe one.
+2. **`else` is written out.** A route whose branch is not taken and that has no
+   `else` falls through to `step_idx + 1`, which at this position is the step
+   the gate exists to hold back.
+
+The back edge to a rework step is bounded by the route's `max_iterations`
+(default `DEFAULT_ROUTE_LOOP_MAX_ITERATIONS`), so a gate that keeps being
+rejected exhausts the step rather than cycling forever.
+
+A resumed run that reaches another await step suspends again. The run's ONE
+ledger entry (#1048) is simply back to `waiting` - never `completed`, which
+would report a dormant run as finished, and never a fresh record.
+`workflows resume` says so on the way out and points at `workflows status`.
 
 ## Lifecycle events
 

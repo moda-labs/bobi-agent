@@ -1,17 +1,25 @@
 name: pr-closed
 trigger: When a pull request is closed (merged or unmerged).
 description: >
-  Deterministic post-close cleanup. Removes the worktree and branch
-  associated with the PR's head ref. If merged, also closes the
-  linked issue.
+  Deterministic post-close cleanup. The cleanup step re-reads the PR's merge
+  state from GitHub and removes the worktree and branch only when that live
+  read says the PR merged; a PR closed without merging keeps both, because
+  its head is the only copy of the work. If merged, also closes the linked
+  issue.
 
 steps:
+  # Self-gating (#1004). cleanup_worktree cannot delete without a merge
+  # verdict, and this action reads that verdict live rather than trusting
+  # input.merged - the webhook snapshot, already stale by the time the run
+  # starts. It publishes what it acted on as `merged_live`.
   - name: cleanup
     action: cleanup_worktree
     timeout: 120
 
+  # Routes on the verdict the cleanup step actually used, so the branch below
+  # can never disagree with what happened on disk above.
   - name: route-merged
-    if: "merged == true"
+    if: "merged_live == true"
     goto: close-issue
     else: done
 
@@ -27,4 +35,7 @@ steps:
 
   - name: done
     notify: slack
-    message: "PR #${{ input.pr_number }} closed (merged=${{ input.merged }}). Worktree cleanup complete."
+    message: >-
+      PR #${{ input.pr_number }} closed (merged=${{ cleanup.merged_live }}).
+      Branch ${{ input.head_branch }}: ${{ cleanup.status }}.
+      ${{ cleanup.reason }}

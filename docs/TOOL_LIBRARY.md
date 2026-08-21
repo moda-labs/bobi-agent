@@ -18,7 +18,7 @@ optional:
 | `install` | no | Explicit **pinned** steps (`apt`/`npm`/`run_root`/`run`) - "do exactly this". |
 | `host` | no | A host capability the container cannot grant itself (a kernel sysctl, a device). Runtime wiring, never baked. |
 | `mcp` | no | An MCP server's connection spec (the SDK-native `{name: spec}` shape), rendered into each brain's config and verified by an `initialize` handshake. |
-| `why` / `fix` | no | Documentation + a runtime repair hint carried to the `requires:` doctor surface. |
+| `why` / `fix` | no | Documentation + a runtime repair hint carried to the `requires:` doctor surface. Standing context, shown *alongside* what a check reported, never instead of it. |
 
 ## Declaring a dependency on a team
 
@@ -117,7 +117,14 @@ inline (an explicit team `requires:` / `build:` / `host:` wins).
 
 - **`requires:`** - a `{name, why, check: success, fix}` entry (unless the team
   already declares that name), so the runtime dispatch gate and `bobi agent
-  <name> doctor` verify it.
+  <name> doctor` verify it. A failed check blocks the launch and is reported
+  three ways, all carrying the check's own detail (a timeout, a missing
+  command, its stderr): the raised error names each failing entry with that
+  detail, every failure is logged at ERROR with its `why` and `fix`, and a
+  Slack alert fires when the team has a `channels:`-configured slack service.
+  Alerting is a bonus, never the record - `channels:` also scopes event
+  subscription, so it is not a field an operator can flip just for
+  diagnosability.
 - **`build:`** - `install` steps accreted + de-duped via the one build merge.
 - **`tools/<name>.md`** - the guide, unless a team layer ships that file in
   this compose run. "Ships it" is read from compose's provenance, not from the
@@ -211,6 +218,24 @@ requires:
 `success` may be **prose** (an agent judges it, as here) or **shell** (run
 directly). Use prose when the check is "the agent can actually do X"; use shell
 when a command exit code settles it.
+
+#### A shell `success` that addresses the CLI reads `$BOBI_AGENT`
+
+A check that has to call an agent-scoped command (`bobi agent <name> otel check`) gets the name from `$BOBI_AGENT`, which the runner exports from the one resolver: `paths.agent_name`, i.e. an explicit `BOBI_AGENT`/`BOBI_INSTANCE`, else the run root's layout.
+
+Never derive it in the check.
+`basename "$BOBI_ROOT"` reads `run` on the canonical `<home>/agents/<name>/run` layout every container deployment uses, so the check addresses an agent that does not exist.
+Because a failed check gates dispatch, that one line refused **every** workflow launch for a live team (#1063).
+
+The name is absent in tiers that build no probe environment, such as the image build's `verify: requires`.
+Guard for it, so a missing name is self-diagnosing rather than reported as a missing dependency:
+
+```yaml
+success: '[ -n "${BOBI_AGENT:-}" ] || { echo "BOBI_AGENT is not set" >&2; exit 1; }; bobi agent "$BOBI_AGENT" otel --help'
+```
+
+At the dispatch gate, a check that reads `$BOBI_AGENT` with no name resolved is **indeterminate**, not failed: it is reported at ERROR and the launch proceeds.
+A probe the harness could not evaluate is not evidence the dependency is missing, and treating it as such is what took dispatch down.
 
 ### 3. A non-CLI asset (font, data file, ...)
 
@@ -469,8 +494,9 @@ tarball.
 
 ## Where the code lives
 
-- `bobi/tool_library.py` - the dependency model, catalog loader, `expand()`, and
-  `dependency_list_hash`.
+- `bobi/tool_library/__init__.py` - the dependency model, catalog loader,
+  `expand()`, and `dependency_list_hash`. The catalog entry directories are
+  package data sitting beside it in the same package.
 - `bobi/dep_bootstrap.py` - the bootstrap-agent harness, the `render_team_deps`
   build seam, and the CLI (`python -m bobi.dep_bootstrap <team> --render`).
 - `bobi/local_deps.py` - local materialization (`install --with-deps`): plan /

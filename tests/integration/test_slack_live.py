@@ -27,7 +27,6 @@ import json
 import os
 import re
 import signal
-import socket
 import time
 from types import SimpleNamespace
 
@@ -35,10 +34,12 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-from bobi.config import save_bubble_state
+from bobi.events.state import save_bubble_state
 from bobi.events.gateway import channels_history, channels_send
 from bobi.events.server import _post_register, ensure_running
 from bobi.events.signing import signed_request
+
+from .conftest import _free_port
 
 pytestmark = [
     pytest.mark.live,
@@ -49,12 +50,6 @@ pytestmark = [
         reason="live Slack not configured (SLACK_BOT_TOKEN, SLACK_TEST_CHANNEL)",
     ),
 ]
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _wait_for(predicate, timeout: float = 15.0, interval: float = 1.0):
