@@ -22,6 +22,7 @@ from bobi.monitors import run_records
 from bobi.monitors.run_records import FAILED as MONITOR_FAILED
 from bobi.monitors.run_records import NOTIFIED, QUIET, MonitorRun
 from bobi.webapp import server
+from bobi.webapp import runs as runs_model
 from bobi.webapp.runs import AWAITING_ACTION_AFTER_SECONDS, build_runs
 
 TOKEN = "runs-token-123"
@@ -571,3 +572,84 @@ class TestLedgerRowContent:
         # Asserting both directions: counted once, and not zero times.
         assert rows["workflow:wf-new"]["tokens"] == 1000
         assert rows["workflow:wf-old"]["tokens"] == 0
+
+
+class TestUsageSummary:
+    def test_folds_terminal_jobs_completed_inside_the_window(self, bobi_install):
+        _session(
+            bobi_install,
+            "wf-recent",
+            terminal_at=NOW - 300,
+            last_activity=NOW - 300,
+            model_usage={"anthropic:sonnet-5": {
+                "cost_usd": 1.25,
+                "input_tokens": 1200,
+                "cached_input_tokens": 200,
+                "output_tokens": 300,
+            }},
+            total_cost_usd=1.25,
+        )
+        _workflow(
+            bobi_install,
+            "wf-recent",
+            session_name="wf-recent",
+            completed_at=NOW - 300,
+            aware=True,
+        )
+        _session(
+            bobi_install,
+            "wf-failed",
+            status="failed",
+            terminal_at=NOW - 600,
+            last_activity=NOW - 600,
+            model_usage={"openai:gpt-5.6-luna": {
+                "input_tokens": 400,
+                "cached_input_tokens": 100,
+                "output_tokens": 100,
+            }},
+        )
+        _workflow(
+            bobi_install,
+            "wf-failed",
+            status="failed",
+            session_name="wf-failed",
+            completed_at=NOW - 600,
+            aware=True,
+        )
+        _workflow(
+            bobi_install,
+            "wf-old",
+            started_at=NOW - 5 * 86400,
+            completed_at=NOW - 4 * 86400,
+            aware=True,
+        )
+        _workflow(
+            bobi_install,
+            "wf-running",
+            status="running",
+            completed_at=0,
+            aware=True,
+        )
+
+        summary = runs_model.build_usage_summary(
+            bobi_install.repo_path,
+            manager_name=MANAGER,
+            window_seconds=3 * 86400,
+            now=NOW,
+        )
+
+        assert summary["jobs"] == {
+            "total": 2,
+            "completed": 1,
+            "failed": 1,
+            "closed": 0,
+        }
+        assert summary["tokens"] == {
+            "input": 1600,
+            "cached_input": 300,
+            "output": 400,
+            "total": 2000,
+        }
+        assert summary["cost_usd"] == 1.25
+        assert summary["estimated_cost_usd"] > 0
+        assert summary["window"]["seconds"] == 3 * 86400

@@ -25,13 +25,14 @@ log = logging.getLogger(__name__)
 # container this ships as bundled source with no installed distribution, so an
 # env stamp (set by the image build) or this literal is the source of truth.
 #
-# 0.2.0 adds the single-agent view's six commands (runs / overview /
+# 0.3.0 adds the rolling usage command used by the fleet MCP summary.
+# 0.2.0 added the single-agent view's six commands (runs / overview /
 # run_details / resume_run / remind_run / close_run) and the additive `detail`
 # arg on `transcript`. Minor, because the change is purely additive per
 # docs/ADMIN_PROTOCOL.md's compatibility promise - and readable by a consumer,
 # which is the point: an instance still on 0.1.0 drops those verbs with no
 # reply, and this is how the runtime tells "too old" from "not answering".
-SUPERVISOR_VERSION = "0.2.0"
+SUPERVISOR_VERSION = "0.3.0"
 
 
 def _iso(now: float) -> str:
