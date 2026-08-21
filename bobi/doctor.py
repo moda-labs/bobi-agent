@@ -243,10 +243,19 @@ def _check_package_requires() -> list[CheckResult]:
         return []
 
     results = []
-    for entry, ok, detail in run_requires_checks(cfg.requires):
+    for entry, ok, detail in run_requires_checks(cfg.requires, root=root):
         if ok:
             results.append(CheckResult(
                 f"Requires: {entry.name}", ok=True, detail="healthy"))
+        elif ok is None:
+            # The check never ran, so `why`/`fix` would send the operator after
+            # the wrong thing: the tool may well be installed. Report the
+            # environment fault itself; dispatch does not gate on this (#1063).
+            results.append(CheckResult(
+                f"Requires: {entry.name}", ok=False,
+                detail=f"could not be evaluated: {requires_detail(detail)}",
+                hint="Dispatch is not blocked by this; the dependency is "
+                     "unverified until the check can run."))
         else:
             # `why` is standing context, never a substitute for what actually
             # failed - doctor is where a blocked dispatch sends the operator,

@@ -219,6 +219,24 @@ requires:
 directly). Use prose when the check is "the agent can actually do X"; use shell
 when a command exit code settles it.
 
+#### A shell `success` that addresses the CLI reads `$BOBI_AGENT`
+
+A check that has to call an agent-scoped command (`bobi agent <name> otel check`) gets the name from `$BOBI_AGENT`, which the runner exports from the one resolver: `paths.agent_name`, i.e. an explicit `BOBI_AGENT`/`BOBI_INSTANCE`, else the run root's layout.
+
+Never derive it in the check.
+`basename "$BOBI_ROOT"` reads `run` on the canonical `<home>/agents/<name>/run` layout every container deployment uses, so the check addresses an agent that does not exist.
+Because a failed check gates dispatch, that one line refused **every** workflow launch for a live team (#1063).
+
+The name is absent in tiers that build no probe environment, such as the image build's `verify: requires`.
+Guard for it, so a missing name is self-diagnosing rather than reported as a missing dependency:
+
+```yaml
+success: '[ -n "${BOBI_AGENT:-}" ] || { echo "BOBI_AGENT is not set" >&2; exit 1; }; bobi agent "$BOBI_AGENT" otel --help'
+```
+
+At the dispatch gate, a check that reads `$BOBI_AGENT` with no name resolved is **indeterminate**, not failed: it is reported at ERROR and the launch proceeds.
+A probe the harness could not evaluate is not evidence the dependency is missing, and treating it as such is what took dispatch down.
+
 ### 3. A non-CLI asset (font, data file, ...)
 
 A dependency is anything with a verifiable `success`, not just CLIs.

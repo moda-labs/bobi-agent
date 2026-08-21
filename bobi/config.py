@@ -320,22 +320,74 @@ class RequiresEntry:
     fix: str = ""
 
 
+def probe_env(root: Path | None = None) -> dict[str, str]:
+    """The environment a `requires:`/`success:` probe is evaluated in.
+
+    A probe that has to address an agent-scoped command writes
+    `bobi agent "$BOBI_AGENT" ...` and reads the name from here, so the
+    resolution lives in ONE place (`paths.agent_name`) rather than once per
+    probe. The otel entry used to derive it inline with
+    `basename "$BOBI_ROOT"`, which reads `run` on the canonical
+    `<home>/agents/<name>/run` layout and addressed an agent that does not
+    exist (#1063).
+
+    ``BOBI_AGENT`` is left unset when no name resolves: an empty value would be
+    indistinguishable from a real selection, and probes that need one are
+    reported as indeterminate rather than run against a name we invented.
+    """
+    from bobi import paths
+
+    env = dict(os.environ)
+    name = paths.agent_name(root, env=env)
+    if name:
+        env[paths.AGENT_ENV] = name
+    else:
+        env.pop(paths.AGENT_ENV, None)
+    return env
+
+
 def run_requires_checks(
     requires: list[RequiresEntry],
     timeout: float = 10,
-) -> list[tuple[RequiresEntry, bool, str]]:
+    root: Path | None = None,
+) -> list[tuple[RequiresEntry, bool | None, str]]:
     """Run each requires check command and return (entry, passed, detail).
 
-    Shared runner used by both doctor and dispatch-time gate.
+    Shared runner used by both doctor and dispatch-time gate. Probes run in
+    `probe_env(root)`, so any of them can address `bobi agent "$BOBI_AGENT"`.
+
+    ``passed`` is tri-state, and callers must not collapse it to a bool:
+
+      * ``True``  - the check ran and the dependency is satisfied.
+      * ``False`` - the check ran and the dependency is not satisfied.
+      * ``None``  - the check could not be evaluated AT ALL, because the
+        environment it needs is unresolvable. This is a fault in the harness,
+        not evidence about the dependency. Reporting the two identically is
+        what turned one misresolved otel probe into a total dispatch outage
+        (#1063): every workflow launch for the team was refused, with only a
+        skipped-launch log line to show for it.
+
+    Only a probe that actually reads ``$BOBI_AGENT`` is held back on an
+    unresolvable name; the rest run as always.
     """
     import subprocess
 
-    results: list[tuple[RequiresEntry, bool, str]] = []
+    from bobi.paths import AGENT_ENV
+
+    env = probe_env(root)
+    agent_unresolved = AGENT_ENV not in env
+
+    results: list[tuple[RequiresEntry, bool | None, str]] = []
     for entry in requires:
+        if agent_unresolved and AGENT_ENV in entry.check:
+            results.append((entry, None, (
+                f"check reads ${AGENT_ENV}, which could not be resolved from "
+                f"the runtime root; set {AGENT_ENV} for this deployment")))
+            continue
         try:
             proc = subprocess.run(
                 entry.check, shell=True, timeout=timeout,
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=env,
             )
             if proc.returncode == 0:
                 results.append((entry, True, "healthy"))

@@ -785,6 +785,34 @@ class TestCheckPackageRequires:
         assert results[0].ok
         assert "good-dep" in results[0].name
 
+    def test_check_that_could_not_run_is_reported_as_such(self, tmp_path,
+                                                          monkeypatch):
+        """An unevaluable check reads as an environment fault, not a miss.
+
+        `why`/`fix` would send the operator to install a tool that may already
+        be there; the real cause is that the probe never ran (#1063). Doctor
+        also states that dispatch is not gated on it, since it is not.
+        """
+        monkeypatch.delenv("BOBI_AGENT", raising=False)
+        monkeypatch.delenv("BOBI_INSTANCE", raising=False)
+        self._write_config(tmp_path, """\
+              - name: otel
+                check: 'bobi agent "$BOBI_AGENT" otel --help'
+                why: "telemetry"
+                fix: "pip install --upgrade bobi" """)
+        # The real runner, with the one thing it needs unresolvable.
+        with patch("bobi.doctor.bound_root", return_value=tmp_path), \
+                patch("bobi.paths.agent_name", return_value=""):
+            from bobi.doctor import _check_package_requires
+            results = _check_package_requires()
+        assert len(results) == 1
+        assert not results[0].ok
+        assert "could not be evaluated" in results[0].detail
+        assert "$BOBI_AGENT" in results[0].detail
+        # Not the install hint: the tool is not what failed here.
+        assert "pip install" not in results[0].hint
+        assert "not blocked" in results[0].hint
+
     def test_check_fails(self, tmp_path):
         self._write_config(tmp_path, """\
               - name: broken-dep

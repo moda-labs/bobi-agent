@@ -425,6 +425,88 @@ class TestRequiresFailureAttribution:
         assert "gstack: no detail" in msg
 
 
+class TestRequiresIndeterminate:
+    """A check that could not RUN must not read as a missing dependency (#1063).
+
+    An otel probe that misresolved the agent name reported exactly like an
+    absent tool, and the preflight refused every launch for that team: a
+    total, silent dispatch outage whose only trace was a skipped-launch line.
+    An indeterminate check (`passed is None`) is a fault in the harness, not
+    evidence about the dependency, so it is reported loudly and does not block.
+    """
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path):
+        _write_agent_yaml(tmp_path)
+        paths.bind_root(tmp_path)
+        yield
+        paths.bind_root(None)
+
+    @staticmethod
+    def _results(*specs):
+        """Build check_requires() output: (entry, passed, detail) tuples."""
+        from bobi.config import RequiresEntry
+        return [
+            (RequiresEntry(name=name, check='bobi agent "$BOBI_AGENT" x',
+                           why=why, fix=fix), passed, detail)
+            for name, passed, detail, why, fix in specs
+        ]
+
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_indeterminate_check_does_not_block_dispatch(self, mock_launch,
+                                                         mock_reg, tmp_path):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        results = self._results(
+            ("otel", None, "probe needs $BOBI_AGENT; unresolvable", "", ""))
+        with patch("bobi.subagent.check_requires", return_value=results):
+            launch_agent(task="Fix #1", cwd=str(tmp_path),
+                         workflow_name="adhoc")
+        mock_launch.assert_called_once()
+
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_indeterminate_check_is_reported_at_error(self, mock_launch,
+                                                      mock_reg, tmp_path,
+                                                      caplog):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        results = self._results(
+            ("otel", None, "probe needs $BOBI_AGENT; unresolvable", "", ""))
+        with caplog.at_level(logging.ERROR, logger="bobi.subagent"):
+            with patch("bobi.subagent.check_requires", return_value=results):
+                launch_agent(task="Fix #1", cwd=str(tmp_path),
+                             workflow_name="adhoc")
+        errors = [r.getMessage() for r in caplog.records
+                  if r.levelno >= logging.ERROR]
+        assert any("otel" in m and "unresolvable" in m for m in errors), errors
+        # Failing open is not the same as passing: the line must not claim the
+        # dependency is healthy, and must name the check that went unverified.
+        assert any("could not be evaluated" in m for m in errors), errors
+
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_a_real_failure_alongside_it_still_blocks(self, mock_launch,
+                                                     mock_reg, tmp_path):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+        results = self._results(
+            ("otel", None, "probe needs $BOBI_AGENT; unresolvable", "", ""),
+            ("gh", False, "check command failed: [Errno 2] gh", "", ""),
+        )
+        with patch("bobi.subagent.check_requires", return_value=results):
+            with pytest.raises(RuntimeError) as exc:
+                launch_agent(task="Fix #1", cwd=str(tmp_path),
+                             workflow_name="adhoc")
+        msg = str(exc.value)
+        assert "gh: check command failed" in msg
+        # The indeterminate one is not evidence of absence; it stays out of the
+        # blocking summary so the operator chases the check that really failed.
+        assert "otel" not in msg
+        mock_launch.assert_not_called()
+
+
 class TestLaunchAgent:
     """Test that launch_agent launches a detached subprocess."""
 
