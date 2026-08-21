@@ -288,6 +288,36 @@ default `moda-labs/bobi-agent`; Bobi never infers a destination from the
 current git remote. Authentication uses the configured GitHub service token,
 then `GITHUB_TOKEN`, `GH_TOKEN`, or the local `gh` auth store.
 
+Every filing searches the destination repo for an existing report first and
+comments on the match instead of opening a duplicate. Pass `--no-dedupe` to
+force a new issue. When the search itself fails, an interactive filing warns and
+proceeds so a person's report is not lost to a rate limit.
+
+### Self-diagnose a framework bug
+
+When Bobi itself misbehaves during normal operation, an agent root-causes it and
+files the finding through the same command:
+
+```bash
+bobi feedback rca --error "one line: what broke"   # prints the procedure
+bobi feedback bug --rca --title "..." --body-file report.md --json
+```
+
+`--rca` marks a filing as machine-generated, which changes three things: the
+title and body are clamped to 120 and 1200 characters so a report stays short
+and clear, deduplication is mandatory (a failed search aborts the filing rather
+than opening a blind duplicate), and no failure is fatal, so an RCA can never
+take down the task that triggered it.
+
+Two environment variables control it:
+
+| Variable | Effect |
+|---|---|
+| `BOBI_FRAMEWORK_RCA=off` | Operator off switch. `bobi feedback rca` prints no procedure and `--rca` files nothing, both before any analysis starts. |
+| `BOBI_FRAMEWORK_RCA_ACTIVE=1` | Set on the RCA sub-agent's own environment so it cannot open an RCA on its own failure. It can still file what it found. |
+
+`BOBI_GITHUB_API_URL` overrides the REST base for a GitHub Enterprise host.
+
 ```bash
 # Create a new Bobi Agent interactively
 bobi setup support

@@ -255,18 +255,33 @@ def _feedback_body(body: str | None, body_file) -> str:
     return value
 
 
-def _run_feedback(kind, title, body, body_file, repo, labels, json_output, dry_run):
+def _run_feedback(
+    kind, title, body, body_file, repo, labels, json_output, dry_run,
+    dedupe=True, rca=False,
+):
     from bobi.config import Config
     from bobi.feedback import (
+        MAX_RCA_BODY_CHARS,
+        MAX_TITLE_CHARS,
         FeedbackError,
         build_context,
         build_issue_body,
-        create_github_issue,
+        clamp_text,
         load_feedback_config,
+        rca_enabled,
         resolve_destination,
         resolve_token,
+        submit_feedback,
     )
 
+    # The operator switch is honored before any RCA work starts, filing
+    # included: an off switch that still writes to the tracker is not one.
+    if rca and not rca_enabled():
+        _echo_feedback_status(
+            json_output, "disabled",
+            "Framework bug RCA is disabled (BOBI_FRAMEWORK_RCA=off); nothing filed.",
+        )
+        return
     if not title.strip():
         raise click.UsageError("--title must not be empty.")
     try:
@@ -276,11 +291,11 @@ def _run_feedback(kind, title, body, body_file, repo, labels, json_output, dry_r
         destination = resolve_destination(
             repo, os.environ.get("BOBI_FEEDBACK_REPO"), feedback_config,
         )
-        issue_body = build_issue_body(
-            kind,
-            _feedback_body(body, body_file),
-            build_context(project_path, config, __version__),
-        )
+        context = build_context(project_path, config, __version__)
+        raw_body = _feedback_body(body, body_file)
+        if rca:
+            title = clamp_text(title, MAX_TITLE_CHARS)
+            raw_body = clamp_text(raw_body, MAX_RCA_BODY_CHARS)
         issue_labels = list(dict.fromkeys([
             *feedback_config.labels_for(kind), *labels,
         ]))
@@ -290,64 +305,139 @@ def _run_feedback(kind, title, body, body_file, repo, labels, json_output, dry_r
                 "repo": destination,
                 "kind": kind,
                 "title": title,
-                "body": issue_body,
+                "body": build_issue_body(kind, raw_body, context),
             }
             if json_output:
                 click.echo(json.dumps(result))
             else:
+                # "File", not "create": a dry run sends nothing, so it cannot
+                # know whether the real call would open an issue or comment on
+                # an existing one.
                 click.echo(
-                    f"Would create {kind} issue in {destination}: {title}\n\n"
-                    f"{issue_body}"
+                    f"Would file this {kind} in {destination}: {title}\n\n"
+                    f"{result['body']}"
                 )
             return
-        result = create_github_issue(
+        result = submit_feedback(
             destination,
             kind,
             title,
-            issue_body,
+            raw_body,
             issue_labels,
+            context,
             token=resolve_token(config.credential("github", "token")),
+            dedupe=dedupe,
+            dedupe_required=rca,
         )
     except FeedbackError as exc:
         if json_output:
             click.echo(json.dumps({"error": exc.code, "message": exc.message}))
         else:
             click.echo(f"Error: {exc.message}", err=True)
-        raise click.exceptions.Exit(1)
+        # An RCA is a bystander to the task that triggered it. Failing to file
+        # must never take that task down with it, so the diagnosis path reports
+        # the failure and exits clean.
+        raise click.exceptions.Exit(0 if rca else 1)
+    if result.warning:
+        click.echo(result.warning, err=True)
     output = {
+        "action": result.action,
         "url": result.url,
         "number": result.number,
         "repo": result.repo,
         "kind": result.kind,
         "title": result.title,
     }
-    click.echo(json.dumps(output) if json_output else result.url)
+    if result.comment_url:
+        output["comment_url"] = result.comment_url
+    click.echo(
+        json.dumps(output) if json_output else (result.comment_url or result.url)
+    )
+
+
+def _echo_feedback_status(json_output, status, message):
+    """Report a no-op outcome without opening an issue, and exit clean."""
+    if json_output:
+        click.echo(json.dumps({"action": "skipped", "status": status}))
+    else:
+        click.echo(message, err=True)
+
+
+# Shared so `bug` and `feature` cannot drift apart: an option added to one and
+# forgotten on the other is the failure mode this list exists to prevent.
+_FEEDBACK_OPTIONS = [
+    click.option("--title", required=True),
+    click.option("--body"),
+    click.option("--body-file", "body_file", "-F", type=click.File("r")),
+    click.option("--repo"),
+    click.option("--label", "labels", multiple=True),
+    click.option("--json", "json_output", is_flag=True),
+    click.option("--dry-run", is_flag=True),
+    click.option(
+        "--dedupe/--no-dedupe", default=True,
+        help="Comment on an existing matching issue instead of opening a duplicate.",
+    ),
+]
+
+
+def _feedback_options(command):
+    for option in reversed(_FEEDBACK_OPTIONS):
+        command = option(command)
+    return command
 
 
 @feedback.command("bug")
-@click.option("--title", required=True)
-@click.option("--body")
-@click.option("--body-file", "body_file", "-F", type=click.File("r"))
-@click.option("--repo")
-@click.option("--label", "labels", multiple=True)
-@click.option("--json", "json_output", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-def feedback_bug(title, body, body_file, repo, labels, json_output, dry_run):
+@_feedback_options
+@click.option(
+    "--rca", is_flag=True,
+    help="File as a framework-bug RCA: short-form limits, dedupe required, "
+         "never fatal to the caller.",
+)
+def feedback_bug(title, body, body_file, repo, labels, json_output, dry_run,
+                 dedupe, rca):
     """File a bug report as a GitHub issue."""
-    _run_feedback("bug", title, body, body_file, repo, labels, json_output, dry_run)
+    _run_feedback("bug", title, body, body_file, repo, labels, json_output,
+                  dry_run, dedupe=dedupe, rca=rca)
 
 
 @feedback.command("feature")
-@click.option("--title", required=True)
-@click.option("--body")
-@click.option("--body-file", "body_file", "-F", type=click.File("r"))
-@click.option("--repo")
-@click.option("--label", "labels", multiple=True)
-@click.option("--json", "json_output", is_flag=True)
-@click.option("--dry-run", is_flag=True)
-def feedback_feature(title, body, body_file, repo, labels, json_output, dry_run):
+@_feedback_options
+def feedback_feature(title, body, body_file, repo, labels, json_output, dry_run,
+                     dedupe):
     """File a feature request as a GitHub issue."""
-    _run_feedback("feature", title, body, body_file, repo, labels, json_output, dry_run)
+    _run_feedback("feature", title, body, body_file, repo, labels, json_output,
+                  dry_run, dedupe=dedupe)
+
+
+@feedback.command("rca")
+@click.option("--error", default="", help="One line: what broke.")
+def feedback_rca(error):
+    """Print the root-cause procedure for a suspected bug in Bobi itself."""
+    from bobi.feedback import (
+        FeedbackError,
+        rca_enabled,
+        rca_guide,
+        rca_in_progress,
+    )
+
+    if not rca_enabled():
+        click.echo(
+            "Framework bug RCA is disabled (BOBI_FRAMEWORK_RCA=off). "
+            "Carry on with your task and file nothing.", err=True,
+        )
+        return
+    if rca_in_progress():
+        click.echo(
+            "Already inside a framework bug RCA. Do not analyze an RCA "
+            "failure; report it in one line and stop.", err=True,
+        )
+        return
+    try:
+        click.echo(rca_guide(error))
+    except FeedbackError as exc:
+        # Nothing about a missing prompt file justifies breaking the caller's
+        # actual work, so this path stays non-fatal like the rest of RCA.
+        click.echo(f"Error: {exc.message}", err=True)
 
 
 @main.group()
