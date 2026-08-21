@@ -138,15 +138,22 @@ therefore runs untrusted-author code against your credentials.
 - The installed `run/package/` image is a frozen build artifact: regenerated
   verbatim on every install, never hand-edited. `bobi agent <name> doctor` flags
   drift against the install manifest.
-- Bobi makes Bobi-owned runtime package roots read-only before handing control to
-  an agent brain. Agents keep read/search access and keep existing execute bits
-  for packaged scripts, while assigned repos, `run/workspace/`, `run/state/`,
-  logs, and handoffs stay writable. The default local backend is POSIX `chmod`:
-  it catches accidental writes from Claude, Codex, gateway-backed Claude, MCP
-  tools, and future brains through the shared launch boundary, but it is not a
-  hard sandbox when the agent process owns the files because the same UID can
-  deliberately restore write bits. Managed deployments that need a stronger
-  boundary should use read-only mounts or split ownership.
+- Bobi protects runtime package roots and framework integrity before handing
+  control to an agent brain:
+  - **Team packages at rest (`run/package/`):** Locked read-only via POSIX
+    `chmod` (`0o555`/`0o444`) with an atomic mutable context for managed installs.
+  - **Framework package launch gate:** Before each brain session, subagent
+    launch, or workflow step starts, Bobi runs a cryptographic File Integrity
+    Monitoring (FIM) check against the distribution's PEP 376 `RECORD` metadata.
+    If any framework file is missing, unreadable, or has a mismatched SHA-256
+    hash, the runtime fails closed immediately and refuses to launch.
+  - **In-session upgrades:** During a session, filesystem permissions on the
+    framework package remain standard (`0644`/`0755`) so standard package managers
+    (`uv tool upgrade bobi`, `pipx upgrade`, `pip`) can perform upgrades without
+    permission conflicts. Note that FIM is a launch-time gate against RECORD
+    rather than live in-process syscall interception; managed deployments that
+    require a hard in-session write boundary should use read-only container
+    mounts or split OS user ownership.
 
 ## Deployed instances
 
