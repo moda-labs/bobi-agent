@@ -55,7 +55,13 @@ class TestEndToEndEventFlow:
 
         if not ready:
             content = log_file.read_text()[log_pos:] if log_file.exists() else "(no log)"
-            pytest.skip(f"Stack did not become ready: {content[-300:]}")
+            # fail, not skip: this file and test_manager_lifecycle are the
+            # suite's only proof the drain loop starts; a skip turns a boot
+            # regression into green CI (D012).
+            pytest.fail(
+                "Stack did not become ready (needs Node 20 + `npm ci` in "
+                f"event-server/ for the drain loop to start): {content[-300:]}"
+            )
 
         self._log_file = log_file
         self._log_pos = log_file.stat().st_size

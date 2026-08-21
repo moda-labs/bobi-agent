@@ -12,11 +12,12 @@ import hashlib
 import json
 import logging
 import re
-import time
 from collections.abc import Callable
 from pathlib import Path
 
 import apsw
+
+from bobi.timeutil import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -29,10 +30,6 @@ MIN_CHUNK_CHARS = 100
 def _kb_dir() -> Path:
     from bobi import paths
     return paths.state_dir() / "kb"
-
-
-def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 # ---------------------------------------------------------------------------
@@ -123,9 +120,15 @@ def _chunk_text(text: str, max_chars: int = MAX_CHUNK_CHARS,
 # ---------------------------------------------------------------------------
 
 def _fts_query(query: str) -> str:
-    tokens = query.split()
-    quoted = [f'"{t}"' for t in tokens if t]
-    return " OR ".join(quoted)
+    """Wrap each whitespace token as an FTS5 phrase.
+
+    A '"' inside a phrase is escaped by DOUBLING it, so a token carrying an
+    odd number of them (`5"`) has to be escaped rather than wrapped — plain
+    wrapping yields `"5""` and apsw raises 'unterminated string' out of
+    `bobi kb search` / `bobi recall-memory` (D043).
+    """
+    return " OR ".join('"' + t.replace('"', '""') + '"'
+                       for t in query.split() if t)
 
 
 # ---------------------------------------------------------------------------
@@ -170,14 +173,6 @@ class KBStore:
         if not self._db_path.exists():
             raise FileNotFoundError(f"KB '{name}' does not exist at {self._db_path}")
         self._conn: apsw.Connection | None = None
-
-    @staticmethod
-    def kb_dir() -> Path:
-        return _kb_dir()
-
-    @staticmethod
-    def db_path_for(name: str) -> Path:
-        return _kb_dir() / f"{name}.db"
 
     def _connect(self) -> apsw.Connection:
         """Open the connection lazily and reuse it for the store's lifetime."""
@@ -313,7 +308,7 @@ class KBStore:
         if not chunks:
             return []
 
-        now = _now()
+        now = now_iso()
         meta_json = json.dumps(metadata) if metadata else None
         source_hash = hashlib.sha256(text.encode()).hexdigest()
 
@@ -507,6 +502,31 @@ class KBStore:
         with conn:
             return self._remove_source_entries(conn, source)
 
+    def source_index_complete(self, source: str, source_hash: str,
+                              content: str) -> bool:
+        """Is *content* fully indexed under (*source*, *source_hash*)?
+
+        "Fully" means every chunk this store would produce for *content* has
+        both an entry row AND a vector row — a partially-embedded source is
+        stale, not present. The chunking rule and the schema both belong to
+        this store, so the question is answered here rather than by a caller
+        reaching for ``_connect``/``_fetchone``/``_chunk_text``.
+        """
+        counts = _fetchone(
+            self._connect(),
+            """SELECT COUNT(*) AS entry_count,
+                      COUNT(v.entry_id) AS vector_count
+               FROM entries
+               LEFT JOIN entries_vec v ON v.entry_id = entries.id
+               WHERE source = ? AND source_hash = ?""",
+            (source, source_hash),
+        ) or {}
+        expected = len(_chunk_text(content))
+        return (
+            int(counts.get("entry_count", 0) or 0) == expected
+            and int(counts.get("vector_count", 0) or 0) == expected
+        )
+
     def delete(self) -> None:
         self.close()
         if self._db_path.exists():
@@ -517,6 +537,11 @@ class KBStore:
     def _fts_search(self, conn: apsw.Connection, query: str,
                     limit: int) -> list[dict]:
         fts = _fts_query(query)
+        if not fts:
+            # An empty MATCH expression is an FTS5 syntax error in its own
+            # right, so an all-whitespace query stops here (D043). No tokens
+            # means nothing could have matched anyway.
+            return []
         rows = _fetchall(
             conn,
             """SELECT e.id, e.content, e.source, e.source_hash, e.chunk_index,
@@ -609,7 +634,7 @@ class KBStore:
         keep_meta["merged_from"] = provenance
         conn.execute(
             "UPDATE entries SET metadata = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(keep_meta), _now(), keep_id),
+            (json.dumps(keep_meta), now_iso(), keep_id),
         )
 
     def _store_embeddings(self, conn: apsw.Connection,
@@ -657,7 +682,7 @@ class KBStore:
         conn = apsw.Connection(str(path))
         cls._load_vec(conn)
         cls._init_schema(conn)
-        now = _now()
+        now = now_iso()
         with conn:
             conn.execute("INSERT OR REPLACE INTO kb_meta VALUES ('name', ?)", (name,))
             conn.execute("INSERT OR REPLACE INTO kb_meta VALUES ('created_at', ?)", (now,))

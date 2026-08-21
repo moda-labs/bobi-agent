@@ -6,24 +6,30 @@ import json
 import os
 import textwrap
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch, call
-from dataclasses import dataclass
 
 import pytest
 
 from bobi import paths
+from bobi.brain import TurnResult
 from bobi.workflow.schema import (
     DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
 from bobi.workflow.orchestrator import (
     _build_step_prompt, _read_handoff, _validate_handoff,
-    _setup_worktree,
+    _drain_response, _setup_worktree,
     run_workflow, resume_workflow, try_resume_for_event,
     make_session_name,
 )
 from bobi.workflow.state import WorkflowRun
+from tests.brain_fakes import (
+    FakeAssistantMessage,
+    FakeResultMessage,
+    FakeTextBlock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -39,6 +45,39 @@ def _bind_runtime_root(root: Path, monkeypatch) -> Path:
     monkeypatch.setenv("BOBI_BRAIN", "claude")
     paths.bind_root(root)
     return root
+
+
+@pytest.mark.asyncio
+async def test_workflow_drain_emits_credit_alert(tmp_path, monkeypatch):
+    _bind_runtime_root(tmp_path, monkeypatch)
+    posts = []
+    monkeypatch.setattr(
+        "bobi.events.publish.post_event",
+        lambda topic, payload, project_path=None: posts.append((topic, payload)),
+    )
+    monkeypatch.setattr(
+        "bobi.brain.turns.save_session_id", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        "bobi.brain.turns.log_activity", lambda *args, **kwargs: None
+    )
+
+    class Client:
+        provider = "openai"
+
+        async def receive_response(self):
+            yield TurnResult(
+                session_id="workflow-credit",
+                is_error=True,
+                error_kind="credits_exhausted",
+                error_message="You've hit your usage limit",
+            )
+
+    result = await _drain_response(Client(), "workflow-session", model="gpt-test")
+
+    assert result.final_text is None
+    assert result.error_kind == "credits_exhausted"
+    assert [topic for topic, _ in posts] == ["system/brain.credits.exhausted"]
 
 
 # ---------------------------------------------------------------------------
@@ -397,27 +436,6 @@ class TestRouteConditions:
 # Orchestrator integration (mock the SDK client)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class FakeResultMessage:
-    session_id: str = "test-session-id"
-    duration_ms: int = 1000
-    total_cost_usd: float = 0.01
-    num_turns: int = 1
-    is_error: bool = False
-    result: str = ""
-    deferred_tool_use: object = None
-
-
-@dataclass
-class FakeTextBlock:
-    text: str
-
-
-@dataclass
-class FakeAssistantMessage:
-    content: list
-
-
 class FakeClient:
     """Mock ClaudeSDKClient that yields one turn per query."""
 
@@ -444,10 +462,35 @@ class FakeClient:
 class FakeBrainClient(FakeClient):
     """Fake normalized BrainSession for tests that patch get_brain directly."""
 
+    async def connect(self):
+        # No prompt parameter, deliberately: BrainSession.connect() is never a
+        # turn (#1016). Code that regresses to connect(prompt) TypeErrors here.
+        self.connected = True
+
     async def receive_response(self):
         from bobi.brain import AssistantText, TurnResult
         yield AssistantText(text="Done.")
         yield TurnResult(session_id="test-session-id")
+
+
+def _recording_brain(*, capabilities=None):
+    """One recording FakeBrain; returns ``(brain, calls, clients)`` (Q110).
+
+    ``make_session`` records its kwargs into ``calls`` and returns a fresh
+    ``FakeBrainClient``, which is also appended to ``clients``.
+    """
+    calls, clients = [], []
+
+    class FakeBrain:
+        def make_session(self, **kwargs):
+            calls.append(kwargs)
+            client = FakeBrainClient()
+            clients.append(client)
+            return client
+
+    if capabilities is not None:
+        FakeBrain.capabilities = capabilities
+    return FakeBrain(), calls, clients
 
 
 class DefaultFakeBrain:
@@ -469,7 +512,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             return run_workflow(workflow, **kwargs)
 
@@ -552,6 +597,96 @@ class TestRunWorkflow:
 
         assert result is False
 
+    def test_collect_receives_the_final_text(self):
+        """The synchronous launch path (#1057) prints the run's answer from
+        `collect` - the bool return cannot carry it, and the ledger entry
+        deliberately does not (full final text would bloat every run doc)."""
+        wf = Workflow(name="adhoc", steps=[StepDef(name="task", prompt="p")])
+        collect: dict = {}
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", collect=collect)
+        assert result is True
+        assert collect["final_text"] == "Done."
+        assert "error" not in collect
+
+    def test_collect_receives_the_error_on_failure(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="gate", condition="ready == true", goto="done",
+                    else_goto="gate", max_iterations=1),
+            StepDef(name="done", prompt="done"),
+        ])
+        collect: dict = {}
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", collect=collect)
+        assert result is False
+        assert "max_iterations" in collect["error"]
+
+    def test_collect_last_prompt_step_wins(self):
+        """The synchronous caller prints the run's ANSWER - the final step's
+        text, not the first's. A setdefault mutant (first wins) fails here."""
+
+        class CountingClient(FakeBrainClient):
+            turn = 0
+
+            async def receive_response(self):
+                from bobi.brain import AssistantText, TurnResult
+                CountingClient.turn += 1
+                yield AssistantText(text=f"reply-{CountingClient.turn}")
+                yield TurnResult(session_id="test-session-id")
+
+        class CountingBrain:
+            def make_session(self, **_kwargs):
+                return CountingClient()
+
+        CountingClient.turn = 0
+        wf = Workflow(name="t", steps=[
+            StepDef(name="first", prompt="a"),
+            StepDef(name="second", prompt="b"),
+        ])
+        collect: dict = {}
+        with patch("bobi.brain.get_brain", lambda: CountingBrain()):
+            result = self._mock_asyncio_run(
+                wf, task="t", repo="r", cwd="/tmp", run_key="1",
+                collect=collect)
+        assert result is True
+        assert collect["final_text"] == "reply-2"
+
+    def test_collect_reports_a_suspended_run(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="gate", await_event="approval"),
+        ])
+        collect: dict = {}
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", collect=collect)
+        assert result is True
+        assert collect["suspended"] == "approval"
+
+    def test_an_interrupted_run_is_ledgered_failed_not_completed(self):
+        """Ctrl-C unwinds the foreground --wait executor as CancelledError -
+        a BaseException the `except Exception` arm never sees. The finally
+        must record the honest terminal status: a false `completed` would
+        consume a period and make retry adoption impossible (#1057)."""
+        import asyncio as _asyncio
+
+        class InterruptedClient(FakeBrainClient):
+            async def receive_response(self):
+                raise _asyncio.CancelledError()
+                yield  # pragma: no cover - makes this an async generator
+
+        class InterruptedBrain:
+            def make_session(self, **_kwargs):
+                return InterruptedClient()
+
+        from bobi.workflow.state import WorkflowRun
+        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="p")])
+        with patch("bobi.brain.get_brain", lambda: InterruptedBrain()):
+            with pytest.raises(BaseException):
+                self._mock_asyncio_run(
+                    wf, task="t", repo="r", cwd="/tmp", run_key="ki-1")
+        runs = [r for r in WorkflowRun.list_runs() if r.run_key == "ki-1"]
+        assert runs and runs[0].status == "failed"
+        assert "interrupted" in runs[0].error
+
     def test_session_name_is_deterministic(self):
         name1 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")
         name2 = make_session_name("issue-lifecycle", "moda-labs/jobtack", "42")
@@ -563,17 +698,8 @@ class TestRunWorkflow:
         assert name1 != name2
 
     def test_step_model_passed_to_brain_session(self, monkeypatch):
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="haiku"),
         ])
@@ -593,14 +719,8 @@ class TestRunWorkflow:
             "agent: test\nentry_point: manager\n"
             "roles:\n  scorer:\n    model: haiku\n"
         )
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kw):
-                calls.append(kw)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=steps)
         result = self._mock_asyncio_run(
             wf, task="t", repo="r", cwd="/tmp", run_key="1", **kwargs,
@@ -625,14 +745,8 @@ class TestRunWorkflow:
         assert models == expected
 
     def test_step_effort_passed_to_brain_session(self, monkeypatch):
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="implement", prompt="build", effort="xhigh"),
         ])
@@ -652,14 +766,8 @@ class TestRunWorkflow:
             "agent: test\nentry_point: manager\n"
             "roles:\n  scorer:\n    effort: low\n"
         )
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kw):
-                calls.append(kw)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=steps)
         result = self._mock_asyncio_run(
             wf, task="t", repo="r", cwd="/tmp", run_key="1", **kwargs,
@@ -686,14 +794,8 @@ class TestRunWorkflow:
         assert efforts == expected
 
     def test_env_effort_default_passed_to_brain_session(self, monkeypatch):
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         monkeypatch.setenv("BOBI_BRAIN_EFFORT", "medium")
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover"),
@@ -710,17 +812,8 @@ class TestRunWorkflow:
         """An effort-only step change is exempt from the resume guard (#778):
         the session reconnects natively under the new dial - same session id,
         no YAML reinject - even on a brain without cross_model_resume."""
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="draft", prompt="draft", effort="low"),
             StepDef(name="implement", prompt="build", effort="xhigh"),
@@ -733,7 +826,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    side_effect=["", "sess-live"]), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(
                 wf, task="t", repo="r", cwd=cwd, run_key="1",
@@ -776,14 +871,8 @@ class TestRunWorkflow:
         run.run_key = "1"
         run.save()
 
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -795,7 +884,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -806,14 +897,8 @@ class TestRunWorkflow:
         assert calls[0]["options"]["effort"] == "xhigh"
 
     def test_env_model_default_passed_to_brain_session(self, monkeypatch):
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         monkeypatch.setenv("BOBI_BRAIN_MODEL", "sonnet")
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover"),
@@ -827,17 +912,8 @@ class TestRunWorkflow:
         assert calls[0]["options"]["model"] == "sonnet"
 
     def test_model_change_starts_fresh_session(self, monkeypatch):
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="haiku"),
             StepDef(name="score", prompt="score", model="sonnet"),
@@ -850,18 +926,17 @@ class TestRunWorkflow:
         assert result is True
         assert [c["options"].get("model") for c in calls] == ["haiku", "sonnet"]
         assert len(clients) == 2
-        assert "Continue workflow `t`" in clients[1].queries[0]
+        # The fresh switch session's first (and only) turn is the step turn,
+        # with the workflow context riding the same prompt — never a
+        # context-only turn of its own (#1016).
+        assert len(clients[1].queries) == 1
+        assert "Workflow `t` context" in clients[1].queries[0]
         assert "run_key: '1'" in clients[1].queries[0]
+        assert "score" in clients[1].queries[0]
 
     def test_model_change_preserves_explicit_role(self, monkeypatch):
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         forced_role = paths.roles_dir() / "forced" / "ROLE.md"
         forced_role.parent.mkdir(parents=True, exist_ok=True)
         forced_role.write_text("PROMPT forced")
@@ -888,19 +963,8 @@ class TestRunWorkflow:
         new model instead of fresh + YAML reinject (#642)."""
         from bobi.brain import BrainCapabilities
 
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            capabilities = BrainCapabilities(cross_model_resume=True)
-
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain(capabilities=BrainCapabilities(cross_model_resume=True))
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="haiku"),
             StepDef(name="score", prompt="score", model="sonnet"),
@@ -913,7 +977,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="live-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
 
@@ -929,14 +995,8 @@ class TestRunWorkflow:
     def test_model_change_records_new_model_on_save(self, monkeypatch):
         """Post-turn saves carry the model the session currently runs under,
         so the store record follows a mid-run switch (#642 stale-record fix)."""
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="haiku"),
             StepDef(name="score", prompt="score", model="sonnet"),
@@ -947,8 +1007,10 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
-             patch("bobi.workflow.orchestrator.save_session_id") as save_mock, \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id") as save_mock, \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
 
@@ -963,19 +1025,8 @@ class TestRunWorkflow:
         transcript, even on a capable brain (#642 isolation rule)."""
         from bobi.brain import BrainCapabilities
 
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            capabilities = BrainCapabilities(cross_model_resume=True)
-
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain(capabilities=BrainCapabilities(cross_model_resume=True))
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         for role_name in ("builder", "scorer"):
             role_md = paths.roles_dir() / role_name / "ROLE.md"
             role_md.parent.mkdir(parents=True, exist_ok=True)
@@ -994,14 +1045,17 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="live-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
 
         assert result is True
-        # Fresh session for the new agent, with the YAML reinject turn.
+        # Fresh session for the new agent; the reinjected context rides the
+        # step prompt instead of a turn of its own (#1016).
         assert calls[1]["resume"] is None
-        assert any("Continue workflow" in q for q in clients[1].queries)
+        assert any("Workflow `t` context" in q for q in clients[1].queries)
 
     def test_native_switch_falls_back_to_fresh_on_stale_resume(
             self, monkeypatch):
@@ -1041,7 +1095,9 @@ class TestRunWorkflow:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="stale-id"), \
              patch("bobi.workflow.orchestrator.save_session_id") as save_mock, \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
 
@@ -1050,9 +1106,144 @@ class TestRunWorkflow:
         # fresh fallback session.
         assert calls[-1]["resume"] is None
         assert calls[-1]["options"]["model"] == "sonnet"
-        assert any("Continue workflow" in q for q in clients[-1].queries)
+        assert any("Workflow `t` context" in q for q in clients[-1].queries)
         # The stale id was cleared from the store.
         assert call("wf-t-r-1", "") in save_mock.call_args_list
+
+
+class TestConnectIsNeverATurn:
+    """#1016: no execution point exists before step 0.
+
+    The double-publish came from the launch task draining as a full agent
+    turn at connect. These tests pin the replacement contract: connect() is
+    setup only, every turn is an explicit query, and the launch brief reaches
+    the agent inside step 0's prompt as a labelled context block.
+    """
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        _bind_runtime_root(tmp_path, monkeypatch)
+
+    def _run(self, workflow, saved_id="", **kwargs):
+        emits = []
+        brain, calls, clients = _recording_brain()
+
+        cwd = kwargs.get("cwd", "/tmp")
+        with patch("bobi.brain.get_brain", lambda kind=None: brain), \
+             patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda t, d, **kw: emits.append((t, d))), \
+             patch("bobi.workflow.orchestrator._setup_worktree",
+                   return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value=saved_id), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(workflow, **kwargs)
+        return result, calls, clients, emits
+
+    def test_no_turn_before_step_0(self):
+        """THE #1016 regression test. On pre-fix code the bare task was the
+        connect prompt and drained as its own turn; now the first text the
+        brain ever receives is step 0's prompt."""
+        wf = Workflow(name="daily", steps=[
+            StepDef(name="review", prompt="review yesterday"),
+            StepDef(name="publish", prompt="publish the page"),
+        ])
+        result, calls, clients, _ = self._run(
+            wf, task="post the catch-up standup", repo="r", cwd="/tmp",
+            run_key="1",
+        )
+        assert result is True
+        assert len(clients) == 1
+        # Turn accounting: turns == queries == prompt steps. The old code
+        # measured prompt steps + 1 (spec §4.2).
+        assert len(clients[0].queries) == 2
+        # The bare imperative is never a message of its own...
+        assert all(
+            q != "post the catch-up standup" for q in clients[0].queries)
+        # ...but the brief still reaches the agent, as labelled context
+        # inside step 0's prompt.
+        assert "review yesterday" in clients[0].queries[0]
+        assert "post the catch-up standup" in clients[0].queries[0]
+        assert "```yaml" in clients[0].queries[0]
+        # Later steps carry no context block — the transcript has it.
+        assert clients[0].queries[1] == "publish the page"
+
+    def test_task_templated_step_gets_single_turn(self):
+        """The adhoc shape: a step prompt of ${{input.task}} used to run the
+        identical instruction twice (turn 0 + step 1). Now: one turn."""
+        wf = Workflow(name="adhoc", steps=[
+            StepDef(name="act", prompt="${{ input.task }}"),
+        ])
+        result, _, clients, _ = self._run(
+            wf, task="do the thing", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is True
+        assert len(clients[0].queries) == 1
+        assert clients[0].queries[0].rstrip().endswith("do the thing")
+
+    def test_resumed_transcript_still_receives_new_dispatch_as_context(self):
+        """A re-dispatch under the same session name resumes the transcript;
+        the NEW task must still arrive (the transcript only holds the old
+        one) — as step-0 context, never as a standalone turn."""
+        wf = Workflow(name="daily", steps=[
+            StepDef(name="review", prompt="review yesterday"),
+        ])
+        result, calls, clients, _ = self._run(
+            wf, saved_id="live-1", task="second dispatch", repo="r",
+            cwd="/tmp", run_key="1",
+        )
+        assert result is True
+        assert calls[0]["resume"] == "live-1"
+        assert len(clients[0].queries) == 1
+        assert "second dispatch" in clients[0].queries[0]
+        assert "review yesterday" in clients[0].queries[0]
+
+    def test_promptless_workflow_opens_no_session(self):
+        """A workflow of only deterministic steps constructs no brain session
+        at all — and reports that the launch brief went nowhere."""
+        wf = Workflow(name="quiet", steps=[
+            StepDef(name="noop", condition="1 == 1"),
+        ])
+        result, calls, clients, emits = self._run(
+            wf, task="do something", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is True
+        assert calls == [] and clients == []
+        assert any(t == "agent/workflow.brief_undelivered" for t, _ in emits)
+
+    def test_unreached_prompt_step_reports_undelivered_brief(self):
+        """The pr-closed shape (spec §5.2): the only prompt step sits behind
+        a route the run does not take. The run must not silently swallow the
+        launch brief — it completes, opens no session, and says so."""
+        wf = Workflow(name="pr-closed", steps=[
+            StepDef(name="cleanup", action="not-a-registered-action"),
+            StepDef(name="route-merged", condition="merged_live == true",
+                    goto="close-issue", else_goto="done"),
+            StepDef(name="close-issue", prompt="close the issue"),
+            StepDef(name="done", condition="1 == 1"),
+        ])
+        result, calls, clients, emits = self._run(
+            wf, task="Run cleanup.", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is True
+        # The route took else: the prompt step never ran, so no session —
+        # and, critically, no un-stepped turn performed the cleanup by hand.
+        assert clients == []
+        assert any(t == "agent/workflow.brief_undelivered" for t, _ in emits)
+
+    def test_delivered_brief_emits_no_undelivered_event(self):
+        wf = Workflow(name="t", steps=[StepDef(name="s", prompt="go")])
+        result, _, clients, emits = self._run(
+            wf, task="go", repo="r", cwd="/tmp", run_key="1",
+        )
+        assert result is True
+        assert len(clients) == 1
+        assert all(t != "agent/workflow.brief_undelivered" for t, _ in emits)
 
 
 class FailingClient:
@@ -1126,8 +1317,10 @@ class TestHonestTerminalEmit:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.turns.log_activity"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: client_cls(),
                  ClaudeAgentOptions=MagicMock,
@@ -1187,7 +1380,13 @@ class TestHonestTerminalEmit:
         assert failed["error"] == "real brain failure"
 
     def test_step_error_result_surfaces_brain_failure(self):
-        wf = Workflow(name="t", steps=[StepDef(name="task", prompt="do it")])
+        # Two prompt steps: the fake scripts success on the first drain and an
+        # error on the second. (Pre-#1016 this fixture leaned on the extra
+        # task turn as its first drain; turns now map 1:1 to prompt steps.)
+        wf = Workflow(name="t", steps=[
+            StepDef(name="first", prompt="do it"),
+            StepDef(name="second", prompt="and this"),
+        ])
         result, emits = self._run_capture(
             wf, ErrorOnStepClient, task="t", repo="r", cwd="/tmp", run_key="1",
         )
@@ -1242,8 +1441,10 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.turns.log_activity"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -1300,8 +1501,10 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.turns.log_activity"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -1335,17 +1538,8 @@ class TestAwaitStep:
         run.run_key = "1"
         run.save()
 
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -1357,14 +1551,21 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
         assert success is True
         assert calls[0]["resume"] is None
         assert calls[0]["options"]["model"] == "sonnet"
-        assert "Continue workflow `t`" in clients[0].queries[0]
+        # Fresh session on a resumed run: the persisted scopes ride the step
+        # prompt as a context block — one turn, not a reinject turn plus a
+        # step turn (#1016).
+        assert len(clients[0].queries) == 1
+        assert "Workflow `t` context" in clients[0].queries[0]
+        assert "build it" in clients[0].queries[0]
         assert "_runtime" not in clients[0].queries[0]
 
     def test_resume_model_change_continues_natively_on_capable_brain(
@@ -1391,19 +1592,8 @@ class TestAwaitStep:
         run.run_key = "1"
         run.save()
 
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            capabilities = BrainCapabilities(cross_model_resume=True)
-
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain(capabilities=BrainCapabilities(cross_model_resume=True))
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -1415,7 +1605,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -1449,14 +1641,8 @@ class TestAwaitStep:
         run.run_key = "1"
         run.save()
 
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -1468,7 +1654,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -1503,14 +1691,8 @@ class TestAwaitStep:
         run.run_key = "1"
         run.save()
 
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -1522,7 +1704,9 @@ class TestAwaitStep:
              patch("bobi.workflow.orchestrator.load_session_id",
                    return_value="old-session"), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             mock_reg.return_value = MagicMock()
             success = resume_workflow(run, wf)
 
@@ -1544,6 +1728,9 @@ class TestAwaitStep:
         run = WorkflowRun.create("t", {"data": {"run_key": "42"}})
         run.status = "waiting"
         run.await_event = "approval"
+        # The engine stamps the run_key FIELD at run creation and find_waiting
+        # matches on it (#1048); the trigger-event copy is payload.
+        run.run_key = "42"
         run.save()
 
         assert WorkflowRun.find_waiting("approval", run_key="42") is not None
@@ -1671,8 +1858,10 @@ class TestQAPhase:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value=cwd), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.turns.log_activity"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -1785,8 +1974,10 @@ class TestResumeWorkflowTimestamps:
              patch("bobi.workflow.orchestrator._setup_worktree", return_value="/tmp"), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
              patch("bobi.workflow.orchestrator.log_activity"), \
-             patch("bobi.sdk.get_cli_path", return_value="/usr/bin/claude"), \
+             patch("bobi.brain.turns.log_activity"), \
+             patch("bobi.brain.claude.get_cli_path", return_value="/usr/bin/claude"), \
              patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
                  ClaudeSDKClient=lambda opts: FakeClient(),
                  ClaudeAgentOptions=MagicMock,
@@ -1864,7 +2055,9 @@ class TestResumeRegistryRefresh:
              patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
              patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
              patch("bobi.workflow.orchestrator.save_session_id"), \
-             patch("bobi.workflow.orchestrator.log_activity"):
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
             success = resume_workflow(run, wf, timeout=1234)
 
         assert success is True
@@ -1969,3 +2162,700 @@ class TestNamedException:
 
         from bobi.workflow.orchestrator import _named_exception
         assert _named_exception(e) != ""
+
+
+class TestSessionConstructionFailureIsTerminal:
+    """D029: a raise from _make_session must not escape the honesty guard.
+
+    prepare_brain_runtime (the runtime-guard EPERM class) or an unresolvable
+    agent prompt can raise while the session is being CONSTRUCTED. That call
+    sat before the retry try and before the terminal-honesty try/finally, so
+    the exception left run_workflow entirely: no session.failed, no
+    workflow.failed, and a registry entry stuck 'running' until the dead-man
+    reconciler timed it out and mis-reported it — contradicting the contract
+    WORKFLOW_ENGINE.md states ("the finally emits the truthful terminal event
+    on any failure path").
+    """
+
+    def _run(self, monkeypatch, mark_terminal, tmp_path):
+        _bind_runtime_root(tmp_path / "run", monkeypatch)
+
+        class ExplodingBrain:
+            def make_session(self, **kwargs):
+                raise RuntimeError("runtime guard: EPERM on run/package")
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: ExplodingBrain())
+        wf = Workflow(name="t", steps=[
+            StepDef(name="only", prompt="do it", model="haiku"),
+        ])
+        registry = MagicMock()
+        registry.mark_terminal = mark_terminal
+        emitted = []
+        cwd = "/tmp"
+        with patch("bobi.workflow.orchestrator.get_registry",
+                   return_value=registry), \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda ev, *a, **k: emitted.append(ev)), \
+             patch("bobi.workflow.orchestrator._setup_worktree",
+                   return_value=cwd), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
+            result = run_workflow(wf, task="t", repo="r", cwd=cwd, run_key="1")
+        return result, emitted
+
+    def test_returns_false_instead_of_propagating(self, monkeypatch, tmp_path):
+        result, _ = self._run(monkeypatch, MagicMock(), tmp_path)
+        assert result is False
+
+    def test_marks_the_registry_entry_terminal(self, monkeypatch, tmp_path):
+        """The entry must not be left 'running' with no live process."""
+        mark_terminal = MagicMock()
+        self._run(monkeypatch, mark_terminal, tmp_path)
+        assert mark_terminal.called, "registry entry left stuck 'running'"
+
+    def test_emits_a_terminal_lifecycle_event(self, monkeypatch, tmp_path):
+        _, emitted = self._run(monkeypatch, MagicMock(), tmp_path)
+        assert any("fail" in ev for ev in emitted), emitted
+
+
+# ---------------------------------------------------------------------------
+# Workflow period (#1048)
+# ---------------------------------------------------------------------------
+
+class TestWorkflowPeriod:
+    def _load(self, tmp_path, body):
+        p = tmp_path / "wf.yaml"
+        p.write_text(textwrap.dedent(body))
+        return load_workflow(p)
+
+    def test_period_parses(self, tmp_path):
+        wf = self._load(tmp_path, """
+            name: standup
+            period: daily
+            steps:
+              - name: post
+                prompt: post the standup
+        """)
+        assert wf.period == "daily"
+
+    def test_period_defaults_empty(self, tmp_path):
+        wf = self._load(tmp_path, """
+            name: standup
+            steps:
+              - name: post
+                prompt: post
+        """)
+        assert wf.period == ""
+
+    def test_unknown_period_rejected_at_load(self, tmp_path):
+        with pytest.raises(ValueError, match="period 'fortnightly'"):
+            self._load(tmp_path, """
+                name: standup
+                period: fortnightly
+                steps:
+                  - name: post
+                    prompt: post
+            """)
+
+    @pytest.mark.parametrize("period,fmt", [
+        ("hourly", "%Y-%m-%dT%H"),
+        ("daily", "%Y-%m-%d"),
+        ("weekly", "%G-W%V"),
+        ("monthly", "%Y-%m"),
+    ])
+    def test_period_run_key_buckets(self, period, fmt):
+        wf = Workflow(name="standup", steps=[], period=period)
+        fixed = 1754838000.0
+        expected = "standup-" + time.strftime(fmt, time.localtime(fixed))
+        assert wf.period_run_key(fixed) == expected
+
+    def test_same_period_same_key_across_dispatchers(self):
+        # The whole point: two dispatch paths in one period derive ONE
+        # identity, so admission can dedupe them (#1016's shape).
+        wf = Workflow(name="standup", steps=[], period="daily")
+        t = 1754838000.0
+        assert wf.period_run_key(t) == wf.period_run_key(t + 3600)
+
+
+    def test_period_run_key_rejects_unknown_period(self):
+        wf = Workflow(name="standup", steps=[], period="fortnightly")
+        with pytest.raises(ValueError, match="fortnightly"):
+            wf.period_run_key(0.0)
+
+    def test_period_bucket_uses_local_time(self, monkeypatch):
+        # Deliberate decision (schema comment): buckets follow the host
+        # clock, not UTC. 2026-08-06 22:30 PDT is already 08-07 in UTC; a
+        # gmtime regression would bucket the standup into the wrong day for
+        # every non-UTC operator.
+        monkeypatch.setenv("TZ", "America/Los_Angeles")
+        time.tzset()
+        try:
+            wf = Workflow(name="standup", steps=[], period="daily")
+            # 2026-08-07T05:30:00Z == 2026-08-06 22:30 PDT
+            assert wf.period_run_key(1786080600.0) == "standup-2026-08-06"
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+
+    def test_steps_fingerprint_tracks_step_names(self):
+        a = Workflow(name="t", steps=[StepDef(name="s1"), StepDef(name="s2")])
+        b = Workflow(name="t", steps=[StepDef(name="s1"), StepDef(name="s2")])
+        c = Workflow(name="t", steps=[StepDef(name="s0"), StepDef(name="s1"),
+                                      StepDef(name="s2")])
+        assert a.steps_fingerprint() == b.steps_fingerprint()
+        assert a.steps_fingerprint() != c.steps_fingerprint()
+
+
+# ---------------------------------------------------------------------------
+# The run ledger (#1048) - every run gets a WorkflowRun entry
+# ---------------------------------------------------------------------------
+
+class RecordingBrain:
+    def __init__(self):
+        self.clients = []
+
+    def make_session(self, **_kwargs):
+        c = FakeBrainClient()
+        self.clients.append(c)
+        return c
+
+    def all_queries(self):
+        return [q for c in self.clients for q in c.queries]
+
+
+class TestRunLedger:
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        _bind_runtime_root(tmp_path, monkeypatch)
+
+    def _run(self, workflow, brain=None, **kwargs):
+        brain = brain or RecordingBrain()
+        kwargs.setdefault("task", "t")
+        kwargs.setdefault("repo", "r")
+        kwargs.setdefault("cwd", "/tmp")
+        emitted = []
+        with patch("bobi.brain.get_brain", return_value=brain), \
+             patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda t, *a, **k: emitted.append(t)), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = run_workflow(workflow, **kwargs)
+        return result, brain, emitted
+
+    def _resume(self, run, workflow, brain=None):
+        brain = brain or RecordingBrain()
+        emitted = []
+        with patch("bobi.brain.get_brain", return_value=brain), \
+             patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event",
+                   side_effect=lambda t, *a, **k: emitted.append(t)), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.log_activity"):
+            mock_reg.return_value = MagicMock()
+            result = resume_workflow(run, workflow)
+        return result, brain, emitted
+
+    def test_completed_run_leaves_a_completed_entry(self):
+        wf = Workflow(name="t", steps=[StepDef(name="s1", prompt="do it")])
+        result, _, _ = self._run(wf, run_key="42")
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "completed"
+        assert runs[0].run_key == "42"
+        assert runs[0].workflow_name == "t"
+        assert runs[0].completed_at != ""
+
+    def test_failed_run_leaves_failed_entry_with_checkpoint(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it"),
+            StepDef(name="s2", prompt="handoff please",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        result, _, _ = self._run(wf, run_key="42")
+        assert result is False
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "failed"
+        # s1 completed, so the checkpoint points a retry at s2 (index 1).
+        assert runs[0].checkpoint_step == 1
+
+    def test_retry_resumes_from_checkpoint_not_step_zero(self):
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+        first = WorkflowRun.list_runs()[0]
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain, _ = self._run(fixed, run_key="42")
+        assert result is True
+        queries = brain.all_queries()
+        assert not any("unmistakable step one prompt" in q for q in queries), (
+            "retry replayed the completed step instead of resuming at the "
+            "checkpoint")
+        assert any("do step two" in q for q in queries)
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1, "retry minted a second ledger entry"
+        assert runs[0].run_id == first.run_id
+        assert runs[0].status == "completed"
+
+    def test_fresh_launch_ignores_the_checkpoint(self):
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain, _ = self._run(fixed, run_key="42", fresh=True)
+        assert result is True
+        assert any("unmistakable step one prompt" in q
+                   for q in brain.all_queries())
+
+    def test_suspend_is_a_state_of_the_same_entry(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it"),
+            StepDef(name="gate", await_event="pr.merged"),
+        ])
+        result, _, _ = self._run(wf, run_key="42")
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        # The old shape minted a SECOND record at suspension; the ledger keeps
+        # one entry per run (#1048).
+        assert len(runs) == 1
+        assert runs[0].status == "waiting"
+        assert runs[0].await_event == "pr.merged"
+        assert runs[0].suspended_at_step == 2
+        assert runs[0].run_key == "42"
+
+    def test_resume_that_suspends_again_stays_waiting(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+            StepDef(name="g2", await_event="e2"),
+            StepDef(name="s3", prompt="three"),
+        ])
+        self._run(wf, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "waiting"
+
+        result, _, _ = self._resume(run, wf)
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "waiting", (
+            "a resume that suspended again was closed as completed")
+        assert runs[0].await_event == "e2"
+
+        run = WorkflowRun.list_runs()[0]
+        result, _, _ = self._resume(run, wf)
+        assert result is True
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].status == "completed"
+
+    def test_suspend_emits_no_completed_event(self):
+        # Parked is not finished: the suspended event is the truth, and a
+        # workflow.completed for a run waiting on a gate is a lie consumers
+        # would act on.
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it"),
+            StepDef(name="gate", await_event="pr.merged"),
+        ])
+        result, _, emitted = self._run(wf, run_key="42")
+        assert result is True
+        assert "agent/workflow.suspended" in emitted
+        assert "agent/workflow.completed" not in emitted
+
+    def test_resuspension_emits_no_completed_event(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+            StepDef(name="g2", await_event="e2"),
+        ])
+        self._run(wf, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        result, _, emitted = self._resume(run, wf)
+        assert result is True
+        assert "agent/workflow.suspended" in emitted
+        assert "agent/workflow.completed" not in emitted
+
+    def test_failed_run_records_error_and_completed_at(self):
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="do it",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        result, _, _ = self._run(wf, run_key="42")
+        assert result is False
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "failed"
+        assert "result" in run.error
+        assert run.completed_at != ""
+
+    def test_run_entry_titles_the_task(self):
+        wf = Workflow(name="t", steps=[StepDef(name="s1", prompt="do it")])
+        self._run(wf, run_key="42", task="Fix moda-labs/bobi-agent#42")
+        assert WorkflowRun.list_runs()[0].title == "Fix moda-labs/bobi-agent#42"
+
+    def test_step_zero_failure_retry_reuses_the_entry(self):
+        # A run that fails before any checkpoint must not mint a second
+        # ledger entry per attempt - the retry adopts and replays from 0.
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+        first = WorkflowRun.list_runs()[0]
+        assert first.checkpoint_step == -1
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+        ])
+        result, brain, _ = self._run(fixed, run_key="42")
+        assert result is True
+        assert any("unmistakable step one prompt" in q
+                   for q in brain.all_queries())
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+        assert runs[0].run_id == first.run_id
+        assert runs[0].status == "completed"
+
+    def test_fingerprint_mismatch_replays_from_step_zero(self):
+        # A checkpoint is a bare index; if the step list changed since the
+        # failure, the index points at the wrong step, so the retry replays.
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42")
+        assert WorkflowRun.list_runs()[0].checkpoint_step == 1
+
+        edited = Workflow(name="t", steps=[
+            StepDef(name="s0", prompt="a newly inserted step"),
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain, _ = self._run(edited, run_key="42")
+        assert result is True
+        assert any("a newly inserted step" in q for q in brain.all_queries())
+        runs = WorkflowRun.list_runs()
+        assert len(runs) == 1
+
+    def test_retry_carries_the_new_dispatch_task(self):
+        # An operator retrying with a corrected brief must not have it
+        # silently swallowed by the restored scopes.
+        failing = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two",
+                    handoff=HandoffContract(required=["result"])),
+        ])
+        self._run(failing, run_key="42", task="original brief")
+
+        fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="unmistakable step one prompt"),
+            StepDef(name="s2", prompt="do step two"),
+        ])
+        result, brain, _ = self._run(fixed, run_key="42",
+                                     task="corrected brief use adapters")
+        assert result is True
+        assert any("corrected brief use adapters" in q
+                   for q in brain.all_queries())
+
+    def test_failed_resume_retries_after_the_gate_not_on_it(self):
+        # The gate's event already arrived once; a retry that lands back ON
+        # the await step re-arms an approval the human already gave and
+        # parks the run behind it forever.
+        wf_fail = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="unmistakable step two",
+                    handoff=HandoffContract(required=["result"])),
+            StepDef(name="s3", prompt="step three"),
+        ])
+        self._run(wf_fail, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "waiting"
+
+        result, _, _ = self._resume(run, wf_fail)
+        assert result is False
+        failed = WorkflowRun.list_runs()[0]
+        assert failed.status == "failed"
+
+        wf_fixed = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="unmistakable step two"),
+            StepDef(name="s3", prompt="step three"),
+        ])
+        result, brain, _ = self._run(wf_fixed, run_key="42")
+        assert result is True
+        assert any("unmistakable step two" in q for q in brain.all_queries())
+        final = WorkflowRun.list_runs()[0]
+        assert final.status == "completed", (
+            "retry landed back on the await gate instead of the step after")
+
+    def test_resume_invalidates_checkpoint_when_workflow_changed(self):
+        # The workflow was edited while the run was parked: the stored index
+        # no longer means what it meant. Resume must invalidate the retry
+        # anchor, not launder it with the current fingerprint.
+        wf = Workflow(name="t", steps=[
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+        ])
+        self._run(wf, run_key="42")
+        run = WorkflowRun.list_runs()[0]
+        assert run.status == "waiting"
+        assert run.checkpoint_step == 2
+
+        edited = Workflow(name="t", steps=[
+            StepDef(name="s0", prompt="inserted"),
+            StepDef(name="s1", prompt="one"),
+            StepDef(name="g1", await_event="e1"),
+            StepDef(name="s2", prompt="two"),
+        ])
+        result, _, _ = self._resume(run, edited)
+        saved = WorkflowRun.list_runs()[0]
+        assert saved.checkpoint_step == -1 or saved.checkpoint_fingerprint == (
+            edited.steps_fingerprint()), (
+            "a stale checkpoint index was re-stamped with the edited "
+            "workflow's fingerprint")
+
+# ---------------------------------------------------------------------------
+# The gate's answer
+# ---------------------------------------------------------------------------
+
+class TestGateVerdictRouting:
+    """What answering a human gate actually does (#987).
+
+    A suspended run records the step AFTER its await, so a resume lands on
+    whatever sits there and runs it. That is the whole mechanism: put a ROUTE
+    there, carry the human's verdict in as the ``event`` scope, and the resume
+    stops being a force-continue and becomes an answer.
+
+    Three answers have to be right, and the third is the one that bites: a
+    verdict that never arrives resolves to the empty string with nothing but a
+    log warning, so it takes whichever branch is the ``else``. These tests are
+    the reason the route is written with the ADVANCING branch as the
+    condition.
+    """
+
+    SPEC = "SPEC-STEP-MARKER"
+    IMPL = "IMPLEMENT-STEP-MARKER"
+
+    def _wf(self) -> Workflow:
+        """The issue-lifecycle gate, in miniature.
+
+        Same shape as the real one: the rework target sits before the await,
+        so rejecting is a back edge through the gate rather than a step that
+        has to be inserted after it.
+        """
+        return Workflow(name="gated", steps=[
+            StepDef(name="spec", prompt=self.SPEC),
+            StepDef(name="gate", await_event="approval"),
+            StepDef(name="approval_route",
+                    condition="${{event.verdict}} == 'approve'",
+                    goto="implement", else_goto="spec"),
+            StepDef(name="implement", prompt=self.IMPL),
+        ])
+
+    def _root(self, tmp_path, monkeypatch) -> Path:
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        (paths.state_path(root) / "workflow" / "runs").mkdir(
+            parents=True, exist_ok=True)
+        return root
+
+    @contextmanager
+    def _brain(self, prompts: list):
+        """Patch in a brain whose every client records what it was asked."""
+        def _client(_opts):
+            client = FakeClient()
+            prompts.append(client)
+            return client
+
+        with patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree",
+                   return_value="/tmp"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.claude.get_cli_path",
+                   return_value="/usr/bin/claude"), \
+             patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+                 ClaudeSDKClient=_client,
+                 ClaudeAgentOptions=MagicMock,
+                 AssistantMessage=FakeAssistantMessage,
+                 ResultMessage=FakeResultMessage,
+                 TextBlock=FakeTextBlock,
+             )}):
+            mock_reg.return_value = MagicMock()
+            yield
+
+    @staticmethod
+    def _asked(clients) -> list[str]:
+        return [q for c in clients for q in c.queries]
+
+    def _park(self, tmp_path, monkeypatch):
+        """Run the workflow from the top until its gate parks it."""
+        self._root(tmp_path, monkeypatch)
+        clients: list = []
+        with self._brain(clients):
+            result = run_workflow(self._wf(), task="t", repo="r", cwd="/tmp",
+                                  run_key="987", interactive=False)
+        waiting = [r for r in WorkflowRun.list_runs() if r.status == "waiting"]
+        assert len(waiting) == 1, [(r.run_id, r.status)
+                                   for r in WorkflowRun.list_runs()]
+        return result, waiting[0], self._asked(clients)
+
+    def _answer(self, run, event):
+        """Resume the parked run with one answer, and report what ran."""
+        clients: list = []
+        with self._brain(clients):
+            success = resume_workflow(run, self._wf(), event=event)
+        return success, self._asked(clients)
+
+    def test_the_gate_parks_the_run_on_the_route_not_on_implement(
+            self, tmp_path, monkeypatch):
+        """The +1 the engine already writes is what puts the route in reach.
+
+        Nothing in the step loop changed for this. `suspended_at_step` has
+        always been "the step after the await"; the route is simply what now
+        occupies that slot, so the verdict is read before anything is built.
+        """
+        result, run, asked = self._park(tmp_path, monkeypatch)
+
+        assert result is True
+        assert run.suspended_at_step == 2
+        assert self._wf().steps[run.suspended_at_step].name == "approval_route"
+        assert any(self.SPEC in q for q in asked)
+        assert not any(self.IMPL in q for q in asked), (
+            "the gate let the run reach implement before anyone answered")
+
+    def test_an_approve_resumes_and_continues(self, tmp_path, monkeypatch):
+        _, run, _ = self._park(tmp_path, monkeypatch)
+
+        success, asked = self._answer(run, {"data": {"verdict": "approve"}})
+
+        assert success is True
+        assert any(self.IMPL in q for q in asked), asked
+        assert not any(self.SPEC in q for q in asked), (
+            "an approval sent the run back to rework")
+        assert WorkflowRun.load(run.run_id).status == "completed"
+
+    def test_a_reject_reworks_the_same_run_instead_of_implementing(
+            self, tmp_path, monkeypatch):
+        """The point of the whole change: a rejection is not a dead end and
+        not a fresh session. The SAME run, in the same session, with its
+        variable scopes intact, goes back to the rework step and re-gates."""
+        _, run, _ = self._park(tmp_path, monkeypatch)
+
+        success, asked = self._answer(
+            run, {"data": {"verdict": "reject", "reply": "not yet"}})
+
+        assert success is True
+        assert any(self.SPEC in q for q in asked), asked
+        assert not any(self.IMPL in q for q in asked), (
+            "a rejection built the thing it rejected")
+
+        # Re-gated, not finished - and the SAME ledger entry (#1048): one
+        # run, one record, so suspension is a state of it, never stamped
+        # completed (F7) and never a fresh file.
+        assert WorkflowRun.load(run.run_id).status == "waiting"
+        waiting = [r for r in WorkflowRun.list_runs() if r.status == "waiting"]
+        assert len(waiting) == 1, [(r.run_id, r.status)
+                                   for r in WorkflowRun.list_runs()]
+        assert waiting[0].run_id == run.run_id
+        assert waiting[0].session_name == run.session_name
+        assert waiting[0].run_key == run.run_key
+        assert waiting[0].await_event == "approval"
+
+    def test_the_rejection_reaches_the_rework_step_as_variables(
+            self, tmp_path, monkeypatch):
+        """The reason has to arrive with the work. A rework step that cannot
+        see why it was rejected can only guess at what to change."""
+        _, run, _ = self._park(tmp_path, monkeypatch)
+        wf = self._wf()
+        wf.steps[0].prompt = (
+            self.SPEC + " verdict=${{event.verdict}} reply=${{event.reply}}")
+
+        clients: list = []
+        with self._brain(clients):
+            resume_workflow(run, wf, event={
+                "data": {"verdict": "reject", "reply": "widen the scope"}})
+
+        asked = self._asked(clients)
+        assert any("verdict=reject" in q for q in asked), asked
+        assert any("reply=widen the scope" in q for q in asked), asked
+
+    @pytest.mark.parametrize("event, why", [
+        ({"data": {"verdict": "", "reply": ""}}, "an empty verdict"),
+        ({"data": {}}, "a verdict key that never arrived"),
+        (None, "no event scope at all"),
+        ({"data": {"verdict": "APPROVE"}}, "a differently-cased verdict"),
+        ({"data": {"verdict": "yes"}}, "a verdict outside the vocabulary"),
+        ({"data": {"verdict": ["approve"]}}, "a verdict of the wrong type"),
+    ])
+    def test_an_unanswered_or_malformed_verdict_never_advances(
+            self, tmp_path, monkeypatch, event, why):
+        """A missing scope resolves to "" with only a log warning, so the
+        branch an unanswered resume takes is whichever one is the `else`.
+        That is why the condition tests for the ONE verdict that advances:
+        everything else, however it is malformed, reworks."""
+        _, run, _ = self._park(tmp_path, monkeypatch)
+
+        success, asked = self._answer(run, event)
+
+        assert success is True
+        assert not any(self.IMPL in q for q in asked), (
+            f"{why} advanced the run into implement")
+        assert any(self.SPEC in q for q in asked), asked
+        assert WorkflowRun.load(run.run_id).status == "waiting"
+
+    def test_a_route_with_no_else_would_fall_through_to_implement(
+            self, tmp_path, monkeypatch):
+        """Why the workflow writes `else` out rather than leaving it implicit.
+
+        A route whose branch is not taken and that has no else falls through
+        to step_idx + 1 - which, at this position, is the step the gate exists
+        to hold back. This asserts the engine behaviour the workflow is
+        written around; it is not a defect, it is the default the author has
+        to answer for.
+        """
+        _, run, _ = self._park(tmp_path, monkeypatch)
+        wf = self._wf()
+        wf.steps[2].else_goto = ""
+
+        clients: list = []
+        with self._brain(clients):
+            resume_workflow(run, wf, event={"data": {"verdict": ""}})
+
+        assert any(self.IMPL in q for q in self._asked(clients)), (
+            "the fall-through this test documents has changed - the workflow's "
+            "explicit `else` may no longer be what stands between an "
+            "unanswered gate and the implement step")

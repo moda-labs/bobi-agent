@@ -22,6 +22,7 @@ from bobi.monitors import run_records
 from bobi.monitors.run_records import FAILED as MONITOR_FAILED
 from bobi.monitors.run_records import NOTIFIED, QUIET, MonitorRun
 from bobi.webapp import server
+from bobi.webapp import runs as runs_model
 from bobi.webapp.runs import AWAITING_ACTION_AFTER_SECONDS, build_runs
 
 TOKEN = "runs-token-123"
@@ -50,21 +51,30 @@ def _session(install, name, *, status="completed", role="review-worker",
     }))
 
 
+def _utc(epoch):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+
+
 def _workflow(install, run_id, *, status="completed", name="triage",
               started_at=NOW - 1800, completed_at=NOW - 1500,
               suspended_at_step=-1, await_event="", session_name="",
-              resumed_at=0.0):
+              resumed_at=0.0, aware=False, run_key=""):
+    # aware=False writes the legacy naive-LOCAL timestamps of pre-timeutil
+    # versions; aware=True writes what WorkflowRun records today (aware UTC).
+    # Both shapes exist on real disks, so both must fold correctly.
+    ts = _utc if aware else _iso
     runs_dir = install.state_dir / "workflow" / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     (runs_dir / f"{run_id}.json").write_text(json.dumps({
         "run_id": run_id, "workflow_name": name,
         "trigger_event": {"type": "github/issue.opened", "data": {}},
-        "started_at": _iso(started_at),
-        "completed_at": _iso(completed_at) if completed_at else "",
+        "started_at": ts(started_at),
+        "completed_at": ts(completed_at) if completed_at else "",
         "status": status, "suspended_at_step": suspended_at_step,
         "await_event": await_event, "session_name": session_name,
-        "variable_scopes": {}, "repo": "", "cwd": "", "run_key": "",
-        "resumed_at": _iso(resumed_at) if resumed_at else "",
+        "variable_scopes": {}, "repo": "", "cwd": "", "run_key": run_key,
+        "resumed_at": ts(resumed_at) if resumed_at else "",
     }))
 
 
@@ -81,11 +91,6 @@ def _monitor(install, monitor="inbox-watch", *, outcome=QUIET, reason="",
     return run
 
 
-def _utc(epoch):
-    from datetime import datetime, timezone
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
-
-
 def _rows(install, **kw):
     kw.setdefault("now", NOW)
     return build_runs(install.repo_path, **kw)
@@ -96,6 +101,7 @@ def _by_key(payload):
 
 
 # === status vocabulary ===
+
 
 class TestSessionStatus:
     @pytest.mark.parametrize("recorded,expected", [
@@ -136,6 +142,21 @@ class TestWorkflowStatus:
                   suspended_at_step=2, await_event="pr.merged")
         assert _by_key(_rows(bobi_install))["workflow:wf-1"]["status"] == "idle"
 
+    def test_aware_era_completed_run_folds_duration_correctly(self, bobi_install):
+        _workflow(bobi_install, "wf-aware", aware=True,
+                  started_at=NOW - 1800, completed_at=NOW - 1500)
+        row = _by_key(_rows(bobi_install))["workflow:wf-aware"]
+        assert row["status"] == "done"
+        assert row["duration_seconds"] == 300.0
+
+    def test_aware_era_waiting_run_awaits_action_at_the_threshold(self, bobi_install):
+        _workflow(bobi_install, "wf-aware", aware=True, status="waiting",
+                  completed_at=0,
+                  started_at=NOW - AWAITING_ACTION_AFTER_SECONDS,
+                  suspended_at_step=2, await_event="pr.merged")
+        assert (_by_key(_rows(bobi_install))["workflow:wf-aware"]["status"]
+                == "awaiting_action")
+
     def test_old_waiting_run_awaits_action_at_the_threshold(self, bobi_install):
         _workflow(bobi_install, "wf-1", status="waiting", completed_at=0,
                   started_at=NOW - AWAITING_ACTION_AFTER_SECONDS,
@@ -153,6 +174,84 @@ class TestWorkflowStatus:
                   started_at=NOW - 3 * 86400, resumed_at=NOW - 3600,
                   suspended_at_step=2, await_event="pr.merged")
         assert _by_key(_rows(bobi_install))["workflow:wf-1"]["status"] == "idle"
+
+
+class TestLiveness:
+    """`detail.live` - can this row's session receive a message right now.
+
+    The composer in the run modal picks its branch off this field (#987): a
+    live session is chatted with, a finished one is continued in a fresh
+    session. Getting it wrong in the permissive direction is a box that
+    accepts typing and then answers `unknown agent`, so the server answers
+    the question it already knows the answer to rather than the client
+    re-deriving it from `status`.
+    """
+
+    @pytest.mark.parametrize("recorded,live", [
+        ("running", True), ("starting", True), ("idle", True),
+        ("completed", False), ("failed", False), ("crashed", False),
+        ("stopped", False),
+    ])
+    def test_a_session_row_is_live_exactly_when_it_is_addressable(
+            self, bobi_install, recorded, live):
+        # The same predicate `SessionRegistry.list_active` uses, which is the
+        # membership guard `service.ask` applies before delivering.
+        _session(bobi_install, "worker", status=recorded, terminal_at=0.0)
+        assert _by_key(_rows(bobi_install))["session:worker"]["detail"]["live"] \
+            is live
+
+    def test_a_waiting_gate_is_not_live_even_though_it_renders_as_idle(
+            self, bobi_install):
+        """The ambiguity this field exists to remove.
+
+        A freshly suspended workflow and a live-but-waiting manager both
+        render `idle`, so `status` cannot tell the composer whether anyone is
+        listening. The gate's session is gone (the orchestrator disconnects
+        and returns at the await step), and `waiting` is not an active status.
+        """
+        _session(bobi_install, "wf-gate-session", status="waiting")
+        _workflow(bobi_install, "wf-gate", status="waiting", completed_at=0,
+                  started_at=NOW - 60, suspended_at_step=7,
+                  await_event="approval", session_name="wf-gate-session")
+        row = _by_key(_rows(bobi_install))["workflow:wf-gate"]
+        assert row["status"] == "idle"
+        assert row["detail"]["live"] is False
+
+    def test_a_workflow_row_running_through_a_live_session_is_live(
+            self, bobi_install):
+        _session(bobi_install, "wf-live-session", status="running",
+                 terminal_at=0.0)
+        _workflow(bobi_install, "wf-live", status="running", completed_at=0,
+                  session_name="wf-live-session")
+        assert _by_key(_rows(bobi_install))["workflow:wf-live"]["detail"]["live"] \
+            is True
+
+    def test_a_row_with_no_session_is_never_live(self, bobi_install):
+        _workflow(bobi_install, "wf-headless", status="waiting",
+                  completed_at=0, suspended_at_step=1, await_event="approval")
+        assert _by_key(_rows(bobi_install))["workflow:wf-headless"]["detail"][
+            "live"] is False
+
+    def test_a_monitor_row_carries_the_field_too(self, bobi_install):
+        # One field, stamped in one place, for every row shape - so the
+        # composer never has to ask what kind of row it is on.
+        _monitor(bobi_install, session_ref="monitor-session")
+        row = next(r for r in _rows(bobi_install)["runs"]
+                   if r["kind"] == "monitor")
+        assert row["detail"]["live"] is False
+
+    def test_a_dead_pid_on_an_active_status_is_not_live(self, bobi_install):
+        """The reap is what makes the predicate safe, and it runs on this read.
+
+        A session recorded `running` whose process is gone is reaped to
+        `crashed` by `list_all(reap_dead=True)`, so a stale registry entry
+        cannot present a dead process as a chat target.
+        """
+        _session(bobi_install, "worker", status="running", pid=999_999_999,
+                 terminal_at=0.0)
+        row = _by_key(_rows(bobi_install))["session:worker"]
+        assert row["status"] == "crashed"
+        assert row["detail"]["live"] is False
 
 
 class TestMonitorStatus:
@@ -417,3 +516,140 @@ class TestEndpoint:
         _monitor(bobi_install)
         body = _get(client, f"/api/agents/{bobi_install.agent_name}/runs")
         json.dumps(body.json())
+
+
+class TestLedgerRowContent:
+    """Every run leaves a ledger entry now (#1048): the workflow row replaces
+    the session row for ordinary runs, so it must carry the task and the
+    failure reason, and must not double-count a session's spend."""
+
+    def _ledger(self, install, run_id, **extra):
+        runs_dir = install.state_dir / "workflow" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        base = {
+            "run_id": run_id, "workflow_name": "triage",
+            "trigger_event": {}, "started_at": _iso(NOW - 1800),
+            "completed_at": _iso(NOW - 1500), "status": "completed",
+            "suspended_at_step": -1, "await_event": "",
+            "session_name": "", "variable_scopes": {}, "repo": "",
+            "cwd": "", "run_key": "", "resumed_at": "",
+        }
+        base.update(extra)
+        (runs_dir / f"{run_id}.json").write_text(json.dumps(base))
+
+    def test_row_titles_the_task_and_carries_the_error(self, bobi_install):
+        self._ledger(bobi_install, "wf-1", status="failed",
+                     title="Fix moda-labs/bobi-agent#42",
+                     error="Handoff missing required fields: ['pr_url']")
+        row = _by_key(_rows(bobi_install))["workflow:wf-1"]
+        assert row["title"] == "Fix moda-labs/bobi-agent#42"
+        assert "pr_url" in row["error"]
+
+    def test_row_without_title_falls_back_to_workflow_name(self, bobi_install):
+        self._ledger(bobi_install, "wf-2")
+        row = _by_key(_rows(bobi_install))["workflow:wf-2"]
+        assert row["title"] == "triage"
+
+    def test_two_entries_one_session_count_usage_once(self, bobi_install):
+        # A --fresh relaunch mints a second entry on the same session name;
+        # both rows citing the session's tokens would double a column the
+        # reader totals by eye.
+        _session(bobi_install, "wf-triage-r-42", status="completed",
+                 model_usage={"anthropic:sonnet-5": {
+                     "cost_usd": 1.0, "input_tokens": 500,
+                     "output_tokens": 500, "cached_input_tokens": 0}},
+                 total_cost_usd=1.0)
+        self._ledger(bobi_install, "wf-old", status="failed",
+                     session_name="wf-triage-r-42",
+                     started_at=_iso(NOW - 3600))
+        self._ledger(bobi_install, "wf-new", status="completed",
+                     session_name="wf-triage-r-42")
+        payload = _rows(bobi_install)
+        rows = {r["key"]: r for r in payload["runs"]
+                if r["key"] in ("workflow:wf-old", "workflow:wf-new")}
+        assert len(rows) == 2
+        # The NEWEST entry claims the session's usage; the older gets zero.
+        # Asserting both directions: counted once, and not zero times.
+        assert rows["workflow:wf-new"]["tokens"] == 1000
+        assert rows["workflow:wf-old"]["tokens"] == 0
+
+
+class TestUsageSummary:
+    def test_folds_terminal_jobs_completed_inside_the_window(self, bobi_install):
+        _session(
+            bobi_install,
+            "wf-recent",
+            terminal_at=NOW - 300,
+            last_activity=NOW - 300,
+            model_usage={"anthropic:sonnet-5": {
+                "cost_usd": 1.25,
+                "input_tokens": 1200,
+                "cached_input_tokens": 200,
+                "output_tokens": 300,
+            }},
+            total_cost_usd=1.25,
+        )
+        _workflow(
+            bobi_install,
+            "wf-recent",
+            session_name="wf-recent",
+            completed_at=NOW - 300,
+            aware=True,
+        )
+        _session(
+            bobi_install,
+            "wf-failed",
+            status="failed",
+            terminal_at=NOW - 600,
+            last_activity=NOW - 600,
+            model_usage={"openai:gpt-5.6-luna": {
+                "input_tokens": 400,
+                "cached_input_tokens": 100,
+                "output_tokens": 100,
+            }},
+        )
+        _workflow(
+            bobi_install,
+            "wf-failed",
+            status="failed",
+            session_name="wf-failed",
+            completed_at=NOW - 600,
+            aware=True,
+        )
+        _workflow(
+            bobi_install,
+            "wf-old",
+            started_at=NOW - 5 * 86400,
+            completed_at=NOW - 4 * 86400,
+            aware=True,
+        )
+        _workflow(
+            bobi_install,
+            "wf-running",
+            status="running",
+            completed_at=0,
+            aware=True,
+        )
+
+        summary = runs_model.build_usage_summary(
+            bobi_install.repo_path,
+            manager_name=MANAGER,
+            window_seconds=3 * 86400,
+            now=NOW,
+        )
+
+        assert summary["jobs"] == {
+            "total": 2,
+            "completed": 1,
+            "failed": 1,
+            "closed": 0,
+        }
+        assert summary["tokens"] == {
+            "input": 1600,
+            "cached_input": 300,
+            "output": 400,
+            "total": 2000,
+        }
+        assert summary["cost_usd"] == 1.25
+        assert summary["estimated_cost_usd"] > 0
+        assert summary["window"]["seconds"] == 3 * 86400

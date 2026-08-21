@@ -1,0 +1,317 @@
+# The single-agent view on the hosted console
+
+> **Status:** Draft
+> **Tracking issue:** moda-labs/bobi-agent#963 · **Created:** 2026-08-05 · **Last amended:** — (see Amendments)
+>
+> Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
+
+## Purpose
+
+Make the single-agent view from `plans/2026-07-31-single-agent-view.md` (MOD-261,
+shipped in 0.55.0) work on the **hosted console** — and, in doing so, ship the
+piece that lets anyone assemble a hosted console at all.
+
+Today the view is whole only on `LocalRuntime` (`bobi app` against a local
+`$BOBI_HOME`). On the hosted console it is **half a page**: what the agent is
+doing right now answers, what it has *done* does not.
+
+## Problem
+
+Verified against `v0.55.0` on 2026-08-05, by driving the real hosted stack
+(Worker + supervisor + stub manager + `EventBusRuntime`) and reading every
+endpoint the page calls — not by inference from the ABC:
+
+| endpoint | hosted | backs |
+|---|---|---|
+| `/health` | **200** | status strip, telemetry |
+| `/status` | **200** | the page title, lifecycle polling |
+| `/spend` | **200** | spend figures |
+| `/overview` | **409** | the identity header's saved / about popovers |
+| `/runs` | **409** | the runs table |
+
+The lifecycle verbs (`start` / `stop` / `restart`) also work, because they are
+existing admin commands. So a hosted agent can be watched and recovered today;
+what is missing is its **history and composition**. Two read models, not five.
+
+That is a smaller user-visible gap than "the page is broken", and it does not
+shrink the work below — every method in the next section still has to be
+implemented — but it should set the urgency honestly.
+
+- **Seven `TeamRuntime` methods are `LocalRuntime`-only.** `runs`, `overview`,
+  `run_details`, `transcript`, `resume_run`, `remind_run`, `close_run` are
+  deliberately **not** `@abstractmethod` — the base implementations
+  `raise TeamLifecycleError("… not available on this runtime")`, which
+  `webapp/server.py:144` maps to **HTTP 409**.
+- **The routes register unconditionally**, so the console renders the new page
+  and the two calls above 409. The page degrades rather than crashing — it
+  renders "Could not read this agent's runs" and an empty saved chip — which is
+  why this was invisible until someone drove it. Confirmed live: the deployed
+  console serves #948's `static/views/agent.js`.
+- **`EventBusRuntime` cannot reach a filesystem.** Every read goes through
+  `_command(fleet, instance, command, args)` to the operator-authed `/fleet`
+  route, which speaks the sidecar admin protocol. That protocol's **entire read
+  vocabulary** is `status`, `transcript`, `roster`, `spend`, `session_log`
+  (`bobi/supervisor/admin.py:55`), plus `chat` / `start` / `stop` / `restart`.
+  Nothing returns runs, overview, or run details, and there is **no run-scoped
+  write at all**.
+
+### The structural problem underneath it
+
+**This repo ships the sidecar (`bobi/supervisor/`), the Cloudflare event bus
+(`event-server/worker/`), and the console UI (`bobi/webapp/`) — and withholds
+the ~470 lines that connect them.** Someone can self-host every published piece
+and still not assemble a hosted console, because the runtime that drives one
+lives in `moda-agents`.
+
+That placement does not survive inspection.
+`bobi-deploy/bobi_deploy/src/bobi_deploy/webapp/runtime.py` imports **only**
+stdlib, `httpx`, and the **public** `bobi.webapp.runtime`. It mentions
+`bobi_deploy` exactly once, in a docstring naming its binder — not an import.
+It contains **zero** Moda-specific literals: no fleet name, no URL, no team
+names. Everything situational arrives through the constructor
+(`fleet_api_url`, `operator_token`).
+
+It is generic framework code sitting on the private side of the line. Every
+contract it depends on — the `/fleet` routes, the admin protocol, the ABC — is
+already public. Only the class implementing them is not.
+
+**What is genuinely Moda's is the binding, not the mechanism:**
+`bobi_deploy/webapp/hosted.py:46`, which constructs it with Moda's URL and
+operator token. That stays private, along with the Fly deploy engine and the
+fleet configs.
+
+## The thing that makes the rest small
+
+The read builders are **already pure functions over a filesystem root**:
+
+| builder | signature |
+|---|---|
+| `bobi/webapp/runs.py` | `build_runs(root, *, manager_name, status, query, offset, limit, now)` |
+| `bobi/webapp/overview.py` | `build_overview(root)` |
+| `bobi/webapp/details.py` | `build_details(root, run_id)` |
+
+`LocalRuntime` is a thin wrapper — resolve the agent root, call the builder.
+**The supervisor runs on the box, where that root exists**, so the new admin
+commands are equally thin delegates to the *same* builders. No read logic is
+re-implemented, and the two runtimes cannot drift, because they call one
+function.
+
+## Non-goals
+
+- **No new UI.** The page shipped in 0.55.0; this makes its calls answer on a
+  second runtime.
+- **No widening of operator authority.** New commands ride the existing
+  `FLEET_OPERATOR_TOKEN` gate and command envelope — more verbs, not more power.
+- **No change to `LocalRuntime`'s behavior.**
+- **Moda's deployment surface stays private** — the Fly engine, fleet configs,
+  and the hosted app's binding. Only the generic adapter moves.
+
+## Design
+
+Repo shorthand: **`bobi-agent`** is this repo (public, the framework).
+**`moda-agents`** is the fleet repo (private), which consumes released `bobi`
+versions and carries the deploy engine as its `bobi-deploy/` subtree. The
+standalone `moda-labs/bobi-deploy` repo is **archived** — not a lane, not a
+location, not somewhere to open a PR.
+
+### Lane A — move `EventBusRuntime` into the framework (`bobi-agent`)
+
+A **pure move**, reviewable as one: 471 lines of implementation and 567 lines of
+tests, from `moda-agents` into `bobi/webapp/` and `tests/`. No behavior change,
+no signature change. The tests come with it and must pass **unmodified** — that
+is the proof it was generic all along.
+
+Lands as `bobi/webapp/event_bus.py` (its own module) rather than appended to
+`runtime.py`, which is already 973 lines.
+
+Worth doing **first and alone**, because everything after it becomes
+single-repo work.
+
+### Lane B — the vocabulary and the implementation (`bobi-agent`)
+
+Now one repo, one CI, both implementers visible — so this can be a single PR.
+
+Six new commands in `bobi/supervisor/admin.py`, each a thin delegate:
+
+| command | args | result | delegates to |
+|---|---|---|---|
+| `runs` | `{status, query, offset, limit}` (all optional) | `{"runs": [...], "counts": {...}, "total", "offset", "limit", "query", "truncated"}` | `build_runs` |
+| `overview` | — | `{"overview": {...}}` | `build_overview` |
+| `run_details` | `{"run_id"}` | `{"details": {...}}` | `build_details` |
+| `resume_run` | `{"run_id"}` | `{"ok", "accepted", "run_id", "workflow", "await_event"}` | the path `LocalRuntime.resume_run` uses |
+| `remind_run` | `{"run_id"}` | as `LocalRuntime.remind_run` | ditto |
+| `close_run` | `{"run_id"}` | as `LocalRuntime.close_run` | ditto |
+
+`transcript` is **not** new — the existing command already returns messages.
+
+**Corrected while building Lane B — the adapter cannot reshape, it has to
+widen.** The plan said the adapter would reshape `messages` into the ABC's
+transcript dict rather than add a seventh command. Read against the code, that
+does not work: `messages` is the CHAT view (`read_transcript_messages` — two
+roles, prose only) and the ABC's `transcript()` is the DEBUGGING view
+(`read_transcript_detail` — timestamped lines *including tool calls*, plus a
+`usage` header). The tool calls are already discarded by the time `messages`
+exists, so nothing downstream can recover them; a hosted transcript built by
+reshaping would silently omit everything the agent DID between speaking, which
+is most of what debugging a run means, and `docs/RUN_DRILLDOWNS.md` exists to
+draw exactly that distinction.
+
+So the conclusion stands and the mechanism changes: still **no seventh
+command**, but the existing `transcript` command takes an additive optional
+`detail: true` arg and its reply gains `entries` + `usage`. Additive on both
+halves of the wire, so the compatibility promise holds. A supervisor too old to
+know the arg replies without `entries`, and that is reported as unavailable
+rather than rendered as a debugging view with the tool calls missing.
+
+- `docs/ADMIN_PROTOCOL.md` documents all six. **Additive only**, per its own
+  compatibility promise; bump `SUPERVISOR_VERSION` (`snapshot.py:28`) minor.
+- The three writes are the protocol's **first run-scoped writes**, and take the
+  honesty discipline `chat` already has: `resume_run` returns once the resume is
+  *under way* (`accepted`), never holding a request open for a workflow.
+- `EventBusRuntime` implements the seven, each a `_command(...)` plus unwrap.
+  `runs` and `overview` are heavier than `status`, so they need their own
+  command timeouts rather than borrowing the default.
+- An older supervisor rejects these as unknown commands. Render that as
+  "unavailable on this instance", naming the instance — **not** a crash. The
+  fleet is not uniform mid-roll. Mechanically this is subtler than it reads:
+  an unknown command is dropped **without a reply**, so the only symptom is a
+  timeout, indistinguishable from a wedged dispatch worker. The runtime
+  therefore consults `supervisor.version` off the heartbeat *on timeout only*,
+  and reports "too old" only when the version says so — guessing "too old" for
+  a box that is merely stuck would be the same lie inverted.
+- **Flip the seven to `@abstractmethod` and delete the fallbacks in this same
+  PR.** This is the dividend of Lane A: both implementers are now under one CI,
+  so the ABC's sequencing rule — which existed *only* because the second
+  implementer was invisible — no longer applies.
+- Correct `runtime.py:238` and `:354`, which name the archived `bobi-deploy`
+  repo. As shipped in 0.55.0 they send implementors to a dead repository; after
+  Lane A they are simply wrong, since the subclass is in-tree. **Already done
+  by Lane A** (its five docstring hunks removed the naming), so what is left
+  for Lane B is B8's *enforcing* grep gate, which did not exist.
+
+- **Folded in while building — hosted `spend` was missing its savings block.**
+  Not in the plan as written, and small enough to belong here rather than in a
+  follow-up. `LocalRuntime.spend_summary` appends `script_cache`
+  (`docs/AGENT_OVERVIEW.md`); the supervisor's `spend` command did not, so a
+  hosted box answered `200` with the savings block silently blank. That is why
+  the Problem table above counted `/spend` as working — it returns, it just
+  under-reports. One line, and the parity test now covers it.
+
+### Lane C — re-point the binding (`moda-agents`)
+
+Small, and strictly after a release carrying Lanes A+B, because `moda-agents`
+pins a **released** `bobi`:
+
+- `bobi_deploy/webapp/hosted.py` imports `EventBusRuntime` from
+  `bobi.webapp.event_bus`.
+- Delete the moved implementation and tests.
+- Re-expand
+  `bobi_deploy/tests/test_hosted_webapp_ui.py::test_drive_deployed_team_from_the_browser`
+  onto the runs table.
+
+  It is **green today** and needs no repair: it was red on the `dev` channel
+  from 2026-08-05 (first observed on moda-agents#100) because 0.55.0's page
+  replaced the layout it asserted, and moda-agents#102 re-pointed it. That
+  change is the baseline this lane builds on, so read it before touching this:
+
+  - The **roster** and **chat** legs were deleted, not re-pointed — those
+    features are gone from the product ("chat lives in Slack and the CLI"), so
+    they are never coming back and this lane must not try to restore them.
+  - The **lifecycle** leg survives and is now asserted more strictly (the busy
+    transition, then its reversal), because `restart` / `status` are existing
+    admin commands that already work here.
+  - The **runs** leg is the only one left out, and only because `/runs` 409s.
+    Restoring it is this lane's job, and it is the sole reason this test is
+    narrower than the page.
+
+## Order
+
+Lane A → Lane B → release → Lane C.
+
+Note what changed. The old ordering was a **hard constraint enforced by nothing**
+— a public ABC whose only other implementer sat where CI could not see it, with
+a docstring asking people to remember. After Lane A that constraint is
+*half* dissolved: the in-tree `EventBusRuntime` is now covered by this repo's
+CI, so the ABC and its implementer can no longer drift unnoticed here.
+
+**Corrected 2026-08-05 while building Lane A — the other half does not
+dissolve until Lane C, and this changes B7.** `moda-agents` keeps its own
+copy of `EventBusRuntime` until Lane C re-points the binding, and its
+`deploy-package.yml` installs the public repo from a **sibling checkout at
+`dev`** (`.github/actions/setup-public-bobi`, ref defaults to `dev`, which
+this repo's promote-dev job fast-forwards to every green main). So B7's
+`@abstractmethod` flip still reds that repo the moment it merges — Python
+refuses to instantiate the private copy once the seven are abstract, and its
+33 `EventBusRuntime` tests plus `hosted.py` all instantiate it. That is
+precisely the breakage the ABC's sequencing rule exists to prevent, so the
+flip is **not** yet "protected by CI instead of prose".
+
+**Zach's call, 2026-08-05: accept the red canary.** The order stands —
+`A → B → release → C` — B7 stays inside Lane B, and `moda-agents`'
+`deploy-package.yml` goes red from B7's merge until Lane C lands. The
+alternatives were both worse: moving Lane C ahead of B7 makes it consume an
+*unreleased* `bobi`, which is the constraint that put it last in the first
+place; splitting B7 into a fourth step buys a clean window at the cost of an
+extra PR and a flip stranded past a release.
+
+Two obligations follow from choosing this, and **Lane B owns both**:
+
+- **Lane B's PR must state that the canary will go red, and why**, before it
+  merges — a knowingly-red check that nobody announced is indistinguishable
+  from a regression, and the next person to look pays for it. `moda-agents`
+  is a consumer; it never gates this repo's main.
+- **Lane C is the repair, and follows the release promptly.** The length of
+  that window is the entire cost being accepted here, so it is short by
+  intent, not by luck.
+
+Lane A is unaffected either way — it adds a module and breaks nothing.
+
+## Validation gates
+
+<!-- checklist -->
+
+- [x] **A1** `EventBusRuntime` and its tests live in `bobi-agent`; the moved tests pass with **no change to any assertion, fixture, or test body** — the import path is the only edit, and it must change, so "unmodified" was never literally achievable.
+- [x] **A2** It still imports nothing private — asserted by `tests/test_import_boundaries.py`, so a future private import fails CI rather than re-splitting the seam.
+- [x] **B1** Six commands in `ADMIN_COMMANDS` and the dispatch chain, each delegating to the existing builder — no re-implemented read logic.
+- [x] **B2** `docs/ADMIN_PROTOCOL.md` documents all six; `SUPERVISOR_VERSION` bumped; the additive-only promise holds.
+- [x] **B3** Each read command's payload is **identical** to `LocalRuntime`'s for the same root — the anti-drift gate, and the reason the delegate design was chosen.
+- [x] **B4** The three writes are proven against real run files on disk, not a mocked `WorkflowRun`: `close` really closes the run and cancels its session, and two concurrent claims on a real waiting run produce exactly one winner. One seam is held back deliberately — `subprocess.Popen`, so what resume asserts is the argv it hands the OS. "Resume moves the run" is NOT asserted here and was never a unit-testable claim: resume is fire-and-forget by design, so moving the run is the spawned CLI's work and the workflow engine's own test surface.
+- [x] **B5** An unknown `run_id` and a non-resumable run return the documented error shapes.
+- [x] **B6** A supervisor that does not know the command surfaces as unavailable, naming the instance — asserted, not assumed.
+- [x] **B7** The seven are `@abstractmethod`, the fallbacks are gone, and **both** runtimes satisfy the ABC in one CI run.
+- [x] **B8** No file under `bobi/` names the archived `bobi-deploy` **repo** as a place a subclass lives — grep gate, so it cannot silently return.
+- [x] **C1** `hosted.py` binds the framework class; the private copies are deleted; no duplicate implementation survives — and that last clause is now a test (`test_eventbus_runtime_is_the_public_class_not_a_local_copy`), asserting class IDENTITY rather than name, because a re-vendored copy would import cleanly under the same name.
+- [x] **C2** `/overview` and `/runs` answer 200 where they answered 409, and `test_drive_deployed_team_from_the_browser` drives the runs table again (roster/chat legs stay deleted). The restored leg asserts the manager's own session by `manager · entry point` — a string the fold prints only when the supervisor resolved the live manager and matched it against the registry, so a 409 or a merely-parseable payload fails it. Proven non-vacuous three ways: it failed on this exact leg before the fix, a bogus origin string fails it, and it is the reason the Worker fork below was found.
+
+## Amendments
+
+### 2026-08-05 — Lane C also had to delete a private Worker fork
+
+Found while building C2, not planned: `runs`/`overview` came back `400 unknown
+command` from the e2e's Worker. Not the public one — that allows all six verbs —
+but a **private fork** at `bobi-deploy/event-server/` that `e2e_harness.py`
+booted. Repo-reorg Lane 3 moved production's deploy onto the public sources and
+left the fork on disk with the harness pointed at it; frozen since the
+subtree-import commit, it was missing `mcp.ts` (0.53.0) and all six verbs
+(0.56.0).
+
+So the marquee full-stack e2e spent three releases proving the stack against a
+Worker production had left behind, green throughout. Lane C deletes the fork and
+re-points the harness at `bobi-agent/event-server/worker`. This was not optional
+scope: C2 cannot go green while the Worker under test lacks the verbs.
+
+It also generalises Lane A's finding. The plan framed the duplicate-implementer
+hazard as a Python one (`EventBusRuntime` subclassing a public ABC where public
+CI could not see it); the same hazard existed in TypeScript, one layer down, and
+nothing in the plan would have caught it. `moda-agents` now carries a guard
+(`test_e2e_harness_wiring.py`) that fails if either the harness path drifts or a
+fork returns — needed because every e2e there is gated on `EVENT_SERVER.exists()`
+and would otherwise **skip to green**.
+
+### 2026-08-05 — C2's "live instance" clause, resolved
+
+C2 said "against a live instance". Zach's call: the automated full-stack browser
+proof (real Worker under workerd, real supervisor, stub brain, real Chromium)
+closes the gate, since it drives the same code path as production against the
+same Worker sources and the remaining delta is the deploy itself. No hosted
+redeploy was required to close this plan.

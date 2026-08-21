@@ -2,7 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { describe, it, expect, beforeEach } from "vitest";
 
 import capture from "./fixtures-claude-code-mcp.json";
-import { MCP_SERVER_NAME, MCP_SERVER_VERSION } from "../src/mcp";
+import { MCP_SERVER_NAME, MCP_SERVER_VERSION, handleMcpRequest } from "../src/mcp";
 import { DEFAULT_COMMAND_WAIT_MS, adminTopic, commandWaitMsFromEnv } from "../src/fleet";
 import { type Bubble, mintBubble, publishSigned, registerSigned } from "./bubble-helpers";
 
@@ -61,29 +61,35 @@ function findCaptured(method: string, predicate?: (body: string) => boolean): Ca
  * Worker that had only the read half.
  */
 function callTool(name: string, args: Record<string, unknown>, token: string | null = OPERATOR): Promise<Response> {
-	const template = findCaptured("tools/call");
-	return replay(
-		{
-			...template,
-			body: JSON.stringify({
-				jsonrpc: "2.0",
-				id: 4242,
-				method: "tools/call",
-				params: { name, arguments: args },
-			}),
-		},
-		token,
-	);
+	return replay(toolCall(name, args), token);
 }
 
-/** Replay one captured request verbatim, with only the bearer swapped in. */
-function replay(req: CapturedRequest, token: string | null = OPERATOR): Promise<Response> {
+/** The captured tools/call request, carrying a synthetic body for `name`. */
+function toolCall(name: string, args: Record<string, unknown>): CapturedRequest {
+	return {
+		...findCaptured("tools/call"),
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			id: 4242,
+			method: "tools/call",
+			params: { name, arguments: args },
+		}),
+	};
+}
+
+/** One captured request as a Request, with only the bearer swapped in. */
+function capturedRequest(req: CapturedRequest, token: string | null = OPERATOR): Request {
 	const headers: Record<string, string> = { "content-type": "application/json" };
 	for (const [k, v] of Object.entries(req.headers)) {
 		if (v !== null && v !== undefined) headers[k] = v;
 	}
 	if (token !== null) headers.authorization = `Bearer ${token}`;
-	return SELF.fetch(MCP_URL, { method: "POST", headers, body: req.body });
+	return new Request(MCP_URL, { method: "POST", headers, body: req.body });
+}
+
+/** Replay one captured request verbatim through the Worker's own routing. */
+function replay(req: CapturedRequest, token: string | null = OPERATOR): Promise<Response> {
+	return SELF.fetch(capturedRequest(req, token));
 }
 
 /**
@@ -248,7 +254,7 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 		expect(res.status).toBe(202);
 	});
 
-	it("lists exactly the six tools, with schemas", async () => {
+	it("lists exactly the seven tools, with schemas", async () => {
 		const res = await replay(findCaptured("tools/list"));
 		const msg = await rpcResult(res);
 		const tools = (msg.result as { tools: { name: string; description?: string; inputSchema?: Record<string, unknown> }[] }).tools;
@@ -260,6 +266,7 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 			"bobi_lifecycle",
 			"bobi_read_transcript",
 			"bobi_send_message",
+			"bobi_usage_summary",
 		]);
 
 		for (const tool of tools) {
@@ -286,6 +293,9 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 		// make the orienting read uncallable.
 		const status = tools.find((t) => t.name === "bobi_fleet_status")!;
 		expect((status.inputSchema as { required?: string[] }).required ?? []).toEqual([]);
+
+		const usage = tools.find((t) => t.name === "bobi_usage_summary")!;
+		expect((usage.inputSchema as { required?: string[] }).required?.sort()).toEqual(["days"]);
 
 		// `reason` is the audit control on lifecycle: it has to be REQUIRED at the
 		// schema, not merely documented, or an agent simply omits it.
@@ -468,9 +478,8 @@ function snapshot(fleet: string, instance: string) {
 }
 
 /** A deployment that is addressable AND has a supervisor listening. */
-async function liveInstance(tag: string): Promise<{ bubble: Bubble; fleet: string; instance: string }> {
+async function liveInstance(tag: string, fleet = "acme"): Promise<{ bubble: Bubble; fleet: string; instance: string }> {
 	const bubble = await mintBubble();
-	const fleet = "acme";
 	const instance = `${tag}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 	const reg = await registerSigned(`${instance}-admin`, [adminTopic(fleet, instance)], bubble);
 	expect(reg.status).toBeLessThan(300);
@@ -480,9 +489,8 @@ async function liveInstance(tag: string): Promise<{ bubble: Bubble; fleet: strin
 }
 
 /** An addressable deployment with NO supervisor subscribed. */
-async function deafInstance(tag: string): Promise<{ bubble: Bubble; fleet: string; instance: string }> {
+async function deafInstance(tag: string, fleet = "acme"): Promise<{ bubble: Bubble; fleet: string; instance: string }> {
 	const bubble = await mintBubble();
-	const fleet = "acme";
 	const instance = `${tag}-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 	const hb = await publishSigned("fleet/heartbeat", bubble, snapshot(fleet, instance));
 	expect(hb.status).toBeLessThan(300);
@@ -505,14 +513,57 @@ async function listCommands(fleet: string, instance: string): Promise<Record<str
 	return values.filter((v): v is string => v !== null).map((v) => JSON.parse(v));
 }
 
-/** Poll until at least one command is listed against the instance. */
-async function recordedCommands(fleet: string, instance: string): Promise<Record<string, unknown>[]> {
-	for (let i = 0; i < 200; i++) {
-		const found = await listCommands(fleet, instance);
-		if (found.length > 0) return found;
-		await new Promise((r) => setTimeout(r, 10));
+// Settle budgets are WALL-CLOCK. An iteration count is a budget in the wrong
+// unit: "200 polls at 10ms" reads like two seconds, but each poll also makes a
+// KV round-trip, so the real ceiling is 200 * (10ms + whatever a round-trip
+// costs on this runner). Locally that is ~2s; on a loaded CI runner - the same
+// run that reported this file's sleep-free tests at ~20x their local time - it
+// passes the budget of the test containing it. The loop then never reaches its
+// own throw. The test timeout kills it first, and the entire failure reads
+// `Test timed out in 5000ms`, naming nothing it was waiting for (#1028).
+//
+// Bounded by the clock, a stuck wait always reports its subject, and always
+// from inside the test rather than over its corpse.
+const SETTLE_BUDGET_MS = 5_000;
+const SETTLE_POLL_MS = 10;
+
+/**
+ * Poll `probe` until it yields a non-null value, bounded by elapsed time.
+ *
+ * `what` is the FAILURE phrase, not a label: it is completed by "within Nms",
+ * so it reads as the diagnosis on the way out ("no command recorded for
+ * acme/tx-1 within 5000ms"). Saying what was awaited is the whole point - a
+ * settle that cannot name its subject is the bug this replaced.
+ */
+async function settle<T>(
+	what: string,
+	probe: () => Promise<T | null>,
+	budgetMs: number = SETTLE_BUDGET_MS,
+): Promise<T> {
+	const deadline = Date.now() + budgetMs;
+	for (;;) {
+		const found = await probe();
+		if (found !== null) return found;
+		// Checked after the probe, so a budget of 0 still gets one honest look.
+		if (Date.now() >= deadline) throw new Error(`${what} within ${budgetMs}ms`);
+		await new Promise((r) => setTimeout(r, SETTLE_POLL_MS));
 	}
-	throw new Error(`no command recorded for ${fleet}/${instance} within the settle budget`);
+}
+
+/** Poll until at least one command is listed against the instance. */
+async function recordedCommands(
+	fleet: string,
+	instance: string,
+	budgetMs?: number,
+): Promise<Record<string, unknown>[]> {
+	return settle(
+		`no command recorded for ${fleet}/${instance}`,
+		async () => {
+			const found = await listCommands(fleet, instance);
+			return found.length > 0 ? found : null;
+		},
+		budgetMs,
+	);
 }
 
 async function awaitRecordedCommand(fleet: string, instance: string): Promise<Record<string, unknown>> {
@@ -522,6 +573,12 @@ async function awaitRecordedCommand(fleet: string, instance: string): Promise<Re
 /**
  * Assert no command was recorded - and keep checking, so the assertion cannot
  * pass merely because the listing had not caught up yet.
+ *
+ * Counted, not clocked, and deliberately the opposite unit to `settle` above: a
+ * NEGATIVE check is only as strong as the number of independent looks it takes,
+ * and a wall-clock budget buys FEWER looks exactly when the runner is slow.
+ * There is no runaway to bound either - 30 looks is 30 round-trips, however
+ * long they take.
  */
 async function expectNoCommandRecorded(fleet: string, instance: string): Promise<void> {
 	for (let i = 0; i < 30; i++) {
@@ -531,15 +588,20 @@ async function expectNoCommandRecorded(fleet: string, instance: string): Promise
 }
 
 describe("/mcp write tools", () => {
-	// The explicit timeouts on the two pending-lifecycle tests ARE an assertion:
-	// they are below the 5s production default and above the 1.5s the suite
-	// configures, so a build that stopped honouring MCP_COMMAND_WAIT_MS fails
-	// here. Without them the only thing killing that mutant is vitest's own 5000ms
-	// default - which someone raising the runner timeout would silently disable,
-	// taking a documented self-hoster contract with it.
-	const WITHIN_CONFIGURED_WAIT = { timeout: 3_000 };
+	// Several tests here leave a command unanswered, so each one spends the
+	// configured wait (1.5s in this suite - see vitest.config.mts). That the
+	// route takes its budget from MCP_COMMAND_WAIT_MS rather than the 5s
+	// production default is asserted at the bottom of this file, by counting
+	// the polls it makes.
+	//
+	// It used to be asserted HERE, by a 3s per-test timeout sitting between the
+	// two values. That reads as an assertion but measures the runner: the
+	// budget has to cover setup, the wait, and every scheduling delay in
+	// between, which left ~1.4s of headroom over the wait itself. A loaded CI
+	// runner closed that gap and turned main red on a build with nothing wrong
+	// with it (run 31056001778). A poll count cannot flake.
 
-	it("bobi_lifecycle issues the command and records the reason on the trail", WITHIN_CONFIGURED_WAIT, async () => {
+	it("bobi_lifecycle issues the command and records the reason on the trail", async () => {
 		const { fleet, instance } = await liveInstance("lc");
 
 		const res = await callTool("bobi_lifecycle", {
@@ -564,7 +626,91 @@ describe("/mcp write tools", () => {
 		});
 	});
 
-	it("bobi_lifecycle says plainly that a pending restart is not a failure", WITHIN_CONFIGURED_WAIT, async () => {
+	it("bobi_usage_summary fans out and aggregates one fleet over the requested window", async () => {
+		const fleetName = `usage-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+		const { bubble, fleet, instance } = await liveInstance("summary", fleetName);
+
+		const inFlight = callTool("bobi_usage_summary", { days: 3, fleet });
+		const recorded = await awaitRecordedCommand(fleet, instance);
+		expect(recorded).toMatchObject({
+			command: "usage",
+			args: { window_seconds: 259200 },
+		});
+		expect(typeof (recorded.args as Record<string, unknown>).end_at).toBe("number");
+
+		await publishSigned("fleet/command_result", bubble, {
+			deployment: { fleet, instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: {
+				usage: {
+					window: { seconds: 259200 },
+					jobs: { total: 4, completed: 3, failed: 1, closed: 0 },
+					tokens: { input: 1000, cached_input: 200, output: 300, total: 1300 },
+					cost_usd: 1.25,
+					estimated_cost_usd: 0.5,
+				},
+			},
+		});
+
+		const body = JSON.parse(await toolText(await inFlight));
+		expect(body.complete).toBe(true);
+		expect(body.window.days).toBe(3);
+		expect(body.fleets).toEqual([
+			{
+				fleet,
+				jobs: { total: 4, completed: 3, failed: 1, closed: 0 },
+				tokens: { input: 1000, cached_input: 200, output: 300, total: 1300 },
+				cost_usd: 1.25,
+				estimated_cost_usd: 0.5,
+				instances: [
+					{
+						instance,
+						jobs: { total: 4, completed: 3, failed: 1, closed: 0 },
+						tokens: { input: 1000, cached_input: 200, output: 300, total: 1300 },
+						cost_usd: 1.25,
+						estimated_cost_usd: 0.5,
+					},
+				],
+			},
+		]);
+		expect(body.unavailable).toEqual([]);
+	});
+
+	it("bobi_usage_summary returns partial data when one instance is unavailable", async () => {
+		const fleetName = `partial-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+		const live = await liveInstance("live", fleetName);
+		const deaf = await deafInstance("deaf", fleetName);
+
+		const inFlight = callTool("bobi_usage_summary", { days: 1, fleet: fleetName });
+		const recorded = await awaitRecordedCommand(live.fleet, live.instance);
+		await publishSigned("fleet/command_result", live.bubble, {
+			deployment: { fleet: live.fleet, instance: live.instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: {
+				usage: {
+					jobs: { total: 1, completed: 1, failed: 0, closed: 0 },
+					tokens: { input: 10, cached_input: 0, output: 5, total: 15 },
+					cost_usd: 0.1,
+					estimated_cost_usd: 0,
+				},
+			},
+		});
+
+		const body = JSON.parse(await toolText(await inFlight));
+		expect(body.complete).toBe(false);
+		expect(body.fleets[0].instances[0].instance).toBe(live.instance);
+		expect(body.unavailable).toEqual([
+			expect.objectContaining({
+				fleet: fleetName,
+				instance: deaf.instance,
+				reason: expect.stringMatching(/not delivered/i),
+			}),
+		]);
+	});
+
+	it("bobi_lifecycle says plainly that a pending restart is not a failure", async () => {
 		const { fleet, instance } = await liveInstance("lcnote");
 		const res = await callTool("bobi_lifecycle", { fleet, instance, action: "restart", reason: "r" });
 		const body = JSON.parse(await toolText(res));
@@ -652,7 +798,7 @@ describe("/mcp write tools", () => {
 		expect(result.content[2].text).toContain("END OF UNTRUSTED CONTENT");
 	});
 
-	it("does not label a pending transcript as untrusted content", WITHIN_CONFIGURED_WAIT, async () => {
+	it("does not label a pending transcript as untrusted content", async () => {
 		// Nothing answers, so the wait expires. The warning must be reserved for
 		// blocks that actually carry third-party text - crying wolf on an empty
 		// stub is how an agent learns to ignore it.
@@ -720,6 +866,57 @@ describe("/mcp write tools", () => {
 	});
 });
 
+describe("the suite's own settle budget", () => {
+	// #1028. A settle that outlives the test containing it cannot report what it
+	// was waiting for: the test timeout kills it first, and the whole failure is
+	// a bare "Test timed out", naming nothing. That is not a cosmetic loss - it
+	// is why a flake that reddened `main` twice needed a ticket to diagnose.
+	//
+	// Budgeted here rather than left to the test timeout, so the diagnosis
+	// survives whatever the runner is doing.
+	it("gives up on a command that never arrives, and says so", async () => {
+		// The WIRING half: that the budget reaches the settle and that the message
+		// names the instance it gave up on. The mechanism behind the budget is the
+		// next test's subject, deliberately - one claim per test, so a regression
+		// says which half broke.
+		//
+		// The instance is in the phrase because that is the sentence a reader gets
+		// instead of a bare "Test timed out". Both halves are asserted: drop the
+		// budget forward and the number is wrong; drop the instance and there is
+		// nothing to act on.
+		await expect(recordedCommands("acme", "never-issued", 300)).rejects.toThrow(
+			/no command recorded for acme\/never-issued within 300ms/,
+		);
+	});
+
+	it("counts the clock, not poll iterations, so a slow runner cannot stretch it", async () => {
+		// Each probe costs 40ms - the regime a loaded CI runner puts KV
+		// round-trips in. The 2026-08-13 failure reported this file's sleep-free
+		// tests at ~20x their local time, which is what turns "200 polls" from
+		// two seconds into ten.
+		//
+		// Asserted by probe COUNT, not elapsed time: a stopwatch assertion here
+		// would measure the runner, which is the mistake that put the original
+		// timing claim in a test timeout in the first place. An iteration budget
+		// probes exactly 200 times no matter how slow each one is; a wall-clock
+		// budget fits about six probes into 300ms at 40ms each, whatever N is.
+		let probes = 0;
+		await expect(
+			settle(
+				"a probe that never settles",
+				async () => {
+					probes += 1;
+					await new Promise((r) => setTimeout(r, 40));
+					return null;
+				},
+				300,
+			),
+		).rejects.toThrow(/a probe that never settles/);
+		expect(probes).toBeGreaterThan(0);
+		expect(probes).toBeLessThan(20);
+	});
+});
+
 // ---------------------------------------------------------------------------
 // The bounded wait, as a unit.
 //
@@ -744,5 +941,66 @@ describe("bounded wait configuration", () => {
 		for (const bad of ["", "abc", "-1", "NaN"]) {
 			expect(commandWaitMsFromEnv(bad), `for ${JSON.stringify(bad)}`).toBe(5_000);
 		}
+	});
+});
+
+/**
+ * Tally the route's reads of one command's RESULT record.
+ *
+ * `awaitCommandResult` polls `buildCommandView`, which is one read of this key
+ * per poll - so the count IS the wait's behaviour, observable without a
+ * stopwatch. Everything else delegates to the real binding, so the route still
+ * runs against real KV; only the reads are counted.
+ */
+function countingEvents(inner: KVNamespace): { binding: KVNamespace; resultReads: () => number } {
+	let reads = 0;
+	const binding = {
+		get(key: string, options?: unknown) {
+			// A key rename in createFleetKVStorage surfaces here as a count of
+			// zero, which fails the assertion below rather than passing vacuously.
+			if (key.startsWith("fleet_command_result:")) reads += 1;
+			return (inner.get as (k: string, o?: unknown) => Promise<unknown>)(key, options);
+		},
+		put: inner.put.bind(inner),
+		list: inner.list.bind(inner),
+		delete: inner.delete.bind(inner),
+		getWithMetadata: inner.getWithMetadata.bind(inner),
+	} as unknown as KVNamespace;
+	return { binding, resultReads: () => reads };
+}
+
+describe("the wait the route actually uses", () => {
+	// What the ROUTE does with the binding, as distinct from what
+	// `commandWaitMsFromEnv` returns for it: `handleMcpRequest` builds both its
+	// storage and its budget out of the env it is handed, so handing it a
+	// wrapped binding and a zero budget makes that wiring observable.
+	//
+	// Counted, never timed. The natural assertion - "an unanswered command
+	// answers within N ms" - measures the runner's load as much as the code's
+	// behaviour, and a budget tight enough to catch the 5s default is tight
+	// enough to fail on a busy runner (run 31056001778). A poll count is the
+	// same contract with none of that.
+	it("takes its budget from MCP_COMMAND_WAIT_MS, not the 5s production default", async () => {
+		const { fleet, instance } = await liveInstance("waitenv");
+		const events = countingEvents(env.EVENTS);
+
+		// Delivery is stubbed to one subscriber: what happens AFTER a delivered
+		// command is this test's subject, and the issue outcomes that precede it
+		// have their own tests above.
+		const res = await handleMcpRequest(
+			capturedRequest(toolCall("bobi_lifecycle", { fleet, instance, action: "restart", reason: "wait wiring" })),
+			{ ...env, EVENTS: events.binding, MCP_COMMAND_WAIT_MS: "0" },
+			async () => 1,
+		);
+
+		// Nothing answers, so the answer is the same `pending` every other
+		// unanswered command returns - reached without waiting.
+		const body = JSON.parse(await toolText(res));
+		expect(body.status).toBe("pending");
+		expect(body.command_id).toBeTruthy();
+
+		// A zero budget reads once and answers. A build that ignored the binding
+		// would spend the 5s default polling this one key roughly twenty times.
+		expect(events.resultReads()).toBe(1);
 	});
 });

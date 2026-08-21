@@ -37,6 +37,26 @@ def webhook_url(event_server: str) -> str:
     return f"{event_server.rstrip('/')}{WEBHOOK_PATH}"
 
 
+def _yaml_scalar(value: str) -> str:
+    """Render one string as a YAML scalar safe to substitute into the template.
+
+    The template places the app name in bare scalar positions
+    (``name: ${APP_NAME}``), so an unescaped name carrying YAML syntax either
+    broke the manifest ('Bobi: Staging' -> "mapping values are not allowed
+    here") or silently changed it ('Bobi #1' -> an app named 'Bobi'; 'yes' ->
+    a boolean). Let the emitter decide the form: ordinary names stay bare, so
+    the rendered manifest is unchanged for them, and anything special is
+    quoted.
+    """
+    if "\n" in value or "\r" in value:
+        raise ValueError("a Slack app name cannot contain a line break")
+    # Dump as a one-key mapping and keep the value side: unlike safe_dump of a
+    # bare string, this never appends a document-end marker to strip back off.
+    line = yaml.safe_dump({"_": value}, default_flow_style=False,
+                          allow_unicode=True, width=10 ** 6).strip()
+    return line[len("_:"):].strip()
+
+
 def _replace_manifest_anchor(text: str, anchor: str, replacement: str) -> str:
     """Replace one required manifest anchor or fail on template drift."""
     count = text.count(anchor)
@@ -56,13 +76,15 @@ def render_manifest(
 ) -> str:
     """Render the bundled manifest template as YAML text.
 
-    ``app_name`` becomes the display name.
+    ``app_name`` becomes the display name; it is emitted as a YAML scalar, so a
+    name carrying YAML syntax survives intact. Raises ``ValueError`` on a name
+    containing a line break.
     ``event_server`` supplies the HTTP request URL and is an inert substitution
     input when ``socket_mode`` removes that URL.
     """
     template = string.Template(TEMPLATE_PATH.read_text())
     rendered = template.safe_substitute(
-        APP_NAME=app_name,
+        APP_NAME=_yaml_scalar(app_name),
         EVENT_SERVER=event_server.rstrip("/"),
     )
     if not socket_mode:

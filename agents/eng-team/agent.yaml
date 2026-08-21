@@ -1,4 +1,4 @@
-version: "1.5.2"
+version: "1.5.5"
 
 entry_point: director
 chat: slack
@@ -123,7 +123,17 @@ auto_dispatch:
   # issue-lifecycle / pr-closed legitimately react to the bot's OWN actions
   # (the bot self-assigns issues to start work; the bot merges PRs and that
   # close must still trigger worktree cleanup), so they opt back in.
-  - event: github.issues.assigned
+  # `github.issues` + match.action, NOT `github.issues.assigned`: the adapter
+  # emits `github.${eventHeader}` and puts the action in fields.action, and
+  # AutoDispatchRule.matches compares the type by exact equality - so the
+  # dotted form matched nothing and issue pickup silently fell through to the
+  # director LLM (D017). Same shape as the pull_request rules above.
+  # `$self` resolves to this deployment's GitHub login, so assignments to a
+  # human do not launch the bot's issue workflow.
+  - event: github.issues
+    match:
+      action: assigned
+      assignee: $self
     workflow: issue-lifecycle
     cooldown: 1800
     allow_self_authored: true

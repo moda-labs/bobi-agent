@@ -143,6 +143,9 @@ class TestWorkflowRunState:
         run = WorkflowRun.create("await-wf", {"type": "test", "data": {"run_key": "Y-2"}})
         run.status = "waiting"
         run.await_event = "pr.reviewed"
+        # The engine stamps the field at run creation; find_waiting matches on
+        # it, not on trigger-event payload (#1048).
+        run.run_key = "Y-2"
         run.save()
 
         found = WorkflowRun.find_waiting("pr.reviewed", run_key="Y-2")
@@ -242,8 +245,51 @@ class TestNotifyAwaitDeliveryGuard:
         assert "notify_checkin" in state["error"]
 
 
-class TestWorkflowStepHelpers:
-    """Workflow navigation helpers."""
+class TestConnectIsNeverATurn:
+    """#1016 end-to-end on the stub brain: one dispatch of a publish-shaped
+    workflow drains exactly one turn per prompt step. On the old engine the
+    launch task drained as its own turn before step 0 — `turns == steps + 1`,
+    the measurement the incident forensics used — which is how one catch-up
+    dispatch published two standups. This is the test that would have
+    caught it."""
+
+    def test_one_dispatch_one_turn_per_step(self, stub_bobi_env):
+        from bobi.sdk import SessionRegistry
+        from bobi.workflow.orchestrator import make_session_name, run_workflow
+        from bobi.workflow.schema import StepDef, Workflow
+
+        run_key = "1016-single-publish"
+        session_name = make_session_name("catchup", "test-repo", run_key)
+        registry = SessionRegistry()
+        session_dir = registry.session_dir(session_name)
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
+
+        workflow = Workflow(name="catchup", steps=[
+            StepDef(name="review", prompt="Review yesterday's page"),
+            StepDef(name="publish", prompt="__stub__:reply:published"),
+        ])
+
+        result = run_workflow(
+            workflow,
+            task="Post the catch-up standup",  # the #1016 imperative, verbatim shape
+            repo="test-repo",
+            cwd=str(stub_bobi_env.project_path),
+            run_key=run_key,
+            timeout=30,
+            interactive=False,
+        )
+
+        assert result is True
+        events = [
+            json.loads(line)
+            for line in (session_dir / "log.jsonl").read_text().splitlines()
+        ]
+        stops = [e for e in events if e.get("event") == "stop"]
+        assert len(stops) == 2, (
+            f"expected turns == prompt steps (2), got {len(stops)} — an "
+            "extra turn means the launch task executed before step 0"
+        )
 
     def test_step_by_name(self):
         from bobi.workflow.schema import Workflow, StepDef

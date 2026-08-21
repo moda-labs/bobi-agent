@@ -17,7 +17,7 @@ import logging
 import os
 import threading
 import time
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -26,9 +26,28 @@ _server: HTTPServer | None = None
 _thread: threading.Thread | None = None
 _port_file: Path | None = None
 
+# How long a connection may hold a handler without completing a request.
+# BaseHTTPRequestHandler defaults to None — wait forever — which is what let
+# a single half-open socket park a handler in rfile.readline() indefinitely.
+_HANDLER_TIMEOUT = 10
 
-class _HealthServer(HTTPServer):
+
+class _HealthServer(ThreadingHTTPServer):
+    """Threaded on purpose (D045).
+
+    A serial HTTPServer handles one connection at a time, so any client that
+    connects and never finishes a request — a port scanner, a stalled proxy,
+    a half-open socket left by a dropped network — blocks /health and /ready
+    for every probe behind it. Under BOBI_HEALTH_BIND=0.0.0.0, where the
+    endpoint is reachable by anything on the network, that turns a healthy
+    manager into one the supervisor diagnoses as wedged and restarts.
+
+    Daemon threads so a stalled handler can never hold up interpreter exit or
+    ``stop()``; the handler timeout bounds how long one can linger at all.
+    """
+
     allow_reuse_address = True
+    daemon_threads = True
 
 
 def _make_handler(manager_pid: int, project_name: str,
@@ -36,6 +55,11 @@ def _make_handler(manager_pid: int, project_name: str,
     """Build the request handler class with closed-over manager state."""
 
     class HealthHandler(BaseHTTPRequestHandler):
+
+        # Applied to the connection socket by StreamRequestHandler.setup(),
+        # so a client that never sends a request line is dropped instead of
+        # holding its thread forever.
+        timeout = _HANDLER_TIMEOUT
 
         def do_GET(self):
             if self.path == "/health":
@@ -114,6 +138,8 @@ def _manager_block_from_registry(manager_session: str | None):
         "status": entry.status,
         "last_activity": entry.last_activity,
         "idle_seconds": max(0.0, time.time() - entry.last_activity),
+        "error": getattr(entry, "error", "") or None,
+        "terminal_at": getattr(entry, "terminal_at", 0.0) or None,
     }
 
 

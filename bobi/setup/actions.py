@@ -3,8 +3,8 @@
 These are the pure(ish) functions the setup machinery is built from:
 registry resolution, credential capture, pack validation, install, and
 preflight. They mutate `SetupState` and checkpoint it, but they do NOT
-enforce which stage you're in — stage gating is a caller concern (the
-`@tool` wrappers in `tools.py` today, the web server tomorrow).
+enforce which stage you're in — stage gating is a caller concern (today,
+the web server's route handlers).
 
 Business-rule refusals (a bad var name, a missing team, a stale
 validation) raise `ActionError`; the caller decides how to surface it.
@@ -12,9 +12,9 @@ The same deterministic machinery the rest of the CLI uses (registry,
 install, validation, preflight) is reused here — setup adds no parallel
 implementations.
 
-Secrets never enter any model transcript: `save_credential` prompts the
-user directly (masked) via the injected `prompt_fn` and writes
-`run/.env`; only a masked echo is returned.
+Secrets never enter any model transcript: `save_credential` takes the value
+straight from the request that carried it and writes `run/.env`; only a
+masked echo is returned.
 """
 
 from __future__ import annotations
@@ -23,9 +23,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Callable
 
-import click
 import yaml
 
 from bobi import paths
@@ -106,15 +104,6 @@ class ActionError(Exception):
 
 # --- terminal / masking helpers ------------------------------------------
 
-def default_secret_prompt(var_name: str, service: str, instructions: str) -> str:
-    """Masked terminal prompt — the value never reaches the model."""
-    click.echo()
-    if instructions:
-        click.secho(f"  {service}: {instructions}", fg="cyan")
-    return click.prompt(f"  {var_name}", hide_input=True, default="",
-                        show_default=False)
-
-
 def mask(value: str) -> str:
     if len(value) > 12:
         return f"{value[:4]}…{value[-4:]}"
@@ -137,11 +126,25 @@ def write_env(project: Path, values: dict[str, str]) -> None:
     write_env_file(env_path(project), values)
 
 
+def env_value(project: Path, var: str) -> str:
+    """The value of `var` that this project's agent will actually run with.
+
+    One precedence, matching runtime resolution (`config.load_dotenv`, which
+    never overwrites an existing `os.environ` entry): an exported environment
+    variable wins over `run/.env`. Setup asks this question from several
+    places — the Venn check, the Slack finalization screen, the MCP connection
+    probe — and each used to spell it out, two of them in the opposite order,
+    so a var set in both places made setup verify one credential while the
+    agent ran on another.
+
+    Not to be confused with reading `run/.env` alone: `/api/credential/value`
+    deliberately does NOT consult the ambient environment (see its comment).
+    """
+    return os.environ.get(var) or read_env(project).get(var, "")
+
+
 def venn_key(project: Path) -> str:
-    # Same precedence as runtime resolution (config.load_dotenv): an
-    # exported environment variable wins over .env, so setup verifies the
-    # key `bobi agent <name> start` will actually use.
-    return os.environ.get("VENN_API_KEY") or read_env(project).get("VENN_API_KEY", "")
+    return env_value(project, "VENN_API_KEY")
 
 
 # --- team / source resolution --------------------------------------------
@@ -159,37 +162,13 @@ def team_source_dir(project: Path, state: SetupState) -> Path:
     return paths.agent_source_dir(state.team_name)
 
 
-def installed_team_name(project: Path) -> str | None:
-    """Name of the team installed in run/package/, or None."""
-    agent_yaml = paths.agent_yaml_path(project)
-    if not agent_yaml.exists():
-        return None
-    try:
-        return (yaml.safe_load(agent_yaml.read_text()) or {}).get(
-            "agent", "an agent team")
-    except yaml.YAMLError:
-        return "an agent team"
-
-
-def resolve_or_fetch(name: str, project: Path) -> Path | None:
-    """Resolve a team locally, then fetch it from a registry if needed."""
-    from bobi.cli import _resolve_agent_pack
-    pack_dir = _resolve_agent_pack(name, project)
-    if pack_dir:
-        return pack_dir
-    from bobi.registry import fetch
-    fetch(project, name)
-    return _resolve_agent_pack(name, project)
-
-
 # --- credential capture ---------------------------------------------------
 
 def save_credential(state: SetupState, project: Path, var_name: str,
-                    service: str, instructions: str,
-                    prompt_fn: Callable[[str, str, str], str]) -> dict:
-    """Collect one credential via `prompt_fn`, write it to run/.env, refresh
-    the process environment, and record it on the state. The value never
-    leaves this function — only a masked echo is returned.
+                    value: str) -> dict:
+    """Write one credential to run/.env, refresh the process environment, and
+    record it on the state. The value never leaves this function — only a
+    masked echo is returned.
 
     Returns {"saved": False, "skipped": True, "var": ...} on empty input,
     else {"saved": True, "var": ..., "masked": ...}.
@@ -203,7 +182,6 @@ def save_credential(state: SetupState, project: Path, var_name: str,
                           "itself and are not credentials — they are not "
                           "collected through setup")
 
-    value = prompt_fn(var, service or "", instructions or "")
     if not value:
         return {"saved": False, "skipped": True, "var": var}
     # A newline in the value would write extra physical lines into .env — on
@@ -352,29 +330,36 @@ def install_team(state: SetupState, project: Path) -> dict:
     runtime image). Returns {"installed", "image", "missing_credentials"}.
     Raises ActionError if the source is missing or its validation is stale.
     """
-    from bobi.cli import (_install_pack, _resolve_agent_pack,
-                               _write_install_gitignore)
+    from bobi.install import (install_pack, resolve_agent_pack,
+                              write_install_gitignore)
     # Prefer the chosen source location; fall back to registry resolution.
     pack_dir = team_source_dir(project, state)
     if not pack_dir.is_dir():
-        pack_dir = _resolve_agent_pack(state.team_name, project)
+        pack_dir = resolve_agent_pack(state.team_name, project)
     if not pack_dir:
         raise ActionError(f"team source for '{state.team_name}' not found")
 
-    if state.mode == "create":
-        current = source_tree_hash(pack_dir,
-                                   exclude=setup_state_artifacts(project))
-        if not state.validated or current != state.validated_hash:
-            state.validated = False
-            state.save(project)
-            raise ActionError("the team source changed since validate_team "
-                              "last passed — run validate_team again before "
-                              "installing")
+    # Every mode, not just create. The gate used to sit behind
+    # `if state.mode == "create":`, so an open/modify-mode pack could be
+    # installed from source that had changed — or never validated at all —
+    # since validate_team last passed: the review editor clears
+    # validated/validated_hash on every edit, /api/install has no gate of its
+    # own, and this is the only enforcement point. `state._hard_floor` already
+    # requires `validated` for Stage.INSTALL in both modes, and the docstring
+    # above promises the check with no mode caveat.
+    current = source_tree_hash(pack_dir,
+                               exclude=setup_state_artifacts(project))
+    if not state.validated or current != state.validated_hash:
+        state.validated = False
+        state.save(project)
+        raise ActionError("the team source changed since validate_team "
+                          "last passed — run validate_team again before "
+                          "installing")
 
     package = paths.package_dir(project)
     local_source = not pack_dir.is_relative_to(paths.agent_cache_dir())
-    _install_pack(pack_dir, project, local_source)
-    _write_install_gitignore(project, local_source)
+    install_pack(pack_dir, project, local_source)
+    write_install_gitignore(project, local_source)
 
     state.installed = True
     state.save(project)

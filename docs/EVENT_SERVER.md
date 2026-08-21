@@ -80,6 +80,11 @@ loopback address - it calls `ensure_running()` (`bobi/events/server.py`), which
 health-checks `http://localhost:<port>/health`.
 A standard wheel already contains a self-contained `dist/local.js`, its input and output manifest, and fixed third-party notices.
 Installed startup validates those files, requires Node.js 20 or newer, removes inherited Node preload and module-search variables, and spawns the bundle directly.
+
+Building that bundle - including installs from git or an sdist - also requires Node.js 20 or newer.
+Pinned esbuild emits an explicit `--target=node20` bundle, so the host major does not set the output syntax.
+CI builds a wheel on a newer Node major and requires its shipped bundle to be byte-identical to the release-major build.
+Release builds remain pinned to Node 20 for provenance, not because newer majors are unsupported.
 It never invokes npm, installs dependencies, builds JavaScript, or writes inside the installed package.
 
 A writable source checkout uses the same bundle contract with content hashes across manifests, lockfile, TypeScript configuration, root sources, and workspace sources.
@@ -204,6 +209,12 @@ signed body, never from client input**:
   Python forwards the app token only through bubble-signed `POST /slack/workspaces` registration after `/health` reports `mode: local`; there is no event-server environment fallback.
   `/health.slack_socket` reports per-app connection state for doctor.
   The Worker remains webhook-only.
+> These per-source type shapes are what an `auto_dispatch` rule's `event:`
+> must match exactly. They are mirrored in `_EVENT_TYPE_SHAPES`
+> (`bobi/validate.py`) so startup preflight can flag a rule nothing will ever
+> emit; that table is hand-maintained and pinned to these adapters by
+> `tests/test_pack_routing_validation.py`, which fails when the two drift.
+
 - **Linear** (`POST /webhooks/linear`): `type = linear.<type>.<action>`, key
   `linear:<TEAM_KEY>`. Signature (`Linear-Signature`, HMAC-SHA256 of the raw body)
   is verified when `LINEAR_WEBHOOK_SECRET` (local: `BOBI_ES_LINEAR_WEBHOOK_SECRET`)
@@ -293,6 +304,9 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 | `system/launch.blocked` | launch lineage guard refused a launch (`rule`: `depth` \| `recursion`) | |
 | `system/launch.depth.approaching` | chain one level below `max_launch_depth` | |
 | `system/launch.lineage.dropped` | an unparseable chain was tolerated as a root | |
+| `system/brain.auth.failed` | a brain account requires operator re-authentication; deduped until recovery | |
+| `system/brain.credits.exhausted` | a brain account exhausted credits/quota; deduped until recovery | |
+| `system/brain.recovered` | a successful turn cleared a persisted brain availability incident | |
 
 `github:`, `linear:`, `slack:`, `whatsapp:`, and `discord:` are **global** topics (cross-bubble, gated by
 resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle

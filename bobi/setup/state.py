@@ -13,8 +13,9 @@ floors are structural — goal must be non-empty to author anything at
 Build, a fresh validation to Install, an install to finish.
 
 State is checkpointed under the selected Bobi Agent's run/state directory
-after every change so an interrupted setup resumes with
-`bobi setup --resume`.
+after every change, so reopening setup for the same team resumes an
+interrupted session (the web UI loads any unfinished checkpoint on open —
+there is no flag to pass).
 
 v1 is the **create** spine. Open mode (editing an existing pack) reuses
 these same stages and is deferred to M2 — `mode` carries the seam.

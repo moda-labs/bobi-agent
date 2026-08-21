@@ -26,9 +26,9 @@ _MONITOR_ERROR_REPEAT_PUSH_EVERY = 3
 def _get_project_root():
     """Resolve the project root, or None if unavailable."""
     try:
-        from bobi.sdk import get_project_root
+        from bobi.paths import bound_root
 
-        return get_project_root() or None
+        return bound_root() or None
     except Exception:
         return None
 
@@ -65,21 +65,6 @@ def _is_monitor_error(event: dict) -> bool:
     return etype == "monitor.error" or etype.endswith("/monitor.error")
 
 
-def _is_passive_slack_thread_reply(event: dict) -> bool:
-    """Whether a Slack event should be delivered without placeholder UX."""
-    return (
-        event.get("source") == "slack"
-        and event.get("type") == "slack.thread_reply"
-    )
-
-
-def _without_placeholder_fields(event: dict) -> dict:
-    """Return an event copy with Slack placeholder metadata removed."""
-    fields = dict(event.get("fields", {}))
-    fields.pop("placeholder_ts", None)
-    return dict(event, fields=fields)
-
-
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
     """Run input channel handlers on chat events, returning augmented copies.
 
@@ -87,6 +72,10 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
     adjustments before delivery. Handlers talk to the channel gateway (#190),
     so no credential is resolved here - the event server holds the channel
     tokens.
+
+    Slack thread replies are delivered without placeholder UX; that decision
+    lives in ``SlackInputChannel.prepare``, which this loop reaches for every
+    ``source == "slack"`` event, so it is not repeated here.
     """
     from bobi.events.channels import get_channel_handler
 
@@ -94,10 +83,6 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
 
     result: list[dict] = []
     for event in events:
-        if _is_passive_slack_thread_reply(event):
-            result.append(_without_placeholder_fields(event))
-            continue
-
         source = event.get("source", "")
         handler = get_channel_handler(source)
         if handler is None:

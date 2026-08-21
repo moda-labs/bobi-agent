@@ -11,13 +11,21 @@ ANTHROPIC_API_KEY is present).
 
 Gated on a working Docker daemon, so they no-op in environments without one.
 Set BOBI_TEST_IMAGE=<tag> to reuse an already-built image and skip the build.
+
+Building the image here needs Node.js major 20 EXACTLY on PATH, because
+staging the wheel runs hatch_build.py's embedded-event-server build. Node 22
+and 24 are both rejected outright. Reusing a prebuilt image via
+BOBI_TEST_IMAGE needs no Node at all.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
+import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -55,21 +63,191 @@ def _run(*args: str, **kw) -> subprocess.CompletedProcess:
     )
 
 
+def _stage_wheel() -> None:
+    """Build the wheel into `dist/`, the way the release pipeline stages it.
+
+    Wheel mode installs `dist/*.whl` and the Dockerfile expects EXACTLY one, so
+    clear the directory first: a stale wheel from an earlier version would make
+    `pip install /dist/*.whl` install two, and which one wins is arbitrary.
+    """
+    dist = REPO_ROOT / "dist"
+    for stale in dist.glob("*.whl"):
+        stale.unlink()
+    proc = _run(
+        sys.executable, "-m", "build", "--wheel", "--outdir", str(dist),
+        cwd=str(REPO_ROOT), timeout=900,
+    )
+    if proc.returncode != 0:
+        pytest.fail(
+            "could not build the wheel to stage into the image build context.\n"
+            "This build runs hatch_build.py, which needs Node.js major 20 "
+            "EXACTLY on PATH (not 22, not 24) to build the embedded event "
+            f"server.\n\nstdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}"
+        )
+
+
 @pytest.fixture(scope="session")
 def image() -> str:
-    """Build (or reuse) the instance image; return its tag."""
+    """Build (or reuse) the instance image; return its tag.
+
+    Builds in WHEEL mode - the mode the release pipeline and this repo's own
+    CI use - not the Dockerfile's nominal `source` default.
+
+    Source mode cannot build in ANY repo: `.dockerignore` drops both `.git`
+    and `event-server/dist`, so hatch_build.py's `initialize` finds neither a
+    VCS checkout nor a prebuilt artifact, takes the rebuild path, and needs
+    Node inside `python:3.11-slim` - where there is none, by design (the image
+    is deliberately Node-free). Defaulting to it made this entire module look
+    environment-blocked when it was really asking for an impossible build.
+    """
     prebuilt = os.environ.get("BOBI_TEST_IMAGE")
     if prebuilt:
         return prebuilt
 
+    _stage_wheel()
     tag = "bobi:pytest"
     proc = _run(
-        "docker", "build", "-t", tag, str(REPO_ROOT),
+        "docker", "build", "--build-arg", "BOBI_BUILD=wheel",
+        "-t", tag, str(REPO_ROOT),
         timeout=1800,
     )
     if proc.returncode != 0:
         pytest.fail(f"docker build failed:\n{proc.stdout}\n{proc.stderr}")
     return tag
+
+
+TEAM_DEPS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "team-deps-bake"
+TEAM_DEPS_SECRET_DIGEST = "/opt/bobi/mod361-secret.sha256"
+
+
+def _ensure_wheel_staged() -> None:
+    """The flavored build uses the same wheel-mode context as the base image."""
+    if len(list((REPO_ROOT / "dist").glob("*.whl"))) != 1:
+        _stage_wheel()
+
+
+def _build_team_deps_image(
+    team_dir: Path,
+    *,
+    tag: str,
+    secret: str,
+) -> tuple[subprocess.CompletedProcess, Path]:
+    """Render a fixture hook into the real build context and build the image."""
+    from bobi.build_render import load_team_config, render_team_deps_script
+
+    _ensure_wheel_staged()
+    hook_dir = REPO_ROOT / "dist" / "team-deps"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    hook = hook_dir / f"mod361-{uuid.uuid4().hex}.sh"
+    script = render_team_deps_script(load_team_config(team_dir))
+    # BuildKit secrets do not invalidate cache, so vary the hook itself to prove
+    # this build consumed this invocation's secret rather than a cached layer.
+    hook.write_text(script + f"# test cache nonce: {uuid.uuid4().hex}\n")
+
+    env = os.environ.copy()
+    env["DOCKER_BUILDKIT"] = "1"
+    env["MODA_SKILLS_TOKEN"] = secret
+    proc = _run(
+        "docker", "build",
+        "--build-arg", "BOBI_BUILD=wheel",
+        "--build-arg", f"TEAM_DEPS={hook.relative_to(REPO_ROOT)}",
+        "--secret", "id=MODA_SKILLS_TOKEN,env=MODA_SKILLS_TOKEN",
+        "-t", tag, str(REPO_ROOT),
+        env=env,
+        timeout=1800,
+    )
+    return proc, hook
+
+
+@pytest.fixture(scope="module")
+def team_deps_image(image: str) -> tuple[str, str]:
+    """Build the published recipe with a rendered hook and a dummy secret."""
+    del image  # Force the base build/cache before changing only TEAM_DEPS.
+    tag = f"bobi-team-deps-mod361:{uuid.uuid4().hex[:12]}"
+    secret = f"mod361-buildkit-secret-{uuid.uuid4().hex}"
+    proc, hook = _build_team_deps_image(
+        TEAM_DEPS_FIXTURE,
+        tag=tag,
+        secret=secret,
+    )
+    try:
+        if proc.returncode != 0:
+            pytest.fail(
+                "TEAM_DEPS image build failed:\n"
+                f"{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}"
+            )
+        yield tag, secret
+    finally:
+        hook.unlink(missing_ok=True)
+        _run("docker", "image", "rm", "-f", tag)
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+def test_team_deps_hook_receives_secret_without_leaking(
+    team_deps_image: tuple[str, str],
+):
+    """The published hook sees the secret, while image metadata never does."""
+    tag, secret = team_deps_image
+    expected_digest = hashlib.sha256(secret.encode()).hexdigest()
+
+    observed = _run(
+        "docker", "run", "--rm", "--entrypoint", "cat",
+        tag, TEAM_DEPS_SECRET_DIGEST,
+        timeout=120,
+    )
+    assert observed.returncode == 0, observed.stderr
+    assert observed.stdout.strip() == expected_digest
+
+    history = _run(
+        "docker", "history", "--no-trunc", "--format", "{{.CreatedBy}}",
+        tag, timeout=60,
+    )
+    inspect = _run("docker", "image", "inspect", tag, timeout=60)
+    assert history.returncode == 0, history.stderr
+    assert inspect.returncode == 0, inspect.stderr
+    assert secret not in history.stdout
+    assert secret not in inspect.stdout
+
+    leftover = _run(
+        "docker", "run", "--rm", "--entrypoint", "sh", tag, "-c",
+        "find /run/secrets -mindepth 1 -maxdepth 1 -print 2>/dev/null || true",
+        timeout=120,
+    )
+    assert leftover.stdout.strip() == "", leftover.stdout
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+def test_team_deps_requires_gate_rejects_missing_tool(
+    image: str,
+    tmp_path: Path,
+):
+    """A failed fixture requires check stops the image build in CI."""
+    del image  # Reuse the warmed base-image layers under the failing hook.
+    team = tmp_path / "team-deps-missing-tool"
+    shutil.copytree(TEAM_DEPS_FIXTURE, team)
+    agent_yaml = team / "agent.yaml"
+    broken = agent_yaml.read_text().replace(
+        "name: hook-tool\n    check: 'command -v mod361-hook-tool >/dev/null'",
+        "name: missing-tool\n    check: 'command -v mod361-missing-tool >/dev/null'",
+    )
+    assert broken != agent_yaml.read_text()
+    agent_yaml.write_text(broken)
+
+    tag = f"bobi-team-deps-mod361-fail:{uuid.uuid4().hex[:12]}"
+    proc, hook = _build_team_deps_image(
+        team,
+        tag=tag,
+        secret=f"mod361-buildkit-secret-{uuid.uuid4().hex}",
+    )
+    try:
+        text = proc.stdout + proc.stderr
+        assert proc.returncode != 0, "a missing requires tool did not fail the build"
+        assert "verify missing-tool" in text, text[-4000:]
+    finally:
+        hook.unlink(missing_ok=True)
+        _run("docker", "image", "rm", "-f", tag)
 
 
 @requires_docker
@@ -247,6 +425,64 @@ def test_gateway_auth_token_passes_post_install_auth_gate(
 
 @requires_docker
 @pytest.mark.timeout(120)
+def test_subscription_claude_gateway_passes_post_install_auth_gate(
+    image: str,
+    tmp_path: Path,
+):
+    """A Claude gateway may use durable subscription OAuth credentials."""
+    import time
+
+    team = tmp_path / "team"
+    shutil.copytree(REPO_ROOT / "tests" / "fixtures" / "claude-smoke", team)
+    agent_yaml = team / "agent.yaml"
+    agent_yaml.write_text(
+        agent_yaml.read_text()
+        + "\nbrain:\n"
+        + "  kind: claude\n"
+        + "  base_url: http://127.0.0.1:9\n"
+    )
+
+    vol = tmp_path / "data"
+    creds = vol / "claude" / ".credentials.json"
+    creds.parent.mkdir(parents=True)
+    creds.write_text(json.dumps({
+        "claudeAiOauth": {"refreshToken": "refresh"},
+    }))
+
+    name = "bobi-gateway-subscription"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "BOBI_AUTH=subscription",
+            "-e", "BOBI_AGENT=claude-smoke",
+            "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-v", f"{vol}:/data",
+            "-v", f"{team}:/mnt/team:ro",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        deadline = time.time() + 30
+        text = ""
+        while time.time() < deadline:
+            logs = _run("docker", "logs", name)
+            text = logs.stdout + logs.stderr
+            if "Starting manager under the supervisor sidecar" in text:
+                break
+            if "FATAL:" in text:
+                break
+            time.sleep(1)
+
+        assert "refresh token is present" in text, text
+        assert "Starting manager under the supervisor sidecar" in text, text
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(120)
 def test_credentialless_claude_gateway_passes_post_install_auth_gate(
     image: str,
     tmp_path: Path,
@@ -312,6 +548,129 @@ def test_subscription_mode_rejects_api_key(image: str):
     )
     assert proc.returncode != 0
     assert "overrides subscription auth" in (proc.stdout + proc.stderr)
+
+
+def _subscription_bootstrap_logs(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+) -> str:
+    """Boot through the real entrypoint and return its auth-decision logs."""
+    import time
+
+    team = REPO_ROOT / "tests" / "fixtures" / f"{brain}-smoke"
+    data = tmp_path / f"data-{brain}"
+    cred_dir = data / brain
+    cred_dir.mkdir(parents=True)
+    cred_file = ".credentials.json" if brain == "claude" else "auth.json"
+    (cred_dir / cred_file).write_text(json.dumps(credential))
+
+    name = f"bobi-subscription-credentials-{brain}"
+    _run("docker", "rm", "-f", name)
+    try:
+        up = _run(
+            "docker", "run", "-d", "--name", name,
+            "-e", "BOBI_AUTH=subscription",
+            "-e", f"BOBI_AGENT={brain}-smoke",
+            "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+            "-e", "BOBI_TEAM=/mnt/team",
+            "-v", f"{data}:/data",
+            "-v", f"{team}:/mnt/team:ro",
+            image,
+        )
+        assert up.returncode == 0, up.stderr
+
+        deadline = time.time() + 45
+        text = ""
+        while time.time() < deadline:
+            logs = _run("docker", "logs", name)
+            text = logs.stdout + logs.stderr
+            if ("running login bootstrap" in text
+                    or "skipping login bootstrap" in text
+                    or "FATAL:" in text):
+                break
+            time.sleep(0.5)
+        return text
+    finally:
+        _run("docker", "rm", "-f", name)
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+@pytest.mark.parametrize(
+    ("brain", "credential", "reason"),
+    [
+        (
+            "claude",
+            {"claudeAiOauth": {"accessToken": "", "refreshToken": ""}},
+            "refresh token is missing or blank",
+        ),
+        (
+            "codex",
+            {"OPENAI_API_KEY": None, "tokens": {"refresh_token": ""}},
+            "refresh token is missing or blank",
+        ),
+    ],
+)
+def test_subscription_bootstrap_runs_for_invalid_credentials(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+    reason: str,
+):
+    text = _subscription_bootstrap_logs(
+        image, tmp_path, brain, credential,
+    )
+
+    assert f"credentials invalid: {reason}" in text, text
+    assert "running login bootstrap" in text, text
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+@pytest.mark.parametrize(
+    ("brain", "credential", "reason"),
+    [
+        (
+            "claude",
+            {
+                "claudeAiOauth": {
+                    "accessToken": "access",
+                    "refreshToken": "refresh",
+                    "refreshTokenExpiresAt": 4_102_444_800_000,
+                },
+            },
+            "refresh token is present and unexpired",
+        ),
+        (
+            "codex",
+            {
+                "OPENAI_API_KEY": None,
+                "tokens": {
+                    "id_token": "id",
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                },
+            },
+            "refresh token is present",
+        ),
+    ],
+)
+def test_subscription_bootstrap_skips_valid_credentials(
+    image: str,
+    tmp_path: Path,
+    brain: str,
+    credential: dict,
+    reason: str,
+):
+    text = _subscription_bootstrap_logs(
+        image, tmp_path, brain, credential,
+    )
+
+    assert f"credentials valid: {reason}" in text, text
+    assert "skipping login bootstrap" in text, text
 
 
 @requires_docker

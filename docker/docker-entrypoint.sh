@@ -152,8 +152,10 @@ validate_auth_mode() {
            && [ -n "${!BRAIN_AUTH_TOKEN_KEY:-}" ]; then
         fatal "BOBI_AUTH=subscription but ${BRAIN_AUTH_TOKEN_KEY} is set; it overrides subscription auth. Unset it."
       fi
-      [ "${ENTRYPOINT_IS_GATEWAY}" != "1" ] \
-        || fatal "BOBI_AUTH=subscription does not apply to a gateway brain; use BOBI_AUTH=api_key."
+      if [ "${ENTRYPOINT_IS_GATEWAY}" = "1" ] \
+         && [ "${ENTRYPOINT_ENGINE}" != "claude" ]; then
+        fatal "BOBI_AUTH=subscription applies only to Claude gateways; use BOBI_AUTH=api_key for Codex gateways."
+      fi
       ;;
     *)
       fatal "unknown BOBI_AUTH='${BOBI_AUTH}' (expected api_key|subscription)."
@@ -560,13 +562,18 @@ if [ "${BOBI_AUTH:-api_key}" = "subscription" ]; then
   fi
 fi
 
-# --- 4. Subscription auth: bootstrap login over Slack if no creds yet (C23) --
-# Idempotent: a no-op once the credentials exist. They live under
-# CLAUDE_CONFIG_DIR (the volume), not HOME — that's the durable state we keep.
-if [ "${BOBI_AUTH:-api_key}" = "subscription" ] \
-   && [ ! -f "${BRAIN_CRED_DIR}/${BRAIN_CRED_FILE}" ]; then
-  log "Subscription mode, no ${ENTRYPOINT_BRAIN} credentials on volume — running login bootstrap"
-  as_app bobi agent "${AGENT_NAME}" login-bootstrap
+# --- 4. Subscription auth: bootstrap when stored creds cannot refresh (C23) --
+# This is deliberately structural and local. It catches missing, malformed,
+# blanked, and explicitly-expired refresh credentials without a network probe.
+if [ "${BOBI_AUTH:-api_key}" = "subscription" ]; then
+  credential_path="${BRAIN_CRED_DIR}/${BRAIN_CRED_FILE}"
+  if credential_reason="$(as_app python -m bobi.auth_bootstrap \
+      credential-status "${ENTRYPOINT_ENGINE}" "${credential_path}" 2>&1)"; then
+    log "Subscription mode, ${ENTRYPOINT_BRAIN} ${credential_reason} — skipping login bootstrap"
+  else
+    log "Subscription mode, ${ENTRYPOINT_BRAIN} ${credential_reason} — running login bootstrap"
+    as_app bobi agent "${AGENT_NAME}" login-bootstrap
+  fi
 fi
 
 # --- 4c. Dependency snapshot is frozen; warm boot runs no bootstrap (#428) ---

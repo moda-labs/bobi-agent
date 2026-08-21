@@ -41,7 +41,8 @@ class TestBrainCrossModelResume:
             options={"model": "haiku", "max_turns": 3},
         )
         try:
-            await first.connect(
+            await first.connect()
+            await first.query(
                 "Remember the code word: PANGOLIN. Reply with just: OK"
             )
             _, result = await _drain(first)
@@ -65,7 +66,7 @@ class TestBrainCrossModelResume:
             options={"model": "sonnet", "max_turns": 3},
         )
         try:
-            await second.connect(None)
+            await second.connect()
             await second.query(
                 "What was the code word, and which model are you powered by "
                 "per your system prompt? Reply exactly as: "
@@ -169,7 +170,8 @@ class TestCodexCrossModelResume:
             system_prompt="You are a test assistant. Reply concisely.",
             options={"model": model_a},
         )
-        await first.connect(
+        await first.connect()
+        await first.query(
             "Remember the code word: PANGOLIN. Reply with just: OK"
         )
         _, result = await _drain(first)
@@ -184,7 +186,7 @@ class TestCodexCrossModelResume:
             resume=thread_id,
             options={"model": model_b},
         )
-        await second.connect(None)
+        await second.connect()
         await second.query(
             "What was the code word? Reply with just the word."
         )

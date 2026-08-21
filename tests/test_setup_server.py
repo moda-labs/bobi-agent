@@ -5,7 +5,9 @@ an injected fake LLM source: no network, no CLI."""
 import json
 import os
 import re
+from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -182,20 +184,16 @@ class TestSerializeState:
 
 
 class TestIngressEndpoint:
-    class _HealthResponse:
-        status = 200
-
-        def __init__(self, body):
-            self._body = body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_):
-            return False
-
-        def read(self, _limit):
-            return self._body
+    @staticmethod
+    def _serves(monkeypatch, resp):
+        """Point the probe's transport at `resp` — an httpx.Response to return,
+        or an exception to raise. The probe goes through bobi.http (the house
+        outbound client), so that is what gets stubbed."""
+        def fake_get(*a, **k):
+            if isinstance(resp, Exception):
+                raise resp
+            return resp
+        monkeypatch.setattr(server.http, "get", fake_get)
 
     def test_ingress_verify_is_the_only_mutation_endpoint(self, project):
         c = _client(SetupState(), project)
@@ -203,21 +201,46 @@ class TestIngressEndpoint:
         assert r.status_code == 404
 
     def test_probe_requires_bobi_health_payload(self, monkeypatch):
-        monkeypatch.setattr(
-            server,
-            "urlopen",
-            lambda *a, **k: self._HealthResponse(b'{"status":"ok","auth":"hmac"}'),
-        )
+        self._serves(monkeypatch,
+                     httpx.Response(200, content=b'{"status":"ok","auth":"hmac"}'))
         assert server._probe_event_server("https://events.example.com") == (True, "")
 
-        monkeypatch.setattr(
-            server,
-            "urlopen",
-            lambda *a, **k: self._HealthResponse(b'{"status":"ok"}'),
-        )
+        # status ok but no hmac auth — not a Bobi event server.
+        self._serves(monkeypatch, httpx.Response(200, content=b'{"status":"ok"}'))
         ok, err = server._probe_event_server("https://events.example.com")
         assert ok is False
         assert "Bobi event server" in err
+
+    def test_probe_reports_transport_and_status_failures(self, monkeypatch):
+        # httpx does not raise on 4xx/5xx the way urlopen did, so the status
+        # check — not an exception handler — is what reports a bad response.
+        self._serves(monkeypatch, httpx.Response(502, content=b""))
+        assert server._probe_event_server("https://e.example.com") == (
+            False, "/health returned HTTP 502")
+
+        self._serves(monkeypatch, httpx.Response(200, content=b"<html>not json"))
+        ok, err = server._probe_event_server("https://e.example.com")
+        assert ok is False and err == "/health did not return Bobi JSON"
+
+        self._serves(monkeypatch, httpx.ConnectTimeout("slow"))
+        assert server._probe_event_server("https://e.example.com") == (
+            False, "timed out reaching /health")
+
+        # Every other httpx transport failure is reachable, not a crash.
+        self._serves(monkeypatch, httpx.ConnectError("refused"))
+        ok, err = server._probe_event_server("https://e.example.com")
+        assert ok is False and err.startswith("could not reach /health:")
+
+    def test_unroutable_host_is_an_error_not_a_500(self):
+        # NOT stubbed — this exercises the real client. httpx.InvalidURL does
+        # not inherit from httpx.HTTPError, so a host that passes the
+        # scheme+netloc validator but cannot be a host used to escape the
+        # probe and 500 the verify endpoint. urlopen folded it into gaierror.
+        url = "https://256.256.256.256"
+        assert server._validate_public_event_server_url(url) is None
+        ok, err = server._probe_event_server(url)
+        assert ok is False
+        assert err.startswith("could not reach /health:")
 
     def test_local_ingress_verified_and_removes_event_server_env(self, project):
         (project / ".env").write_text("BOBI_EVENT_SERVER=https://old.example\n")
@@ -489,6 +512,20 @@ class TestConnect:
         assert r.status_code == 200
         assert r.json()["value"] == "lin_api_copyme"
         assert c.get("/api/credential/value?var=NOPE_TOKEN").status_code == 404
+
+    def test_credential_value_never_serves_an_ambient_env_var(self, project,
+                                                              monkeypatch):
+        # D081: the endpoint fell back to os.environ for any requested name, so
+        # anything holding the page's nonce could read a secret exported into
+        # the shell that launched `bobi setup` — never saved through setup and
+        # not in run/.env. Only the saved-credential store is copyable.
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "ambient-super-secret")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-ambient")
+        c = _client(SetupState(), project)
+        for var in ("AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"):
+            r = c.get(f"/api/credential/value?var={var}")
+            assert r.status_code == 404, f"{var} was served from the environment"
+            assert "ambient" not in r.text
 
 
 # --- Venn setup flow: discover account MCPs, apply picks -----------------
@@ -1051,6 +1088,76 @@ class TestPanelEdits:
         assert not s.pending_test
         assert s.spec.mcp_servers["substack_mcp"].get("last_test") is None
 
+    # D033 — the probe awaits for up to 60s (the first run resolves deps). The
+    # handler captured `entry` BEFORE that await and wrote the snapshot back
+    # after, so a correction the user saved through /api/mcp/add while the test
+    # was running was silently reverted — which is exactly what a user does when
+    # a connection test is failing. The removal case was guarded; the edit case
+    # was not.
+
+    def test_an_edit_during_the_probe_is_not_reverted(self, project, monkeypatch):
+        import shutil
+        import bobi.setup.mcp_probe as mcp_probe
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+
+        s = SetupState()
+        c = _client(s, project)
+
+        async def fake_probe(entry, proj, *, call_name=None, **kw):
+            if call_name is None:
+                return {"ok": True, "count": 1, "suggested": "substack_get_profile",
+                        "tools": ["substack_get_profile"]}
+            # The user fixes the command while the test is in flight — the same
+            # mutation /api/mcp/add performs on the shared state.
+            s.spec.mcp_servers = dict(s.spec.mcp_servers or {})
+            s.spec.mcp_servers["substack_mcp"] = {
+                "type": "stdio", "command": "uvx", "args": ["corrected"]}
+            return {"ok": True, "live_ok": True, "output": "ok",
+                    "called": call_name}
+        monkeypatch.setattr(mcp_probe, "probe", fake_probe)
+
+        self._added_substack(s, c)
+        c.post("/api/message", json={"text": "test the substack connection"})
+        body = c.post("/api/message", json={"text": "yes"}).text
+
+        entry = s.spec.mcp_servers["substack_mcp"]
+        assert entry["command"] == "uvx", "the user's correction was reverted"
+        assert entry["args"] == ["corrected"]
+        # And the result of testing the OLD command must not be recorded
+        # against the new one — that would render a never-tested config green.
+        assert entry.get("last_test") is None
+        assert "changed while I was testing" in body
+        card = next(x for x in c.get("/api/connect").json()["cards"]
+                    if x["key"] == "substack_mcp")
+        assert card["status"] != "connected"
+
+    def test_a_removal_during_the_probe_does_not_resurrect_the_entry(
+            self, project, monkeypatch):
+        import shutil
+        import bobi.setup.mcp_probe as mcp_probe
+        monkeypatch.setattr(shutil, "which", lambda name: "/bin/claude")
+        monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
+        monkeypatch.setattr(services, "live_venn_catalog", lambda *a, **k: set())
+
+        s = SetupState()
+        c = _client(s, project)
+
+        async def fake_probe(entry, proj, *, call_name=None, **kw):
+            if call_name is None:
+                return {"ok": True, "count": 1, "suggested": "substack_get_profile",
+                        "tools": ["substack_get_profile"]}
+            s.spec.mcp_servers = {}          # user deletes it mid-test
+            return {"ok": True, "live_ok": True, "called": call_name}
+        monkeypatch.setattr(mcp_probe, "probe", fake_probe)
+
+        self._added_substack(s, c)
+        c.post("/api/message", json={"text": "test the substack connection"})
+        c.post("/api/message", json={"text": "yes"})
+
+        assert "substack_mcp" not in (s.spec.mcp_servers or {})
+
     def test_ordinary_chat_does_not_trigger_a_test(self, project, monkeypatch):
         # A normal design message must fall through to digestion, not the probe.
         import bobi.setup.mcp_probe as mcp_probe
@@ -1105,6 +1212,41 @@ class TestPanelEdits:
         r = c.post("/api/mcp/detect", json={"path": "/etc"})
         assert r.status_code == 400 and "home" in r.json()["error"]
 
+    def test_mcp_detect_accepts_a_project_folder_in_the_users_home(
+            self, project, tmp_path, monkeypatch):
+        # D007: the picker boundary is the user's HOME directory — what the
+        # /api/browse comment and this endpoint's 400 both claim — not
+        # BOBI_HOME. MCP server projects live in ~/dev, never under ~/.bobi, so
+        # confining to BOBI_HOME rejected every real folder with a message the
+        # path already satisfied, and detect could never succeed.
+        # No home_root here: this is the production path, with BOBI_HOME left
+        # where the module fixture put it (tmp_path/.bobi, i.e. ~/.bobi).
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        srv = tmp_path / "dev" / "acme-mcp"
+        (srv / "src" / "acme_mcp").mkdir(parents=True)
+        (srv / "pyproject.toml").write_text(
+            '[project]\nname = "acme-mcp"\nversion = "0.1.0"\n\n'
+            '[project.scripts]\nacme-mcp = "acme_mcp.server:main"\n')
+        (srv / "src" / "acme_mcp" / "__init__.py").write_text("")
+        (srv / "src" / "acme_mcp" / "server.py").write_text(
+            'import os\nT = os.environ.get("ACME_TOKEN", "")\n')
+        c = _client(SetupState(), project)
+        r = c.post("/api/mcp/detect", json={"path": str(srv)})
+        assert r.status_code == 200, r.json()
+        assert r.json()["ok"] is True
+
+    def test_mcp_detect_still_rejects_a_path_outside_the_users_home(
+            self, project, tmp_path, monkeypatch):
+        # Widening the boundary to the real home is not removing it.
+        user_home = tmp_path / "user"
+        user_home.mkdir()
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: user_home))
+        c = _client(SetupState(), project)
+        r = c.post("/api/mcp/detect", json={"path": str(outside)})
+        assert r.status_code == 400 and "home" in r.json()["error"]
+
     def test_connect_surfaces_stdio_card(self, project, monkeypatch):
         monkeypatch.setattr(services, "venn_connected_names", lambda *a, **k: None)
         monkeypatch.delenv("SUBSTACK_API_KEY", raising=False)
@@ -1147,6 +1289,26 @@ class TestReviewFiles:
         _, c = self._built(project)
         r = c.get("/api/file", params={"path": "../../../etc/passwd"})
         assert r.status_code == 404
+
+    # D080 — /api/files lists every file under the pack with no suffix filter,
+    # so a logo.png or a latin-1 doc copied into the source tree is directly
+    # reachable from the review UI. read_text() then raised UnicodeDecodeError
+    # and the viewer 500'd instead of saying "that one isn't text".
+
+    def test_read_of_a_non_utf8_file_is_a_clean_error_not_a_500(self, project):
+        s, c = self._built(project)
+        from bobi.setup import actions
+        pack = actions.team_source_dir(project, s).resolve()
+        blob = pack / "logo.png"
+        blob.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00binary")
+
+        assert "logo.png" in c.get("/api/files").json()["files"], \
+            "the file viewer lists it, so it must be able to answer for it"
+        r = c.get("/api/file", params={"path": "logo.png"})
+
+        assert r.status_code < 500, r.text
+        assert "binary" in r.json().get("error", "").lower() or \
+               r.json().get("binary") is True
 
     def test_reveal_opens_the_source_folder(self, project, monkeypatch):
         import subprocess
@@ -1545,9 +1707,9 @@ class TestIntro:
         # mirroring registry.fetch + copy_into without hitting the network.
         from bobi.setup import open_mode
 
-        def fake_fetch_into(proj, name, dest):
-            _seed_team(proj, name)  # writes agents/<name>/
-            open_mode.copy_into(proj / "agents" / name, dest)
+        def fake_fetch_into(name, dest):
+            _seed_team(project, name)  # writes agents/<name>/
+            open_mode.copy_into(project / "agents" / name, dest)
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project)
@@ -1570,9 +1732,9 @@ class TestIntro:
         # library slot (agents/<name>/src) and be visible on /api/home.
         from bobi.setup import open_mode
 
-        def fake_fetch_into(proj, name, dest):
-            _seed_team(proj, name)  # writes agents/<name>/
-            open_mode.copy_into(proj / "agents" / name, dest)
+        def fake_fetch_into(name, dest):
+            _seed_team(project, name)  # writes agents/<name>/
+            open_mode.copy_into(project / "agents" / name, dest)
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project, home_root=home)
@@ -1615,7 +1777,7 @@ class TestIntro:
         # leftover would 409 every retry and permanently block the slot.
         from bobi.setup import open_mode
 
-        def failing_fetch_into(proj, name, dest):
+        def failing_fetch_into(name, dest):
             dest.mkdir(parents=True)
             (dest / "agent.yaml").write_text("agent: eng-team\n")  # partial
             raise RuntimeError("network died")
@@ -1628,9 +1790,9 @@ class TestIntro:
         assert not (home / "agents" / "eng-team" / "src").exists()
         assert state.source_dir == ""
         # ...and the retry succeeds once the fetch works.
-        def ok_fetch_into(proj, name, dest):
-            _seed_team(proj, name)
-            open_mode.copy_into(proj / "agents" / name, dest)
+        def ok_fetch_into(name, dest):
+            _seed_team(project, name)
+            open_mode.copy_into(project / "agents" / name, dest)
         monkeypatch.setattr(open_mode, "fetch_into", ok_fetch_into)
         assert c.post("/api/start", json={"mode": "registry",
                                           "team": "eng-team"}).status_code == 200
@@ -1651,9 +1813,9 @@ class TestIntro:
         # ("Eng Team") still lands at agents/eng-team/src.
         from bobi.setup import open_mode
 
-        def fake_fetch_into(proj, name, dest):
-            _seed_team(proj, "eng-team")
-            open_mode.copy_into(proj / "agents" / "eng-team", dest)
+        def fake_fetch_into(name, dest):
+            _seed_team(project, "eng-team")
+            open_mode.copy_into(project / "agents" / "eng-team", dest)
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         c = _client(SetupState(), project, home_root=home)
@@ -1694,9 +1856,9 @@ class TestIntro:
         # scaffolding — an empty dir is not "an existing team".
         from bobi.setup import open_mode
 
-        def fake_fetch_into(proj, name, dest):
-            _seed_team(proj, name)
-            open_mode.copy_into(proj / "agents" / name, dest)
+        def fake_fetch_into(name, dest):
+            _seed_team(project, name)
+            open_mode.copy_into(project / "agents" / name, dest)
 
         monkeypatch.setattr(open_mode, "fetch_into", fake_fetch_into)
         empty = home / "agents" / "new-agent" / "src"
@@ -1931,6 +2093,10 @@ class TestSlackFinalize:
         calls = []
         import bobi.slack
 
+        monkeypatch.setattr(
+            bobi.slack, "require_app_identity",
+            lambda token: ("T111", "B111", "U111", "A111"),
+        )
         def fake_post(token, channel, text, *a, **kw):
             calls.append((token, channel, text))
             return {"ok": True}
@@ -1940,6 +2106,24 @@ class TestSlackFinalize:
         assert r.status_code == 200
         assert calls[0][1] == "C111"
         assert "crew" in calls[0][2]
+
+    def test_test_rejects_missing_app_identity(self, project, monkeypatch):
+        import os
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+        os.environ["SLACK_CHANNELS"] = "C111"
+        import bobi.slack
+
+        def missing_identity(token):
+            raise bobi.slack.SlackAppIdentityError("users:read is required")
+
+        monkeypatch.setattr(
+            bobi.slack, "require_app_identity",
+            missing_identity,
+        )
+        c = _client(SetupState(team_name="crew"), project)
+        r = c.post("/api/slack/test")
+        assert r.status_code == 502
+        assert "users:read" in r.json()["error"]
 
 
 class TestShutdown:

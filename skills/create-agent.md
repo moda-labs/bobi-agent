@@ -18,7 +18,7 @@ agents/<pack-name>/
 ├── tools/                # Service interaction guides (loaded into all roles)
 │   └── <service>.md
 ├── workflows/            # DAG definitions for multi-step processes
-│   ├── adhoc.yaml        # Always include — open-ended task handler
+│   ├── adhoc.yaml        # Recommended — trigger text for the manager's menu
 │   └── <workflow>.yaml
 ├── monitors/             # Optional: background polling checks
 │   └── defaults.yaml
@@ -91,6 +91,40 @@ linear:
 
 Only include services the team actually needs. `bobi agents install`
 prompts for any `${VAR}` references and writes them to `run/.env`.
+
+`chat:` must name a service the pack declares. Ingress subscribes topics from
+declared services only, so `chat: slack` without a `slack` service means no
+Slack event ever arrives and a reply has no bot token — while the role prompt
+goes on describing how to handle Slack messages.
+
+#### auto_dispatch: `event:` is a type, never a type + action
+
+`auto_dispatch` rules match the event **type** by exact equality, and the type
+is whatever the adapter emits (`docs/EVENT_SERVER.md` lists them per source).
+Anything narrower belongs in `match:`, against the event's fields:
+
+```yaml
+auto_dispatch:
+  - event: github.issues           # NOT github.issues.assigned
+    match:
+      action: assigned             # the action is a FIELD, not part of the type
+      assignee: $self              # this deployment's resolved GitHub login
+    workflow: issue-lifecycle
+```
+
+`$self` is a reserved match value resolved from the deployment's own GitHub
+login. For `assignee`, it checks both the single assignee field and membership
+in the adapter's comma-separated `assignees` field. If the login cannot be
+resolved, the rule does not match; it must not dispatch someone else's issue.
+
+The distinction is per source and there is no universal rule: GitHub emits
+`github.<webhook-event>` and carries the action in `fields.action`, while
+Linear emits `linear.<type>.<action>` with the action *in* the type. A rule
+naming a type nothing emits fails silently — the deterministic dispatch it
+promises simply never happens and the work falls through to whatever the
+director LLM decides. Startup preflight (`bobi agent <name> start`) warns
+about the shapes it recognizes, but it fails open on sources it has not been
+taught, so it is a safety net rather than a guarantee.
 
 To give the team host tools, skills, or MCP servers, declare them under
 `tool_library:` (a named catalog entry like `- venn`, or an inline dependency
@@ -198,6 +232,8 @@ trigger: >
   When [condition]. One sentence.
 description: >
   What this workflow does end-to-end.
+period: daily        # optional: hourly/daily/weekly/monthly - one run per
+                     # period, deduped across every dispatch path (#1048)
 
 steps:
   - name: step-name
@@ -249,12 +285,15 @@ brain:
 
 Gateway auth is `ANTHROPIC_AUTH_TOKEN` in the runtime `.env`, and it is
 optional - Ollama serves unauthenticated; LiteLLM typically wants its master
-key. An ambient real `ANTHROPIC_API_KEY` is never sent to a gateway. Model
-names are the backend's own: the Claude aliases below only mean something if
-the gateway serves models by those names. Cross-model session continuation is
-disabled for gateways (a model switch starts fresh and re-injects context),
-and costs reported through a gateway are nominal, attributed to provider
-`gateway` in `bobi agent <name> costs`.
+key. If the gateway accepts Claude subscription OAuth, set
+`BOBI_AUTH=subscription` and leave `ANTHROPIC_AUTH_TOKEN` unset;
+`bobi agent <name> login-bootstrap` then creates the OAuth credentials without
+removing the `base_url` pin. An ambient real `ANTHROPIC_API_KEY` is never sent
+to a gateway. Model names are the backend's own: the Claude aliases below only
+mean something if the gateway serves models by those names. Cross-model
+session continuation is disabled for gateways (a model switch starts fresh
+and re-injects context), and costs reported through a gateway are nominal,
+attributed to provider `gateway` in `bobi agent <name> costs`.
 
 For an OpenAI-compatible gateway, use the codex engine:
 
@@ -341,7 +380,11 @@ both do), carrying the full transcript into the new model's context. A step
 that moves a long conversation onto a pricier model pays for that history in
 input tokens; a step that also changes `agent:` always starts fresh instead.
 
-Always include `adhoc.yaml`:
+Include `adhoc.yaml` so the manager's workflow menu can offer ad-hoc dispatch
+with your team's own trigger wording. Launching `-w adhoc` works even without
+it — the framework carries a built-in one-step definition (#1057) — but the
+built-in never appears in the manager's semantic menu, and a shipped yaml
+overrides it:
 ```yaml
 name: adhoc
 trigger: >

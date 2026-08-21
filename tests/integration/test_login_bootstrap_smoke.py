@@ -208,7 +208,10 @@ _FAKE_CLAUDE = textwrap.dedent(
     sys.stdout.flush()
     code = sys.stdin.readline().strip()   # blocks until _write_line feeds stdin
     creds.parent.mkdir(parents=True, exist_ok=True)
-    creds.write_text(json.dumps({"received_code": code, "claudeAiOauth": {"accessToken": "x"}}))
+    creds.write_text(json.dumps({
+        "received_code": code,
+        "claudeAiOauth": {"accessToken": "x", "refreshToken": "refresh"},
+    }))
     sys.stdout.write("Login successful.\\r\\n")
     sys.stdout.flush()
     """
@@ -241,10 +244,12 @@ def test_full_bootstrap_smoke_real_event_through_pty(adapter_event, tmp_path, mo
     )
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
+    claude_config_dir = tmp_path / "claude-volume"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config_dir))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv(ab.LOGIN_CHANNEL_ENV, LOGIN_DM)
 
-    creds_file = home / ".claude" / ".credentials.json"
+    creds_file = claude_config_dir / ".credentials.json"
     fake_script = tmp_path / "fake_claude.py"
     fake_script.write_text(_FAKE_CLAUDE)
 

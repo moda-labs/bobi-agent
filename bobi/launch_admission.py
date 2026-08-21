@@ -38,15 +38,34 @@ class LaunchAdmissionSnapshot:
     metrics_readable: bool
 
 
+# The ONE authority for the tunable launch-admission defaults (D088/Q124).
+# `Config` renders these into every team's `launch_admission` block and
+# `policy_from_config` reads them back, so a value tuned here takes effect for
+# every team — which is exactly what the three hand-maintained copies this
+# replaced could not promise. `max_concurrent_agents` is absent on purpose: it
+# is a required argument resolved from the team's own cap, never defaulted here.
+LAUNCH_ADMISSION_DEFAULTS: dict[str, object] = {
+    "enabled": False,
+    "max_starting_agents": 1,
+    "load_per_cpu_soft_limit": 1.5,
+    "load_per_cpu_hard_limit": 2.0,
+    "min_memory_available_mb": 512,
+    "init_failure_window_seconds": 600,
+    "init_failure_backoff_threshold": 2,
+}
+
+
 @dataclass(frozen=True)
 class LaunchAdmissionPolicy:
     max_concurrent_agents: int
-    max_starting_agents: int = 1
-    load_per_cpu_soft_limit: float = 1.5
-    load_per_cpu_hard_limit: float = 2.0
-    min_memory_available_mb: int = 512
-    init_failure_window_seconds: int = 600
-    init_failure_backoff_threshold: int = 2
+    max_starting_agents: int = LAUNCH_ADMISSION_DEFAULTS["max_starting_agents"]
+    load_per_cpu_soft_limit: float = LAUNCH_ADMISSION_DEFAULTS["load_per_cpu_soft_limit"]
+    load_per_cpu_hard_limit: float = LAUNCH_ADMISSION_DEFAULTS["load_per_cpu_hard_limit"]
+    min_memory_available_mb: int = LAUNCH_ADMISSION_DEFAULTS["min_memory_available_mb"]
+    init_failure_window_seconds: int = \
+        LAUNCH_ADMISSION_DEFAULTS["init_failure_window_seconds"]
+    init_failure_backoff_threshold: int = \
+        LAUNCH_ADMISSION_DEFAULTS["init_failure_backoff_threshold"]
     queue_poll_seconds: float = 5.0
 
 
@@ -70,14 +89,15 @@ class InitHealthCounts:
 
 
 def policy_from_config(max_concurrent_agents: int, raw: dict) -> LaunchAdmissionPolicy:
+    cfg = {**LAUNCH_ADMISSION_DEFAULTS, **raw}
     return LaunchAdmissionPolicy(
         max_concurrent_agents=max_concurrent_agents,
-        max_starting_agents=int(raw.get("max_starting_agents", 1)),
-        load_per_cpu_soft_limit=float(raw.get("load_per_cpu_soft_limit", 1.5)),
-        load_per_cpu_hard_limit=float(raw.get("load_per_cpu_hard_limit", 2.0)),
-        min_memory_available_mb=int(raw.get("min_memory_available_mb", 512)),
-        init_failure_window_seconds=int(raw.get("init_failure_window_seconds", 600)),
-        init_failure_backoff_threshold=int(raw.get("init_failure_backoff_threshold", 2)),
+        max_starting_agents=int(cfg["max_starting_agents"]),
+        load_per_cpu_soft_limit=float(cfg["load_per_cpu_soft_limit"]),
+        load_per_cpu_hard_limit=float(cfg["load_per_cpu_hard_limit"]),
+        min_memory_available_mb=int(cfg["min_memory_available_mb"]),
+        init_failure_window_seconds=int(cfg["init_failure_window_seconds"]),
+        init_failure_backoff_threshold=int(cfg["init_failure_backoff_threshold"]),
     )
 
 

@@ -61,7 +61,7 @@
   // (Ctrl-C, closed terminal, crash) the UI must say so and stop pretending to
   // be live — every action would silently fail otherwise. A heartbeat plus
   // fetch-failure detection flips a blocking overlay; it clears itself if the
-  // server comes back (e.g. `bobi setup <name> --resume`).
+  // server comes back (e.g. `bobi setup <name>`, which resumes).
   let _finished = false;        // set when the user intentionally finishes
   let _disconnected = false;
   function markDisconnected() {
@@ -75,7 +75,7 @@
       <div class="disc-dot"></div>
       <h2>Setup server disconnected</h2>
       <p>The local <code>bobi setup</code> server stopped — closed, interrupted, or crashed. Nothing here works until it's back.</p>
-      <div class="disc-cmd"><span class="pr">$</span> bobi setup &lt;name&gt; --resume</div>
+      <div class="disc-cmd"><span class="pr">$</span> bobi setup &lt;name&gt;</div>
       <p class="disc-sub">Run that in your terminal — this page reconnects on its own. Your progress is saved.</p></div>`;
     document.body.appendChild(ov);
   }
@@ -1314,7 +1314,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
     for (const input of inputs) {
       const v = input.dataset.secret;
       const r = await postJSON("/api/credential", {
-        var_name: v, service: cardKey, value: input.value.trim(),
+        var_name: v, value: input.value.trim(),
       });
       if (!r.ok) { toast(r.data.error || `couldn't save ${v}`); return; }
       editSecrets.delete(v);
@@ -1760,7 +1760,7 @@ cloudflared tunnel --url http://127.0.0.1:8080</span></div>
           <p class="ns-lede">${ingUrl ? "" : "After you deploy, "}Slack needs to know where to send events — then your team is reachable in your workspace.</p>
           <ol class="ns-list">
             ${urlSteps}
-            <li>Install the app to your workspace with the scopes below (the <span class="mono">bobi create-slack-bot</span> manifest prefills them).</li>
+            <li>Install the app to your workspace with the scopes below (the <span class="mono">bobi create-slack-bot</span> manifest prefills them). Keep <span class="mono">users:read</span>: Bobi requires it to identify the app for inbound routing.</li>
             <li>Invite the bot to a dedicated channel (<span class="mono">/invite @your-bot</span>), then save that channel here.</li>
           </ol>
           <div class="scopes">${SLACK_SCOPES.map(s => `<b>${esc(s)}</b>`).join("")}</div>

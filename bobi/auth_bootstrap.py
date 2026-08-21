@@ -21,7 +21,9 @@ tests/test_auth_bootstrap.py.
 """
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 import re
 import select
@@ -30,8 +32,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from bobi.brain import BRAIN_ENV, set_process_brain
+from bobi.brain import (
+    BRAIN_ENV,
+    DEFAULT_BRAIN,
+    normalize_brain_kind,
+    set_process_brain_from_config,
+)
 from bobi.config import Config
+from bobi.conversation import parse_conversation
 from bobi.slack import post_slack_message
 
 log = logging.getLogger(__name__)
@@ -55,11 +63,20 @@ class SubscriptionLogin:
 
     kind: str
     login_cmd: tuple[str, ...]       # the CLI that drives the OAuth flow
-    creds_relpath: tuple[str, ...]   # OAuth credential file, relative to $HOME
+    creds_relpath: tuple[str, ...]   # OAuth credential fallback relative to $HOME
     shadow_env: str                  # the API key that would silently outrank subscription auth
     flow: str                        # "paste_back" (claude) | "device_poll" (codex)
     url_re: re.Pattern               # scrape the sign-in URL from pty output
-    code_re: "re.Pattern | None" = None  # device_poll: also scrape the one-time code
+    code_re: re.Pattern | None = None  # device_poll: also scrape the one-time code
+    credentials_dir_env: str | None = None
+
+
+@dataclass(frozen=True)
+class CredentialStatus:
+    """Local structural validity of a subscription credential file."""
+
+    valid: bool
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -81,6 +98,7 @@ _SPECS: dict[str, SubscriptionLogin] = {
         flow="paste_back",
         # e.g. https://claude.com/cai/oauth/authorize?code=true&client_id=...
         url_re=re.compile(r"https://\S+/oauth/authorize\S+"),
+        credentials_dir_env="CLAUDE_CONFIG_DIR",
     ),
     "codex": SubscriptionLogin(
         kind="codex",
@@ -91,6 +109,7 @@ _SPECS: dict[str, SubscriptionLogin] = {
         # Codex prints a fixed device URL + a one-time code "XXXX-XXXXX".
         url_re=re.compile(r"https://auth\.openai\.com/codex/device\S*"),
         code_re=re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{5})\b"),
+        credentials_dir_env="CODEX_HOME",
     ),
 }
 
@@ -101,14 +120,81 @@ def _active_spec() -> SubscriptionLogin:
     return _SPECS.get(kind, _SPECS["claude"])
 
 
+def subscription_credentials_status(
+    path: Path,
+    kind: str,
+    *,
+    now_ms: float | None = None,
+) -> CredentialStatus:
+    """Check whether a stored OAuth credential can refresh without a network call."""
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return CredentialStatus(False, "credential file is missing")
+    except json.JSONDecodeError:
+        return CredentialStatus(False, "credential JSON is malformed")
+    except OSError:
+        return CredentialStatus(False, "credential file is unreadable")
+
+    if not isinstance(data, dict):
+        return CredentialStatus(False, "credential JSON root is not an object")
+
+    if kind == "claude":
+        oauth = data.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
+            return CredentialStatus(False, "claudeAiOauth is missing or malformed")
+        refresh_token = oauth.get("refreshToken")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            return CredentialStatus(False, "refresh token is missing or blank")
+
+        expires_at = oauth.get("refreshTokenExpiresAt")
+        if expires_at is None:
+            return CredentialStatus(True, "refresh token is present")
+        if (isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(expires_at)):
+            return CredentialStatus(False, "refresh token expiry is malformed")
+        current_ms = time.time() * 1000 if now_ms is None else now_ms
+        if expires_at <= current_ms:
+            return CredentialStatus(False, "refresh token is expired")
+        return CredentialStatus(True, "refresh token is present and unexpired")
+
+    if kind == "codex":
+        tokens = data.get("tokens")
+        if not isinstance(tokens, dict):
+            return CredentialStatus(False, "tokens is missing or malformed")
+        refresh_token = tokens.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
+            return CredentialStatus(False, "refresh token is missing or blank")
+        # Codex's real OAuth schema has no refresh-token expiry field. An
+        # expired access token is recoverable as long as this token is present.
+        return CredentialStatus(True, "refresh token is present")
+
+    return CredentialStatus(False, f"unsupported credential schema '{kind}'")
+
+
 def credentials_path(home: Path | None = None) -> Path:
-    """Path to the active brain's subscription OAuth credentials on the volume."""
+    """Path to the active brain's subscription OAuth credentials on the volume.
+
+    Claude and Codex each support a provider-specific config directory override.
+    Use it when present; otherwise retain the historical ``$HOME``-relative
+    fallback used by local callers and tests.
+    """
+    spec = _active_spec()
+    if spec.credentials_dir_env:
+        configured_dir = os.environ.get(spec.credentials_dir_env)
+        if configured_dir:
+            return Path(configured_dir, spec.creds_relpath[-1])
     base = home or Path(os.environ.get("HOME", str(Path.home())))
-    return Path(base, *_active_spec().creds_relpath)
+    return Path(base, *spec.creds_relpath)
 
 
 def credentials_exist(home: Path | None = None) -> bool:
-    return credentials_path(home).is_file()
+    """True when the active brain has locally refreshable subscription OAuth."""
+    spec = _active_spec()
+    return subscription_credentials_status(
+        credentials_path(home), spec.kind,
+    ).valid
 
 
 def needs_bootstrap(home: Path | None = None) -> bool:
@@ -189,35 +275,17 @@ def _write_line(master_fd: int, text: str) -> None:
 
 # --- event-bus wait ---------------------------------------------------------
 
-def _parse_conversation(ref: str) -> tuple[str, str, str, str] | None:
-    """Return ``(source, scope, chat_type, chat_id)`` for a gateway ref."""
-    parts = ref.split(":")
-    if len(parts) not in (4, 6):
-        return None
-    if any(not p for p in parts):
-        return None
-    if len(parts) == 6 and parts[4] != "thread":
-        return None
-    source, scope, chat_type, chat_id = parts[:4]
-    if chat_type not in {"dm", "group", "channel"}:
-        return None
-    return source, scope, chat_type, chat_id
-
-
 def _slack_topic(cfg: Config) -> str:
-    from bobi.events.server import _slack_app_id, _slack_auth_info
+    from bobi.slack import require_app_identity
 
     token = cfg.credential("slack", "bot_token")
-    team_id, bot_id, _ = _slack_auth_info(token)
-    if not team_id:
-        raise RuntimeError("could not resolve Slack team_id from bot_token.")
-    app_id = _slack_app_id(token, bot_id)
-    return f"slack:{team_id}:app:{app_id}" if app_id else f"slack:{team_id}"
+    team_id, _bot_id, _bot_user_id, app_id = require_app_identity(token)
+    return f"slack:{team_id}:app:{app_id}"
 
 
 def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
     """Resolve ``BOBI_LOGIN_CHANNEL`` to a post destination and bus topic."""
-    conv = _parse_conversation(raw)
+    conv = parse_conversation(raw)
     if conv is None:
         token = cfg.credential("slack", "bot_token")
         if not token:
@@ -234,7 +302,7 @@ def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
             legacy_slack_channel=channel,
         )
 
-    source, scope, _chat_type, _chat_id = conv
+    source, scope = conv.source, conv.scope
     if source == "slack":
         return LoginChannel(destination=raw, source=source, topic=_slack_topic(cfg))
     if source in {"discord", "whatsapp"}:
@@ -245,10 +313,21 @@ def _resolve_login_channel(cfg: Config, raw: str) -> LoginChannel:
     )
 
 
-def _register_login_channel(project_path: Path, cfg: Config, channel: LoginChannel) -> None:
-    """Ensure channel-gateway credentials and resource grants exist."""
+def _register_login_channel(project_path: Path, cfg: Config,
+                            channel: LoginChannel) -> dict:
+    """Ensure channel credentials/grants exist and return their live bubble.
+
+    Channel registration is intentionally best-effort in the general event
+    startup path: it returns an empty list for both invalid upstream credentials
+    and a rejected bubble signature. Login bootstrap cannot treat those cases
+    alike. When registration is empty, probe the bubble with a signed JOIN; only
+    a :class:`BubbleRejected` permits a compare-and-swap re-mint and one retry.
+    """
     from bobi.events.server import (
+        BubbleRejected,
+        deregister,
         ensure_bubble,
+        register,
         register_discord_apps,
         register_slack_workspaces,
         register_whatsapp_numbers,
@@ -260,29 +339,44 @@ def _register_login_channel(project_path: Path, cfg: Config, channel: LoginChann
             "event_server_url is not configured — cannot post the login URL "
             "through the channel gateway."
         )
+    def register_channel(bubble: dict) -> list[str]:
+        kwargs = {
+            "bubble_id": bubble["bubble_id"],
+            "bubble_key": bubble["bubble_key"],
+        }
+        if channel.source == "slack":
+            return register_slack_workspaces(es_url, cfg, **kwargs)
+        if channel.source == "discord":
+            return register_discord_apps(es_url, cfg, **kwargs)
+        if channel.source == "whatsapp":
+            return register_whatsapp_numbers(es_url, cfg, **kwargs)
+        return []
+
     bubble = ensure_bubble(es_url, project_path)
-    if channel.source == "slack":
-        registered = register_slack_workspaces(
-            es_url, cfg,
-            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-        )
-    elif channel.source == "discord":
-        registered = register_discord_apps(
-            es_url, cfg,
-            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-        )
-    elif channel.source == "whatsapp":
-        registered = register_whatsapp_numbers(
-            es_url, cfg,
-            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-        )
-    else:
-        registered = []
+    registered = register_channel(bubble)
+    if not registered:
+        # A channel endpoint's 403 may mean either stale bubble auth or invalid
+        # upstream channel credentials. A signed empty-subscription JOIN tests
+        # only bubble membership, so a valid bubble never gets rotated merely
+        # because Slack/Discord/WhatsApp configuration is wrong.
+        try:
+            probe_id, probe_key = register(
+                es_url, "login-bootstrap-bubble-probe", [],
+                bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+            )
+        except BubbleRejected:
+            bubble = ensure_bubble(
+                es_url, project_path, force_remint_of=bubble["bubble_id"],
+            )
+            registered = register_channel(bubble)
+        else:
+            deregister(es_url, probe_id, probe_key)
     if not registered:
         raise RuntimeError(
             f"could not register {channel.source} credentials for "
             "subscription login bootstrap."
         )
+    return bubble
 
 
 def _post_login_message(project_path: Path, cfg: Config, channel: LoginChannel,
@@ -359,7 +453,13 @@ def _conversation_matches(expected: str, actual: object, source: str) -> bool:
 
 
 def _paste_back_instruction(channel: LoginChannel) -> str:
-    if channel.source == "discord" and ":channel:" in channel.destination:
+    is_channel = (
+        channel.source in {"discord", "slack"}
+        and ":channel:" in channel.destination
+    ) or (
+        channel.source == "slack" and bool(channel.legacy_slack_channel)
+    )
+    if is_channel:
         return (
             "Open this URL, authorize, then reply to this message with the "
             "code, or @mention the bot with the code:\n"
@@ -389,8 +489,10 @@ def _extract_code(event: dict, channel: LoginChannel | str) -> str | None:
         expected_conversation, event.get("conversation"), expected_source
     ):
         return None
-    fields = event.get("fields") if isinstance(event.get("fields"), dict) else {}
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    raw_fields = event.get("fields")
+    fields = raw_fields if isinstance(raw_fields, dict) else {}
+    raw_payload = event.get("payload")
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
     ev_channel = fields.get("channel") or payload.get("channel")
     # Filter to the login channel; a workspace subscription sees every channel.
     if expected_channel and ev_channel and ev_channel != expected_channel:
@@ -414,7 +516,7 @@ def _wait_for_code(project_path: Path, channel: LoginChannel | str,
     from queue import Empty, SimpleQueue
 
     from bobi.events.client import EventServerClient
-    from bobi.events.server import ensure_bubble, register
+    from bobi.events.server import BubbleRejected, ensure_bubble, register
 
     cfg = Config.load(project_path)
     es_url = cfg.event_server_url
@@ -433,15 +535,27 @@ def _wait_for_code(project_path: Path, channel: LoginChannel | str,
             legacy_slack_channel=login_channel.legacy_slack_channel,
         )
 
-    # Resolve the bubble first so chat registration can be signed. Signed
-    # registration also creates the bubble-scoped record outbound send needs.
-    bubble = ensure_bubble(es_url, project_path)
-    _register_login_channel(project_path, cfg, login_channel)
-
-    deployment_id, api_key = register(
-        es_url, "login-bootstrap", [login_channel.topic],
-        bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
-    )
+    # Signed channel registration creates the resource grant required by the
+    # global chat topic. It also returns the bubble it recovered to if the
+    # server forgot the persisted one after a restart.
+    bubble = _register_login_channel(project_path, cfg, login_channel)
+    try:
+        deployment_id, api_key = register(
+            es_url, "login-bootstrap", [login_channel.topic],
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
+    except BubbleRejected:
+        # The server can restart between channel registration and this JOIN.
+        # Re-mint with the CAS guard, then recreate the bubble-scoped channel
+        # credential/grant before retrying the listener exactly once.
+        ensure_bubble(
+            es_url, project_path, force_remint_of=bubble["bubble_id"],
+        )
+        bubble = _register_login_channel(project_path, cfg, login_channel)
+        deployment_id, api_key = register(
+            es_url, "login-bootstrap", [login_channel.topic],
+            bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
+        )
 
     q: SimpleQueue = SimpleQueue()
     client = EventServerClient(es_url, deployment_id, api_key, queue=q)
@@ -470,7 +584,6 @@ def _wait_for_code(project_path: Path, channel: LoginChannel | str,
 def run_bootstrap(
     project_path: Path,
     *,
-    channel: str | None = None,
     timeout: float = 600,
     url_timeout: float = 120,
     spawn_login=None,
@@ -484,6 +597,9 @@ def run_bootstrap(
     CLID/flow/credential path is used). The pty spawn, Slack post, code scrape,
     and event-bus wait are injectable so the orchestration is unit-testable
     without a real CLI, Slack, or Worker.
+
+    The destination is ``$BOBI_LOGIN_CHANNEL`` and takes no override - see the
+    comment on ``channel_ref`` below.
     """
     spawn_login = spawn_login or _spawn_login
     post_message = post_message or post_slack_message
@@ -494,15 +610,20 @@ def run_bootstrap(
     # all the right ones. Loading cfg here also seeds BOBI_BRAIN for the
     # spec lookups below (and the spawned login subprocess).
     cfg = Config.load(project_path)
-    if cfg.brain_is_gateway:
-        # No spec fallback: _active_spec would silently drive the CLAUDE
-        # subscription login for a team that authenticates with gateway-specific
-        # credentials (or nothing) - mirror the DeployError (#655/#777).
+    configured_engine = normalize_brain_kind(cfg.brain_kind) or DEFAULT_BRAIN
+    if cfg.brain_is_gateway and (
+        configured_engine != "claude"
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+    ):
+        # A Claude gateway can deliberately use subscription OAuth when the
+        # endpoint accepts it. Other gateways, or a configured gateway token,
+        # must keep using the gateway-specific credential path.
         raise RuntimeError(
-            "subscription login does not apply to a gateway team - a gateway "
-            "authenticates with gateway credentials in the runtime .env."
+            "subscription login applies only to a Claude gateway without "
+            "ANTHROPIC_AUTH_TOKEN; this gateway authenticates with gateway "
+            "credentials in the runtime .env."
         )
-    set_process_brain(cfg.brain_kind)
+    set_process_brain_from_config(cfg)
     spec = _active_spec()
 
     home = Path(os.environ.get("HOME", str(Path.home())))
@@ -517,7 +638,15 @@ def run_bootstrap(
             "Unset it before subscription login."
         )
 
-    channel_ref = channel or os.environ.get(LOGIN_CHANNEL_ENV, "")
+    # The destination is configuration, never a caller's argument. The login
+    # URL is a live credential-granting link, and the code pasted back into it
+    # is read from this same channel and written to the login CLI's stdin - so
+    # whoever picks the channel drives both ends of the flow. `login-bootstrap`
+    # sits on the `agent` group any worker's shell can reach, and a worker
+    # handling a fork diff, an issue body, or a webhook payload is handling
+    # untrusted text (docs/SECURITY.md). It once took a `--channel` that
+    # outranked this env var; it does not.
+    channel_ref = os.environ.get(LOGIN_CHANNEL_ENV, "")
     if not channel_ref:
         raise RuntimeError(
             f"{LOGIN_CHANNEL_ENV} is unset — need a private chat channel to post "
@@ -594,3 +723,23 @@ def run_bootstrap(
     except Exception as exc:  # noqa: BLE001 — best-effort status post
         log.warning("Could not post bootstrap result to chat channel: %s", exc)
     return ok
+
+
+def _credential_status_cli(argv: list[str] | None = None) -> int:
+    """Machine-facing local check used by the container entrypoint."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("command", choices=["credential-status"])
+    parser.add_argument("kind", choices=sorted(_SPECS))
+    parser.add_argument("path", type=Path)
+    args = parser.parse_args(argv)
+
+    status = subscription_credentials_status(args.path, args.kind)
+    state = "valid" if status.valid else "invalid"
+    print(f"credentials {state}: {status.reason}")
+    return 0 if status.valid else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_credential_status_cli())

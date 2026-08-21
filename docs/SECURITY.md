@@ -131,18 +131,29 @@ therefore runs untrusted-author code against your credentials.
 
 - **Review a team before installing it**, the same way you would review a dependency
   - especially one from a non-default registry or an arbitrary URL.
+- Trusted does not mean unbounded: compose refuses a `prune:` entry that is a
+  path rather than an item name. An absolute name or a `..` segment would have
+  deleted host files outside the image being frozen, which is beyond what
+  installing a team is understood to do — and a typo away from data loss.
 - The installed `run/package/` image is a frozen build artifact: regenerated
   verbatim on every install, never hand-edited. `bobi agent <name> doctor` flags
   drift against the install manifest.
-- Bobi makes Bobi-owned runtime package roots read-only before handing control to
-  an agent brain. Agents keep read/search access and keep existing execute bits
-  for packaged scripts, while assigned repos, `run/workspace/`, `run/state/`,
-  logs, and handoffs stay writable. The default local backend is POSIX `chmod`:
-  it catches accidental writes from Claude, Codex, gateway-backed Claude, MCP
-  tools, and future brains through the shared launch boundary, but it is not a
-  hard sandbox when the agent process owns the files because the same UID can
-  deliberately restore write bits. Managed deployments that need a stronger
-  boundary should use read-only mounts or split ownership.
+- Bobi protects runtime package roots and framework integrity before handing
+  control to an agent brain:
+  - **Team packages at rest (`run/package/`):** Locked read-only via POSIX
+    `chmod` (`0o555`/`0o444`) with an atomic mutable context for managed installs.
+  - **Framework package launch gate:** Before each brain session, subagent
+    launch, or workflow step starts, Bobi runs a cryptographic File Integrity
+    Monitoring (FIM) check against the distribution's PEP 376 `RECORD` metadata.
+    If any framework file is missing, unreadable, or has a mismatched SHA-256
+    hash, the runtime fails closed immediately and refuses to launch.
+  - **In-session upgrades:** During a session, filesystem permissions on the
+    framework package remain standard (`0644`/`0755`) so standard package managers
+    (`uv tool upgrade bobi`, `pipx upgrade`, `pip`) can perform upgrades without
+    permission conflicts. Note that FIM is a launch-time gate against RECORD
+    rather than live in-process syscall interception; managed deployments that
+    require a hard in-session write boundary should use read-only container
+    mounts or split OS user ownership.
 
 ## Deployed instances
 
@@ -154,6 +165,30 @@ therefore runs untrusted-author code against your credentials.
   prompt-injected agent could exfiltrate its own instance's tokens. This is an
   accepted internal-only risk today, mitigated by scoped per-instance tokens; an
   egress proxy is tracked for any non-employee/tenant use (epic #395).
+- **The subscription login destination is configuration, never an argument.**
+  `login-bootstrap` posts a live credential-granting sign-in URL and then reads
+  the code pasted back to that same place, so whoever picks the destination
+  drives both ends of the brain's OAuth flow. It sits on the `agent` group any
+  worker's shell reaches, and workers run with `bypassPermissions`, so the
+  destination is `$BOBI_LOGIN_CHANNEL` and the command takes no `--channel`
+  override. That removes the affordance, not the capability: a process that
+  can already run arbitrary shell as the agent user can set the env var on the
+  invocation (process env outranks the runtime `.env` by design,
+  `bobi/config.py`), which is also the operator's one-off escape hatch. The
+  bound is the accepted risk two bullets up - what a prompt-injected agent can
+  reach is what its own uid can reach. What the removal does buy is that a
+  documented flag no longer advertises "redirect the brain's login here" to a
+  model reading `--help` and following an injected instruction.
+- **An OTLP ingest token must be write-only and per-instance.** The accepted risk
+  directly above is bounded by "its own instance's tokens", and a vendor OTLP
+  token breaks that bound: a Grafana Cloud OTLP credential is typically
+  **stack-scoped** and identical on every box, so one exfiltrated from one
+  instance reaches the organization's whole observability plane - a change to
+  the model, not an instance of it. A team enabling `bobi agent <name> otel`
+  therefore mints a write-only token scoped to one instance, never a
+  stack-admin token and never one shared across the fleet. The command's own
+  controls (credential origin-pinning, no redirects on export, header values
+  never printed) are documented in `docs/OTEL.md`.
 
 ## What's enforced vs. v1 boundaries
 

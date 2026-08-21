@@ -12,7 +12,7 @@ investigation: prod manager.log lines 34867-35008.
 from unittest.mock import patch
 
 from bobi import http as pooled
-from bobi.config import save_bubble_state
+from bobi.events.state import save_bubble_state
 from bobi.events import publish as pub
 
 

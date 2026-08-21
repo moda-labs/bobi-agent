@@ -75,7 +75,8 @@ async def _work_the_checklist(repo: Path, *, max_turns: int = 60) -> str:
         options={"skills": "all", "max_turns": max_turns},
     )
     try:
-        await session.connect(
+        await session.connect()
+        await session.query(
             "Work the checklist at plans/work.md. Stop when every item is "
             "either checked off or marked blocked."
         )

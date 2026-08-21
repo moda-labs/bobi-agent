@@ -19,6 +19,7 @@ from pathlib import Path
 
 
 from bobi import sdk
+from bobi.brain import claude as claude_brain
 
 PACKAGE_ROOT = Path(sdk.__file__).resolve().parent
 REPO_ROOT = PACKAGE_ROOT.parent
@@ -26,23 +27,23 @@ REPO_ROOT = PACKAGE_ROOT.parent
 
 class TestClaudeCliResolution:
     def test_prefers_path(self, monkeypatch):
-        monkeypatch.setattr(sdk.shutil, "which", lambda name: "/somewhere/bin/claude")
-        assert sdk.get_cli_path() == "/somewhere/bin/claude"
+        monkeypatch.setattr(claude_brain.shutil, "which", lambda name: "/somewhere/bin/claude")
+        assert claude_brain.get_cli_path() == "/somewhere/bin/claude"
 
     def test_linux_fallback_is_path_relative(self, monkeypatch):
         """When ``claude`` isn't found and we're not on macOS, fall back to the
         bare name so exec resolves it via ``PATH`` at spawn time — never a
         macOS-specific absolute path that doesn't exist in the container."""
-        monkeypatch.setattr(sdk.shutil, "which", lambda name: None)
-        monkeypatch.setattr(sdk.platform, "system", lambda: "Linux")
-        resolved = sdk.get_cli_path()
+        monkeypatch.setattr(claude_brain.shutil, "which", lambda name: None)
+        monkeypatch.setattr(claude_brain.platform, "system", lambda: "Linux")
+        resolved = claude_brain.get_cli_path()
         assert resolved == "claude"
         assert "/opt/homebrew" not in resolved
 
     def test_macos_fallback_kept_for_dev(self, monkeypatch):
-        monkeypatch.setattr(sdk.shutil, "which", lambda name: None)
-        monkeypatch.setattr(sdk.platform, "system", lambda: "Darwin")
-        assert sdk.get_cli_path() == "/opt/homebrew/bin/claude"
+        monkeypatch.setattr(claude_brain.shutil, "which", lambda name: None)
+        monkeypatch.setattr(claude_brain.platform, "system", lambda: "Darwin")
+        assert claude_brain.get_cli_path() == "/opt/homebrew/bin/claude"
 
 
 def _macos_path_hits() -> list[tuple[Path, int, str]]:

@@ -13,9 +13,21 @@ from pathlib import Path
 
 import yaml
 
-from bobi.fsutil import atomic_write_json
-
 log = logging.getLogger(__name__)
+
+
+def _launch_admission_defaults() -> dict:
+    """The one authority for the launch-admission tunables (D088/Q124).
+
+    Imported lazily ON PURPOSE. `bobi.launch_admission` reaches `bobi.sdk` and
+    `bobi.concurrency_semaphore`; this module is imported almost everywhere and
+    deliberately keeps zero module-level `bobi` dependencies, so a
+    top-level import here would quadruple what `import bobi.config` costs. Both
+    readers below run at call time, so the lazy import is free.
+    """
+    from bobi.launch_admission import LAUNCH_ADMISSION_DEFAULTS
+    return dict(LAUNCH_ADMISSION_DEFAULTS)
+
 
 # `${{...}}` is workflow template syntax, not an env reference. Excluding
 # `${{` keeps templates intact during both scanning and interpolation.
@@ -308,22 +320,74 @@ class RequiresEntry:
     fix: str = ""
 
 
+def probe_env(root: Path | None = None) -> dict[str, str]:
+    """The environment a `requires:`/`success:` probe is evaluated in.
+
+    A probe that has to address an agent-scoped command writes
+    `bobi agent "$BOBI_AGENT" ...` and reads the name from here, so the
+    resolution lives in ONE place (`paths.agent_name`) rather than once per
+    probe. The otel entry used to derive it inline with
+    `basename "$BOBI_ROOT"`, which reads `run` on the canonical
+    `<home>/agents/<name>/run` layout and addressed an agent that does not
+    exist (#1063).
+
+    ``BOBI_AGENT`` is left unset when no name resolves: an empty value would be
+    indistinguishable from a real selection, and probes that need one are
+    reported as indeterminate rather than run against a name we invented.
+    """
+    from bobi import paths
+
+    env = dict(os.environ)
+    name = paths.agent_name(root, env=env)
+    if name:
+        env[paths.AGENT_ENV] = name
+    else:
+        env.pop(paths.AGENT_ENV, None)
+    return env
+
+
 def run_requires_checks(
     requires: list[RequiresEntry],
     timeout: float = 10,
-) -> list[tuple[RequiresEntry, bool, str]]:
+    root: Path | None = None,
+) -> list[tuple[RequiresEntry, bool | None, str]]:
     """Run each requires check command and return (entry, passed, detail).
 
-    Shared runner used by both doctor and dispatch-time gate.
+    Shared runner used by both doctor and dispatch-time gate. Probes run in
+    `probe_env(root)`, so any of them can address `bobi agent "$BOBI_AGENT"`.
+
+    ``passed`` is tri-state, and callers must not collapse it to a bool:
+
+      * ``True``  - the check ran and the dependency is satisfied.
+      * ``False`` - the check ran and the dependency is not satisfied.
+      * ``None``  - the check could not be evaluated AT ALL, because the
+        environment it needs is unresolvable. This is a fault in the harness,
+        not evidence about the dependency. Reporting the two identically is
+        what turned one misresolved otel probe into a total dispatch outage
+        (#1063): every workflow launch for the team was refused, with only a
+        skipped-launch log line to show for it.
+
+    Only a probe that actually reads ``$BOBI_AGENT`` is held back on an
+    unresolvable name; the rest run as always.
     """
     import subprocess
 
-    results: list[tuple[RequiresEntry, bool, str]] = []
+    from bobi.paths import AGENT_ENV
+
+    env = probe_env(root)
+    agent_unresolved = AGENT_ENV not in env
+
+    results: list[tuple[RequiresEntry, bool | None, str]] = []
     for entry in requires:
+        if agent_unresolved and AGENT_ENV in entry.check:
+            results.append((entry, None, (
+                f"check reads ${AGENT_ENV}, which could not be resolved from "
+                f"the runtime root; set {AGENT_ENV} for this deployment")))
+            continue
         try:
             proc = subprocess.run(
                 entry.check, shell=True, timeout=timeout,
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=env,
             )
             if proc.returncode == 0:
                 results.append((entry, True, "healthy"))
@@ -335,6 +399,20 @@ def run_requires_checks(
         except OSError as exc:
             results.append((entry, False, f"check command failed: {exc}"))
     return results
+
+
+def requires_detail(detail: str, limit: int = 0) -> str:
+    """Render one failed check's detail as a single bounded line.
+
+    The detail is what distinguishes a timeout from a missing command from
+    the check's own stderr, so every surface that reports a failure renders
+    it through here rather than deciding for itself what to drop (#771).
+    `limit` truncates for display; 0 keeps the whole detail.
+    """
+    text = " ".join((detail or "").split()) or "no detail"
+    if limit and len(text) > limit:
+        text = text[:limit].rstrip() + "..."
+    return text
 
 
 @dataclass
@@ -404,11 +482,8 @@ class Config:
     services: list[ServiceConfig] = field(default_factory=list)
 
     event_server_url: str = ""
-    registries: list[str] = field(default_factory=list)
 
     venn_api_key: str = ""
-
-    default_role: str = ""
 
     mcp_servers: dict[str, dict] = field(default_factory=dict)
     monitors: list[dict] = field(default_factory=list)
@@ -424,15 +499,7 @@ class Config:
     spend_cap: int = 0  # max agent invocations per rolling hour; 0 = use default
     max_concurrent_agents: int = 0  # max simultaneous subagents; 0 = use default (2)
     max_launch_depth: int = 0  # max launch-chain depth; 0 = use default (8)
-    launch_admission: dict = field(default_factory=lambda: {
-        "enabled": False,
-        "max_starting_agents": 1,
-        "load_per_cpu_soft_limit": 1.5,
-        "load_per_cpu_hard_limit": 2.0,
-        "min_memory_available_mb": 512,
-        "init_failure_window_seconds": 600,
-        "init_failure_backoff_threshold": 2,
-    })
+    launch_admission: dict = field(default_factory=_launch_admission_defaults)
     # Which agent "brain" (ENGINE) drives this team's agents (#485). `{kind:
     # claude|codex, model: <optional override>, effort: <optional reasoning
     # effort>, max_turns: <optional per-session turn cap>}`. Setting
@@ -562,7 +629,7 @@ class Config:
         # verbatim — they may contain ${VAR} or ~ intended for shell
         # expansion, not config interpolation.
         monitors_raw = raw_uninterpolated.get("monitors", [])
-        requires_raw = raw_uninterpolated.get("requires", [])
+        requires_raw = raw_uninterpolated.get("requires") or []
         # host: entries carry a sysctl `key=value` verbatim — no config
         # interpolation (mirrors requires/build).
         host_raw = raw_uninterpolated.get("host", [])
@@ -573,7 +640,7 @@ class Config:
         raw["monitors"] = monitors_raw
 
         services = []
-        for s in raw.get("services", []):
+        for s in raw.get("services") or []:
             if isinstance(s, str):
                 services.append(ServiceConfig(name=s))
             elif isinstance(s, dict):
@@ -604,7 +671,7 @@ class Config:
 
         build = cls._parse_build(build_raw, path)
 
-        event_server = raw.get("event_server", {})
+        event_server = raw.get("event_server") or {}
         if isinstance(event_server, str):
             event_server_url = event_server
         else:
@@ -617,51 +684,46 @@ class Config:
             chat=raw.get("chat", ""),
             services=services,
             event_server_url=raw.get("event_server_url", event_server_url),
-            registries=raw.get("registries", []),
-            default_role=raw.get("defaults", {}).get("role", "") if isinstance(raw.get("defaults"), dict) else "",
             venn_api_key=raw.get("venn_api_key", ""),
-            mcp_servers=raw.get("mcp_servers", {}),
-            monitors=raw.get("monitors", []),
-            auto_dispatch=raw.get("auto_dispatch", []),
+            mcp_servers=raw.get("mcp_servers") or {},
+            monitors=raw.get("monitors") or [],
+            auto_dispatch=raw.get("auto_dispatch") or [],
             requires=requires,
             host=host_raw if isinstance(host_raw, list) else [],
             build=build,
-            spend_cap=int(raw.get("spend_cap", 0)),
-            max_concurrent_agents=int(raw.get("max_concurrent_agents", 0)),
-            # `max_launch_depth:` with an empty value parses as None, and a
-            # bare int(None) would raise out of Config.load entirely - so a
-            # half-finished edit to this one key would stop the whole team
-            # booting with an error naming neither the key nor the file.
+            # `key:` with an empty value is YAML null, so `raw.get(key, default)`
+            # returns None and the default never applies. Every container and
+            # numeric field therefore reads `or <default>`, not a get-default:
+            # one commented-out value in agent.yaml used to raise out of
+            # Config.load and take down start/status/dispatch with a traceback
+            # naming neither the key nor the file.
+            spend_cap=int(raw.get("spend_cap") or 0),
+            max_concurrent_agents=int(raw.get("max_concurrent_agents") or 0),
             max_launch_depth=int(raw.get("max_launch_depth") or 0),
-            launch_admission=cls._parse_launch_admission(raw.get("launch_admission", {})),
+            launch_admission=cls._parse_launch_admission(raw.get("launch_admission") or {}),
             brain=raw.get("brain", {}) if isinstance(raw.get("brain"), dict) else {},
             roles=raw.get("roles", {}) if isinstance(raw.get("roles"), dict) else {},
         )
 
     @staticmethod
     def _parse_launch_admission(raw: object) -> dict:
-        defaults = {
-            "enabled": False,
-            "max_starting_agents": 1,
-            "load_per_cpu_soft_limit": 1.5,
-            "load_per_cpu_hard_limit": 2.0,
-            "min_memory_available_mb": 512,
-            "init_failure_window_seconds": 600,
-            "init_failure_backoff_threshold": 2,
-        }
+        defaults = _launch_admission_defaults()
         if not isinstance(raw, dict):
             return defaults
+        # Every key is present after the merge, so the per-key `.get` fallbacks
+        # this replaced were unreachable — a second copy of the defaults that
+        # could only ever drift from the first (Q124).
         cfg = {**defaults, **raw}
-        soft = max(0.1, float(cfg.get("load_per_cpu_soft_limit", 1.5)))
-        hard = max(soft, float(cfg.get("load_per_cpu_hard_limit", 2.0)))
+        soft = max(0.1, float(cfg["load_per_cpu_soft_limit"]))
+        hard = max(soft, float(cfg["load_per_cpu_hard_limit"]))
         return {
-            "enabled": _as_bool(cfg.get("enabled", False)),
-            "max_starting_agents": max(1, int(cfg.get("max_starting_agents", 1))),
+            "enabled": _as_bool(cfg["enabled"]),
+            "max_starting_agents": max(1, int(cfg["max_starting_agents"])),
             "load_per_cpu_soft_limit": soft,
             "load_per_cpu_hard_limit": hard,
-            "min_memory_available_mb": max(0, int(cfg.get("min_memory_available_mb", 512))),
-            "init_failure_window_seconds": max(1, int(cfg.get("init_failure_window_seconds", 600))),
-            "init_failure_backoff_threshold": max(1, int(cfg.get("init_failure_backoff_threshold", 2))),
+            "min_memory_available_mb": max(0, int(cfg["min_memory_available_mb"])),
+            "init_failure_window_seconds": max(1, int(cfg["init_failure_window_seconds"])),
+            "init_failure_backoff_threshold": max(1, int(cfg["init_failure_backoff_threshold"])),
         }
 
     @staticmethod
@@ -712,106 +774,3 @@ class Config:
     def event_services(self) -> list[ServiceConfig]:
         """Services with events enabled."""
         return [s for s in self.services if s.events]
-
-
-# --- Event server deployment state (ephemeral, auto-registered) ---
-#
-# One deployment per SESSION, never shared. When sessions shared one
-# deployment (a single deployment.json per project), every agent's
-# subscriptions were unioned onto it and the event server fanned every
-# matching event out to every connected agent — project leads received
-# the user's Slack DMs to the director and replied to them.
-
-
-def _safe_session(session: str) -> str:
-    import re
-    return re.sub(r"[^A-Za-z0-9._-]", "_", session) or "_"
-
-
-def deployment_state_path(project_path: Path, session: str) -> Path:
-    from bobi import paths
-    return (paths.state_path(project_path) / "deployments"
-            / f"{_safe_session(session)}.json")
-
-
-def session_cursor_path(project_path: Path, session: str) -> Path:
-    """Per-session event cursor. Seq numbers are per-deployment, so a shared
-    cursor file would corrupt replay positions across sessions."""
-    from bobi import paths
-    return (paths.state_path(project_path) / "cursors"
-            / f"{_safe_session(session)}.json")
-
-
-def load_deployment_state(project_path: Path, session: str) -> dict:
-    """Load a session's event server deployment_id + api_key."""
-    import json
-    state_file = deployment_state_path(project_path, session)
-    if not state_file.exists():
-        return {}
-    try:
-        return json.loads(state_file.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_deployment_state(project_path: Path, session: str,
-                          deployment_id: str, api_key: str) -> None:
-    """Save a session's event server deployment_id + api_key."""
-    state_file = deployment_state_path(project_path, session)
-    # Atomic: a torn write here reads back as {} and the session loses the
-    # credentials it needs to reach its event server.
-    atomic_write_json(state_file, {
-        "deployment_id": deployment_id,
-        "api_key": api_key,
-    }, indent=None)
-
-
-# --- bubble (trust-domain) state -------------------------------------------
-# One bubble per running instance. Minted once (lazily, lock-protected) and
-# shared by every session of the instance via the local filesystem. The bubble
-# key signs publishes + join registrations; it is a private local secret stored
-# OUTSIDE .env (which is template-expanded into agent configs). See
-# bobi/events/server.py:ensure_bubble.
-
-
-def bubble_state_path(project_path: Path) -> Path:
-    from bobi import paths
-    return paths.state_path(project_path) / "bubble.json"
-
-
-def load_bubble_state(project_path: Path) -> dict:
-    """Load the instance's bubble_id + bubble_key, or {} if not yet minted."""
-    import json
-    state_file = bubble_state_path(project_path)
-    if not state_file.exists():
-        return {}
-    try:
-        return json.loads(state_file.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_bubble_state(project_path: Path, bubble_id: str, bubble_key: str) -> None:
-    """Persist the bubble credential at mode 0600 (it is a signing secret)."""
-    import json
-    import os
-    state_file = bubble_state_path(project_path)
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    # Create with 0600 so the key is never group/world-readable.
-    fd = os.open(str(state_file), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, json.dumps({
-            "bubble_id": bubble_id,
-            "bubble_key": bubble_key,
-        }).encode())
-    finally:
-        os.close(fd)
-    try:
-        os.chmod(state_file, 0o600)
-    except OSError:
-        pass
-
-
-def clear_bubble_state(project_path: Path) -> None:
-    """Drop the bubble credential — a subsequent start mints a fresh bubble."""
-    bubble_state_path(project_path).unlink(missing_ok=True)

@@ -1,6 +1,6 @@
 """Bootstrap-agent harness for the unified dependency model (#428 Stage 2).
 
-Stage 1 (`bobi/tool_library.py`) gave every dependency a `name`, a required
+Stage 1 (`bobi/tool_library/`) gave every dependency a `name`, a required
 `success` contract, and the optional fields (`install`/`guide`/`host`/`mcp`).
 This module is the **cold path**: on a fresh base image that already has the
 brain CLI installed, make each dependency's `success` true and verify it, so
@@ -41,6 +41,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from bobi.brain import DEFAULT_BRAIN
@@ -85,20 +86,14 @@ class ResolvedRecipe:
         return {"apt": self.apt, "npm": self.npm,
                 "run_root": self.run_root, "run": self.run}
 
-    @classmethod
-    def from_install(cls, install: dict) -> "ResolvedRecipe":
-        """Adopt a dependency's pinned ``install`` verbatim (already declarative)."""
-        return cls._coerce(install or {})
-
-    @classmethod
-    def from_agent(cls, recipe: dict) -> "ResolvedRecipe":
-        """Adopt the recipe a bootstrap agent reported. Unknown keys are ignored;
-        each field is coerced to a list of strings so a stray scalar can't poison
-        the Stage-3 build."""
-        return cls._coerce(recipe or {})
-
     @staticmethod
-    def _coerce(data: dict) -> "ResolvedRecipe":
+    def coerce(data: dict | None) -> "ResolvedRecipe":
+        """Adopt a recipe from either source — a dependency's pinned ``install``
+        (already declarative) or the one a bootstrap agent reported. Unknown keys
+        are ignored; each field is coerced to a list of strings so a stray scalar
+        can't poison the Stage-3 build."""
+        data = data or {}
+
         def _steps(key: str) -> list[str]:
             val = data.get(key)
             if isinstance(val, str):
@@ -257,8 +252,9 @@ def materialize(dep: Dependency, *, agent_runner: AgentRunner,
     the pinned steps it ran.
     """
     if dep.install:
+        # A pinned install is already declarative — adopted verbatim, no agent.
         return MaterializeResult(
-            dep=dep.name, recipe=ResolvedRecipe.from_install(dep.install),
+            dep=dep.name, recipe=ResolvedRecipe.coerce(dep.install),
             agent_used=False, ok=True, notes="pinned install recipe (no agent)",
         )
 
@@ -291,7 +287,8 @@ def materialize(dep: Dependency, *, agent_runner: AgentRunner,
                    "truncated output)"),
         )
 
-    recipe = ResolvedRecipe.from_agent(verdict.get("recipe") or {})
+    # The recipe a bootstrap agent reported — untrusted shape, hence the coerce.
+    recipe = ResolvedRecipe.coerce(verdict.get("recipe"))
     ok = bool(verdict.get("ok"))
     notes = str(verdict.get("notes", "") or "")
     if ok and recipe.is_empty:
@@ -329,6 +326,16 @@ def preflight(dep: Dependency, *, brains: list[str], shell_runner: ShellRunner,
     """
     env_base = dict(os.environ if base_env is None else base_env)
     env_base["BOBI_VERIFY_PHASE"] = phase
+    # The same agent name `requires:` probes get, from the same resolver: a
+    # `success` contract is ONE contract, so the two runners must not disagree
+    # about who the agent is (#1063). Resolved against `env_base`, so a
+    # selection the caller already put there wins. Absent on the build tier,
+    # where there is no runtime root - a probe that needs the name says so
+    # itself there.
+    from bobi.paths import AGENT_ENV, agent_name
+    selected = agent_name(None, env=env_base)
+    if selected:
+        env_base[AGENT_ENV] = selected
     from bobi.brain import BRAIN_ENV
 
     results: list[PreflightResult] = []
@@ -407,7 +414,7 @@ def agent_needed(dep: Dependency) -> bool:
     return not dep.install and bool(dep.guide.strip())
 
 
-def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
+def team_has_bake(team_dir: Path, project_path: Path | None = None) -> bool:
     """True if a team bakes anything into an image — a declarative `build:` OR a
     guide-only dependency the bootstrap agent must resolve.
 
@@ -416,8 +423,6 @@ def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
     only), this also catches a team whose ONLY baked content is a guide dependency
     — which carries no `cfg.build` yet still needs an image layer.
     """
-    from pathlib import Path
-
     from bobi.build_render import _workspace_root, load_composed_team_config
     from bobi.tool_library import resolve_team_dependencies
 
@@ -432,7 +437,7 @@ def team_has_bake(team_dir: "Path", project_path: "Path | None" = None) -> bool:
     return any(agent_needed(d) for d in deps)
 
 
-def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
+def render_team_deps(team_dir: Path, project_path: Path | None = None, *,
                      brains: list[str] | None = None,
                      agent_runner: AgentRunner | None = None,
                      shell_runner: ShellRunner | None = None,
@@ -455,8 +460,6 @@ def render_team_deps(team_dir: "Path", project_path: "Path | None" = None, *,
     dependency set may pass them in, avoiding a second
     chain walk + registry fetch; omitted, they are computed here as before.
     """
-    from pathlib import Path
-
     from bobi.brain import _BRAINS
     from bobi.build_render import (
         _workspace_root,
@@ -528,8 +531,6 @@ def _ensure_bootstrap_runtime() -> str:
     Idempotent: a real spawner-bound root (or an earlier bootstrap dep) wins.
     """
     import tempfile
-    from pathlib import Path
-
     from bobi import paths
 
     existing = paths.bound_root()
@@ -655,7 +656,6 @@ def _main(argv: list[str] | None = None) -> int:
              "and exit; no bootstrap")
     args = ap.parse_args(argv)
 
-    from pathlib import Path
     team_dir = Path(args.team_dir)
     project_path = _workspace_root(team_dir)
     brains = [b.strip() for b in args.brains.split(",") if b.strip()]

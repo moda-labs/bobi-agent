@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -80,98 +79,82 @@ def _detect_github(project_path: Path, cfg: "Config") -> list[str]:
 
 def _github_remote_key(repo_path: Path) -> list[str]:
     """Subscription key for a single repo's GitHub origin remote."""
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=5,
-            cwd=str(repo_path),
-        )
-        if result.returncode != 0:
-            return []
-        url = result.stdout.strip()
-        slug = _parse_github_url(url)
-        if slug:
-            log.info(f"Auto-detected GitHub repo: {slug}")
-            return [f"github:{slug}"]
-    except (OSError, subprocess.SubprocessError):
-        pass
+    from bobi.gitutil import origin_url
+
+    slug = _parse_github_url(origin_url(repo_path))
+    if slug:
+        log.info(f"Auto-detected GitHub repo: {slug}")
+        return [f"github:{slug}"]
     return []
 
 
 def _parse_github_url(url: str) -> str:
-    """Extract org/repo from a GitHub remote URL."""
+    """Extract org/repo from a github.com remote URL, else "".
+
+    The host is compared exactly, not searched for (D075). A substring test
+    made every GitHub Enterprise host — ``github.company.com`` — look like
+    github.com followed by a path, producing a garbage slug ('pany.com/acme')
+    and a subscription topic no event can ever match; it also accepted
+    lookalikes such as ``notgithub.com`` and ``github.com.evil.test``. bobi
+    talks only to github.com here, so anything else yields no slug.
+    """
     url = url.rstrip("/")
     if url.endswith(".git"):
         url = url[:-4]
-    if "github.com" in url:
-        parts = url.split("github.com")[-1].lstrip(":/").split("/")
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
+
+    rest = url.split("://", 1)[1] if "://" in url else url
+    # Strip any userinfo (git@, user:token@) ahead of the host.
+    head = rest.split("/", 1)[0]
+    if "@" in head:
+        rest = rest.split("@", 1)[1]
+
+    # scp-style `host:org/repo` vs URL-style `host/org/repo`. A numeric
+    # segment after the colon is a port, not the path.
+    head = rest.split("/", 1)[0]
+    if ":" in head:
+        host, _, after = rest.partition(":")
+        first = after.split("/", 1)[0]
+        path = after.split("/", 1)[1] if first.isdigit() else after
+    else:
+        host, _, path = rest.partition("/")
+
+    if host.lower() != "github.com":
+        return ""
+    parts = [p for p in path.split("/") if p]
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
     return ""
 
 
-def _is_channel_id(value: str) -> bool:
-    """True if the value looks like a Slack channel ID (e.g. C0ABC123)."""
-    return bool(value) and value[0] in ("C", "G") and value[1:].isalnum()
-
-
 def _resolve_channel_names(token: str, channels: list[str]) -> list[str]:
-    """Resolve human-readable channel names to Slack channel IDs.
+    """Resolve configured channel references to Slack channel IDs.
 
-    Accepts a mix of IDs (``C0ABC123``) and names (``#support`` or
-    ``support``).  IDs pass through unchanged; names are resolved via
-    ``conversations.list``.  Unresolvable names are logged and dropped.
+    Accepts a mix of IDs (``C0ABC123``), names (``#support`` or ``support``)
+    and ``@handle`` DMs. The ID-vs-name decision and the lookup itself belong
+    to :func:`bobi.slack.resolve_channel_id`, the house's single code path for
+    them; this only adds the subscription-side policy that a reference which
+    cannot be resolved is logged and dropped rather than raised, so one bad
+    channel never costs the agent every other subscription.
+
+    Only ``RuntimeError`` — the "no such channel" / "Slack said not ok" signal
+    — is absorbed. A transport failure still propagates, because the caller
+    turns that into "no Slack subscription at all"; swallowing it here would
+    silently promote a channel-scoped subscription to a workspace-wide one.
     """
-    names_to_resolve: dict[str, int] = {}  # normalized name -> index
-    resolved: list[str | None] = list(channels)
+    from bobi.slack import resolve_channel_id
 
-    for i, ch in enumerate(channels):
-        if _is_channel_id(ch):
+    resolved: list[str] = []
+    for ch in channels:
+        try:
+            channel_id = resolve_channel_id(token, ch)
+        except RuntimeError as e:
+            log.warning(
+                f"Could not resolve Slack channel name '{ch}' to an ID — skipping ({e})"
+            )
             continue
-        name = ch.lstrip("#").lower()
-        names_to_resolve[name] = i
-
-    if not names_to_resolve:
-        return channels
-
-    from bobi import http as pooled
-
-    # Paginate conversations.list to find matching channels.
-    cursor = ""
-    while True:
-        url = "https://slack.com/api/conversations.list?limit=200&types=public_channel,private_channel"
-        if cursor:
-            url += f"&cursor={cursor}"
-        resp = pooled.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10.0)
-        data = resp.json()
-
-        if not data.get("ok"):
-            log.warning(f"conversations.list failed: {data.get('error', 'unknown')}")
-            break
-
-        for conv in data.get("channels", []):
-            name = conv.get("name", "").lower()
-            if name in names_to_resolve:
-                idx = names_to_resolve.pop(name)
-                resolved[idx] = conv["id"]
-                log.info(f"Resolved Slack channel #{name} -> {conv['id']}")
-                if not names_to_resolve:
-                    break
-
-        if not names_to_resolve:
-            break
-        cursor = data.get("response_metadata", {}).get("next_cursor", "")
-        if not cursor:
-            break
-
-    for name in names_to_resolve:
-        idx = names_to_resolve[name]
-        log.warning(
-            f"Could not resolve Slack channel name '{channels[idx]}' to an ID — skipping"
-        )
-        resolved[idx] = None
-
-    return [ch for ch in resolved if ch is not None]
+        if channel_id:
+            resolved.append(channel_id)
+    return resolved
 
 
 def _slack_keys(team_id: str, channels: list[str],
@@ -198,7 +181,7 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
     (``#support`` or ``support``) — names are resolved to IDs
     automatically via the Slack API.
     """
-    from bobi import http as pooled
+    from bobi.slack import SlackAppIdentityError, require_app_identity
 
     token = cfg.credential("slack", "bot_token")
     if not token:
@@ -206,26 +189,17 @@ def _detect_slack(project_path: Path, cfg: "Config") -> list[str]:
     svc = next((s for s in cfg.services if s.name == "slack"), None)
     channels = svc.channels if svc else []
     try:
-        resp = pooled.get(
-            "https://slack.com/api/auth.test",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=5.0,
+        team_id, _bot_id, _bot_user_id, app_id = require_app_identity(token)
+        if channels:
+            channels = _resolve_channel_names(token, channels)
+        keys = _slack_keys(team_id, channels, app_id)
+        log.info(
+            f"Auto-detected Slack workspace {team_id}; "
+            f"subscribing: {keys}"
         )
-        data = resp.json()
-        if data.get("ok") and data.get("team_id"):
-            if channels:
-                channels = _resolve_channel_names(token, channels)
-            try:
-                from bobi.events.server import _slack_app_id
-                app_id = _slack_app_id(token, data.get("bot_id", "") or "")
-            except Exception:
-                app_id = ""
-            keys = _slack_keys(data["team_id"], channels, app_id)
-            log.info(
-                f"Auto-detected Slack workspace {data['team_id']}; "
-                f"subscribing: {keys}"
-            )
-            return keys
+        return keys
+    except SlackAppIdentityError as e:
+        log.warning("Slack event subscription disabled: %s", e)
     except Exception as e:
         log.debug(f"Slack auto-detection failed: {e}")
     return []

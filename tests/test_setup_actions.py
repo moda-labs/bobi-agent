@@ -135,36 +135,6 @@ class TestEnvHelpers:
         assert actions.mask("short") == "•••"
 
 
-# --- installed_team_name -------------------------------------------------
-
-class TestInstalledTeamName:
-    def test_none_when_no_install(self, project):
-        assert actions.installed_team_name(project) is None
-
-    def test_reads_agent_name(self, project):
-        from bobi import paths
-        agent_yaml = paths.agent_yaml_path(project)
-        agent_yaml.parent.mkdir(parents=True, exist_ok=True)
-        agent_yaml.write_text(yaml.dump({"agent": "eng-team"}))
-        assert actions.installed_team_name(project) == "eng-team"
-
-
-# --- resolve_or_fetch ----------------------------------------------------
-
-class TestResolveOrFetch:
-    def test_resolves_local_pack_without_fetching(self, project, monkeypatch):
-        _write_minimal_pack(project / "agents" / "local-team")
-        def boom(*a, **k):
-            raise AssertionError("should not fetch a locally-resolvable team")
-        monkeypatch.setattr("bobi.registry.fetch", boom)
-        resolved = actions.resolve_or_fetch("local-team", project)
-        assert resolved == project / "agents" / "local-team"
-
-    def test_returns_none_when_unresolvable(self, project, monkeypatch):
-        monkeypatch.setattr("bobi.registry.fetch", lambda *a, **k: None)
-        assert actions.resolve_or_fetch("ghost-team", project) is None
-
-
 # --- save_credential -----------------------------------------------------
 
 class TestSaveCredential:
@@ -175,8 +145,7 @@ class TestSaveCredential:
         state = SetupState()
         secret = "xoxb-very-secret-value-12345"
         payload = actions.save_credential(
-            state, project, "SLACK_BOT_TOKEN", "slack", "paste it",
-            prompt_fn=lambda v, s, i: secret)
+            state, project, "SLACK_BOT_TOKEN", secret)
         assert payload["saved"] is True
         assert secret not in str(payload)
         assert payload["masked"] == actions.mask(secret)
@@ -188,8 +157,7 @@ class TestSaveCredential:
     def test_empty_input_is_skip(self, project):
         state = SetupState()
         payload = actions.save_credential(
-            state, project, "LINEAR_API_KEY", "linear", "",
-            prompt_fn=lambda v, s, i: "")
+            state, project, "LINEAR_API_KEY", "")
         assert payload == {"saved": False, "skipped": True, "var": "LINEAR_API_KEY"}
         assert not actions.env_path(project).exists()
 
@@ -197,28 +165,25 @@ class TestSaveCredential:
         monkeypatch.setenv("NEW_VAR", "placeholder")
         monkeypatch.delenv("NEW_VAR")
         actions.write_env(project, {"EXISTING": "keep"})
-        actions.save_credential(state := SetupState(), project, "NEW_VAR", "", "",
-                                prompt_fn=lambda v, s, i: "val")
+        actions.save_credential(state := SetupState(), project, "NEW_VAR", "val")
         env = actions.read_env(project)
         assert env == {"EXISTING": "keep", "NEW_VAR": "val"}
 
     def test_refreshes_process_environment(self, project, monkeypatch):
         monkeypatch.setenv("LINEAR_API_KEY", "stale-value")
         actions.save_credential(SetupState(), project, "LINEAR_API_KEY",
-                                "linear", "", prompt_fn=lambda v, s, i: "fresh")
+                                "fresh")
         assert os.environ["LINEAR_API_KEY"] == "fresh"
 
 
     def test_bad_var_name_raises(self, project):
         with pytest.raises(ActionError):
-            actions.save_credential(SetupState(), project, "not-a-var", "", "",
-                                    prompt_fn=lambda v, s, i: "x")
+            actions.save_credential(SetupState(), project, "not-a-var", "x")
 
     def test_framework_var_raises(self, project):
         with pytest.raises(ActionError):
             actions.save_credential(SetupState(), project,
-                                    "BOBI_VENN_API_BASE", "", "",
-                                    prompt_fn=lambda v, s, i: "x")
+                                    "BOBI_VENN_API_BASE", "x")
 
 
 # --- validate_team / validate_pack ---------------------------------------
@@ -323,6 +288,57 @@ class TestInstallTeam:
         with pytest.raises(ActionError) as exc:
             actions.install_team(build_state, project)
         assert "not found" in str(exc.value)
+
+    # D035 — the freshness gate was inside `if state.mode == "create":`, so an
+    # open-mode pack could be installed from source that had changed (or never
+    # validated at all) since validate_team last passed. The docstring promises
+    # the gate with no mode caveat, /api/install has no gate of its own, and
+    # state._hard_floor requires `validated` for Stage.INSTALL in BOTH modes —
+    # the guard was the only thing missing.
+
+    @pytest.mark.parametrize("mode", ["create", "open"])
+    def test_stale_validation_raises_in_every_mode(self, project, build_state,
+                                                   mode):
+        _write_minimal_pack(project / "agents" / "my-team")
+        build_state.mode = mode
+        build_state.validated = True
+        build_state.validated_hash = "old-hash"
+
+        with pytest.raises(ActionError) as exc:
+            actions.install_team(build_state, project)
+
+        assert "changed since" in str(exc.value)
+        assert build_state.validated is False
+        assert build_state.installed is False
+
+    @pytest.mark.parametrize("mode", ["create", "open"])
+    def test_unvalidated_source_never_installs(self, project, build_state, mode):
+        # The review editor clears validated/validated_hash on every edit, so
+        # this is the shape a mid-edit install actually takes.
+        _write_minimal_pack(project / "agents" / "my-team")
+        build_state.mode = mode
+        build_state.validated = False
+        build_state.validated_hash = ""
+
+        with pytest.raises(ActionError):
+            actions.install_team(build_state, project)
+
+        assert build_state.installed is False
+        assert not paths.agent_yaml_path(project).exists()
+
+    @pytest.mark.parametrize("mode", ["create", "open"])
+    def test_fresh_validation_still_installs_in_every_mode(self, project,
+                                                           build_state, mode):
+        pack = project / "agents" / "my-team"
+        _write_minimal_pack(pack)
+        build_state.mode = mode
+        build_state.validated = True
+        build_state.validated_hash = source_tree_hash(
+            pack, exclude=actions.setup_state_artifacts(project))
+
+        payload = actions.install_team(build_state, project)
+
+        assert payload["installed"] == "my-team"
 
 
 # --- run_preflight -------------------------------------------------------

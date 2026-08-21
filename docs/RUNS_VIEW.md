@@ -5,10 +5,13 @@ failed. The second is answered by a single table, so the three places an
 agent's work is recorded have to become one shape.
 
 - **sessions** — `SessionRegistry`: the manager and every subagent it ran
-- **workflow runs** — `run/state/workflow/runs/*.json`, including the ones
-  suspended waiting for a human approval or clarification
-- **monitor runs** — `run/state/monitor_runs/*.json`, one record per firing
-  ([MONITORS.md](MONITORS.md))
+- **workflow runs** — `run/state/workflow/runs/*.json`. Every workflow run
+  leaves one (#1048), including the ones suspended waiting for a human
+  approval or clarification - suspension is a state of the run's own record,
+  not a separate one. Ad-hoc `--wait` runs are one-step workflow executions
+  since #1057, so they leave one too
+- **monitor runs** — `run/state/monitor_runs/*.json`, one record per firing,
+  plus one per completed retry-park recovery ([MONITORS.md](MONITORS.md))
 
 The fold lives in `bobi/webapp/runs.py`. Decisions and raw event deliveries are
 deliberately **not** here: they are log lines, not runs — no status, no cost,
@@ -28,7 +31,8 @@ text search), `offset=`, and `limit=` (default 100).
     "error": "",
     "session_id": "", "run_id": "wf-71",
     "detail": {"await_event": "pr.merged", "suspended_at_step": 3,
-               "run_key": "", "repo": "", "resumable": true}}],
+               "run_key": "", "repo": "", "resumable": true,
+               "live": false}}],
  "counts": {"all": 14, "running": 1, "awaiting_action": 2, "failed": 2},
  "total": 14, "offset": 0, "limit": 100, "query": "",
  "truncated": false}
@@ -52,11 +56,31 @@ rather than translation:
 **`awaiting_action` is derived, not recorded.** A workflow run suspended past
 `AWAITING_ACTION_AFTER_SECONDS` (24h, a constant) is elevated from idle into its
 own attention state and tab. It remains a healthy, resumable human gate, not a
-failure. The row names the awaited event and offers reminder and close actions.
+failure. The row names the awaited event and offers a close action.
 The clock runs from the last resume, not from first suspension.
 
 **`status=failed` is the terminal-failure tab.** It returns `failed` and
 `crashed`. Human approval and clarification gates use `status=awaiting_action`.
+
+## `detail.live`: can this row be spoken to right now
+
+`detail.live` is on **every** row, whatever its kind, and it answers one
+question: is the session behind this row addressable at this moment. It is
+true exactly when the row's `session_id` is in
+`SessionRegistry.list_active()` - the same membership guard `service.ask`
+applies before it delivers - and it is stamped from the same registry read the
+rest of the fold already does, which reaps an active status with a dead pid on
+the way through.
+
+It exists because `status` cannot answer the question. `idle` is a live
+manager waiting for work *and* a workflow that just suspended onto a gate,
+whose process has already exited (`_session_status` and `_workflow_status`
+both map onto it). A caller that guesses from `status` guesses wrong in the
+permissive direction: it offers to send a message nobody will receive.
+
+The run modal's composer branches on it ([RUN_DRILLDOWNS.md](RUN_DRILLDOWNS.md)).
+Deriving it client-side would mean re-deriving four separate server-side
+invariants in the browser, so the server answers what it already knows.
 
 `status` and `query` filter before `offset` and `limit` select a page. Search
 matches the visible row fields, identifiers, and the kind-specific `detail`
@@ -110,7 +134,18 @@ every store read from `bobi/webapp/` takes an explicit `root=`. That is why
 Never `mkdir` on a read path: asking about a team that has never run a workflow
 must not create its runs directory.
 
+## Rolling usage summary
+
+`build_usage_summary` reuses this exact de-duplicated fold for fleet reporting.
+It counts terminal jobs by completion time inside a caller-specified rolling
+window and sums their input, cached-input, output, recorded-cost, and
+estimated-cost fields. Running and waiting work is excluded.
+
+Session usage is cumulative rather than a token-level time series. A terminal
+job that completes inside the window therefore contributes its whole usage;
+the summary does not claim to split a long job across calendar boundaries.
+
 ## What is deliberately not here
 
-Per-run latency (not captured) · time-series cost (no data) · decisions and raw
-event deliveries.
+Per-run latency (not captured) · sub-run time-series cost (no data) · decisions
+and raw event deliveries.

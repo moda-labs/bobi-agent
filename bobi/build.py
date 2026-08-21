@@ -20,8 +20,6 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-import yaml
-
 
 class BuildError(RuntimeError):
     """A team build step failed - resolution here, or the image engine
@@ -67,11 +65,9 @@ def _flatten_if_chained(project_path: Path, team_dir: Path) -> Path:
     # the chain's merged workspace (leaf-wins) so an overlay's per-principal
     # assistant-context.md actually ships.
     compose.merge_workspace(chain, staged)
+    # `agent:` needs no defaulting here — _compose_agent_yaml already setdefaults
+    # it to the leaf layer's directory name, and this team_dir IS that leaf.
     # Preserve the leaf's directory name so the app/tarball naming is unchanged.
-    cfg = compose._read_agent_yaml(staged)
-    cfg.setdefault("agent", team_dir.name)
-    (staged / "agent.yaml").write_text(
-        yaml.dump(cfg, default_flow_style=False, sort_keys=False))
     final = staged.parent / team_dir.name
     if final.exists():
         shutil.rmtree(final)
@@ -103,11 +99,11 @@ def _resolve_team_package(project_path: Path, team: str) -> Path:
     if version:
         # Reuse an already-cached pin with no second download (§3.4); the
         # immutable asset makes the cached copy authoritative.
-        if (registry.cached_version(project_path, name) == version
-                and registry.is_cached(project_path, name)):
-            return registry.cache_path(project_path, name)
+        if (registry.cached_version(name) == version
+                and registry.is_cached(name)):
+            return registry.cache_path(name)
         try:
-            return registry.fetch(project_path, name, version=version)
+            return registry.fetch(name, version=version)
         except Exception as e:
             raise BuildError(
                 f"could not resolve pinned team '{name}@{version}': {e}"
@@ -117,7 +113,7 @@ def _resolve_team_package(project_path: Path, team: str) -> Path:
         if (cand / "agent.yaml").exists():
             return cand.resolve()
     try:
-        return registry.fetch(project_path, name)
+        return registry.fetch(name)
     except Exception as e:
         raise BuildError(
             f"local team '{name}' not found and could not fetch it from the "

@@ -16,7 +16,6 @@ from bobi.history import (
     _index_file,
     _init_db,
     _project_from_path,
-    context_for_events,
     conversations,
     index,
     messages_since,
@@ -35,11 +34,11 @@ def db(tmp_path):
 
 @pytest.fixture
 def projects_dir(tmp_path, monkeypatch):
-    """Redirect PROJECTS_DIR and DB_PATH for test isolation."""
+    """Redirect the transcript roots and DB_PATH for test isolation."""
     pdir = tmp_path / "projects"
     pdir.mkdir()
     db_path = tmp_path / "history.db"
-    monkeypatch.setattr(history, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(history, "_projects_dirs", lambda: [pdir])
     monkeypatch.setattr(history, "_db_path", lambda: db_path)
     return pdir
 
@@ -173,6 +172,51 @@ class TestProjectFromPath:
 
 
 # ---------------------------------------------------------------------------
+# D069 — a hyphen in a repo name survives into `project`
+# ---------------------------------------------------------------------------
+
+class TestHyphenatedProjectName:
+    """Claude encodes a cwd by replacing '/' with '-', which is lossy: the
+    directory '-Users-alice-dev-bobi-agent' could decode to either
+    '/Users/alice/dev/bobi-agent' or '/Users/alice/dev/bobi/agent'. The
+    transcript carries the real cwd, so nothing has to guess."""
+
+    def test_conversation_records_the_transcript_cwd(self, db, tmp_path):
+        f = (tmp_path / "projects" / "-Users-alice-dev-bobi-agent"
+             / "sess-hyphen.jsonl")
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [
+            _user_msg("hello", timestamp="2024-01-01T00:00:00",
+                      cwd="/Users/alice/dev/bobi-agent", gitBranch="main"),
+        ])
+        _index_file(db, f)
+        project = db.execute(
+            "SELECT project FROM conversations WHERE session_id = 'sess-hyphen'"
+        ).fetchone()[0]
+        assert project == "/Users/alice/dev/bobi-agent"
+
+    def test_project_filter_matches_a_hyphenated_repo(self, projects_dir):
+        d = projects_dir / "-Users-alice-dev-bobi-agent"
+        d.mkdir()
+        _write_jsonl(d / "sess-a.jsonl", [
+            _user_msg("the deploy is wedged", timestamp="2024-01-01T00:00:00",
+                      cwd="/Users/alice/dev/bobi-agent", gitBranch="main"),
+        ])
+        index()
+        assert search("wedged", project="bobi-agent")
+
+    def test_falls_back_to_the_directory_name_without_a_cwd(self, db, tmp_path):
+        f = tmp_path / "projects" / "-Users-alice-dev-myproject" / "sess-nocwd.jsonl"
+        f.parent.mkdir(parents=True)
+        _write_jsonl(f, [_user_msg("hi", timestamp="2024-01-01T00:00:00")])
+        _index_file(db, f)
+        project = db.execute(
+            "SELECT project FROM conversations WHERE session_id = 'sess-nocwd'"
+        ).fetchone()[0]
+        assert project == "/Users/alice/dev/myproject"
+
+
+# ---------------------------------------------------------------------------
 # _fts_query
 # ---------------------------------------------------------------------------
 
@@ -191,6 +235,41 @@ class TestFtsQuery:
         result = _fts_query("  a   b  ")
         assert '"a"' in result
         assert '"b"' in result
+
+
+# ---------------------------------------------------------------------------
+# D068 — a quote in the query is FTS5 syntax, not text
+# ---------------------------------------------------------------------------
+
+class TestFtsQueryQuoting:
+    def test_embedded_quote_is_doubled(self):
+        # FTS5 escapes a '"' inside a phrase by doubling it. Wrapping the raw
+        # token instead produces '""auth""', which is a syntax error.
+        assert _fts_query('"auth"') == '"""auth"""'
+
+    def test_search_survives_an_unbalanced_quote(self, projects_dir):
+        d = projects_dir / "-proj"
+        d.mkdir()
+        _write_jsonl(d / "sess-q.jsonl", [
+            _user_msg('the 5" display is misaligned',
+                      timestamp="2024-01-01T00:00:00", cwd="/proj"),
+        ])
+        index()
+        # A token carrying an ODD number of quotes is what actually breaks:
+        # wrapping it yields '"5""' and FTS5 raises 'unterminated string'.
+        # (An even count survives by accident — FTS5 reads '""' as an
+        # escaped quote — so the finding's own '"auth"' repro does not fail.)
+        assert search('the 5" display') is not None
+
+    def test_search_with_an_all_whitespace_query_is_empty(self, projects_dir):
+        d = projects_dir / "-proj"
+        d.mkdir()
+        _write_jsonl(d / "sess-w.jsonl", [
+            _user_msg("something", timestamp="2024-01-01T00:00:00", cwd="/proj"),
+        ])
+        index()
+        # An empty MATCH expression is also an FTS5 syntax error.
+        assert search("   ") == []
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +355,29 @@ class TestIndexFile:
 
         count = _index_file(db, f)
         assert count == 1
+
+    def test_completed_trailing_line_is_indexed_on_the_next_pass(self, db, tmp_path):
+        """D022 — the indexer reads transcripts while Claude is mid-append.
+
+        A half-written final line must not count as consumed, or the writer's
+        completion of that same line is never seen and the message is lost
+        from the index (and from the sleep cycle's transcript delta) forever.
+        """
+        f = tmp_path / "proj" / "sess-partial.jsonl"
+        f.parent.mkdir(parents=True)
+        complete = json.dumps(_user_msg("first", timestamp="2024-01-01T00:00:00"))
+        second = json.dumps(_assistant_msg("second", timestamp="2024-01-01T00:00:01"))
+        # Caught mid-append: the second record is only half on disk.
+        f.write_text(complete + "\n" + second[:20])
+
+        assert _index_file(db, f) == 1
+
+        f.write_text(complete + "\n" + second + "\n")
+        assert _index_file(db, f) == 1
+
+        contents = [r[0] for r in db.execute(
+            "SELECT content FROM messages ORDER BY id").fetchall()]
+        assert contents == ["first", "second"]
 
     def test_skips_invalid_json(self, db, tmp_path):
         f = tmp_path / "proj" / "sess5.jsonl"
@@ -621,7 +723,8 @@ class TestIndex:
         assert stats["new_messages"] == 0
 
     def test_missing_projects_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(history, "PROJECTS_DIR", tmp_path / "nonexistent")
+        monkeypatch.setattr(
+            history, "_projects_dirs", lambda: [tmp_path / "nonexistent"])
         monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "history.db")
         stats = index()
         assert stats["files_scanned"] == 0
@@ -759,83 +862,6 @@ class TestSessionMessages:
         _write_jsonl(proj / "s1.jsonl", [_user_msg("a", timestamp="2024-01-01T00:00:00")])
         index()
         assert session_messages("nonexistent") == []
-
-
-# ---------------------------------------------------------------------------
-# context_for_events()
-# ---------------------------------------------------------------------------
-
-class TestContextForEvents:
-    def test_returns_context_for_matching_events(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("fix the login authentication flow", timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [{"data": {"title": "login authentication"}}]
-        ctx = context_for_events(events)
-        assert "Prior conversation context" in ctx
-        assert "login" in ctx.lower() or "authentication" in ctx.lower()
-
-    def test_returns_empty_for_no_matches(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("hello world", timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [{"data": {"title": "zzz_nonexistent_term_zzz"}}]
-        ctx = context_for_events(events)
-        assert ctx == ""
-
-    def test_empty_events(self, projects_dir):
-        assert context_for_events([]) == ""
-
-    def test_no_db_returns_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "nonexistent.db")
-        assert context_for_events([{"data": {"title": "test"}}]) == ""
-
-    def test_extracts_issue_id(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("working on BET-42 ticket", timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [{"data": {"run_key": "BET-42"}}]
-        ctx = context_for_events(events)
-        assert "BET-42" in ctx
-
-    def test_truncates_long_text(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("unique_marker " + "x" * 300, timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [{"data": {"text": "unique_marker " + "x" * 300}}]
-        ctx = context_for_events(events)
-        assert "unique_marker" in ctx
-
-    def test_deduplicates_results(self, projects_dir):
-        proj = projects_dir / "-Users-alice-dev"
-        proj.mkdir()
-        _write_jsonl(proj / "s1.jsonl", [
-            _user_msg("dedupe_target_word", timestamp="2024-01-01T00:00:00"),
-        ])
-        index()
-
-        events = [
-            {"data": {"title": "dedupe_target_word"}},
-            {"data": {"text": "dedupe_target_word"}},
-        ]
-        ctx = context_for_events(events)
-        assert ctx.count("dedupe_target_word") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1003,3 +1029,67 @@ class TestMessagesSince:
         delta = messages_since(0)
 
         assert [m["content"] for m in delta] == ["real team signal"]
+
+
+class TestIndexHonorsClaudeConfigDir:
+    """Q104: the indexer reads the same roots the replay path does.
+
+    ``index()`` used to hardcode ``~/.claude/projects``, so an agent whose
+    brain runs under a ``CLAUDE_CONFIG_DIR`` (bobi renders per-team CLAUDE.md
+    there, #779) had its transcripts silently missing from the FTS index and
+    the sleep-cycle delta. These drive the real ``_projects_dirs`` wiring
+    rather than the isolation seam the other tests patch.
+    """
+
+    def _seed(self, base: Path, session_id: str, text: str) -> Path:
+        project = base / "projects" / "proj"
+        project.mkdir(parents=True, exist_ok=True)
+        path = project / f"{session_id}.jsonl"
+        _write_jsonl(path, [_user_msg(text)])
+        return path
+
+    def test_indexes_transcripts_under_claude_config_dir(
+            self, tmp_path, monkeypatch):
+        self._seed(tmp_path / "cfg", "sess-cfg", "hello from the config dir")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "history.db")
+
+        stats = index()
+
+        assert stats["files_scanned"] == 1
+        assert stats["total_conversations"] == 1
+
+    def test_indexes_both_roots(self, tmp_path, monkeypatch):
+        self._seed(tmp_path / "cfg", "sess-cfg", "from config dir")
+        self._seed(tmp_path / "home" / ".claude", "sess-home", "from home")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "history.db")
+
+        stats = index()
+
+        assert stats["files_scanned"] == 2
+        assert stats["total_conversations"] == 2
+
+    def test_symlinked_config_dir_counts_each_file_once(
+            self, tmp_path, monkeypatch):
+        """One tree under two names is one tree.
+
+        `claude_projects_dirs` dedupes by spelling, so a CLAUDE_CONFIG_DIR
+        symlinked at ~/.claude survives it as two distinct roots; the indexer
+        resolves them.
+        """
+        home = tmp_path / "home" / ".claude"
+        self._seed(home, "sess-dup", "only once")
+        link = tmp_path / "linked-claude"
+        link.symlink_to(home, target_is_directory=True)
+
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(link))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setattr(history, "_db_path", lambda: tmp_path / "history.db")
+
+        stats = index()
+
+        assert stats["files_scanned"] == 1
+        assert stats["total_conversations"] == 1

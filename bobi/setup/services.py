@@ -165,6 +165,8 @@ _NATIVE = [
                     "create link — scopes + events are prefilled.",
                     "Or create from the manifest: api.slack.com/apps → Create "
                     "New App → From a manifest.",
+                    "Keep users:read enabled — Bobi needs it to identify the "
+                    "app for inbound event routing.",
                     "Install to your workspace, then copy the Bot User OAuth "
                     "Token (starts xoxb-).",
                     "Invite the bot to a channel: /invite @your-bot.",

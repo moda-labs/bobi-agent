@@ -32,8 +32,7 @@ def run_doctor() -> list[CheckResult]:
 
     results = []
 
-    results.append(_check_claude_cli())
-    results.append(_check_claude_auth())
+    results.extend(_check_brain_cli())
     results.append(_check_local_config())
     results.append(_check_runtime_layout())
     results.append(_check_runtime_write_policy())
@@ -45,6 +44,7 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_workflows())
     results.append(_check_bubble_auth())
     results.append(_check_event_server())
+    results.append(_check_running_code())
     slack_socket = _check_slack_socket_mode()
     if slack_socket:
         results.append(slack_socket)
@@ -53,6 +53,62 @@ def run_doctor() -> list[CheckResult]:
     results.append(_check_long_term_memory())
 
     return results
+
+
+def _team_brain() -> tuple[str, bool]:
+    """This runtime's brain ``(engine, is_gateway)``.
+
+    Falls back to the framework default whenever there is no bound runtime or
+    its config cannot be read — an unreadable config is `_check_local_config`'s
+    story to tell, not this one's.
+    """
+    from bobi.brain import DEFAULT_BRAIN, normalize_brain_kind
+
+    root = bound_root()
+    if not root:
+        return DEFAULT_BRAIN, False
+    try:
+        from bobi.config import Config
+        cfg = Config.load(root)
+    except Exception:
+        return DEFAULT_BRAIN, False
+    return normalize_brain_kind(cfg.brain_kind) or DEFAULT_BRAIN, cfg.brain_is_gateway
+
+
+def _check_brain_cli() -> list[CheckResult]:
+    """Health of the CLI this team's brain actually runs on (D020).
+
+    Demanding the claude binary unconditionally reported a codex team broken
+    (doctor exit 1) on a host that legitimately never had it. The gate is the
+    ENGINE, not gateway-ness: gateway mode is an endpoint property, so a
+    `kind: claude` gateway team still needs the claude CLI — it is the CLI
+    that dials the gateway. What a gateway team does NOT need is vendor auth,
+    which is the gateway's business; the ambient `claude --print hi` probe
+    would be testing this host's personal credentials instead.
+    """
+    engine, is_gateway = _team_brain()
+    if engine == "codex":
+        return [_check_codex_cli()]
+    if engine != "claude":
+        # stub, or an engine this doctor has not been taught about: it has no
+        # host prerequisite to check, and inventing a failure would be a lie.
+        return []
+    results = [_check_claude_cli()]
+    if is_gateway:
+        results.append(CheckResult(
+            "Claude auth", ok=True,
+            detail="gateway endpoint — auth is the gateway's"))
+    else:
+        results.append(_check_claude_auth())
+    return results
+
+
+def _check_codex_cli() -> CheckResult:
+    if shutil.which("codex"):
+        return CheckResult("Codex CLI", ok=True, detail="found")
+    return CheckResult("Codex CLI", ok=False,
+                       detail="not found in PATH",
+                       hint="Install the Codex CLI: https://github.com/openai/codex")
 
 
 def _check_claude_cli() -> CheckResult:
@@ -96,9 +152,6 @@ def _check_install_integrity() -> CheckResult:
     `bobi agents install` — so hand-edits are silently lost on the next install.
     Compare on-disk files against the hashes recorded at install time.
     """
-    import hashlib
-    import json
-
     root = bound_root()
     if not root:
         return CheckResult("Installed team", ok=True, detail="no runtime selected")
@@ -109,21 +162,21 @@ def _check_install_integrity() -> CheckResult:
         return CheckResult("Installed team", ok=True,
                            detail="no install manifest")
     try:
+        import json
         manifest = json.loads(manifest_path.read_text())
     except (json.JSONDecodeError, OSError):
         return CheckResult("Installed team", ok=False,
                            detail="unreadable install manifest",
                            hint="Re-run `bobi agents install ... --name <agent>`")
+    if not isinstance(manifest, dict):
+        return CheckResult("Installed team", ok=False,
+                           detail="invalid install manifest",
+                           hint="Re-run `bobi agents install ... --name <agent>`")
     if not manifest.get("frozen", True):
         return CheckResult("Installed team", ok=True,
                            detail=f"{manifest.get('agent', '?')} (downloaded — editable)")
-    drifted = []
-    for rel, digest in manifest.get("files", {}).items():
-        f = dest / rel
-        if not f.is_file():
-            drifted.append(f"{rel} (missing)")
-        elif hashlib.sha256(f.read_bytes()).hexdigest() != digest:
-            drifted.append(rel)
+    from bobi.install import verify_install_manifest
+    drifted = verify_install_manifest(dest)
     if drifted:
         shown = ", ".join(drifted[:3]) + ("…" if len(drifted) > 3 else "")
         return CheckResult(
@@ -177,7 +230,7 @@ def _check_bobi_install_integrity() -> CheckResult:
 
 def _check_package_requires() -> list[CheckResult]:
     """Check host-level dependencies declared in agent.yaml requires: block."""
-    from bobi.config import Config, run_requires_checks
+    from bobi.config import Config, requires_detail, run_requires_checks
 
     root = bound_root()
     if not root:
@@ -190,15 +243,30 @@ def _check_package_requires() -> list[CheckResult]:
         return []
 
     results = []
-    for entry, ok, detail in run_requires_checks(cfg.requires):
+    for entry, ok, detail in run_requires_checks(cfg.requires, root=root):
         if ok:
             results.append(CheckResult(
                 f"Requires: {entry.name}", ok=True, detail="healthy"))
+        elif ok is None:
+            # The check never ran, so `why`/`fix` would send the operator after
+            # the wrong thing: the tool may well be installed. Report the
+            # environment fault itself; dispatch does not gate on this (#1063).
+            results.append(CheckResult(
+                f"Requires: {entry.name}", ok=False,
+                detail=f"could not be evaluated: {requires_detail(detail)}",
+                hint="Dispatch is not blocked by this; the dependency is "
+                     "unverified until the check can run."))
         else:
+            # `why` is standing context, never a substitute for what actually
+            # failed - doctor is where a blocked dispatch sends the operator,
+            # so it has to show the check's own detail (#771).
+            text = requires_detail(detail)
+            if entry.why:
+                text += f" (needed for: {entry.why})"
             hint = f"Fix: {entry.fix}" if entry.fix else ""
             results.append(CheckResult(
                 f"Requires: {entry.name}", ok=False,
-                detail=entry.why or detail,
+                detail=text,
                 hint=hint))
     return results
 
@@ -318,7 +386,8 @@ def _check_bubble_auth() -> CheckResult:
     if not root:
         return CheckResult("Bubble auth", ok=True, detail="no runtime selected")
 
-    from bobi.config import Config, load_bubble_state
+    from bobi.config import Config
+    from bobi.events.state import load_bubble_state
 
     bubble = load_bubble_state(root)
     bubble_id = bubble.get("bubble_id", "")
@@ -344,8 +413,7 @@ def _check_bubble_auth() -> CheckResult:
     if not bubble_id:
         # No bubble yet — might be fine if the instance hasn't started.
         from bobi import paths
-        pid_file = paths.state_dir(root) / "event-server.pid"
-        if pid_file.exists():
+        if paths.event_server_pid_path(root).exists():
             return CheckResult(
                 "Bubble auth", ok=False,
                 detail="no bubble credential but event server appears running",
@@ -366,17 +434,27 @@ def _check_bubble_auth() -> CheckResult:
 
 
 def _check_event_server() -> CheckResult:
-    """Probe the event server /health endpoint."""
+    """Probe the event server /health endpoint.
+
+    The URL probed is the one this runtime actually uses (D019): the
+    configured remote server when there is one, otherwise the local port
+    `event-server start` would bind. Probing a hardcoded localhost:8080
+    reported a healthy remote instance 'not running' — a REQUIRED failure,
+    doctor exit 1 — and told the operator to start a local server that was
+    never meant to run.
+    """
     from bobi.config import Config
     from bobi.events.server import (
         NodeRuntimePrerequisiteError,
         _is_local_url,
         health,
+        resolve_local_port,
         resolve_node_runtime,
     )
 
     root = bound_root()
-    needs_local_node = True
+    remote_url = ""
+    url = "http://localhost:8080"
     if root:
         try:
             cfg = Config.load(root)
@@ -390,26 +468,72 @@ def _check_event_server() -> CheckResult:
                 return CheckResult("Event server", ok=True,
                                    detail=f"remote ({cfg.event_server_url})")
             if cfg.event_server_url and not _is_local_url(cfg.event_server_url):
-                needs_local_node = False
+                remote_url = cfg.event_server_url.rstrip("/")
+                url = remote_url
+            else:
+                url = f"http://localhost:{resolve_local_port(root)}"
         except FileNotFoundError:
             pass
 
-    url = "http://localhost:8080"
     if health(url):
-        return CheckResult("Event server", ok=True, detail=url)
-    if needs_local_node:
-        try:
-            resolve_node_runtime()
-        except NodeRuntimePrerequisiteError as exc:
-            return CheckResult(
-                "Event server",
-                ok=False,
-                detail=str(exc),
-                hint="Install Node.js 20+ and ensure `node` is on PATH, then run doctor again.",
-            )
+        detail = f"remote ({remote_url})" if remote_url else url
+        return CheckResult("Event server", ok=True, detail=detail)
+
+    if remote_url:
+        # Nothing local to start, and no local Node prerequisite to report.
+        return CheckResult(
+            "Event server", ok=False,
+            detail=f"remote ({remote_url}) not reachable",
+            hint="Check the event_server_url in agent.yaml and that the "
+                 "remote server is deployed and reachable from this host.")
+
+    try:
+        resolve_node_runtime()
+    except NodeRuntimePrerequisiteError as exc:
+        return CheckResult(
+            "Event server",
+            ok=False,
+            detail=str(exc),
+            hint="Install Node.js 20+ and ensure `node` is on PATH, then run doctor again.",
+        )
     return CheckResult("Event server", ok=False,
                        detail="not running",
                        hint="`bobi agent <name> event-server start` or `bobi agent <name> start` will auto-launch")
+
+
+def _check_running_code() -> CheckResult:
+    """Flag long-lived processes still running code the install has replaced.
+
+    A local `uv tool install --upgrade` swaps bobi's files underneath the
+    manager and the local event server; `_check_event_server` above then probes
+    a stale server, gets a healthy `/health`, and says so (#928). The processes
+    record what they launched from, and this compares it to what is installed.
+
+    A warning, not a failure: nothing is broken - a restart is pending, and the
+    remedy is one command. Reporting a red install would fire on every upgrade
+    between `bobi agents install` and the restart it asks for.
+    """
+    root = bound_root()
+    if not root:
+        return CheckResult("Running code", ok=True, detail="no runtime selected")
+    from bobi.launch_stamp import inspect_processes, installed_bobi_version
+
+    running = inspect_processes(root)
+    stale = [p for p in running if p.stale]
+    if not running:
+        return CheckResult("Running code", ok=True,
+                           detail="no long-lived local processes running")
+    if not stale:
+        names = ", ".join(f"{p.name} (pid {p.pid})" for p in running)
+        return CheckResult(
+            "Running code", ok=True,
+            detail=f"{names} on bobi {installed_bobi_version()}")
+    return CheckResult(
+        "Running code", ok=False,
+        detail="; ".join(f"{p.name}: {p.detail}" for p in stale),
+        hint="Restart to pick up the installed code: "
+             + ", ".join(f"`{p.remedy}`" for p in stale),
+        required=False)
 
 
 def _check_slack_socket_mode() -> CheckResult | None:
@@ -419,7 +543,8 @@ def _check_slack_socket_mode() -> CheckResult | None:
         return None
 
     from bobi.config import Config
-    from bobi.events.server import _slack_app_id, _slack_auth_info, health
+    from bobi.events.server import health
+    from bobi.slack import SlackAppIdentityError, require_app_identity
 
     try:
         cfg = Config.load(root)
@@ -472,14 +597,14 @@ def _check_slack_socket_mode() -> CheckResult | None:
             required=False,
         )
 
-    _team_id, bot_id, _bot_user_id = _slack_auth_info(bot_token)
-    app_id = _slack_app_id(bot_token, bot_id)
-    if not app_id:
+    try:
+        _team_id, _bot_id, _bot_user_id, app_id = require_app_identity(bot_token)
+    except SlackAppIdentityError as e:
         return CheckResult(
             "Slack Socket Mode",
             ok=False,
             detail="configured Slack app identity is unavailable",
-            hint="Check SLACK_BOT_TOKEN, then restart the agent and run doctor again.",
+            hint=str(e),
             required=False,
         )
 
@@ -650,8 +775,3 @@ def _check_long_term_memory() -> CheckResult:
     return CheckResult(
         "Long-term memory", ok=True,
         detail=f"long_term_memory.md present ({size} chars, under {MAX_MEMORY_CHARS} cap)")
-
-
-def _check_policy() -> CheckResult:
-    """Deprecated compatibility wrapper for one release."""
-    return _check_long_term_memory()

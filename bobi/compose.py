@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import yaml
 
@@ -157,9 +157,9 @@ def resolve_team_ref(
         # Registry-only. An explicit pin fetches that immutable asset; a "latest"
         # ref fetches the rolling asset. (A compose-lock can pin "latest" to a
         # locked version upstream — see compose()'s lock handling.)
-        fetched = registry.fetch(project_path, name, version=version)
+        fetched = registry.fetch(name, version=version)
         return ResolvedLayer(dir=fetched, ref=ref,
-                             version=version or registry.cached_version(project_path, name),
+                             version=version or registry.cached_version(name),
                              source="registry")
 
     # 1. Checked-in sibling source — local always wins.
@@ -172,18 +172,18 @@ def resolve_team_ref(
 
     # 2. Already-fetched cache. Version comes from .meta.json, falling back to
     #    the cached agent.yaml (spec §4) for a cache stamped without one.
-    if registry.is_cached(project_path, name):
-        cache_dir = registry.cache_path(project_path, name)
-        cached_v = registry.cached_version(project_path, name) or _read_version(cache_dir)
+    if registry.is_cached(name):
+        cache_dir = registry.cache_path(name)
+        cached_v = registry.cached_version(name) or _read_version(cache_dir)
         _assert_pin(ref, name, version, cached_v, cache_dir, referrer_dir)
         return ResolvedLayer(dir=cache_dir, ref=ref, version=cached_v,
                              source="cache")
 
     # 3. Registry fetch (immutable asset for a pin; rolling for latest).
-    fetched = registry.fetch(project_path, name, version=version)
+    fetched = registry.fetch(name, version=version)
     return ResolvedLayer(
         dir=fetched, ref=ref,
-        version=version or registry.cached_version(project_path, name),
+        version=version or registry.cached_version(name),
         source="registry")
 
 
@@ -335,7 +335,7 @@ def compose(chain: list[ResolvedLayer], dest: Path) -> Provenance:
     # Local import avoids a module-level import cycle (tool_library imports the
     # compose merge helpers).
     from bobi import tool_library
-    tool_library.expand(merged_yaml, dest)
+    tool_library.expand(merged_yaml, dest, prov)
 
     # prune (§4) is applied after merge, across the frozen surfaces + agent.yaml.
     _apply_prune(chain, dest, merged_yaml, prov)
@@ -360,13 +360,10 @@ def merge_workspace(chain: list[ResolvedLayer], dest: Path) -> None:
         src = layer.dir / "workspace"
         if not src.is_dir():
             continue
-        for f in sorted(src.rglob("*")):
-            target = dest / "workspace" / f.relative_to(src)
-            if f.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-            else:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, target)
+        # `dirs_exist_ok` is what makes leaf-wins work across layers: copytree
+        # copies with copy2 and overwrites an existing file, so a later layer's
+        # same-named file replaces the earlier one while base-only files stay.
+        shutil.copytree(src, dest / "workspace", dirs_exist_ok=True)
 
 
 # --- prose rule (§2) ---------------------------------------------------------
@@ -502,8 +499,9 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
     """
     out = dest / sub
     # Monitor record-level merge needs to accumulate across layers first.
+    # Insertion-ordered: a record is added once, on the layer that first names
+    # it, so `monitor_records` IS the monitor order — no parallel list needed.
     monitor_records: dict[str, dict] = {}
-    monitor_order: list[str] = []
     monitor_src: dict[str, str] = {}  # record name → contributing layer label(s)
     monitor_yaml_seen = False
 
@@ -515,7 +513,7 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
     # makes removing a team's now-redundant copy a byte-identical no-op. The seed
     # is prunable like any inherited monitor (prune runs after this writes the file).
     if sub == "monitors":
-        if _seed_framework_monitors(monitor_records, monitor_order, monitor_src):
+        if _seed_framework_monitors(monitor_records, monitor_src):
             monitor_yaml_seen = True
 
     for layer in chain:
@@ -529,7 +527,7 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
             if sub == "monitors" and f.suffix in (".yaml", ".yml"):
                 monitor_yaml_seen = True
                 _accumulate_monitors(f, _layer_label(layer), monitor_records,
-                                     monitor_order, monitor_src)
+                                     monitor_src)
                 continue
             target = out / rel
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -538,16 +536,16 @@ def _compose_structured_dir(chain: list[ResolvedLayer], dest: Path, sub: str,
 
     if monitor_yaml_seen:
         out.mkdir(parents=True, exist_ok=True)
-        merged = [monitor_records[name] for name in monitor_order]
+        merged = list(monitor_records.values())
         (out / "defaults.yaml").write_text(
             yaml.dump({"monitors": merged}, default_flow_style=False,
                       sort_keys=False))
-        for name in monitor_order:
+        for name in monitor_records:
             prov.record(f"monitors:{name}", monitor_src[name])
 
 
 def _accumulate_monitors(f: Path, label: str, records: dict[str, dict],
-                         order: list[str], src: dict[str, str]) -> None:
+                         src: dict[str, str]) -> None:
     """Merge one monitors yaml file's records into the accumulator by name."""
     try:
         data = yaml.safe_load(f.read_text()) or {}
@@ -563,7 +561,6 @@ def _accumulate_monitors(f: Path, label: str, records: dict[str, dict],
             src[name] = f"{src[name]} + {label}"
         else:
             records[name] = dict(rec)
-            order.append(name)
             src[name] = label
 
 
@@ -580,7 +577,7 @@ def _normalize_monitor_record(rec: dict) -> dict:
     return out
 
 
-def _seed_framework_monitors(records: dict[str, dict], order: list[str],
+def _seed_framework_monitors(records: dict[str, dict],
                              src: dict[str, str]) -> bool:
     """Seed framework-default monitor records (#471) as the most-base layer.
 
@@ -593,8 +590,8 @@ def _seed_framework_monitors(records: dict[str, dict], order: list[str],
     from bobi.monitors import FRAMEWORK_DEFAULTS_PATH
     if not FRAMEWORK_DEFAULTS_PATH.is_file():
         return False
-    _accumulate_monitors(FRAMEWORK_DEFAULTS_PATH, "framework", records, order, src)
-    return bool(order)
+    _accumulate_monitors(FRAMEWORK_DEFAULTS_PATH, "framework", records, src)
+    return bool(records)
 
 
 # --- agent.yaml deep-merge (§3.1) --------------------------------------------
@@ -654,6 +651,12 @@ def _merge_keyed_list(base: list | None, overlay: list | None,
         if entry.get("remove") is True:
             if name in index:
                 result[index[name]] = None  # tombstone; compacted below
+                # Forget the slot too. Leaving the name indexed made a later
+                # re-add — the natural way to wholesale-REPLACE an inherited
+                # entry, since same-key entries otherwise field-merge — deep
+                # merge into the tombstone and crash `bobi agents install` with
+                # a raw TypeError.
+                del index[name]
             continue
         if name in index:
             result[index[name]] = _deep_merge_dict(result[index[name]], entry)
@@ -720,12 +723,10 @@ def _dedupe(items: list) -> list:
 
 # --- prune (§4) --------------------------------------------------------------
 
-_PRUNE_DIR_SURFACES = {
-    "tools": "tools",
-    "workflows": "workflows",
-    "context": "context",
-    "roles": "roles",
-}
+# Surfaces pruned by removing a file (or directory) named under `dest/<surface>`.
+# `monitors` and `roles` are NOT here — each is handled by its own branch in
+# `_prune_one` before this membership test is reached.
+_PRUNE_DIR_SURFACES = ("tools", "workflows", "context")
 
 
 def _apply_prune(chain: list[ResolvedLayer], dest: Path, merged_yaml: dict,
@@ -744,8 +745,31 @@ def _apply_prune(chain: list[ResolvedLayer], dest: Path, merged_yaml: dict,
         label = _layer_label(layer)
         for surface, names in prune.items():
             for name in names or []:
+                _reject_escaping_prune_name(label, surface, str(name))
                 if not _prune_one(dest, merged_yaml, surface, name):
                     prov.warn(f"{label}: prune {surface}:{name} matched nothing")
+
+
+def _reject_escaping_prune_name(label: str, surface: str, name: str) -> None:
+    """Reject a prune name that would reach outside the staging dir.
+
+    A prune entry names an item on a surface (`codex`, `methodology/old.md`),
+    never a path. `dest / surface / name` with an absolute `name` collapses to
+    that absolute path — pathlib drops the base — and a `..` segment walks out
+    of the image, so `_prune_one`'s unlink/rmtree would delete host files during
+    `bobi agents install`. Packs are trusted code (SECURITY.md), but deleting
+    outside the image being frozen exceeds even that model and turns a typo into
+    host data loss.
+    """
+    p = PurePosixPath(name.replace("\\", "/"))
+    if p.is_absolute() or PureWindowsPath(name).is_absolute() \
+            or ".." in p.parts:
+        raise ComposeError(
+            f"{label}: prune {surface}:{name} is a path, not an item name — a "
+            "prune entry names something on the surface (`codex`, "
+            "`methodology/old.md`). Absolute paths and `..` would delete "
+            "outside the composed image."
+        )
 
 
 def _prune_one(dest: Path, merged_yaml: dict, surface: str, name: str) -> bool:

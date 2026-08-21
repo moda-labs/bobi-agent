@@ -93,13 +93,32 @@ priced, not because nothing was saved. A caller showing dollars should show
 in their own block, beside a bill and never inside one — the same separation
 `estimated_cost_usd` already keeps from `total_cost_usd`.
 
+## The window: lifetime, and why there is no since-date
+
+Every figure in the spend payload is **lifetime-cumulative**. `rollup_costs`
+folds each session's whole recorded cost with no time filter, so `saved ~$50`
+is since the first run still on disk, never this week. The saved card states
+that on its heading rather than leaving the reader to guess (MOD-373).
+
+It says `lifetime` and not `since <date>` deliberately. No timestamp rides
+`CostSummary`, and the one that could be derived - the earliest `started_at`
+across folded sessions - would name the oldest session **still on disk**, not
+the agent's first run. Nothing prunes those directories, but a rebuilt box or
+a cleared state dir loses them, and a since-date that silently moves forward
+whenever old sessions disappear is worse than the honest word. A real
+since-date needs a first-run timestamp recorded once per team, at team level;
+until something records one, `lifetime` is the claim the data supports.
+
 ## Compatibility
 
-`TeamRuntime.overview()` is **not** an `@abstractmethod`, for the same reason
-`runs()` is not: an out-of-tree subclass in the private deploy repo implements
-this ABC, and marking the method abstract here would break its CI the moment
-this merges. It becomes abstract once the hosted runtime implements it. The base
-raises `TeamLifecycleError` meanwhile.
+`TeamRuntime.overview()` **is** an `@abstractmethod`, as of the lane that gave
+the hosted runtime its implementation. Both implementers now live in this repo
+— `LocalRuntime` and `EventBusRuntime` — so a missing method fails this repo's
+own CI in the commit that adds it, and the base no longer carries a
+`TeamLifecycleError` fallback for a subclass nobody could see. The hosted side
+answers from the supervisor's `overview` admin command, which delegates to the
+same `build_overview` this document describes.
 
 `script_cache` is additive to a payload whose other keys are byte-stable for
-older consumers.
+older consumers. It rides the hosted `spend` command too, so the savings block
+renders on both surfaces.

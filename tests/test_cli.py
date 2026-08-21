@@ -2,8 +2,9 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from bobi.__version__ import __version__
@@ -18,6 +19,27 @@ def test_version_flag():
     assert result.exit_code == 0
     assert "bobi" in result.output
     assert __version__ in result.output
+
+
+def test_transport_logs_do_not_reach_the_console(monkeypatch):
+    """The root logger runs at INFO, and httpx logs every request at INFO.
+
+    `daemon._ping` uses the pooled client (Q123), and `bobi app start` polls
+    it every 0.2s while the daemon comes up — so without this the command
+    buries its own "running at ..." line under a stack of transport chatter
+    that `urllib` never produced.
+    """
+    import logging
+
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    monkeypatch.setattr(
+        "bobi.webapp.daemon.start",
+        lambda open_browser=True: type("Status", (), {"url": "u", "pid": 1})(),
+    )
+
+    CliRunner().invoke(main, [])
+
+    assert logging.getLogger("httpx").level == logging.WARNING
 
 
 def test_bare_bobi_starts_app(monkeypatch):
@@ -43,7 +65,7 @@ def test_top_level_help_is_machine_scoped():
     assert "agent" in result.output
     assert "agents" in result.output
     assert "setup" in result.output
-    for removed in [" start", " stop", " status", " workflows", " monitors"]:
+    for removed in [" start", " stop", " status", " workflows", " monitors", " otel"]:
         assert removed not in result.output
 
 
@@ -59,7 +81,7 @@ def test_agent_help_lists_runtime_commands(bobi_install):
     result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "--help"])
     assert result.exit_code == 0, result.output
     for cmd in ["start", "stop", "status", "workflows", "monitors",
-                "subagents", "event-server", "login-bootstrap"]:
+                "subagents", "event-server", "login-bootstrap", "otel"]:
         assert cmd in result.output
 
 
@@ -203,6 +225,158 @@ def test_workflow_validate_is_agent_scoped(bobi_install, tmp_path):
     assert "Valid" in result.output
 
 
+class TestWorkflowResume:
+    """`workflows resume` is how a human gate gets answered (#987).
+
+    Two contracts. The verdict has to REACH the workflow - it lands as the
+    ``event`` scope, which a route step after the await reads back - and the
+    command has to report the run's real ending: ``resume_workflow`` returns
+    True both when a run finishes and when it parks on a LATER await step, so
+    a bare truthiness check calls a re-gated run "completed."
+    """
+
+    def _waiting_run(self):
+        from bobi.workflow.state import WorkflowRun
+        run = WorkflowRun.create("adhoc", {"data": {"run_key": "42"}})
+        run.status = "waiting"
+        run.suspended_at_step = 1
+        run.await_event = "approval"
+        run.run_key = "42"
+        run.save()
+        return run
+
+    def _resume(self, run_id, fake_resume, *args):
+        with patch("bobi.workflow.orchestrator.resume_workflow", fake_resume):
+            return CliRunner().invoke(
+                main,
+                ["agent", TEST_AGENT_NAME, "workflows", "resume", run_id,
+                 *args],
+            )
+
+    def _completes(self, seen):
+        def fake_resume(run, wf, **kwargs):
+            seen.append(kwargs)
+            run.status = "completed"
+            run.save()
+            return True
+        return fake_resume
+
+    def test_the_verdict_reaches_the_workflow_as_the_event_scope(
+            self, bobi_install):
+        """The inlet the whole design turns on. ``event`` already becomes the
+        run's ``event`` scope inside ``resume_workflow``; this is what finally
+        puts something in it."""
+        run = self._waiting_run()
+        seen: list = []
+
+        result = self._resume(run.run_id, self._completes(seen),
+                              "--verdict", "approve", "--reply", "ship it")
+
+        assert result.exit_code == 0, result.output
+        assert seen[0]["event"] == {
+            "data": {"verdict": "approve", "reply": "ship it"}}
+
+    def test_a_resume_with_no_verdict_still_populates_the_scope(
+            self, bobi_install):
+        """An empty verdict and a MISSING scope both resolve to "" in a
+        condition, but only the first does it without a warning about an
+        unknown scope. The route reads either as "not an approval"."""
+        run = self._waiting_run()
+        seen: list = []
+
+        result = self._resume(run.run_id, self._completes(seen))
+
+        assert result.exit_code == 0, result.output
+        assert seen[0]["event"] == {"data": {"verdict": "", "reply": ""}}
+
+    def test_a_verdict_outside_the_vocabulary_is_refused(self, bobi_install):
+        """Refused before anything is claimed or resumed. The route would fail
+        closed on it anyway, but a typo that silently reworks a spec is a
+        worse answer than one that says the word was not understood."""
+        run = self._waiting_run()
+        called: list = []
+
+        def fake_resume(run, wf, **kwargs):
+            called.append(kwargs)
+            return True
+
+        result = self._resume(run.run_id, fake_resume, "--verdict", "approved")
+
+        assert result.exit_code != 0
+        assert not called, "a malformed verdict reached the workflow"
+        from bobi.workflow.state import WorkflowRun
+        assert WorkflowRun.load(run.run_id).status == "waiting"
+
+    def test_suspended_again_is_not_reported_as_completed(self, bobi_install):
+        """A rejected gate reworks and re-gates, so this is the ordinary
+        ending of every reject - not an edge case."""
+        run = self._waiting_run()
+
+        def fake_resume(run, wf, **kwargs):
+            # What the orchestrator does when a later await step parks the
+            # run: the SAME ledger entry goes back to waiting (#1048).
+            run.status = "waiting"
+            run.save()
+            return True
+
+        result = self._resume(run.run_id, fake_resume, "--verdict", "approve")
+
+        assert result.exit_code == 0, result.output
+        assert "Workflow completed." not in result.output
+        assert "suspended" in result.output.lower()
+
+    def test_a_rejection_the_workflow_cannot_honour_is_refused(
+            self, bobi_install):
+        """`reject` means "do NOT run the next step". Without a route on the
+        verdict in the slot the resume lands on, that is exactly what resuming
+        would do, so the command refuses rather than doing the opposite of
+        what it was told. The `adhoc` workflow has one prompt step and no
+        route."""
+        run = self._waiting_run()
+        called: list = []
+
+        def fake_resume(run, wf, **kwargs):
+            called.append(kwargs)
+            return True
+
+        result = self._resume(run.run_id, fake_resume, "--verdict", "reject")
+
+        assert result.exit_code == 1
+        assert "no route on the gate's verdict" in result.output
+        assert not called
+
+    def test_a_refusal_never_leaves_the_run_claimed(self, bobi_install):
+        """`claim()` renames <id>.json to <id>.resuming.json and nothing
+        renames it back, so a refusal after claiming would leave the run
+        findable forever and resumable never (state.py's D071). Every check
+        that can refuse resolves before the claim."""
+        from bobi.workflow.state import WorkflowRun
+        run = self._waiting_run()
+
+        self._resume(run.run_id, lambda *a, **k: True, "--verdict", "reject")
+
+        assert WorkflowRun.load(run.run_id).status == "waiting"
+
+    def test_completed_run_is_reported_as_completed(self, bobi_install):
+        run = self._waiting_run()
+        result = self._resume(run.run_id, self._completes([]))
+
+        assert result.exit_code == 0, result.output
+        assert "Workflow completed." in result.output
+
+    def test_failed_run_exits_nonzero(self, bobi_install):
+        run = self._waiting_run()
+
+        def fake_resume(run, wf, **kwargs):
+            run.status = "failed"
+            run.save()
+            return False
+
+        result = self._resume(run.run_id, fake_resume)
+
+        assert result.exit_code == 1
+
+
 class TestSubagents:
     def test_launch_adhoc_workflow(self, bobi_install):
         with patch("bobi.subagent.launch_agent", return_value="wf-adhoc-42") as mock:
@@ -217,6 +391,116 @@ class TestSubagents:
         assert mock.call_args[1]["task"] == "Fix #42"
         assert mock.call_args[1]["role"] == "engineer"
         assert mock.call_args[1]["cwd"] == str(bobi_install.repo_path)
+
+    def test_id_random_is_passed_through(self, bobi_install):
+        with patch("bobi.subagent.launch_agent", return_value="wf-adhoc-x") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--id-random",
+                "--task", "Fan out",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[1]["random_key"] is True
+
+    def test_id_random_reaches_the_wait_path_too(self, bobi_install):
+        """--wait needs its OWN --id-random passthrough (#850).
+
+        Asserting only the detached branch leaves `--wait --id-random` free to
+        fall back to a derived key, which is the opposite of what was asked
+        for: two deliberate parallel runs would land on one name.
+        """
+        with patch("bobi.subagent.launch_agent") as mock:
+            mock.return_value = MagicMock(final_text="", success=True, error="")
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--wait", "--id-random",
+                "--task", "Fan out",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[1]["random_key"] is True
+        assert mock.call_args[1]["wait"] is True
+
+    def test_wait_refusal_renders_readably_not_as_a_traceback(
+            self, bobi_install):
+        """--wait can raise DuplicateRunError since #1057 (the old executor
+        had no active-run guard). The reader is an LLM mid-delegation: a raw
+        traceback reads as a transient crash and teaches it to retry, so the
+        refusal must land through _launch_refusal_is_readable like every
+        other launch."""
+        from bobi.subagent import DuplicateRunError
+        exc = DuplicateRunError(
+            "A run is already active: wf-adhoc-r-adhoc-abc123",
+            session_name="wf-adhoc-r-adhoc-abc123", status="running",
+            derived_key=True)
+        with patch("bobi.subagent.launch_agent", side_effect=exc):
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--wait",
+                "--task", "Investigate X",
+            ])
+        assert result.exit_code == 1
+        assert "Launch refused" in result.output
+        assert "Traceback" not in result.output
+
+    def test_wait_routes_through_the_one_launch_path(self, bobi_install):
+        """--wait is launch_agent's synchronous mode (#1057): derivation,
+        admission and the run ledger are launch_agent's own, so the CLI
+        passes the raw launch through rather than resolving a name first."""
+        with patch("bobi.subagent.launch_agent") as mock:
+            mock.return_value = MagicMock(final_text="", success=True, error="")
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--wait",
+                "--task", "Investigate X",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args[1]["wait"] is True
+        assert mock.call_args[1]["run_key"] is None
+        assert mock.call_args[1]["workflow_name"] == "adhoc"
+
+    def test_id_and_id_random_are_mutually_exclusive(self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer",
+                "--id", "42", "--id-random", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert "--id-random" in result.output
+        mock.assert_not_called()
+
+    def test_duplicate_launch_reports_cleanly(self, bobi_install):
+        """Refusing an un-keyed duplicate is a common path now, not a crash."""
+        from bobi.subagent import DuplicateRunError
+        refusal = DuplicateRunError(
+            "A run is already active: wf-adhoc-x (status=running). Its run key "
+            "was derived from the task; pass --id-random to run both.",
+            session_name="wf-adhoc-x", status="running", derived_key=True,
+        )
+        with patch("bobi.subagent.launch_agent", side_effect=refusal):
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--task", "Fix #42",
+            ])
+        assert result.exit_code == 1
+        assert "already active" in result.output
+        assert "Traceback" not in result.output
+        # The remediation must be runnable as printed, not a <name> placeholder.
+        assert f"bobi agent {TEST_AGENT_NAME} subagents cancel wf-adhoc-x" \
+            in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    def test_a_dependency_failure_is_not_reported_as_a_duplicate(self, bobi_install):
+        """`launch_agent` raises RuntimeError for the requires preflight and the
+        spend governor too; a blanket catch would relabel those."""
+        with patch("bobi.subagent.launch_agent",
+                   side_effect=RuntimeError("Required dependency check failed: gh")):
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--task", "Fix #42",
+            ])
+        assert result.exit_code != 0
+        assert "Launch refused" not in result.output
 
     def test_workflow_required(self, bobi_install):
         result = CliRunner().invoke(main, [
@@ -247,7 +531,7 @@ class TestSubagents:
             session_id="sess-1", run_key="run-1", phase="adhoc",
             success=True, final_text="done",
         )
-        with patch("bobi.subagent.spawn_adhoc", return_value=agent) as spawn, \
+        with patch("bobi.subagent.launch_agent", return_value=agent) as spawn, \
              patch("bobi.subagent.run_check_blocking") as check:
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
@@ -265,7 +549,7 @@ class TestSubagents:
         check = CheckResult(success=True, finding=False,
                             session="monitor-check-abc-check")
         with patch("bobi.subagent.run_check_blocking", return_value=check) as run_check, \
-             patch("bobi.subagent.spawn_adhoc") as spawn:
+             patch("bobi.subagent.launch_agent") as spawn:
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
                 "-w", "adhoc", "--role", "engineer",
@@ -295,7 +579,7 @@ class TestSubagents:
         assert "monitoring check" in result.output
 
     def test_agent_wait_alias_is_not_supported(self, bobi_install):
-        with patch("bobi.subagent.spawn_adhoc") as spawn, \
+        with patch("bobi.subagent.launch_agent") as spawn, \
              patch("bobi.subagent.run_check_blocking") as check:
             result = CliRunner().invoke(main, [
                 "agent", TEST_AGENT_NAME, "subagents", "launch",
@@ -337,7 +621,7 @@ class TestSubagents:
         # recover without reading the source (#845).
         assert "--wait requires '-w adhoc'" in result.output
         assert "issue-lifecycle" in result.output
-        assert "dispatched" in result.output
+        assert "fan out" in result.output
         assert "wait" in result.output
 
     def test_passes_requested_by(self, bobi_install):
@@ -438,6 +722,29 @@ class TestEventsCommand:
         assert result.exit_code == 0, result.output
         assert "deploy" in result.output
         assert "1 malformed" in result.output
+
+    def test_orders_mixed_era_timestamps_by_instant_not_string(self, bobi_install,
+                                                                monkeypatch):
+        # An events file spans the aware-UTC upgrade: pre-upgrade lines carry
+        # naive LOCAL timestamps, post-upgrade lines aware UTC. On a UTC+9
+        # host the newer UTC string sorts lexicographically BEFORE the older
+        # local one; ordering (and --tail selection) must go by instant.
+        import time as _time
+        monkeypatch.setenv("TZ", "Asia/Tokyo")
+        _time.tzset()
+        try:
+            older_local = {"timestamp": "2026-01-01T18:00:00",  # 09:00 UTC
+                           "source": "github", "type": "old-evt", "data": {}}
+            newer_aware = {"timestamp": "2026-01-01T10:00:00+00:00",
+                           "source": "github", "type": "new-evt", "data": {}}
+            (bobi_install.state_dir / "events-default.jsonl").write_text(
+                json.dumps(older_local) + "\n" + json.dumps(newer_aware) + "\n")
+            result = self._run_events(bobi_install)
+            assert result.exit_code == 0, result.output
+            assert result.output.index("old-evt") < result.output.index("new-evt")
+        finally:
+            monkeypatch.undo()
+            _time.tzset()
 
     def test_deduplicates_events_by_seq_deployment(self, bobi_install):
         ev = {"timestamp": "2026-01-01T00:00:01", "source": "github",
@@ -682,6 +989,46 @@ class TestEventServerCommand:
         assert result.exit_code == 0, result.output
         assert "Event server is still running on port 58405" in result.output
 
+    # D018 — a pid file is written by another process and can be truncated by a
+    # crash mid-write. `int(pid_file.read_text())` sat outside the try, so stop
+    # raised ValueError, printed a traceback, and left the stale files in
+    # place — making every subsequent stop fail the same way. The manager stop
+    # path (cli.py `Invalid PID file — cleaning up.`) already defends against
+    # exactly this.
+
+    @pytest.mark.parametrize("contents", ["", "   ", "not-a-pid", "12345\n67890"])
+    def test_stop_cleans_up_a_corrupt_pid_file(self, bobi_install, contents):
+        pid_file = bobi_install.state_dir / "event-server.pid"
+        port_file = bobi_install.state_dir / "event-server.port"
+        pid_file.write_text(contents)
+        port_file.write_text("58405")
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert "Traceback" not in result.output
+        assert not pid_file.exists(), "stale pid file left behind"
+        assert not port_file.exists(), "stale port file left behind"
+
+    def test_stop_reports_a_pid_it_may_not_signal(self, bobi_install, monkeypatch):
+        # A pid owned by another user: os.kill raises PermissionError, which was
+        # uncaught. Report it and still clear our own stale files.
+        (bobi_install.state_dir / "event-server.pid").write_text("4242")
+        (bobi_install.state_dir / "event-server.port").write_text("58405")
+
+        def deny(pid, sig):
+            raise PermissionError(1, "Operation not permitted")
+        monkeypatch.setattr("os.kill", deny)
+
+        result = CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "event-server", "stop"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert "Traceback" not in result.output
+
 
 class TestSetupCommand:
     def _home(self, tmp_path, monkeypatch):
@@ -716,7 +1063,23 @@ class TestSetupCommand:
     def test_help(self):
         result = CliRunner().invoke(main, ["setup", "--help"])
         assert result.exit_code == 0
-        assert "--resume" in result.output
+        assert "--model" in result.output
+        # Q122/D064 — `--resume` was parsed, advertised in help, documented in
+        # QUICKSTART, then discarded with `del resume`. Setup reopens through
+        # the webapp, which resumes an unfinished session unconditionally
+        # (webapp/server.py), so the flag named the default and promised a
+        # choice that did not exist. Removed rather than left as dead surface.
+        assert "--resume" not in result.output
+        assert "resumes where you left off" in result.output
+
+    def test_resume_flag_is_gone(self, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        self._patch_app(monkeypatch)
+
+        result = CliRunner().invoke(main, ["setup", "alpha", "--resume"])
+
+        assert result.exit_code != 0
+        assert "No such option" in result.output
 
     def test_setup_without_name_opens_create_route(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
@@ -727,12 +1090,12 @@ class TestSetupCommand:
         assert result.exit_code == 0, result.output
         assert seen["url"] == "http://127.0.0.1:8642/?n=tok#/setup"
 
-    def test_setup_options_are_accepted_for_compatibility(self, tmp_path, monkeypatch):
+    def test_model_option_reaches_the_setup_url(self, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         seen = self._patch_app(monkeypatch)
 
         result = CliRunner().invoke(
-            main, ["setup", "alpha", "--resume", "--model", "sonnet"])
+            main, ["setup", "alpha", "--model", "sonnet"])
 
         assert result.exit_code == 0, result.output
         assert seen["url"] == (
@@ -794,3 +1157,126 @@ class TestMonitorAdd:
         result = self._add(bobi_install, ["x", "--at", "21:00", "--days", "funday"])
         assert result.exit_code != 0
         assert "weekday" in result.output.lower()
+
+
+class TestAgentsUpdateAndBrowse:
+    """D066/D065 — the machine-facing `agents` surface."""
+
+    def test_update_all_exits_nonzero_when_every_pack_fails(self, bobi_install,
+                                                            monkeypatch):
+        # D066: the named-pack path exits 1 on this exact failure, the
+        # update-all path returned 0, so the two forms reported contradictory
+        # exit codes for identical failures and CI could not detect it.
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda: [{"name": "alpha"}, {"name": "beta"}])
+
+        def boom(*a, **k):
+            raise RuntimeError("registry unreachable")
+        monkeypatch.setattr("bobi.registry.check_update", boom)
+
+        result = CliRunner().invoke(main, ["agents", "update"])
+
+        assert result.exit_code == 1, result.output
+        assert "alpha — failed" in result.output
+        assert "beta — failed" in result.output
+
+    def test_update_all_still_exits_zero_when_a_pack_succeeds(self, bobi_install,
+                                                              monkeypatch):
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda: [{"name": "alpha"}, {"name": "beta"}])
+
+        def check(name, *a, **k):
+            if name == "beta":
+                raise RuntimeError("registry unreachable")
+            return ("1.0.0", "1.0.0")
+        monkeypatch.setattr("bobi.registry.check_update", check)
+
+        result = CliRunner().invoke(main, ["agents", "update"])
+
+        assert result.exit_code == 1, "one failure is still a failure"
+        assert "alpha v1.0.0 — up to date" in result.output
+
+    def test_browse_survives_an_unquoted_numeric_version(self, bobi_install,
+                                                         monkeypatch):
+        # D065: a third-party registry.yaml with `version: 1.0` parses as a
+        # float, and `f"v{version:8s}"` dies with "Unknown format code 's'",
+        # taking down the whole listing instead of one row.
+        monkeypatch.setattr(
+            "bobi.registry.list_remote",
+            lambda *a, **k: [{"name": "numeric", "version": 1.0,
+                              "description": "unquoted version"},
+                             {"name": "ordinary", "version": "2.1.0",
+                              "description": "quoted version"}])
+        monkeypatch.setattr("bobi.registry.list_cached", lambda: [])
+
+        result = CliRunner().invoke(main, ["agents", "browse"])
+
+        assert result.exception is None or isinstance(result.exception, SystemExit), \
+            f"unhandled traceback: {result.exception!r}"
+        assert result.exit_code == 0, result.output
+        assert "numeric" in result.output and "ordinary" in result.output
+
+    def test_browse_matches_a_local_version_against_a_numeric_remote(
+            self, bobi_install, monkeypatch):
+        # The same coercion fixes the silent str-vs-float mismatch that made an
+        # installed pack read as an available upgrade to itself.
+        monkeypatch.setattr(
+            "bobi.registry.list_remote",
+            lambda *a, **k: [{"name": "numeric", "version": 1.0}])
+        monkeypatch.setattr(
+            "bobi.registry.list_cached",
+            lambda: [{"name": "numeric", "version": "1.0"}])
+
+        result = CliRunner().invoke(main, ["agents", "browse"])
+
+        assert result.exit_code == 0, result.output
+        assert "[installed]" in result.output
+        assert "available" not in result.output
+
+
+class TestFindTranscript:
+    """`bobi logs`' transcript fallback, on the shared locator (Q027).
+
+    This fallback was the fourth hand-rolled copy of "find <session>.jsonl"
+    and the only one that ignored CLAUDE_CONFIG_DIR, so `bobi logs` printed
+    "No session" for exactly the agents bobi itself runs under a per-team
+    config dir (#779).
+    """
+
+    def _bind(self, tmp_path, monkeypatch, session_id):
+        from bobi import paths
+        from bobi.cli import _find_transcript
+
+        monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            "bobi.sdk._sessions_dir",
+            lambda root=None: paths.sessions_dir(tmp_path))
+        sessions = paths.sessions_dir(tmp_path)
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions / "worker.id").write_text(session_id + "\n")
+        return _find_transcript
+
+    def test_finds_transcript_under_claude_config_dir(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "sess-cli")
+        target = tmp_path / "cfg" / "projects" / "proj" / "sess-cli.jsonl"
+        target.parent.mkdir(parents=True)
+        target.write_text("{}\n")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") == target
+
+    def test_missing_transcript_returns_none(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "sess-absent")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") is None
+
+    def test_blank_session_id_returns_none(self, tmp_path, monkeypatch):
+        find = self._bind(tmp_path, monkeypatch, "")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+        assert find("worker") is None
