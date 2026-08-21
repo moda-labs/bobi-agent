@@ -1149,19 +1149,65 @@ class MonitorScheduler:
                 entry["last_spawn"] = now.isoformat()
             self._save_state()
 
+    def _sleep_cycle_streak(self, monitor) -> tuple[int, str]:
+        """This monitor's consecutive sleep-cycle failure count and last reason.
+
+        Persisted in monitor state rather than held in memory like
+        `_gate_failures`: the deadlock this feeds (#1064) survived pod restarts
+        on a PVC-backed deployment, and an in-memory counter would reset to
+        zero on every restart — never reaching the escalation threshold on
+        exactly the deployments that need it.
+        """
+        with self._state_lock:
+            entry = self.state.get(monitor.state_key) or {}
+            try:
+                streak = max(0, int(entry.get("sleep_cycle_failures", 0) or 0))
+            except (TypeError, ValueError):
+                streak = 0
+            return streak, str(entry.get("sleep_cycle_last_failure", "") or "")
+
+    def _note_sleep_cycle_outcome(self, monitor, *, succeeded: bool,
+                                  reason: str = "") -> None:
+        """Advance or clear the failure streak that drives input degradation.
+
+        A run "succeeded" when it passed validation and its window is done with
+        — including a compaction-only run that ingested no transcript rows, and
+        including one that landed in the documented 16k-24k grace zone (#1066).
+        Anything that turned the run back leaves the cursor parked and counts.
+        """
+        with self._state_lock:
+            entry = self.state.setdefault(monitor.state_key, {})
+            if succeeded:
+                entry.pop("sleep_cycle_failures", None)
+                entry.pop("sleep_cycle_last_failure", None)
+            else:
+                try:
+                    prior = max(0, int(entry.get("sleep_cycle_failures", 0) or 0))
+                except (TypeError, ValueError):
+                    prior = 0
+                entry["sleep_cycle_failures"] = prior + 1
+                entry["sleep_cycle_last_failure"] = reason
+            self._save_state()
+
     def _sleep_cycle_error(self, monitor, reason: str, detail: str,
-                           tracker=None) -> None:
+                           tracker=None, *, fatal: bool = True) -> None:
         """Publish a sleep-cycle failure and record it against the firing.
 
         The sleep cycle has many ways to turn back (unreadable artifact, blown
         memory budget, a reference file that did not change); each one already
         published `system/monitor.error`. Routing them through here means the
         run record carries the same reason the bus event did.
+
+        ``fatal=False`` publishes the same loud event but records it as a
+        warning: the stuck escalation (#1064) is a verdict on the PRECEDING
+        runs, fired before this one has done anything, so failing this firing's
+        record on it would misreport the very run that recovers.
         """
         _publish_monitor_error(monitor.name, "sleep-cycle", reason, detail,
                                publish=self.publish)
         if tracker is not None:
-            tracker.note_failure(f"{reason}: {detail}" if detail else reason)
+            note = tracker.note_failure if fatal else tracker.note_warning
+            note(f"{reason}: {detail}" if detail else reason)
 
     def _sleep_cycle_turn_back(self, monitor, reason: str, detail: str,
                                tracker=None) -> None:
@@ -1179,6 +1225,7 @@ class MonitorScheduler:
         """
         log.warning("Monitor %s: %s - cursor NOT advanced, retrying next interval",
                     monitor.name, detail)
+        self._note_sleep_cycle_outcome(monitor, succeeded=False, reason=reason)
         self._sleep_cycle_error(monitor, reason, detail, tracker)
 
     def _run_error_sink(self, monitor):
@@ -1879,11 +1926,21 @@ class MonitorScheduler:
                      "and nothing to seed", monitor.name, cursor)
             return False
 
+        # A run whose prompt does not fit the model's context fails identically
+        # forever unless something shrinks (#1064). Each consecutive failure
+        # halves this run's window until it fits; success restores it.
+        failures, last_failure = self._sleep_cycle_streak(monitor)
+        input_budget = sleep_cycle_mod.degraded_input_budget(failures)
+
         ingested, highest_id, flags = sleep_cycle_mod.select_messages(
-            rows, sleep_cycle_mod.MAX_SLEEP_CYCLE_INPUT_CHARS)
+            rows, input_budget)
         if highest_id is None and not seed and not compaction_required:
             log.info("Monitor %s: nothing ingestable this run", monitor.name)
             return False
+
+        if failures:
+            flags["input_budget_degraded"] = failures
+            flags["input_budget"] = input_budget
 
         if compaction_required:
             flags["memory_over_budget"] = True
@@ -1902,9 +1959,30 @@ class MonitorScheduler:
 
         cwd = str(projects[0]) if projects else None
         log.info("Monitor %s due - spawning sleep cycle over %d new message(s) "
-                 "(highest id %s, deferred=%s, compaction_required=%s)",
+                 "(highest id %s, deferred=%s, compaction_required=%s, "
+                 "input_budget=%d, consecutive_failures=%d)",
                  monitor.name, len(ingested), highest_id,
-                 flags.get("input_truncated"), compaction_required)
+                 flags.get("input_truncated"), compaction_required,
+                 input_budget, failures)
+
+        # Past this many identical retries the loop is not retrying, it is
+        # wedged: durable memory has stopped absorbing history while every
+        # interval logs an ordinary failure. Escalate under its own reason so
+        # the drain's per-reason suppression cannot bury it in that noise.
+        if failures >= sleep_cycle_mod.SLEEP_CYCLE_STUCK_RUNS:
+            detail = (
+                f"sleep cycle has failed {failures} consecutive run(s): durable "
+                f"memory is not absorbing history and the cursor is parked at "
+                f"{cursor} with {len(rows)} message(s) unread. This run's ingest "
+                f"window is reduced to {input_budget} chars (normally "
+                f"{sleep_cycle_mod.MAX_SLEEP_CYCLE_INPUT_CHARS}); "
+                f"long_term_memory.md is {memory_chars} chars. Last failure: "
+                f"{last_failure or 'unknown'}"
+            )
+            log.error("Monitor %s: %s", monitor.name, detail)
+            self._sleep_cycle_error(
+                monitor, "sleep-cycle-stuck", detail, tracker, fatal=False)
+
         self.spawn_sleep_cycle(
             monitor, cwd, task,
             lambda result: self._on_sleep_cycle_result(
@@ -1958,6 +2036,8 @@ class MonitorScheduler:
         if not isinstance(result, dict):
             log.warning("Monitor %s: sleep-cycle run failed/indeterminate - cursor "
                         "NOT advanced, retrying next interval", monitor.name)
+            self._note_sleep_cycle_outcome(
+                monitor, succeeded=False, reason="no usable result")
             if tracker is not None:
                 tracker.note_failure(
                     "sleep-cycle agent returned no usable result")
@@ -1966,6 +2046,8 @@ class MonitorScheduler:
             summary = str(result.get("summary", "") or "sleep cycle returned failure")
             log.warning("Monitor %s: sleep-cycle run failed - cursor NOT advanced, "
                         "retrying next interval: %s", monitor.name, summary)
+            self._note_sleep_cycle_outcome(
+                monitor, succeeded=False, reason=summary)
             self._sleep_cycle_error(
                 monitor, "indeterminate-result", summary, tracker)
             return
@@ -1998,19 +2080,25 @@ class MonitorScheduler:
             self._sleep_cycle_turn_back(
                 monitor, "memory-cap-exceeded", detail, tracker)
             return
-        if actual_chars > WORKING_MEMORY_CHARS and (
-            compaction_required or result.get("updated")
-        ):
+        if actual_chars > WORKING_MEMORY_CHARS:
+            # NOT a failure. bobi/prompts/sleep_cycle.md tells the agent the
+            # scheduler validates the artifact against the 24k cap, and that
+            # the 16k working budget is the target it aims for — so a write
+            # landing between them is the documented outcome of an honest run,
+            # not a broken one. Failing it here parked the cursor on every
+            # ordinary over-budget update, which is what let the backlog grow
+            # until the compaction run itself no longer fit (#1066 -> #1064).
             detail = (
                 "long_term_memory.md output exceeded working budget: "
                 f"{actual_chars} chars (budget {WORKING_MEMORY_CHARS}, "
                 f"hard cap {MAX_MEMORY_CHARS}) at {path}; "
                 f"compaction_required={compaction_required}; "
-                f"updated={bool(result.get('updated'))}"
+                f"updated={bool(result.get('updated'))}; "
+                "not a failed run - a later run compacts it"
             )
-            self._sleep_cycle_turn_back(
-                monitor, "memory-working-budget-exceeded", detail, tracker)
-            return
+            log.warning("Monitor %s: %s", monitor.name, detail)
+            if tracker is not None:
+                tracker.note_warning(detail)
         reference_changed_required = bool(
             result.get("demoted") or result.get("reference_updated")
         )
@@ -2063,6 +2151,10 @@ class MonitorScheduler:
                 tracker=tracker,
             )
             if sync is None:
+                # Parked cursor, same as every turn-back above — count it, or a
+                # KB-sync loop stalls the sleep cycle without ever escalating.
+                self._note_sleep_cycle_outcome(
+                    monitor, succeeded=False, reason="reference-kb-sync-failed")
                 return
             result["deduped"] = int(sync.get("deduped", 0) or 0)
             result["merged"] = int(sync.get("merged", 0) or 0)
@@ -2075,8 +2167,22 @@ class MonitorScheduler:
             try:
                 sleep_cycle_mod.write_cursor(cursor_path, highest_id)
             except OSError as e:
-                log.error("Monitor %s: failed to advance sleep-cycle cursor: %s",
-                          monitor.name, e)
+                # A cursor that did not move leaves this window to be re-read
+                # forever, which IS the wedge (#1064) - so this is a turn-back
+                # like every other parked-cursor path, never a clean run.
+                # Counting it matters most here: swallowing it would clear the
+                # streak on every attempt, so the stuck escalation could never
+                # fire on precisely the loop that cannot advance.
+                detail = (f"failed to advance sleep-cycle cursor to {highest_id} "
+                          f"at {cursor_path}: {e}")
+                self._sleep_cycle_turn_back(
+                    monitor, "cursor-write-failed", detail, tracker)
+                return
+
+        # Every validation passed and the window is closed out - clear the
+        # degradation streak, including on a compaction-only run that ingested
+        # no transcript rows (#1064).
+        self._note_sleep_cycle_outcome(monitor, succeeded=True)
 
         if result.get("lossy_drops"):
             log.warning("Monitor %s: sleep cycle made %s LOSSY drop(s) of still-valid "

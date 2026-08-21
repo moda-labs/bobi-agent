@@ -122,6 +122,46 @@ without a restart.
   distillation judgment matters more than poll cost; pin its
   model with `roles: {curator: {model: ...}}`.
 
+### Sleep-cycle budgets, and why a run cannot wedge
+
+Two thresholds govern the artifact, and only one of them fails a run:
+
+| `long_term_memory.md` | Outcome |
+|---|---|
+| under 16,000 chars (`WORKING_MEMORY_CHARS`) | clean run |
+| 16,000-24,000 chars | **warning** - cursor advances, `system/memory.updated` publishes, the run record carries the warning. A later run compacts it |
+| over 24,000 chars (`MAX_MEMORY_CHARS`) | failed run - cursor parked, `system/monitor.error`, retried next interval |
+
+The grace band is deliberate: `bobi/prompts/sleep_cycle.md` tells the agent to
+land under the working budget but to stop rather than loop edits if it ends up
+between the two, and the scheduler must honour that. Failing the band instead
+parked the cursor on ordinary updates, and the parked cursor is what grows the
+backlog until the compaction run itself no longer fits (#1066, #1064).
+
+A run that fails still cannot retry identically forever. The scheduler keeps a
+consecutive-failure count per monitor in `monitor_state.json`
+(`sleep_cycle_failures`, persisted so it survives a restart) and:
+
+- **halves the transcript window per failure** - `degraded_input_budget()`, from
+  `MAX_SLEEP_CYCLE_INPUT_CHARS` down to `MIN_SLEEP_CYCLE_INPUT_CHARS` - so the
+  input shrinks until it fits, the cursor advances, and the backlog drains. The
+  reduced window is named in the task's ingest notes; success restores it;
+- **bounds the memory copy** it embeds at `MAX_MEMORY_INPUT_CHARS`. A rejected
+  over-cap rewrite stays on disk and is re-read raw every interval, so without
+  this one bad write grows the prompt without limit;
+- **escalates at `SLEEP_CYCLE_STUCK_RUNS`** consecutive failures with reason
+  `sleep-cycle-stuck`, naming the streak, the parked cursor, and the unread
+  backlog. Its own reason matters: the drain suppresses repeats per
+  `(session, monitor, flavor, reason)`, so an escalation sharing the ordinary
+  failure's reason would be buried in exactly the noise it needs to break out of.
+
+The counting rule behind all three: **a run counts as a failure exactly when it
+leaves the cursor parked**, because a parked cursor is what re-reads the same
+window forever. That includes a cursor the scheduler validated but could not
+write (`cursor-write-failed`) - reporting that one clean would reset the streak
+on every attempt, so the escalation could never fire on the one loop genuinely
+unable to advance.
+
 Out-of-band monitor agents must not inline large context into the spawn command.
 Use the request-file pattern instead: write the full context under `run/state/`,
 pass the absolute path in a dedicated `--request` argument, and delete the file

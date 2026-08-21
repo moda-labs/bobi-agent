@@ -208,6 +208,69 @@ class TestBuildCuratorTask:
         assert "DEFERRED" in task and "5" in task and "9" in task
         assert "oversized" in task.lower()
 
+    def test_bounds_runaway_memory_preview(self):
+        """#1064: a rejected over-cap artifact stays on disk and is re-read RAW
+        into every later task. Unbounded, that alone grows the prompt past the
+        model's context and wedges the loop. Bound the preview, keep the file."""
+        from bobi.monitors.sleep_cycle import MAX_MEMORY_INPUT_CHARS
+
+        runaway = "## Facts\n\n" + ("x" * (MAX_MEMORY_INPUT_CHARS * 4))
+        task = curator_mod.build_curator_task("P", "t", runaway, {})
+
+        assert len(task) < MAX_MEMORY_INPUT_CHARS + 5000
+        assert "memory preview truncated" in task
+        assert str(len(runaway)) in task  # the real on-disk size stays visible
+
+    def test_keeps_over_cap_memory_whole_when_it_still_fits(self):
+        """The ordinary over-cap doc must ride whole — it is what the run has
+        to compact. Only a runaway beyond the preview bound gets clipped."""
+        from bobi.memory import MAX_MEMORY_CHARS
+
+        over_cap = "## Facts\n\n" + ("x" * MAX_MEMORY_CHARS)
+        task = curator_mod.build_curator_task("P", "t", over_cap, {})
+
+        assert over_cap in task
+        assert "memory preview truncated" not in task
+
+
+class TestDegradedInputBudget:
+    """#1064: a run that cannot fit its context must not retry identically."""
+
+    def test_full_budget_when_no_failures(self):
+        from bobi.monitors.sleep_cycle import (
+            MAX_SLEEP_CYCLE_INPUT_CHARS,
+            degraded_input_budget,
+        )
+
+        assert degraded_input_budget(0) == MAX_SLEEP_CYCLE_INPUT_CHARS
+
+    def test_halves_per_consecutive_failure(self):
+        from bobi.monitors.sleep_cycle import (
+            MAX_SLEEP_CYCLE_INPUT_CHARS,
+            degraded_input_budget,
+        )
+
+        assert degraded_input_budget(1) == MAX_SLEEP_CYCLE_INPUT_CHARS // 2
+        assert degraded_input_budget(2) == MAX_SLEEP_CYCLE_INPUT_CHARS // 4
+        assert degraded_input_budget(3) == MAX_SLEEP_CYCLE_INPUT_CHARS // 8
+
+    def test_floors_so_a_run_always_ingests_something(self):
+        from bobi.monitors.sleep_cycle import (
+            MIN_SLEEP_CYCLE_INPUT_CHARS,
+            degraded_input_budget,
+        )
+
+        assert degraded_input_budget(50) == MIN_SLEEP_CYCLE_INPUT_CHARS
+        assert degraded_input_budget(1000) == MIN_SLEEP_CYCLE_INPUT_CHARS
+
+    def test_never_negative_on_bad_input(self):
+        from bobi.monitors.sleep_cycle import (
+            MAX_SLEEP_CYCLE_INPUT_CHARS,
+            degraded_input_budget,
+        )
+
+        assert degraded_input_budget(-1) == MAX_SLEEP_CYCLE_INPUT_CHARS
+
     def test_surfaces_working_budget_compaction_note(self):
         flags = {"memory_over_budget": True, "memory_over_cap": False,
                  "memory_chars": 17_000, "memory_budget": 16_000,
@@ -226,6 +289,17 @@ class TestSleepCyclePromptContract:
         assert "16,000 characters" in self.text
         assert "24,000-character hard cap" in self.text
         assert "emergency bound, never the target" in self.text
+
+    def test_prompt_and_scheduler_agree_on_what_fails(self):
+        """#1066: the two halves of this contract drifted apart once already.
+        The prompt promises the cap is the only failing threshold; the
+        scheduler must enforce exactly that."""
+        from bobi.memory import MAX_MEMORY_CHARS, WORKING_MEMORY_CHARS
+
+        assert "not a failed run" in self.text
+        assert "over 24,000 characters** is a failed run" in self.text
+        assert f"{MAX_MEMORY_CHARS:,}" in self.text
+        assert f"{WORKING_MEMORY_CHARS:,}" in self.text
 
     def test_prompt_defines_lossless_reference_demotion_tier(self):
         assert "workspace/memory/reference.md" in self.text
@@ -249,6 +323,7 @@ class _CuratorHarness:
         self.rows = rows
         self.published = []
         self.captured = {}  # task, on_result, cwd
+        self.dispatches = []  # every captured spawn, in order (multi-run tests)
         self.cursor_seen = []
 
         def fake_publish(event, data):
@@ -257,6 +332,7 @@ class _CuratorHarness:
 
         def fake_spawn(monitor, cwd, task, on_result):
             self.captured = {"task": task, "on_result": on_result, "cwd": cwd}
+            self.dispatches.append(self.captured)
 
         self.sched = MonitorScheduler(
             publish=fake_publish, state_path=tmp_path / "monitor_state.json",
@@ -394,10 +470,14 @@ class TestCuratorDispatch:
         assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
 
     def test_dispatches_compaction_only_when_memory_over_working_budget(
-        self, tmp_path, monitor
+        self, tmp_path, monitor, caplog
     ):
+        import logging
+
         from bobi.memory import MAX_MEMORY_CHARS, WORKING_MEMORY_CHARS
         from bobi import paths
+
+        caplog.set_level(logging.WARNING, logger="bobi.monitors.scheduler")
 
         state = paths.state_path(tmp_path)
         state.mkdir(parents=True)
@@ -416,21 +496,13 @@ class TestCuratorDispatch:
                                  "summary": "no durable changes",
                                  "urgent": False})
         assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
-        assert h.published == [(
-            "system/monitor.error",
-            {
-                "monitor": "policy-curator",
-                "flavor": "sleep-cycle",
-                "reason": "memory-working-budget-exceeded",
-                "detail": (
-                    "long_term_memory.md output exceeded working budget: "
-                    f"{len(oversized)} chars (budget {WORKING_MEMORY_CHARS}, "
-                    f"hard cap {MAX_MEMORY_CHARS}) at "
-                    f"{paths.long_term_memory_path(tmp_path)}; "
-                    "compaction_required=True; updated=False"
-                ),
-            },
-        )]
+        # #1066: 16k-24k is the documented grace zone, not a failed run. It is
+        # warned (log + run record), never published as a monitor failure.
+        assert h.published == []
+        assert f"{len(oversized)} chars" in caplog.text
+        assert f"budget {WORKING_MEMORY_CHARS}" in caplog.text
+        assert f"hard cap {MAX_MEMORY_CHARS}" in caplog.text
+        assert "a later run compacts it" in caplog.text
 
     def test_dispatches_compaction_when_raw_whitespace_pushes_memory_over_cap(
         self, tmp_path, monitor
@@ -559,7 +631,10 @@ class TestCuratorDispatch:
             "system/memory.updated",
         ]
 
-    def test_rejects_updated_file_over_working_budget_even_under_cap(self, tmp_path, monitor):
+    def test_accepts_updated_file_over_working_budget_under_cap(self, tmp_path, monitor):
+        """#1066: the prompt tells the agent the scheduler validates against the
+        24k cap. A write landing in the 16k-24k grace zone must advance the
+        cursor and publish — warned, not failed."""
         from bobi.memory import MAX_MEMORY_CHARS, WORKING_MEMORY_CHARS
         from bobi import paths
 
@@ -574,10 +649,80 @@ class TestCuratorDispatch:
                                  "summary": "added signal", "bytes": 999999,
                                  "urgent": False})
 
-        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 0
-        assert [event for event, _ in h.published] == ["system/monitor.error"]
-        assert h.published[0][1]["reason"] == "memory-working-budget-exceeded"
-        assert "updated=True" in h.published[0][1]["detail"]
+        assert curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path)) == 10
+        assert [event for event, _ in h.published] == [
+            "system/policy.updated",
+            "system/memory.updated",
+        ]
+
+    def test_grace_zone_warns_on_the_run_record_without_failing_it(
+        self, tmp_path, monitor
+    ):
+        """#1066 + requirement 3: the over-budget state must stay visible to a
+        human reading the runs table — but as a warning, not a failed run."""
+        from bobi.memory import WORKING_MEMORY_CHARS
+        from bobi.monitors.run_records import FAILED, NOTIFIED, RunTracker
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        tracker = RunTracker("policy-curator", flavor="sleep_cycle")
+        with _patch_history(h):
+            h.sched._spawn_sleep_cycle(monitor, [tmp_path], tracker)
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text(
+            "x" * (WORKING_MEMORY_CHARS + 500))
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "added signal", "bytes": 0,
+                                 "urgent": False})
+        tracker.close()
+
+        assert tracker.run.outcome == NOTIFIED
+        assert tracker.run.outcome != FAILED
+        assert "working budget" in tracker.run.reason
+        assert "a later run compacts it" in tracker.run.reason
+
+    @pytest.mark.parametrize(
+        "size,advances,warns",
+        [
+            (15_999, True, False),   # under the working budget: clean run
+            (16_000, True, False),   # exactly at it: still clean
+            (16_001, True, True),    # grace zone opens: warn, do not fail
+            (23_999, True, True),    # still the grace zone
+            (24_000, True, True),    # exactly at the hard cap: still allowed
+            (24_001, False, False),  # over the cap: the one real failure
+        ],
+    )
+    def test_working_budget_classification_boundary(
+        self, tmp_path, monitor, caplog, size, advances, warns
+    ):
+        """#1066: pin every edge of the two thresholds. Only >24,000 chars is a
+        failed run; the 16k-24k band advances the cursor with a warning."""
+        import logging
+
+        from bobi import paths
+
+        caplog.set_level(logging.WARNING, logger="bobi.monitors.scheduler")
+
+        h = _CuratorHarness(tmp_path, [_row(10, "new durable signal")])
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.long_term_memory_path(tmp_path).write_text("x" * size)
+        h.captured["on_result"]({"success": True, "updated": True,
+                                 "summary": "added signal", "bytes": size,
+                                 "urgent": False})
+
+        cursor = curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path))
+        topics = [event for event, _ in h.published]
+        if advances:
+            assert cursor == 10
+            assert "system/memory.updated" in topics
+            assert "system/monitor.error" not in topics
+        else:
+            assert cursor == 0
+            assert topics == ["system/monitor.error"]
+            assert h.published[0][1]["reason"] == "memory-cap-exceeded"
+        assert ("exceeded working budget" in caplog.text) is warns
 
     def test_demoted_result_requires_reference_artifact(self, tmp_path, monitor):
         from bobi import paths
@@ -787,6 +932,260 @@ class TestCuratorDispatch:
                 "detail": "bad output",
             },
         )]
+
+
+# ---------------------------------------------------------------------------
+# the compaction deadlock (#1064): a run that cannot fit must not retry
+# identically, and the stuck state must be loud
+# ---------------------------------------------------------------------------
+
+def _big_rows(count: int, size: int = 15_000) -> list[dict]:
+    """Rows large enough that the input budget, not the row count, decides how
+    many one run ingests."""
+    return [_row(i, f"m{i}-" + ("z" * size)) for i in range(1, count + 1)]
+
+
+def _ingested_ids(task: str) -> list[int]:
+    return [int(m) for m in re.findall(r"\[assistant #(\d+)\]", task)]
+
+
+class TestSleepCycleWedge:
+    """#1064: over-budget memory made the compaction run itself too large, so
+    it failed with `Prompt is too long` every interval, the cursor never
+    advanced, and the backlog grew forever. Nothing in the loop shrank either
+    input. These pin the escape."""
+
+    def _fail(self, h, summary="Prompt is too long"):
+        h.captured["on_result"]({"success": False, "summary": summary})
+
+    def test_repeated_failure_shrinks_the_next_window(self, tmp_path, monitor):
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+            first = _ingested_ids(h.captured["task"])
+            self._fail(h)
+
+            h.sched._spawn_curator(monitor, [tmp_path])
+            second = _ingested_ids(h.captured["task"])
+            self._fail(h)
+
+            h.sched._spawn_curator(monitor, [tmp_path])
+            third = _ingested_ids(h.captured["task"])
+
+        assert len(first) > len(second) > len(third)
+        assert len(h.dispatches[1]["task"]) < len(h.dispatches[0]["task"])
+
+    def test_success_restores_the_full_window(self, tmp_path, monitor):
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+            full = _ingested_ids(h.captured["task"])
+            self._fail(h)
+
+            h.sched._spawn_curator(monitor, [tmp_path])
+            assert len(_ingested_ids(h.captured["task"])) < len(full)
+            h.captured["on_result"]({"success": True, "updated": False,
+                                     "summary": "no durable changes"})
+
+            h.sched._spawn_curator(monitor, [tmp_path])
+            assert _ingested_ids(h.captured["task"]) == full
+
+    def test_grace_zone_write_is_not_a_failure_for_degradation(
+        self, tmp_path, monitor
+    ):
+        """The join between the two bugs: while #1066 mis-classified every
+        ordinary 16k-24k write as failed, the streak could never reset."""
+        from bobi.memory import WORKING_MEMORY_CHARS
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+            full = _ingested_ids(h.captured["task"])
+            self._fail(h)
+
+            h.sched._spawn_curator(monitor, [tmp_path])
+            paths.long_term_memory_path(tmp_path).write_text(
+                "x" * (WORKING_MEMORY_CHARS + 500))
+            h.captured["on_result"]({"success": True, "updated": True,
+                                     "summary": "over budget, stopping",
+                                     "bytes": 0, "urgent": False})
+
+            h.sched._spawn_curator(monitor, [tmp_path])
+
+        assert _ingested_ids(h.captured["task"]) == full
+
+    def test_escalates_loudly_once_stuck(self, tmp_path, monitor):
+        """Requirement 3: a wedged loop must stop reading as a routine retry.
+        The escalation carries its own reason, so the drain's per-reason
+        suppression cannot bury it behind the ordinary failure noise."""
+        from bobi.monitors.sleep_cycle import SLEEP_CYCLE_STUCK_RUNS
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+
+        with _patch_history(h):
+            for _ in range(SLEEP_CYCLE_STUCK_RUNS):
+                h.sched._spawn_curator(monitor, [tmp_path])
+                assert not [
+                    d for _, d in h.published
+                    if d.get("reason") == "sleep-cycle-stuck"
+                ], "escalated before the streak threshold"
+                self._fail(h)
+            h.sched._spawn_curator(monitor, [tmp_path])
+
+        stuck = [d for e, d in h.published
+                 if e == "system/monitor.error"
+                 and d.get("reason") == "sleep-cycle-stuck"]
+        assert len(stuck) == 1
+        detail = stuck[0]["detail"]
+        assert f"{SLEEP_CYCLE_STUCK_RUNS} consecutive" in detail
+        assert "cursor" in detail
+        assert "Prompt is too long" in detail  # the last failure's own summary
+
+    def test_stuck_escalation_repeats_while_still_stuck(self, tmp_path, monitor):
+        from bobi.monitors.sleep_cycle import SLEEP_CYCLE_STUCK_RUNS
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+
+        with _patch_history(h):
+            for _ in range(SLEEP_CYCLE_STUCK_RUNS + 3):
+                h.sched._spawn_curator(monitor, [tmp_path])
+                self._fail(h)
+
+        stuck = [d for e, d in h.published if d.get("reason") == "sleep-cycle-stuck"]
+        assert len(stuck) == 3  # one per interval past the threshold
+
+    def test_stuck_escalation_does_not_fail_the_recovering_run(
+        self, tmp_path, monitor
+    ):
+        """The escalation judges the PRECEDING runs and fires before this one
+        has done anything. Recording it as this firing's failure would mark the
+        very run that recovers as failed — the same mis-report class as #1066."""
+        from bobi.monitors.run_records import FAILED, RunTracker
+        from bobi.monitors.sleep_cycle import SLEEP_CYCLE_STUCK_RUNS
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+
+        with _patch_history(h):
+            for _ in range(SLEEP_CYCLE_STUCK_RUNS):
+                h.sched._spawn_curator(monitor, [tmp_path])
+                self._fail(h)
+
+            tracker = RunTracker("policy-curator", flavor="sleep_cycle")
+            h.sched._spawn_sleep_cycle(monitor, [tmp_path], tracker)
+            h.captured["on_result"]({"success": True, "updated": False,
+                                     "summary": "no durable changes"})
+            tracker.close()
+
+        assert [d for _, d in h.published
+                if d["reason"] == "sleep-cycle-stuck"], "never escalated"
+        assert tracker.run.outcome != FAILED
+        assert "sleep-cycle-stuck" in tracker.run.reason  # still visible
+
+    def test_reference_kb_sync_failure_counts_toward_the_streak(
+        self, tmp_path, monitor, monkeypatch
+    ):
+        """A KB-sync failure parks the cursor like any other turn-back, so it
+        must degrade and escalate like one."""
+        from bobi import paths
+
+        monkeypatch.setattr(
+            "bobi.memory.sync_reference_to_cold_memory_kb",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("index down")),
+        )
+        reference = paths.workspace_dir(tmp_path) / "memory" / "reference.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("Header\n\n## Tools\n\n- cold detail\n")
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+            full = _ingested_ids(h.captured["task"])
+            paths.long_term_memory_path(tmp_path).write_text(
+                "## Facts\n\n- see workspace/memory/reference.md\n\n## Decisions\n\n- x\n")
+            reference.write_text("Header\n\n## Tools\n\n- changed cold detail\n")
+            h.captured["on_result"]({"success": True, "updated": True,
+                                     "summary": "demoted", "bytes": 42,
+                                     "urgent": False, "demoted": 1})
+
+            assert curator_mod.read_cursor(
+                paths.long_term_memory_cursor_path(tmp_path)) == 0
+            h.sched._spawn_curator(monitor, [tmp_path])
+
+        assert len(_ingested_ids(h.captured["task"])) < len(full)
+
+    def test_degraded_window_is_named_in_the_task(self, tmp_path, monitor):
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+            assert "reduced ingest window" not in h.captured["task"]
+            self._fail(h)
+            h.sched._spawn_curator(monitor, [tmp_path])
+
+        assert "reduced ingest window" in h.captured["task"]
+        assert "1 consecutive failed run" in h.captured["task"]
+
+    def test_cursor_still_advances_under_a_degraded_window(self, tmp_path, monitor):
+        """Progress, not just a smaller prompt: the shrunk run must still move
+        the watermark so the backlog drains."""
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+            self._fail(h)
+            h.sched._spawn_curator(monitor, [tmp_path])
+            ingested = _ingested_ids(h.captured["task"])
+            h.captured["on_result"]({"success": True, "updated": False,
+                                     "summary": "no durable changes"})
+
+        cursor = curator_mod.read_cursor(paths.long_term_memory_cursor_path(tmp_path))
+        assert cursor == max(ingested)
+        assert cursor > 0
+
+    def test_cursor_write_failure_is_a_turn_back_not_a_clean_run(
+        self, tmp_path, monitor
+    ):
+        """A cursor that cannot be written leaves this window to be re-read
+        forever - the wedge itself. Reporting the run clean would also clear
+        the streak on every attempt, so the stuck escalation could never fire
+        on precisely the loop that is unable to advance."""
+        from bobi import paths
+
+        h = _CuratorHarness(tmp_path, _big_rows(20))
+        paths.state_path(tmp_path).mkdir(parents=True, exist_ok=True)
+        # Real failure injection, not a mock: a directory where the cursor file
+        # belongs. read_cursor treats a non-file as 0; write_cursor raises.
+        paths.long_term_memory_cursor_path(tmp_path).mkdir(parents=True)
+
+        with _patch_history(h):
+            h.sched._spawn_curator(monitor, [tmp_path])
+            full = _ingested_ids(h.captured["task"])
+            h.captured["on_result"]({"success": True, "updated": False,
+                                     "summary": "no durable changes"})
+
+            assert [d for e, d in h.published
+                    if e == "system/monitor.error"
+                    and d.get("reason") == "cursor-write-failed"], \
+                "a parked cursor was reported as a clean run"
+
+            # And it counts: the next run's window shrinks like any failure.
+            h.sched._spawn_curator(monitor, [tmp_path])
+            assert len(_ingested_ids(h.captured["task"])) < len(full)
 
 
 def _spawn_curator_and_wait(monkeypatch, monitor, task: str = "task body",
