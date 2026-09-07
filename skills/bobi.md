@@ -77,6 +77,11 @@ bobi build <team> --tag <ref> [--push]  # render a team into a ready-to-run
 
 ## Runtime Commands
 
+Ordinary restart preserves saved event replay identity. Replay still requires the
+deployment and server history to survive. `restart --fresh` deliberately clears
+deployment/cursor state and conversation identity; do not use it to recover pending
+events. See `docs/EVENT_SERVER.md` for recovery limits and diagnostics.
+
 ```bash
 bobi agent <name> start
 bobi agent <name> stop

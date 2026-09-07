@@ -1291,7 +1291,11 @@ class Session:
             if response is None:
                 log.error(
                     "Inbox message %s for '%s' did not reach a terminal result; "
-                    "leaving it unacknowledged for replay (state=%s)",
+                    "leaving it unacknowledged (state=%s). Brain replacement does not "
+                    "replay this message in the current process. An ordinary manager "
+                    "restart may recover it only while the deployment and server "
+                    "history survive. Review prior side effects before resending; "
+                    "do not use --fresh to preserve pending replay.",
                     msg.id,
                     self.name,
                     self._state,
@@ -1649,7 +1653,8 @@ class Session:
             log.warning(
                 "Event subscription registration failed for '%s' — booting "
                 "anyway and retrying in the background; queued events resume "
-                "on reconnect", self.name, exc_info=True,
+                "on reconnect only while deployment and server history survive",
+                self.name, exc_info=True,
             )
             self._retry_subscription_in_background(keys)
 
