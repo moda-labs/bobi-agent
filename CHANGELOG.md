@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.58.0 - 2026-08-21
+
+Minor release: fleet usage answers over MCP, a durable WorkflowRun ledger with
+period-deduped admission, operator alerts when a brain cannot authenticate or
+is out of credits, one executor and one turn primitive behind every run, the
+mcp 2.0 breakage closed, and the review-remediation initiative finished.
+
+### Added
+
+- **Rolling fleet usage summary over MCP (#1061, MOD-375).** Agents can answer
+  per-fleet job-count, token-usage, and cost questions over a 1-365 day rolling
+  window — terminal job outcomes, input/cached/output tokens, recorded and
+  estimated cost — aggregated by fleet with per-instance detail retained, and
+  partial results when one instance is unreachable.
+- **A WorkflowRun ledger entry for every run, with period-deduped admission
+  (#1052, #1049, #1048).** Every workflow run opens a durable ledger entry at
+  launch and closes it honestly (`completed`, `failed` with its error, or
+  `waiting` at an await step). A new `period: hourly|daily|weekly|monthly`
+  workflow field derives the run key per bucket, so one period admits one run
+  across every dispatch path — the #1016 double-publish shape. A dead run's
+  stale entry is flipped to `failed` instead of blocking the period; `--fresh`
+  is the operator escape hatch. Underneath, `drain_turn` in `bobi/brain/turns.py`
+  is now the single copy of the spawn-style drain, replacing the orchestrator's
+  and subagent's hand-rolled loops.
+- **Alerts on brain authentication and credit failures (#1042, #1041; MOD-360,
+  MOD-292).** A brain auth failure is now a terminal, visible session failure —
+  status `error` with diagnostics, the triggering message left unacknowledged
+  for replay — and operators are notified once when an unattended run cannot
+  proceed because auth expired or credits ran out, with recovery observable
+  without a successful brain turn.
+- **A framework communication baseline in every team's instructions (#1044,
+  #1043).** Rendered ahead of team `AGENTS.md` on every brain (lead with the
+  outcome, plain language, honest reporting, no completion claims without
+  evidence). Operator opt-out via `BOBI_COMMUNICATION_STYLE=off`; packages
+  cannot override it.
+
+### Fixed
+
+Security and hardening:
+- **Framework protection no longer blocks package managers (#1060, MOD-290).**
+  Runtime `chmod -w` across `site-packages/bobi/` broke `uv tool upgrade`,
+  pipx, and pip with `PermissionError`. Replaced by launch-time file-integrity
+  checks against PEP 376 `RECORD` hashes; team packages keep their strict
+  read-only locks.
+- **The login destination is no longer caller-controlled (#1009, #958).**
+  `login-bootstrap --channel` is gone.
+- **Delivered team archives fail closed (#1031, MOD-332).** Package bytes that
+  do not match the install manifest can no longer silently replace a
+  known-good team cache.
+- **Issue-assignment dispatch is scoped to self (#1032, MOD-297).**
+
+mcp 2.0, closed in two passes:
+- **Survive the streamable-http client rename (#1046, #1045).** mcp 2.0.0
+  dropped the legacy spelling, breaking the codex-brain MCP preflight and the
+  setup wizard's HTTP probe on every fresh install. One shared transport
+  opener handles both eras.
+- **Pin `mcp>=1.23.0,<2` and read both field spellings (#1054).** Without the
+  bound every fresh install resolves mcp 2.0 today. The setup probe now reads
+  both eras of `inputSchema`/`input_schema` and `isError`/`is_error` — under
+  2.0 an errored tool call had been reported as live-ok.
+
+Runtime and operations:
+- **`connect()` is never a turn (#1017, #1016).** The session handshake ran
+  dispatch text as an unowned tool-enabled turn before step 0 — the source of
+  the double-standup and a bypass of the pr-closed merge gate. Every piece of
+  text now enters a session as an explicit, tracked turn.
+- **The sleep cycle no longer wedges on over-budget memory (#1069, #1064,
+  #1066).** An over-budget `long_term_memory.md` failed the run without
+  advancing the cursor, deadlocking the cycle.
+- **Ambiguous liveness verdicts are deferred under legitimate heavy load
+  (#1022, MOD-364, #903).** The supervisor no longer charges the restart
+  budget when the manager's own sanctioned work saturates the host.
+- **`doctor` detects processes still running code an in-place upgrade replaced
+  (#1035, #928).** Long-lived processes record what they launched from; a
+  six-day-old event server no longer reads as healthy.
+- **A failed monitor publish is parked and retried off the tick (#1019,
+  #1006).**
+- **Duplicate suppression is the default (#1036, #850).** A default run key is
+  derived when the caller supplies none.
+- **Brain auth failures are terminal (#1041, MOD-292, #855)** — see the alert
+  feature above.
+- **Distribution builds accept Node 20+ (#1010, #857, MOD-291).** The build
+  hook required exactly Node 20; git and sdist installs failed on 21+ after
+  passing the installer preflight. esbuild still targets node20.
+- **Smaller fixes:** probe agent name resolved from `BOBI_ROOT`'s layout, not
+  its basename (#1068, #1063); every line bobi appends to a runtime log is
+  dated, once (#1033, #851); `requires:` preflight failures are attributed to
+  the failing dependency (#1034, #771); pr-closed cleanup gates on a live
+  merge re-read instead of a cached verdict (#1007, #1004); the web app labels
+  the saved popover's figures as lifetime (#1014, MOD-373) and drops the
+  Remind button from awaiting-action rows (#1015, MOD-371).
+
+### Changed
+
+- **One executor for ad-hoc work (#1058, #1057).** `-w adhoc --wait` runs
+  through the workflow executor — same derivation, preflight, spend governor,
+  and admission as a detached launch — and `spawn_adhoc`'s executor role is
+  retired. Config-declared `mcp_servers` now reach workflow sessions.
+- **The review-remediation initiative is closed (#821, #819, #822).** Roughly
+  a dozen consolidation refactors (one wall-clock timestamp convention, brain
+  CLI path resolution in the adapter, shared launch contract for the webapp
+  daemon, dead-parameter removal), the six deferred web-UI items (#1065), and
+  the Phase 9 test-suite cleanup (#1059). Behavior-preserving by design and
+  test-pinned.
+
 ## 0.57.0 - 2026-08-11
 
 Minor release: agents can author their own OTLP telemetry, subscription login

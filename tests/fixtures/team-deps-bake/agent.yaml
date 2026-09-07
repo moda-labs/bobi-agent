@@ -1,0 +1,15 @@
+version: "1.0.0"
+agent: team-deps-bake
+entry_point: manager
+
+build:
+  run_root:
+    - 'printf "%s" "${MODA_SKILLS_TOKEN}" | sha256sum | cut -d " " -f 1 > /opt/bobi/mod361-secret.sha256'
+    - 'printf "#!/bin/sh\nexit 0\n" > /usr/local/bin/mod361-hook-tool && chmod 755 /usr/local/bin/mod361-hook-tool'
+  verify: requires
+
+requires:
+  - name: secret-digest
+    check: 'test -s /opt/bobi/mod361-secret.sha256'
+  - name: hook-tool
+    check: 'command -v mod361-hook-tool >/dev/null'

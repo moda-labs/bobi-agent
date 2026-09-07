@@ -25,6 +25,7 @@ on:
       - ".dockerignore"
       - "docker/**"
       - "tests/integration/test_container_image.py"
+      - "tests/fixtures/team-deps-bake/**"
       - ".github/workflows/container.yml"
       # Regained at the reorg: the public inputs that define what the image
       # installs. Under the split these lived in another repo and could not

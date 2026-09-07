@@ -18,6 +18,7 @@ per process; no code should infer identity from cwd.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 ROOT_MARKER = "agent.yaml"
@@ -91,6 +92,40 @@ def agent_run_root(name: str) -> Path:
 def agent_name_for_root(root: Path | None = None) -> str:
     r = (root if root is not None else bobi_root()).resolve()
     return r.parent.name if r.name == "run" else r.name
+
+
+AGENT_ENV = "BOBI_AGENT"
+INSTANCE_ENV = "BOBI_INSTANCE"
+
+
+def agent_name(root: Path | None = None,
+               env: Mapping[str, str] | None = None) -> str:
+    """The selected agent's name - the one resolution, for spawned commands.
+
+    Mirrors docker-entrypoint.sh: an explicit ``BOBI_AGENT`` wins, then
+    ``BOBI_INSTANCE``, then the run root's own layout. Callers that hand a
+    resolved name to a child process (a `requires:` probe addressing an
+    agent-scoped command) use this instead of deriving it themselves -
+    ``basename "$BOBI_ROOT"`` reads ``run`` for every ``<home>/agents/<name>/
+    run`` deployment, an agent that does not exist (#1063).
+
+    ``env`` is the environment the answer is FOR, defaulting to this process's.
+    A caller building a child's environment passes that dict, so a selection it
+    already carries wins over this process's own.
+
+    Returns "" when no name can be determined, which is a real state on an
+    unbound or non-canonical root. The caller decides what that means; this
+    never guesses.
+    """
+    source = os.environ if env is None else env
+    for var in (AGENT_ENV, INSTANCE_ENV):
+        selected = (source.get(var) or "").strip()
+        if selected:
+            return selected
+    try:
+        return agent_name_for_root(root).strip()
+    except (RuntimeError, OSError):
+        return ""
 
 
 def list_agents() -> list[str]:

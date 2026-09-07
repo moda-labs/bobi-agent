@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from .conftest import _drain
+
 
 def _codex_meets_version_floor() -> bool:
     exe = shutil.which("codex")
@@ -239,18 +241,6 @@ def responses_stub():
     finally:
         server.shutdown()
         thread.join(timeout=5)
-
-
-async def _drain(session):
-    from bobi.brain import AssistantText, TurnResult
-
-    text, result = "", None
-    async for msg in session.receive_response():
-        if isinstance(msg, AssistantText) and msg.text:
-            text += msg.text
-        elif isinstance(msg, TurnResult):
-            result = msg
-    return text, result
 
 
 @requires_codex_responses_gateway

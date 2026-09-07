@@ -29,16 +29,6 @@ def state_dir(tmp_path, monkeypatch):
     return sd
 
 
-@pytest.fixture
-def mock_project_root(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        "bobi.kb.embedder._state_dir",
-        lambda root=None: tmp_path / ".bobi" / "state",
-    )
-    (tmp_path / ".bobi" / "state").mkdir(parents=True, exist_ok=True)
-    return tmp_path
-
-
 # ---------------------------------------------------------------------------
 # _check_health
 # ---------------------------------------------------------------------------

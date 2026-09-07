@@ -29,6 +29,22 @@ log = logging.getLogger(__name__)
 # deterministically and good enough to bound ingest cost.
 MAX_SLEEP_CYCLE_INPUT_CHARS = 200_000
 
+# Floor for the degraded window below. A run must always ingest *something*,
+# or the cursor can never advance and the backlog never drains.
+MIN_SLEEP_CYCLE_INPUT_CHARS = MAX_SLEEP_CYCLE_INPUT_CHARS // 16
+
+# Consecutive failed runs before the scheduler stops reporting the loop as an
+# ordinary retry and escalates it as stuck (#1064).
+SLEEP_CYCLE_STUCK_RUNS = 3
+
+# Bound on the long_term_memory.md copy embedded in the task. The document's own
+# hard cap is MAX_MEMORY_CHARS (24k); this is deliberately looser so an
+# over-cap file — the very thing a compaction run exists to fix — still rides
+# whole. It bounds only a runaway: a rejected over-cap rewrite STAYS on disk and
+# is re-read raw into every later run, so without a bound one bad write grows
+# the prompt past the model's context and wedges the loop forever (#1064).
+MAX_MEMORY_INPUT_CHARS = 48_000
+
 # The one-time seed (impl step 7) distills the full existing INDEX.md journal(s)
 # in one shot and must NOT be clipped by the per-run cap — capping the seed would
 # truncate the very knowledge it exists to preserve. A generous one-shot budget.
@@ -45,6 +61,11 @@ _ELISION = "\n… [truncated {n} chars] …\n"
 _REFERENCE_ELISION = (
     "\n\n[reference preview truncated; read workspace/memory/reference.md "
     "before editing]\n"
+)
+
+_MEMORY_ELISION = (
+    "\n\n[memory preview truncated: the file on disk is {n} chars; read "
+    "<run>/state/long_term_memory.md before rewriting it]\n\n"
 )
 
 
@@ -85,19 +106,46 @@ def _row_text(row: dict) -> str:
     return content
 
 
-def _truncate_head_tail(text: str, budget: int) -> str:
+def _truncate_head_tail(text: str, budget: int, marker: str = "") -> str:
     """Head+tail slice of ``text`` fitting in ``budget`` chars, with an explicit
-    elision marker naming how many chars were dropped — lossy and LOUD."""
+    elision marker naming how many chars were dropped — lossy and LOUD.
+
+    ``marker`` overrides the default elision for callers that clip something
+    other than a transcript message; head+tail (never head-only) because the
+    documents this clips carry their most load-bearing sections at the end.
+    """
     if len(text) <= budget:
         return text
-    dropped = len(text) - budget
-    marker = _ELISION.format(n=dropped)
+    marker = marker or _ELISION.format(n=len(text) - budget)
     keep = max(budget - len(marker), 0)
     head = keep // 2
     tail = keep - head
     if tail:
         return text[:head] + marker + text[-tail:]
     return text[:head] + marker
+
+
+def degraded_input_budget(consecutive_failures: int) -> int:
+    """This run's transcript budget, given the sleep cycle's failure streak.
+
+    A run whose prompt does not fit the model's context fails identically every
+    interval unless something shrinks — and nothing did (#1064): the transcript
+    cap was a constant, and the memory document rode whole. Halving per
+    consecutive failure guarantees the input reaches a size that fits, so the
+    cursor advances and the backlog starts draining again. Success resets it,
+    so the reduced window is a recovery mode, never the steady state.
+    """
+    failures = max(0, int(consecutive_failures or 0))
+    return max(MIN_SLEEP_CYCLE_INPUT_CHARS,
+               MAX_SLEEP_CYCLE_INPUT_CHARS >> min(failures, 32))
+
+
+def _memory_for_prompt(text: str) -> str:
+    """Bound the long_term_memory.md copy embedded in the sleep-cycle task."""
+    if len(text) <= MAX_MEMORY_INPUT_CHARS:
+        return text
+    return _truncate_head_tail(text, MAX_MEMORY_INPUT_CHARS,
+                               _MEMORY_ELISION.format(n=len(text)))
 
 
 def _reference_for_prompt(text: str) -> str:
@@ -206,6 +254,14 @@ def build_sleep_cycle_task(prompt_template: str, transcript: str,
         notes.append(f"- {flags['oversized_truncated']} oversized message(s) were "
                      f"head+tail truncated to fit (ids {flags.get('oversized_ids')}); "
                      f"set oversized_truncated and name them.")
+    if flags.get("input_budget_degraded"):
+        notes.append(
+            f"- This run has a reduced ingest window: the previous "
+            f"{flags['input_budget_degraded']} consecutive failed run(s) shrank "
+            f"the transcript budget to {flags.get('input_budget')} chars "
+            f"(normally {MAX_SLEEP_CYCLE_INPUT_CHARS}). Fewer messages are in "
+            f"view; the rest are DEFERRED, not lost. Land a smaller rewrite "
+            f"rather than stopping — the window widens again on success.")
     if flags.get("memory_over_budget"):
         observed = flags.get("memory_chars")
         budget = flags.get("memory_budget")
@@ -237,7 +293,7 @@ def build_sleep_cycle_task(prompt_template: str, transcript: str,
     return (
         f"{prompt_template}\n\n"
         f"=== CURRENT long_term_memory.md (rewrite this in full via Write) ===\n"
-        f"{current_policy or '(empty — no long_term_memory.md yet)'}\n\n"
+        f"{_memory_for_prompt(current_policy) or '(empty — no long_term_memory.md yet)'}\n\n"
         f"=== CURRENT workspace/memory/reference.md (update in place if needed) ===\n"
         f"{_reference_for_prompt(current_reference) or '(empty — no reference.md yet)'}\n\n"
         f"=== NEW TRANSCRIPT DELTA (since your last run) ===\n"

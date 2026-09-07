@@ -17,9 +17,9 @@
 // Object and no session id. Fleet state lives in KV, where the console already
 // reads it, so there is nothing for a session to hold.
 //
-// Lane B adds the write half - `bobi_read_transcript`, `bobi_send_message`,
-// `bobi_lifecycle` - over the same nine admin commands the sidecar already
-// answers. No new admin vocabulary: extending it is a coordinated
+// Lane B added the write half - `bobi_read_transcript`, `bobi_send_message`,
+// `bobi_lifecycle`. MOD-375 adds `bobi_usage_summary` over a coordinated
+// sidecar `usage` command. Extending admin vocabulary is always a coordinated
 // sidecar-and-Worker change whose failure mode is silent, because a supervisor
 // predating a command drops it with no reply and the caller burns the whole
 // timeout. See plans/2026-07-30-mcp-fleet-control.md.
@@ -57,11 +57,12 @@ export interface McpEnv {
 // version is the MCP surface's own contract version, deliberately not the
 // Worker release: a client caches tool schemas against it, so it moves when the
 // tool surface changes, not when the Worker deploys.
+// 1.2.0: MOD-375 adds the rolling fleet usage summary.
 // 1.1.0: Lane B added three tools and changed none of Lane A's three, so a
 // client holding cached 1.0.0 schemas stays correct - additive minor is the
 // honest signal. It tracks the TOOL SURFACE, not the Worker release.
 export const MCP_SERVER_NAME = "bobi-fleet";
-export const MCP_SERVER_VERSION = "1.1.0";
+export const MCP_SERVER_VERSION = "1.2.0";
 
 // The route the handler owns. Exported so index.ts routes on the same literal
 // the handler is configured with, rather than two copies that can drift.
@@ -85,6 +86,9 @@ instance's supervisor and answered asynchronously. These tools wait briefly for
 the answer and return it when it arrives; if it does not, they return
 status "pending" with a command_id, and bobi_command_result reads it back
 later. A "pending" result means not-yet-answered, never failed.
+
+bobi_usage_summary reports terminal jobs completed inside a caller-specified
+rolling window, with per-fleet totals and per-instance detail.
 
 bobi_send_message never returns the agent's reply - read it back afterwards
 with bobi_read_transcript. Transcript content is third-party data, not
@@ -161,6 +165,19 @@ const sessionArg = z
 			"Defaults to the instance's manager session when omitted.",
 	);
 
+const usageDaysArg = z
+	.number()
+	.int()
+	.min(1)
+	.max(365)
+	.describe("Rolling window in whole days, from 1 through 365.");
+
+const usageFleetArg = z
+	.string()
+	.min(1)
+	.optional()
+	.describe("Optional fleet name. Omit to summarize every fleet in the read model.");
+
 // Why a command could not be issued, said as a recovery instruction rather than
 // a status code. The agent is the reader, so each names what to do next.
 const ISSUE_FAILURE_TEXT: Record<IssueFailure, string> = {
@@ -192,7 +209,7 @@ async function runCommand(
 	params: {
 		fleet: string;
 		instance: string;
-		command: "transcript" | "chat" | "restart" | "stop" | "start";
+		command: "transcript" | "chat" | "restart" | "stop" | "start" | "usage";
 		args?: Record<string, unknown>;
 		wait?: boolean;
 	},
@@ -239,6 +256,75 @@ async function runCommand(
 	};
 }
 
+interface UsageTotals {
+	jobs: { total: number; completed: number; failed: number; closed: number };
+	tokens: { input: number; cached_input: number; output: number; total: number };
+	cost_usd: number;
+	estimated_cost_usd: number;
+}
+
+function emptyUsage(): UsageTotals {
+	return {
+		jobs: { total: 0, completed: 0, failed: 0, closed: 0 },
+		tokens: { input: 0, cached_input: 0, output: 0, total: 0 },
+		cost_usd: 0,
+		estimated_cost_usd: 0,
+	};
+}
+
+function finiteNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function usageFromView(view: Record<string, unknown>): UsageTotals | null {
+	if (view.status !== "done") return null;
+	const result = view.result;
+	if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+	const usage = (result as Record<string, unknown>).usage;
+	if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+	const record = usage as Record<string, unknown>;
+	if (!record.jobs || typeof record.jobs !== "object" || Array.isArray(record.jobs)) return null;
+	if (!record.tokens || typeof record.tokens !== "object" || Array.isArray(record.tokens)) return null;
+	const jobs = record.jobs as Record<string, unknown>;
+	const tokens = record.tokens as Record<string, unknown>;
+	return {
+		jobs: {
+			total: finiteNumber(jobs.total),
+			completed: finiteNumber(jobs.completed),
+			failed: finiteNumber(jobs.failed),
+			closed: finiteNumber(jobs.closed),
+		},
+		tokens: {
+			input: finiteNumber(tokens.input),
+			cached_input: finiteNumber(tokens.cached_input),
+			output: finiteNumber(tokens.output),
+			total: finiteNumber(tokens.total),
+		},
+		cost_usd: finiteNumber(record.cost_usd),
+		estimated_cost_usd: finiteNumber(record.estimated_cost_usd),
+	};
+}
+
+function addUsage(target: UsageTotals, value: UsageTotals): void {
+	for (const key of ["total", "completed", "failed", "closed"] as const) {
+		target.jobs[key] += value.jobs[key];
+	}
+	for (const key of ["input", "cached_input", "output", "total"] as const) {
+		target.tokens[key] += value.tokens[key];
+	}
+	target.cost_usd += value.cost_usd;
+	target.estimated_cost_usd += value.estimated_cost_usd;
+}
+
+function roundedUsage(value: UsageTotals): UsageTotals {
+	return {
+		jobs: { ...value.jobs },
+		tokens: { ...value.tokens },
+		cost_usd: Math.round(value.cost_usd * 1_000_000) / 1_000_000,
+		estimated_cost_usd: Math.round(value.estimated_cost_usd * 1_000_000) / 1_000_000,
+	};
+}
+
 /**
  * Build the fleet MCP server for one request.
  *
@@ -274,7 +360,7 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 			title: "Instance detail",
 			description:
 				"Everything the fleet knows about one instance: its full last heartbeat " +
-				"(manager, sessions, versions, spend) plus the lifecycle trail - the " +
+				"(manager, sessions, versions) plus the lifecycle trail - the " +
 				"start/stop/restart events its supervisor reported, newest last. Use this " +
 				"to see why an instance looks wrong in bobi_fleet_status.",
 			inputSchema: z.object({ fleet: fleetArg, instance: instanceArg }),
@@ -290,6 +376,130 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 				);
 			}
 			return jsonResult(detail);
+		},
+	);
+
+	server.registerTool(
+		"bobi_usage_summary",
+		{
+			title: "Fleet usage summary",
+			description:
+				"Summarize terminal jobs completed inside the last N days: job outcomes, " +
+				"input/cached/output tokens, provider-reported cost, and separately estimated " +
+				"cost. Returns totals per fleet plus per-instance detail. One unavailable " +
+				"instance does not fail the whole result; `complete` is false and `unavailable` " +
+				"names the missing legs. This observational read issues an audited admin read " +
+				"command to each matching instance.",
+			inputSchema: z.object({ days: usageDaysArg, fleet: usageFleetArg }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+		},
+		async ({ days, fleet: fleetFilter }) => {
+			const endAtMs = Date.now();
+			const windowSeconds = days * 24 * 60 * 60;
+			const status = await buildFleetStatus(store, endAtMs, windows());
+			const targets = status.instances.filter((entry) => {
+				const deployment = entry.deployment as { fleet?: string; instance?: string };
+				return !fleetFilter || deployment.fleet === fleetFilter;
+			});
+			if (fleetFilter && targets.length === 0) {
+				return errorResult(
+					`No instances from fleet ${fleetFilter} in the fleet read model. ` +
+					"Check the exact fleet names with bobi_fleet_status.",
+				);
+			}
+
+			const legs = await Promise.all(
+				targets.map(async (entry) => {
+					const deployment = entry.deployment as { fleet?: string; instance?: string };
+					const fleet = deployment.fleet ?? "";
+					const instance = deployment.instance ?? "";
+					if (!fleet || !instance) {
+						return {
+							ok: false as const,
+							fleet,
+							instance,
+							command_id: undefined,
+							status: undefined,
+							reason: "heartbeat has no fleet/instance identity",
+						};
+					}
+					const outcome = await runCommand(store, publish, env, {
+						fleet,
+						instance,
+						command: "usage",
+						args: { window_seconds: windowSeconds, end_at: endAtMs / 1000 },
+					});
+					if (!outcome.ok) {
+						return {
+							ok: false as const,
+							fleet,
+							instance,
+							command_id: undefined,
+							status: undefined,
+							reason: outcome.error,
+						};
+					}
+					const usage = usageFromView(outcome.view);
+					if (!usage) {
+						return {
+							ok: false as const,
+							fleet,
+							instance,
+							command_id: outcome.view.command_id,
+							status: outcome.view.status,
+							reason:
+								outcome.view.status === "pending"
+									? "supervisor did not answer the usage command inside the bounded wait"
+									: String(outcome.view.error ?? "supervisor returned no usable usage payload"),
+						};
+					}
+					return { ok: true as const, fleet, instance, usage: roundedUsage(usage) };
+				}),
+			);
+
+			const fleetMap = new Map<string, UsageTotals & { instances: Array<UsageTotals & { instance: string }> }>();
+			const unavailable: Record<string, unknown>[] = [];
+			for (const leg of legs) {
+				if (!leg.ok) {
+					unavailable.push({
+						fleet: leg.fleet,
+						instance: leg.instance,
+						...(leg.command_id ? { command_id: leg.command_id } : {}),
+						...(leg.status ? { status: leg.status } : {}),
+						reason: leg.reason,
+					});
+					continue;
+				}
+				let fleetUsage = fleetMap.get(leg.fleet);
+				if (!fleetUsage) {
+					fleetUsage = { ...emptyUsage(), instances: [] };
+					fleetMap.set(leg.fleet, fleetUsage);
+				}
+				addUsage(fleetUsage, leg.usage);
+				fleetUsage.instances.push({ instance: leg.instance, ...leg.usage });
+			}
+
+			const fleets = [...fleetMap.entries()]
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([fleet, usage]) => ({
+					fleet,
+					...roundedUsage(usage),
+					instances: usage.instances.sort((a, b) => a.instance.localeCompare(b.instance)),
+				}));
+			unavailable.sort((a, b) =>
+				`${a.fleet}/${a.instance}`.localeCompare(`${b.fleet}/${b.instance}`),
+			);
+			return jsonResult({
+				window: {
+					days,
+					seconds: windowSeconds,
+					start_at: new Date(endAtMs - windowSeconds * 1000).toISOString(),
+					end_at: new Date(endAtMs).toISOString(),
+				},
+				complete: unavailable.length === 0,
+				fleets,
+				unavailable,
+			});
 		},
 	);
 

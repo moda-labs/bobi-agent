@@ -788,7 +788,10 @@ The risk is a box that accepts typing and delivers nothing, so the tests must pr
 
 **Frontend, executed as real JavaScript under Node**
 
-The repo already has this harness and it is not Playwright:
+The repo already had this harness and it is not Playwright (the quoted
+exemplar, `tests/test_webapp_markdown.py`, was deleted 2026-08-20 with the
+orphaned renderer it tested — #819; `tests/test_webapp_composer.py` is the
+surviving example of the pattern):
 
 ```
 tests/test_webapp_markdown.py:1, 6-7
@@ -899,9 +902,9 @@ message moved out of `agent.js` into its own module,
 the page token from a meta tag at module scope, so the view cannot be imported
 under Node without faking a DOM - and faking one to test a pure string
 function proves nothing about the string. This is the same split
-`markdown.js` already has in this directory, for the same reason: the relay
-IS the contract with the manager, and it is only testable while it is
-importable.
+`markdown.js` had in this directory at the time (deleted 2026-08-20 as dead
+code, #819), for the same reason: the relay IS the contract with the
+manager, and it is only testable while it is importable.
 
 **Verification, against §8.** Every listed test exists.
 `tests/test_webapp_runs.py::TestLiveness` covers the `detail.live` fold

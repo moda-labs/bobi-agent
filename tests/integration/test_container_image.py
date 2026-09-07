@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -113,6 +114,140 @@ def image() -> str:
     if proc.returncode != 0:
         pytest.fail(f"docker build failed:\n{proc.stdout}\n{proc.stderr}")
     return tag
+
+
+TEAM_DEPS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "team-deps-bake"
+TEAM_DEPS_SECRET_DIGEST = "/opt/bobi/mod361-secret.sha256"
+
+
+def _ensure_wheel_staged() -> None:
+    """The flavored build uses the same wheel-mode context as the base image."""
+    if len(list((REPO_ROOT / "dist").glob("*.whl"))) != 1:
+        _stage_wheel()
+
+
+def _build_team_deps_image(
+    team_dir: Path,
+    *,
+    tag: str,
+    secret: str,
+) -> tuple[subprocess.CompletedProcess, Path]:
+    """Render a fixture hook into the real build context and build the image."""
+    from bobi.build_render import load_team_config, render_team_deps_script
+
+    _ensure_wheel_staged()
+    hook_dir = REPO_ROOT / "dist" / "team-deps"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    hook = hook_dir / f"mod361-{uuid.uuid4().hex}.sh"
+    script = render_team_deps_script(load_team_config(team_dir))
+    # BuildKit secrets do not invalidate cache, so vary the hook itself to prove
+    # this build consumed this invocation's secret rather than a cached layer.
+    hook.write_text(script + f"# test cache nonce: {uuid.uuid4().hex}\n")
+
+    env = os.environ.copy()
+    env["DOCKER_BUILDKIT"] = "1"
+    env["MODA_SKILLS_TOKEN"] = secret
+    proc = _run(
+        "docker", "build",
+        "--build-arg", "BOBI_BUILD=wheel",
+        "--build-arg", f"TEAM_DEPS={hook.relative_to(REPO_ROOT)}",
+        "--secret", "id=MODA_SKILLS_TOKEN,env=MODA_SKILLS_TOKEN",
+        "-t", tag, str(REPO_ROOT),
+        env=env,
+        timeout=1800,
+    )
+    return proc, hook
+
+
+@pytest.fixture(scope="module")
+def team_deps_image(image: str) -> tuple[str, str]:
+    """Build the published recipe with a rendered hook and a dummy secret."""
+    del image  # Force the base build/cache before changing only TEAM_DEPS.
+    tag = f"bobi-team-deps-mod361:{uuid.uuid4().hex[:12]}"
+    secret = f"mod361-buildkit-secret-{uuid.uuid4().hex}"
+    proc, hook = _build_team_deps_image(
+        TEAM_DEPS_FIXTURE,
+        tag=tag,
+        secret=secret,
+    )
+    try:
+        if proc.returncode != 0:
+            pytest.fail(
+                "TEAM_DEPS image build failed:\n"
+                f"{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}"
+            )
+        yield tag, secret
+    finally:
+        hook.unlink(missing_ok=True)
+        _run("docker", "image", "rm", "-f", tag)
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+def test_team_deps_hook_receives_secret_without_leaking(
+    team_deps_image: tuple[str, str],
+):
+    """The published hook sees the secret, while image metadata never does."""
+    tag, secret = team_deps_image
+    expected_digest = hashlib.sha256(secret.encode()).hexdigest()
+
+    observed = _run(
+        "docker", "run", "--rm", "--entrypoint", "cat",
+        tag, TEAM_DEPS_SECRET_DIGEST,
+        timeout=120,
+    )
+    assert observed.returncode == 0, observed.stderr
+    assert observed.stdout.strip() == expected_digest
+
+    history = _run(
+        "docker", "history", "--no-trunc", "--format", "{{.CreatedBy}}",
+        tag, timeout=60,
+    )
+    inspect = _run("docker", "image", "inspect", tag, timeout=60)
+    assert history.returncode == 0, history.stderr
+    assert inspect.returncode == 0, inspect.stderr
+    assert secret not in history.stdout
+    assert secret not in inspect.stdout
+
+    leftover = _run(
+        "docker", "run", "--rm", "--entrypoint", "sh", tag, "-c",
+        "find /run/secrets -mindepth 1 -maxdepth 1 -print 2>/dev/null || true",
+        timeout=120,
+    )
+    assert leftover.stdout.strip() == "", leftover.stdout
+
+
+@requires_docker
+@pytest.mark.timeout(1900)
+def test_team_deps_requires_gate_rejects_missing_tool(
+    image: str,
+    tmp_path: Path,
+):
+    """A failed fixture requires check stops the image build in CI."""
+    del image  # Reuse the warmed base-image layers under the failing hook.
+    team = tmp_path / "team-deps-missing-tool"
+    shutil.copytree(TEAM_DEPS_FIXTURE, team)
+    agent_yaml = team / "agent.yaml"
+    broken = agent_yaml.read_text().replace(
+        "name: hook-tool\n    check: 'command -v mod361-hook-tool >/dev/null'",
+        "name: missing-tool\n    check: 'command -v mod361-missing-tool >/dev/null'",
+    )
+    assert broken != agent_yaml.read_text()
+    agent_yaml.write_text(broken)
+
+    tag = f"bobi-team-deps-mod361-fail:{uuid.uuid4().hex[:12]}"
+    proc, hook = _build_team_deps_image(
+        team,
+        tag=tag,
+        secret=f"mod361-buildkit-secret-{uuid.uuid4().hex}",
+    )
+    try:
+        text = proc.stdout + proc.stderr
+        assert proc.returncode != 0, "a missing requires tool did not fail the build"
+        assert "verify missing-tool" in text, text[-4000:]
+    finally:
+        hook.unlink(missing_ok=True)
+        _run("docker", "image", "rm", "-f", tag)
 
 
 @requires_docker

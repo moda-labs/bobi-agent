@@ -1,11 +1,10 @@
 """Tests for drain loop integration with auto-dispatch via EventReactor."""
 
-import queue
 import time
 from unittest.mock import patch, MagicMock
 
-from bobi.events.drain import drain_loop
 from bobi.events.reactor import AutoDispatchRule, EventReactor
+from tests.drain_utils import drain_one_batch
 
 
 def _wait_calls(mock, n, timeout=2.0):
@@ -15,30 +14,6 @@ def _wait_calls(mock, n, timeout=2.0):
         if mock.call_count >= n:
             return
         time.sleep(0.005)
-
-
-class _OneShotQueue:
-    """A queue that yields pre-loaded events then raises to stop the loop."""
-
-    def __init__(self, events):
-        self._events = list(events)
-        self._calls = 0
-
-    def get(self):
-        self._calls += 1
-        if self._calls == 1 and self._events:
-            return self._events[0]
-        raise KeyboardInterrupt
-
-    def empty(self):
-        if self._calls == 1 and len(self._events) > 1:
-            return False
-        return True
-
-    def get_nowait(self):
-        if len(self._events) > 1:
-            return self._events.pop(1)
-        raise queue.Empty
 
 
 class TestDrainAutoDispatch:
@@ -56,32 +31,7 @@ class TestDrainAutoDispatch:
         return EventReactor(rules=rules, cwd="/tmp/proj")
 
     def _run_drain_one_batch(self, events, reactor=None):
-        """Run drain_loop for exactly one batch and capture pushed messages."""
-        from bobi.inbox import register_local_inbox, unregister_local_inbox
-
-        q = _OneShotQueue(events)
-        delivered = []
-
-        class _CaptureInbox:
-            def push(self, msg, priority=False):
-                delivered.append(msg.text)
-
-        def fake_formatter(event):
-            return event.get("text", "")
-
-        register_local_inbox("test-session", _CaptureInbox())
-        try:
-            with patch("bobi.events.drain.time.sleep"):
-                try:
-                    drain_loop("test-session", queue=q,
-                               formatter=fake_formatter,
-                               reactor=reactor)
-                except KeyboardInterrupt:
-                    pass
-        finally:
-            unregister_local_inbox("test-session")
-
-        return delivered
+        return drain_one_batch(events, session="test-session", reactor=reactor)
 
     @patch("bobi.subagent.launch_agent")
     def test_matching_event_gets_annotation(self, mock_launch):

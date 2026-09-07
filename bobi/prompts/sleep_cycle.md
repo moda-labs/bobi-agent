@@ -60,6 +60,11 @@ this order, even if a section is empty:
 - Your working budget is **16,000 characters**. Above it you are not done:
   keep triaging (demote, merge, evict) until you are under. The 24k cap is an
   emergency bound, never the target.
+- Landing between them is **not a failed run**. You cannot count characters
+  precisely while composing, and the 8k between budget and cap is the slack
+  that buys. If the file lands over 16k but under 24k, say so in the summary
+  and stop — do not loop edits chasing the last few hundred characters. The
+  scheduler warns, keeps your run, and a later run compacts it.
 - Entry hygiene: **one item per bullet**. A `## Facts` bullet longer than about
   350 characters is almost always reference material wearing a fact's clothes —
   demote the body and keep the one-line state. Do not bold everything; bold is
@@ -134,7 +139,8 @@ Two sharpening rules:
 5. Land under the **16,000-character working budget**. On a compaction-required
    run (the ingest notes will say so), the budget — not the 24k cap — is the
    finish line. The scheduler validates the file on disk against the 24k cap;
-   an over-cap rewrite is rejected and the same run retries later.
+   an over-cap rewrite is rejected and the same run retries later. Only a file
+   **over 24,000 characters** is a failed run.
 
 Compression, in order of preference — the first three are **lossless**:
 

@@ -15,7 +15,6 @@ Requires Node (the local event server). Skips cleanly if it can't start.
 import json
 import os
 import signal
-import socket
 import threading
 import time
 import urllib.request
@@ -25,11 +24,7 @@ import yaml
 
 from bobi.runtime_guard import with_mutable_runtime_package
 
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+from .conftest import _free_port, wait_healthy
 
 
 @pytest.fixture
@@ -51,17 +46,12 @@ def inbox_event_server(bobi_env):
 
     ensure_running(port, project_path=bobi_env.project_path)
 
-    deadline = time.monotonic() + 15
-    healthy = False
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
-                if json.loads(r.read()).get("status") == "ok":
-                    healthy = True
-                    break
-        except Exception:
-            time.sleep(0.3)
-    if not healthy:
+    if not wait_healthy(url, timeout=15):
+        # Never skip on CI: integration-fast installs the event server's Node
+        # deps precisely so this suite runs, and a silent skip here greens the
+        # lane with the inbox transport unproven (same mechanism as D012).
+        if os.environ.get("CI"):
+            pytest.fail("local event server is required on CI and never became healthy")
         pytest.skip("local event server (Node) unavailable")
 
     yield url
@@ -277,17 +267,12 @@ def fast_eviction_event_server(bobi_env):
         "BOBI_ES_EVICTION_SWEEP_MS": "1000",
     })
 
-    deadline = time.monotonic() + 15
-    healthy = False
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
-                if json.loads(r.read()).get("status") == "ok":
-                    healthy = True
-                    break
-        except Exception:
-            time.sleep(0.3)
-    if not healthy:
+    if not wait_healthy(url, timeout=15):
+        # Never skip on CI: integration-fast installs the event server's Node
+        # deps precisely so this suite runs, and a silent skip here greens the
+        # lane with the inbox transport unproven (same mechanism as D012).
+        if os.environ.get("CI"):
+            pytest.fail("local event server is required on CI and never became healthy")
         pytest.skip("local event server (Node) unavailable")
 
     yield url

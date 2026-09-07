@@ -924,7 +924,9 @@ _REQUIRES_TTL = 120  # seconds
 def check_requires(project_path: Path) -> list[tuple]:
     """Run package requires checks with a short-TTL cache.
 
-    Returns list of (RequiresEntry, passed, detail) tuples.
+    Returns list of (RequiresEntry, passed, detail) tuples. ``passed`` is
+    tri-state (see `config.run_requires_checks`); ``None`` means the check
+    could not be evaluated, which is not evidence the dependency is missing.
     Cached results are reused within the TTL to avoid latency
     growth when multiple agents dispatch in quick succession.
     """
@@ -942,7 +944,7 @@ def check_requires(project_path: Path) -> list[tuple]:
     if not cfg.requires:
         return []
 
-    results = run_requires_checks(cfg.requires)
+    results = run_requires_checks(cfg.requires, root=project_path)
     _requires_cache[key] = (now, results)
     return results
 
@@ -963,6 +965,25 @@ def _log_requires_failure(failures: list[tuple]) -> None:
         line = f"Requires check failed: {entry.name}: {requires_detail(detail)}"
         if entry.why:
             line += f" | why: {entry.why}"
+        if entry.fix:
+            line += f" | fix: {entry.fix}"
+        log.error(line)
+
+
+def _log_requires_unevaluated(unknown: list[tuple]) -> None:
+    """Record every check that could not RUN, and say the launch went ahead.
+
+    These do not block: a probe the harness could not evaluate says nothing
+    about the dependency, and treating it as absent refused every launch for a
+    live team with no signal beyond the skipped-launch line (#1063). Failing
+    open is only safe if it is loud, so this is ERROR, names the check, and
+    states plainly that the dependency went unverified.
+    """
+    from bobi.config import requires_detail
+    for entry, detail in unknown:
+        line = (f"Requires check could not be evaluated: {entry.name}: "
+                f"{requires_detail(detail)} | dispatch proceeded with "
+                f"{entry.name} unverified")
         if entry.fix:
             line += f" | fix: {entry.fix}"
         log.error(line)
@@ -1202,9 +1223,18 @@ def launch_agent(
     from bobi.paths import bobi_root
     root = bobi_root()
 
-    # Preflight: check host-level dependencies declared in agent.yaml
+    # Preflight: check host-level dependencies declared in agent.yaml.
+    # `ok` is tri-state: only a check that RAN and failed blocks the launch. A
+    # check that could not be evaluated is a harness fault and is reported
+    # without gating, so one unevaluable probe cannot take all dispatch down
+    # (#1063).
     req_results = check_requires(root)
-    req_failures = [(entry, detail) for entry, ok, detail in req_results if not ok]
+    req_failures = [(entry, detail)
+                    for entry, ok, detail in req_results if ok is False]
+    req_unevaluated = [(entry, detail)
+                       for entry, ok, detail in req_results if ok is None]
+    if req_unevaluated:
+        _log_requires_unevaluated(req_unevaluated)
     if req_failures:
         # Log before alerting: the log is the one surface that is always
         # there, and the alert is best-effort by design.

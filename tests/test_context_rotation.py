@@ -1,4 +1,4 @@
-"""Integration tests for context rotation (#273).
+"""Context-rotation tests (#273) — unit lane: fully mocked, no real sessions.
 
 These tests verify the rotate-before-compact mechanism for persistent
 sessions. They use mocked SDK clients to avoid real Claude sessions

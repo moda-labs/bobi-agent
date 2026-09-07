@@ -213,6 +213,7 @@ class RunTracker:
         )
         self._closed = False
         self._failure = ""
+        self._warning = ""
         self._published = 0
 
     @property
@@ -232,6 +233,18 @@ class RunTracker:
         the one nearest the root cause; later ones are its consequences."""
         if reason and not self._failure:
             self._failure = reason
+
+    def note_warning(self, warning: str) -> None:
+        """Record a condition worth surfacing on an otherwise-good firing.
+
+        Distinct from :meth:`note_failure`: a warning never makes the run
+        `failed`, it only supplies the reason text when nothing failed. The
+        sleep cycle's over-working-budget memory is the case this exists for —
+        real, worth seeing in the runs table, and explicitly NOT a failure
+        (#1066). First warning wins, matching note_failure.
+        """
+        if warning and not self._warning:
+            self._warning = warning
 
     def add_published(self, count: int) -> None:
         """Count events this firing actually got onto the bus."""
@@ -255,6 +268,6 @@ class RunTracker:
                        else NOTIFIED if self._published else QUIET)
         self.run.ended_at = self._now()
         self.run.outcome = outcome
-        self.run.reason = reason or self._failure
+        self.run.reason = reason or self._failure or self._warning
         self.run.published = self._published
         record(self.run)

@@ -18,7 +18,6 @@ session actually subscribed to.
 import json
 import os
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -26,6 +25,8 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+
+from .conftest import _free_port, wait_healthy
 
 PACKAGE_ROOT = Path(__file__).parent.parent.parent
 
@@ -69,12 +70,6 @@ time.sleep(120)  # parent terminates us
 '''
 
 
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:
     payload = json.dumps(data).encode()
     hdrs = {"Content-Type": "application/json"}
@@ -106,7 +101,7 @@ def _node_major() -> int:
 @pytest.fixture
 def iso_project(tmp_path):
     """Isolated project root with its own local event server."""
-    from bobi.events.server import ensure_running, health
+    from bobi.events.server import ensure_running
 
     if _node_major() < 20:
         pytest.skip("local event server requires Node.js 20+")
@@ -129,12 +124,7 @@ def iso_project(tmp_path):
         project_path=project,
         extra_env={"BOBI_ES_TEST_GRANTS_SECRET": TEST_GRANTS_SECRET},
     )
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if health(base_url):
-            break
-        time.sleep(0.3)
-    else:
+    if not wait_healthy(base_url, timeout=15):
         raise RuntimeError("local event server did not become healthy")
 
     yield project, base_url

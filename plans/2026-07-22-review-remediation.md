@@ -1,6 +1,6 @@
 # Full-repo review remediation (defects + mechanical quality)
 
-> **Status:** Approved
+> **Status:** Done
 > **Tracking issue:** moda-labs/bobi-agent#817 · **Created:** 2026-07-22 · **Last amended:** 2026-07-29 (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
@@ -463,13 +463,13 @@ Each appendix entry names the surviving implementation — move callers to it; n
 
 Read `docs/FRONTEND_QA.md` before touching the static UIs. Security items first: D007 (attr injection via markdown links — `esc()` must escape quotes), D077 per Q5, D006 (path confinement), D082 (register payload validation).
 
-- [ ] **D098** `bobi/setup/webui/static/app.css:8` — The framed app-window chrome (.app rule, body radial-gradient background, and the data-retro grid overlay) is copied verbatim between the setup UI…
-- [ ] **D099** `bobi/setup/webui/static/app.js:20` — HTML-escaping is hand-rolled in three variants across the two UIs: setup app.js esc (5 chars incl. quotes), agent.js esc (3 chars, pre-markdown), and…
-- [ ] **D124** `bobi/setup/webui/static/app.js:90` — The token-header JSON fetch wrapper with server-gone health tracking is implemented independently in both SPAs: setup app.js getJSON/postJSON +… *(plausible — re-verify first)*
-- [ ] **Q073** `bobi/webapp/static/shell.js:166` — The dynamic `import("./views/agent.js").catch(() => null)` with the stub() fallback ('The agent view is coming in this build.') is leftover…
-- [ ] **Q076** `bobi/webapp/static/views/agent.js:17` — The header interpolates the agent name into an innerHTML template with a hand-rolled `name.replace(/[&<>]/g, "")` strip — the single deviation from…
+- [f] state:falsified **D098** `bobi/setup/webui/static/app.css:8` — The framed app-window chrome (.app rule, body radial-gradient background, and the data-retro grid overlay) is copied verbatim between the setup UI…
+- [x] **D099** `bobi/setup/webui/static/app.js:20` — HTML-escaping is hand-rolled in three variants across the two UIs: setup app.js esc (5 chars incl. quotes), agent.js esc (3 chars, pre-markdown), and…
+- [f] state:declined-redesign **D124** `bobi/setup/webui/static/app.js:90` — The token-header JSON fetch wrapper with server-gone health tracking is implemented independently in both SPAs: setup app.js getJSON/postJSON +… *(plausible — re-verify first)*
+- [x] **Q073** `bobi/webapp/static/shell.js:166` — The dynamic `import("./views/agent.js").catch(() => null)` with the stub() fallback ('The agent view is coming in this build.') is leftover…
+- [f] state:falsified **Q076** `bobi/webapp/static/views/agent.js:17` — The header interpolates the agent name into an innerHTML template with a hand-rolled `name.replace(/[&<>]/g, "")` strip — the single deviation from…
 - [x] **D008/Q025** `bobi/webapp/static/views/agent.js:189` — Markdown link renderer interpolates the URL into a double-quoted href attribute without escaping quotes, allowing agent output to inject…
-- [ ] **Q074** `bobi/webapp/static/views/agent.js:322` — loadMessages wraps `await api(...)` in try/catch, but api() is designed never to reject — its own catch returns {ok:false,status:0,data:null} — so…
+- [f] state:falsified **Q074** `bobi/webapp/static/views/agent.js:322` — loadMessages wraps `await api(...)` in try/catch, but api() is designed never to reject — its own catch returns {ok:false,status:0,data:null} — so…
 - [x] **D011** `event-server/core/src/adapters/chat-sdk-slack.ts:82` — The blanket `if (innerEvent.subtype) skip` drops every Slack message carrying subtype 'file_share', so file uploads in DMs and thread replies are…
 - [x] **D091** `event-server/core/src/adapters/discord.ts:91` — The attachment-to-files normalization loop (build Array<Record<string,string>> with per-key presence checks and String() coercion, then mirror into…
 - [x] **Q117** `event-server/core/src/adapters/github.ts:42` — Webhook-payload field extraction is handled in two conflicting styles: linear/whatsapp/discord narrow at runtime (asRecord/stringField helpers,… *(plausible — re-verify first)*
@@ -489,8 +489,8 @@ Read `docs/FRONTEND_QA.md` before touching the static UIs. Security items first:
 **Validation gate**
 
 - [x] `cd event-server && npm test` (vitest) green, incl. new failing-first tests: `file_share` subtype delivered, breaker pause-buffer bound, `readBody` size cap, workspace-register shape validation
-- [ ] New JS escaping tests (or minimal harness per FRONTEND_QA.md): quotes escaped in href interpolation; agent-name rendering
-- [ ] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q -k "webapp or webui"`
+- [x] New JS escaping tests (or minimal harness per FRONTEND_QA.md): quotes escaped in href interpolation; agent-name rendering
+- [x] `pytest tests/ --ignore=tests/integration --ignore=tests/e2e --timeout=30 -q -k "webapp or webui"`
 
 ### Phase 8 — Documentation drift sweep
 
@@ -534,24 +534,24 @@ For each item: re-verify the claim against the tree, then edit the doc to say th
 
 ### Phase 9 — Test-suite cleanup
 
-- [ ] **D101** `tests/integration/COVERAGE.md:13` — COVERAGE.md's marker column claims the subagent-launch and e2e-event-flow tests are claude-gated, but both files now run dual-brain with an unmarked…
-- [ ] **Q044** `tests/integration/test_context_rotation.py:1` — test_context_rotation.py lives in tests/integration/ but is a fully-mocked unit test (MagicMock SDK clients, no subprocess, no event server, no…
-- [ ] **D103** `tests/integration/test_event_server.py:42` — An identical _free_port() helper is defined in seven separate integration test files instead of once in tests/integration/conftest.py.
-- [ ] **D100** `tests/integration/test_event_server.py:877` — _send_and_drain ignores the ready.wait() result and its WS thread swallows every exception, so negative-delivery tests pass vacuously when the…
-- [ ] **Q128** `tests/integration/test_gateway_openai_brain.py:244` — test_gateway_openai_brain.py defines its own async _drain(session) that duplicates tests/integration/conftest._drain — the helper whose docstring… *(unverified — re-verify first)*
-- [ ] **Q041** `tests/integration/test_inbox_transport.py:53` — Four integration files hand-roll /health polling loops (raw urllib + json + status=='ok') that bobi.events.server.health() already implements — and…
-- [ ] **D012** `tests/integration/test_manager_lifecycle.py:218` — The only two checks in the whole suite that the manager's drain loop actually starts convert boot failure into pytest.skip, so a drain-loop…
-- [ ] **Q043** `tests/integration/test_pr_feedback_followup_dispatch.py:22` — The run-drain_loop-for-one-batch harness (_OneShotQueue + _CaptureInbox + register/unregister_local_inbox + patch time.sleep + swallow…
-- [ ] **D105** `tests/test_kb_embedder.py:27` — The mock_project_root fixture is dead code — defined but never requested by any test.
-- [ ] **D102** `tests/test_orchestrator.py:399` — The fake Claude-SDK message dataclasses (FakeResultMessage/FakeTextBlock/FakeAssistantMessage) are copy-pasted across four unit-test files, two of…
-- [ ] **Q110** `tests/test_orchestrator.py:567` — test_orchestrator.py defines the same 4-line inline 'class FakeBrain: def make_session(...): calls.append(kwargs); return FakeBrainClient()' plus its… *(plausible — re-verify first)*
-- [ ] **D104** `tests/test_subagent.py:28` — The tmp_cwd fixture is dead code — defined but never requested by any test.
-- [ ] **Q042** `tests/test_subagent_blocking.py:67` — The fake brain/SDK message protocol (FakeTextBlock / FakeAssistantMessage / FakeResultMessage / FakeClient) is modeled independently in four unit…
+- [x] **D101** `tests/integration/COVERAGE.md:13` — COVERAGE.md's marker column claims the subagent-launch and e2e-event-flow tests are claude-gated, but both files now run dual-brain with an unmarked…
+- [x] **Q044** `tests/integration/test_context_rotation.py:1` — test_context_rotation.py lives in tests/integration/ but is a fully-mocked unit test (MagicMock SDK clients, no subprocess, no event server, no…
+- [x] **D103** `tests/integration/test_event_server.py:42` — An identical _free_port() helper is defined in seven separate integration test files instead of once in tests/integration/conftest.py.
+- [x] **D100** `tests/integration/test_event_server.py:877` — _send_and_drain ignores the ready.wait() result and its WS thread swallows every exception, so negative-delivery tests pass vacuously when the…
+- [x] **Q128** `tests/integration/test_gateway_openai_brain.py:244` — test_gateway_openai_brain.py defines its own async _drain(session) that duplicates tests/integration/conftest._drain — the helper whose docstring… *(unverified — re-verify first)*
+- [x] **Q041** `tests/integration/test_inbox_transport.py:53` — Four integration files hand-roll /health polling loops (raw urllib + json + status=='ok') that bobi.events.server.health() already implements — and…
+- [x] **D012** `tests/integration/test_manager_lifecycle.py:218` — The only two checks in the whole suite that the manager's drain loop actually starts convert boot failure into pytest.skip, so a drain-loop…
+- [x] **Q043** `tests/integration/test_pr_feedback_followup_dispatch.py:22` — The run-drain_loop-for-one-batch harness (_OneShotQueue + _CaptureInbox + register/unregister_local_inbox + patch time.sleep + swallow…
+- [x] **D105** `tests/test_kb_embedder.py:27` — The mock_project_root fixture is dead code — defined but never requested by any test.
+- [x] **D102** `tests/test_orchestrator.py:399` — The fake Claude-SDK message dataclasses (FakeResultMessage/FakeTextBlock/FakeAssistantMessage) are copy-pasted across four unit-test files, two of…
+- [x] **Q110** `tests/test_orchestrator.py:567` — test_orchestrator.py defines the same 4-line inline 'class FakeBrain: def make_session(...): calls.append(kwargs); return FakeBrainClient()' plus its… *(plausible — re-verify first)*
+- [x] **D104** `tests/test_subagent.py:28` — The tmp_cwd fixture is dead code — defined but never requested by any test.
+- [x] **Q042** `tests/test_subagent_blocking.py:67` — The fake brain/SDK message protocol (FakeTextBlock / FakeAssistantMessage / FakeResultMessage / FakeClient) is modeled independently in four unit…
 
 **Validation gate**
 
-- [ ] `pytest tests/ -q` (full suite) green; the de-skipped manager-lifecycle checks proven by forcing a boot failure locally (they must FAIL, then pass on real boot)
-- [ ] `pytest tests/ --collect-only -q` count change explained in the PR (deleted dead tests enumerated)
+- [x] `pytest tests/ -q` (full suite) green; the de-skipped manager-lifecycle checks proven by forcing a boot failure locally (they must FAIL, then pass on real boot)
+- [x] `pytest tests/ --collect-only -q` count change explained in the PR (deleted dead tests enumerated)
 
 ## Proof of work
 
@@ -571,7 +571,7 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
 
 **Lanes (filed 2026-07-22):** A=#818, B=#821, C=#819, D=#820, E=#822. A: Phases 1–4. C: Phase 7 (parallel with A, no shared files). D: Phase 8 (docs, parallel). B: Phases 5–6 (builds in parallel, *lands after* A — shares bobi/ files, not a build-blocking dependency). E: Phase 9 (builds in parallel, *lands after* A). Only "lands after" ordering here — nothing build-blocks except that B/E should rebase onto A's merge to avoid churn.
 
-- [ ] Convergence gate: full `pytest tests/ -q` + `cd event-server && npm test` green on main after the last lane merges, plus the in-repo dogfood run (isolated `BOBI_HOME`, dogfood-content-review pack: agent boots, event round-trips, the D015 fix-step route actually takes) — run by the session landing the last lane
+- [x] Convergence gate: full `pytest tests/ -q` + `cd event-server && npm test` green on main after the last lane merges, plus the in-repo dogfood run (isolated `BOBI_HOME`, dogfood-content-review pack: agent boots, event round-trips, the D015 fix-step route actually takes) — run by the session landing the last lane
 
 ## Amendments
 
@@ -958,6 +958,204 @@ Five lanes per the Q1 decision. Dispatch issues filed by Split (Lane A first —
   webhook→manager injection and response logging, real manager processes,
   isolated `BOBI_HOME`. Phase 6 closes; the phase's two gate boxes flip in
   this PR.
+
+- **2026-08-19** (Lane E build session): **Phase 9 ships whole — all 13 items,
+  one PR, per the re-triage sizing table (Lane E 13 / 1).** Every item
+  re-derived against `main` @ `abaa5392`; the two flagged re-verify-first both
+  confirmed — **Q128** (the two `_drain`s differ by exactly `+=` vs `=`; the
+  conftest one adopts accumulate and the local copy is deleted) and **Q110**
+  (the inline recording FakeBrain had grown to ~20 copies from the finding's
+  12; 18 collapse onto a module-level `_recording_brain()` factory, and the
+  two genuinely custom ones — stale-resume client selection, mid-run
+  reconcile — stay local). Per-item notes the checklist lines cannot carry:
+
+  - **Growth since the 2026-08-03 re-validation:** D103's `_free_port` was in
+    **12** files (7 at review, 10 at re-triage) plus the inline copy in
+    `_provision_bobi_env`; Q043's drain harness was in **6** files
+    (`test_issue_assignment_dispatch.py` is new since review, with a
+    single-event queue variant that folds into the shared list-based one).
+  - **Q041 shrank and then regrew differently than recorded.** The 2026-08-03
+    note counted three hand-rolled `/health` polls; at build time there were
+    five convertible sites (`test_inbox_transport` ×2, a new one in
+    `test_webapp_chat_delivery`, `test_event_server`'s module-level
+    `_wait_healthy` plus a second copy inside `TestBindAddress` and one inline
+    loop) — all now on `tests/integration/conftest.wait_healthy`, which loops
+    on `bobi.events.server.health()`. **One listed site is deliberately NOT
+    converted:** `test_slack_socket_mode._wait_for_health` no longer polls
+    `status == "ok"` at all — since review it polls `slack_socket` connection
+    state, a different predicate — so it is no longer Q041 duplication.
+  - **Q044 moved five files, not one.** The finding's Detail names
+    `test_completion_delivery_loop` and both `test_pr_feedback_*_dispatch`
+    files as "candidates for the same move";
+    `test_issue_assignment_dispatch.py` is the same shape and post-dates the
+    review. All five are in-process and fully mocked; the only edit beyond
+    `git mv` is `PACKAGE_ROOT` losing one `.parent`. Full-suite collection is
+    **5462 → 5462 (net zero)**: +23 unit lane / −23 integration lane, exactly
+    the moved tests. **Zero tests were deleted anywhere in this lane** — the
+    dead code (D104/D105) was fixtures, and `test_notify_step`'s three fake
+    dataclasses (D102) were constructed nowhere.
+  - **D102/Q042's superset takes `test_subagent_blocking`'s defaults** (the
+    12-field copy), so the other files' *default values* changed
+    (`session_id`, `total_cost_usd`, `num_turns`); no test asserted on them —
+    proven by the suites, with one mechanical exception: one assert read the
+    old client's private `_i` counter and now reads `_round_idx`.
+    `FakeToolUseBlock` was already dead in its own file and is NOT carried
+    into `tests/brain_fakes.py`.
+  - **D012's gate proof ran both ways:** with the `Drain loop active` log
+    line mutated away, `test_manager_lifecycle`'s messaging fixture went red
+    (`Failed: Manager did not become ready`, a setup error, not a skip); on
+    real boot the same tests pass. `test_e2e_event_flow`'s fixture carries the
+    identical fix.
+  - **D101's doc drift was worse than filed:** the header also claimed an
+    `integration-claude` CI job exists; no CI job has a claude CLI (see the
+    retired-runner note in `ci.yml`). The header now explains the two gating
+    mechanisms (marker vs dual-brain skipif) instead of naming jobs, and the
+    session row follows `test_context_rotation.py` to its unit-lane home.
+
+  **Gate evidence (both boxes flip in this PR):** full `pytest tests/ -q`
+  including integration + e2e on the branch tree (Node 20, `npm ci`, real
+  Claude CLI so the dual-brain `[claude]` legs ran): **5409 passed / 52
+  skipped / 1 failed in 26:43** — the one failure is the KNOWN parked
+  TZ-sensitive test (`tests/e2e/test_webapp_ui.py::TestRunModal::…transcript`,
+  fails PDT / passes `TZ=UTC`; identical in the Phase 6 gate run; not a Phase
+  9 regression). The 52-skip count matches the Phase 6 gate baseline. The
+  forced-boot-failure arm ran before the de-skip commit landed: with the
+  `Drain loop active` log line mutated away, the messaging fixture FAILED
+  (setup error, not skip); restored, `test_manager_lifecycle` messaging +
+  `test_e2e_event_flow` stub legs passed 3/3. Collect-only: **5462 → 5462**
+  (net zero), unit lane 4972 → 4995 (+23) / integration 410 → 387 (−23) =
+  exactly the five moved files; **zero tests deleted** (the dead code was two
+  fixtures and three never-constructed dataclasses).
+
+- **2026-08-20** (Lane C build session): **the 6 deferred web-UI items un-park
+  and close — mostly by falsification.** The 2026-08-04 deferral waited for
+  "Luke's single-agent UI work to reach main"; that condition was satisfied
+  the same day it was recorded (**#948 merged to `main` 2026-08-04T23:08Z as
+  `7c627fd7`** — the deferral comment's "no `feat/single-agent-*` → main PR
+  has ever been opened" was true at 01:55 and stale by that evening), and
+  Zach gave the explicit go to proceed 2026-08-20. Every item re-derived
+  against `main` @ `f68c6399`. What #948's rewrite of `views/agent.js`
+  (1,569 → 1,111 lines) did to this batch:
+
+  - **D098 `[f] state:falsified`** — the framed app-window chrome the finding
+    says is duplicated no longer exists anywhere: both `.app` rules are now
+    trivial full-bleed resets ("the browser window IS the app window"), the
+    radial-gradient body and `data-retro` grid overlay are deleted, and the
+    consolidation mechanism the finding asked for is already in place — the
+    shared top bar lives in `bobi/webui_common/static/chrome.css`, in
+    `SHARED_ASSET_NAMES`, since the design-system reskin. Nothing to move.
+  - **D099 `[x]`, by deletion rather than by a shared module** — the finding's
+    three variants are down to one. #948 deleted `agent.js`'s 3-char `esc`
+    and the inline `name.replace` strip along with the whole markdown path;
+    the quote-safe `esc` that #942 extracted to `views/markdown.js` became
+    dead code the same day (zero importers — the rewrite renders every
+    dynamic string through `mk()`/`textContent`, and the transcript slab is
+    deliberately plain text per `docs/RUN_DRILLDOWNS.md`). This lane deletes
+    the orphaned `markdown.js`, its test (`tests/test_webapp_markdown.py`),
+    and the dead chat-panel CSS #948 stranded in
+    `bobi/webapp/static/app.css` — the `.msg`/`.pending` block, its
+    reduced-motion override, and the `.chat`/`.chat-head`/`.chat-name`/
+    `.agent-hint`/`.slab` rules (nothing creates any of those classes; the
+    live slab renders as `.transcript`/`.tr-line`). One adjacent idiom is
+    closed in the same sweep: `shell.js`'s `setNavBack` took raw HTML into
+    `innerHTML` (both callers constant); it now builds the link via
+    `createElement`/`textContent` like every other dynamic sink.
+    Exactly one HTML-escaping implementation remains in the product UIs: the
+    5-char attribute-safe `esc` in `setup/webui/static/app.js`.
+  - **D124 `[f] state:declined-redesign`** — the "plausible — re-verify
+    first" flag was right to worry. The duplication claim still holds at the
+    narrowest reading (both SPAs read a token meta tag and set the
+    `x-bobi-webui-token` header), but the two wrappers now implement
+    deliberately different error contracts — setup's `getJSON/postJSON`
+    THROW and drive a full-page overlay + 4s heartbeat (a wizard where any
+    failure means the server is gone); `shell.js`'s `api()` never rejects
+    and returns `{ok,status,data}` with a missed-pings threshold (a
+    dashboard that polls) — and setup's SPA is a non-module IIFE while
+    `shell.js` is an ES module, so the finding's "shared client module" is
+    no longer a dedup but a cross-contract redesign plus a script-loading
+    change. Declined here; belongs with the successor structural-refactor
+    list in Notes (alongside Q005/Q111/Q129).
+  - **Q073 `[x]`** — the one survivor, shipped as filed: `agent.js` is now
+    imported statically beside `dashboard.js`, the `.catch(() => null)` and
+    `stub()` fallback are deleted (its only caller), and `route()` loses its
+    now-purposeless `async`. The `.stub` CSS class stays — `showMissing()`
+    (via `mk()`) and `mountSetupEntry` (via `createElement`) still build
+    stubs.
+  - **Q076 `[f] state:falsified`** — the deviation is gone: the header is
+    `els.title.textContent = name` (`agent.js:180`), and the rewrite has no
+    innerHTML interpolation of dynamic data anywhere. The gate's agent-name
+    clause is proven by a NEW e2e test rather than by reading source:
+    `test_a_hostile_agent_name_renders_as_text_not_markup` drives
+    `#/agents/<payload>` (the name is client-derived from the hash, so the
+    view can be handed any string) and asserts the name renders literally,
+    injects no element, and executes nothing.
+  - **Q074 `[f] state:falsified`** — `loadMessages` and its try/catch left
+    with #948; today no `api()` call site in any view uses try/catch (zero
+    `catch` tokens in `agent.js`).
+
+  **Phase 7's escaping-tests gate box flips with a correction, same pattern
+  as the convergence-gate correction above.** Its first clause ("quotes
+  escaped in href interpolation") was satisfied by #942 and then mooted by
+  #948: the href interpolation site no longer exists in the product, so this
+  lane deletes those tests together with the dead renderer they exercised.
+  The property the clause defended — agent output cannot inject markup — is
+  now enforced structurally (textContent-only rendering) and proven by TWO
+  new e2e tests against the live DOM: a hostile agent NAME through the
+  route (the gate's second clause as written), and hostile agent OUTPUT —
+  a payload run title and transcript line — through the runs table and the
+  slab, which is the prompt-injectable surface the deleted suite existed
+  for. Comment/docstring references to `markdown.js` (`views/composer.js`,
+  `tests/test_webapp_composer.py`, `docs/specs/987-…md`) updated.
+
+  With this, Lane C is complete: 2 shipped PRs (#942, #945) plus this
+  closing batch; #819 closes when it lands. The convergence gate (corrected
+  wording, 2026-08-05 amendment) runs on main after this merge — it is the
+  last open line.
+
+- **2026-08-20** (gate session): **convergence gate EXECUTED on `main` @
+  `6c8f6681` (the #1065 merge = the last lane's merge); the gate box and
+  `Status: Done` flip on that evidence.** All three legs of the corrected
+  2026-08-05 wording, run from a worktree checked out at the merge commit
+  (own venv, editable install verified to import the worktree tree):
+
+  - **Full `pytest tests/ -q`** (Node 20.20.2 on PATH, `event-server/
+    npm ci` done, real Claude CLI 2.1.220): **5416 passed / 52 skipped /
+    1 failed in 20:01.** The 1 failure is the KNOWN parked TZ-sensitive
+    `tests/e2e/test_webapp_ui.py::TestRunModal::…opens_its_transcript`
+    (machine on PDT; re-run in isolation reproduces it; passes under
+    `TZ=UTC` and in CI) — identical in the Phase 6 and Phase 9 gate runs,
+    not a regression. All 52 skips enumerated via `-rs` and every one is
+    environment-gated, none vacuous: 27 docker-daemon-gated (container
+    image + otel collector; no docker running), the live-credential lanes
+    (ANTHROPIC/OPENAI keys, live Slack ×6, gateway, worker-deploy smoke
+    ×4, codex cross-model), the known `wire_api=chat` codex skip, `/mcp`
+    on the local backend ×3, `/proc` on macOS, and the deploy plugin.
+    Collected 5469 = the Phase 9 baseline 5462 + 15 (#1058's net test
+    delta, landed after Lane E's gate tree) − 10 (the orphaned markdown
+    suite deleted by #1065) + 2 (#1065's hostile-payload e2e tests) —
+    every count movement accounted for.
+  - **`cd event-server && npm test`**: **442 passed, 12 files** (vitest,
+    Node 24.4.1 — Node 22 was not installed on the box; wrangler's floor
+    is 22+, satisfied).
+  - **Real-agent smoke, surviving pack, isolated `BOBI_HOME`**:
+    `agents/personal-assistant` installed via `bobi agents install` into a
+    throwaway home, booted with `bobi agent pa start` (manager up, local
+    event server auto-started on :8080, assistant session spawned on the
+    real Claude brain), then one round-trip: `bobi agent pa ask "Reply
+    with exactly the single word: pong"` → event queued over the connected
+    websocket (`reply/reply/2957b90b`) → **`pong` returned in ~10s**.
+    Stopped and torn down after; one sleep-cycle curator descendant
+    survived the stop and was killed by hand (the known
+    cancel-agent-orphans-descendants shape, recorded, not fixed here).
+
+  **Post-merge CI on `6c8f6681`: green** (`CI` success; the Container
+  workflow correctly did not trigger — its path filter names image inputs
+  only, and #1065 touched none). With this, every non-parked line in the
+  plan is closed: Lanes A (#818), B (#821), C (#819), D (#820), E (#822)
+  all landed and their issues closed. Parked residue stays recorded in the
+  amendments and Notes: the TZ-sensitive e2e test (unfiled at Zach's
+  call), the otel-collector flake, D052's second half, and the deferred
+  structural refactors including D124's wrapper redesign.
 
 ## Notes
 

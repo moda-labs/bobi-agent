@@ -128,6 +128,36 @@ class TestRuntimePaths:
         run = _install(tmp_path / "home", "eng")
         assert paths.agent_name_for_root(run) == "eng"
 
+    def test_agent_name_derives_from_a_run_root(self, monkeypatch, tmp_path):
+        """`<home>/agents/<name>/run` resolves to <name>, never the `run` leaf.
+
+        This is the resolution the docker entrypoint performs, and the one a
+        `requires:` probe's environment is built from (#1063): a hand-rolled
+        `basename "$BOBI_ROOT"` reads `run`, an agent that does not exist,
+        so every probe addressing the CLI fails on the canonical layout.
+        """
+        monkeypatch.delenv("BOBI_AGENT", raising=False)
+        monkeypatch.delenv("BOBI_INSTANCE", raising=False)
+        run = _install(tmp_path / "home", "eng")
+        assert paths.agent_name(run) == "eng"
+
+    def test_agent_name_prefers_an_explicit_override(self, monkeypatch,
+                                                     tmp_path):
+        run = _install(tmp_path / "home", "eng")
+        monkeypatch.setenv("BOBI_AGENT", "override")
+        assert paths.agent_name(run) == "override"
+        # Same order as docker-entrypoint.sh: BOBI_AGENT, then BOBI_INSTANCE,
+        # then the run root. An empty value is not a selection.
+        monkeypatch.setenv("BOBI_AGENT", "")
+        monkeypatch.setenv("BOBI_INSTANCE", "instance")
+        assert paths.agent_name(run) == "instance"
+
+    def test_agent_name_is_empty_when_unresolvable(self, monkeypatch):
+        """No override and no name in the root: say so, don't invent one."""
+        monkeypatch.delenv("BOBI_AGENT", raising=False)
+        monkeypatch.delenv("BOBI_INSTANCE", raising=False)
+        assert paths.agent_name(Path("/")) == ""
+
     def test_state_path_does_not_mkdir(self, tmp_path):
         run = tmp_path / "run"
         assert paths.state_path(run) == run / "state"

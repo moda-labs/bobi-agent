@@ -1,8 +1,8 @@
 /* The run slab's composer: the one part of it that is pure decision (#987).
 
-   A module rather than a closure in agent.js, for the same reason markdown.js
-   is one: which branch a row gets, and what that branch posts, IS the
-   contract, and it is only testable while it is importable.
+   A module rather than a closure in agent.js: which branch a row gets, and
+   what that branch posts, IS the contract, and it is only testable while it
+   is importable.
    `tests/test_webapp_composer.py` runs it under Node and reads back what it
    returns.
 

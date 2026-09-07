@@ -169,6 +169,39 @@ def test_preflight_runs_once_per_brain_with_build_phase_and_brain_env():
     assert {phase for _, _, phase in sink} == {"build"}
 
 
+def test_preflight_exports_the_resolved_agent_name(monkeypatch):
+    """The build/local tier gets the same `$BOBI_AGENT` the dispatch gate does.
+
+    One `success` contract, one resolver: if the two runners disagreed about
+    who the agent is, a probe could pass at bake time and fail at dispatch
+    (#1063).
+    """
+    monkeypatch.setenv("BOBI_AGENT", "sre")
+    sink: list = []
+
+    def _run(cmd, env, timeout):
+        sink.append(env.get("BOBI_AGENT"))
+        return 0, "", ""
+
+    preflight(_dep(success='bobi agent "$BOBI_AGENT" otel --help'),
+              brains=["claude"], shell_runner=_run)
+    assert sink == ["sre"]
+
+
+def test_preflight_keeps_a_caller_supplied_agent_name(monkeypatch):
+    """An explicit `base_env` selection wins over this process's own."""
+    monkeypatch.setenv("BOBI_AGENT", "ambient")
+    sink: list = []
+
+    def _run(cmd, env, timeout):
+        sink.append(env.get("BOBI_AGENT"))
+        return 0, "", ""
+
+    preflight(_dep(), brains=["claude"], shell_runner=_run,
+              base_env={"BOBI_AGENT": "explicit"})
+    assert sink == ["explicit"]
+
+
 def test_preflight_fails_when_any_brain_fails():
     dep = _dep(success="check")
     results = preflight(dep, brains=["claude", "codex"],

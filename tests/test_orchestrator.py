@@ -9,7 +9,6 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch, call
-from dataclasses import dataclass
 
 import pytest
 
@@ -26,6 +25,11 @@ from bobi.workflow.orchestrator import (
     make_session_name,
 )
 from bobi.workflow.state import WorkflowRun
+from tests.brain_fakes import (
+    FakeAssistantMessage,
+    FakeResultMessage,
+    FakeTextBlock,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -432,27 +436,6 @@ class TestRouteConditions:
 # Orchestrator integration (mock the SDK client)
 # ---------------------------------------------------------------------------
 
-@dataclass
-class FakeResultMessage:
-    session_id: str = "test-session-id"
-    duration_ms: int = 1000
-    total_cost_usd: float = 0.01
-    num_turns: int = 1
-    is_error: bool = False
-    result: str = ""
-    deferred_tool_use: object = None
-
-
-@dataclass
-class FakeTextBlock:
-    text: str
-
-
-@dataclass
-class FakeAssistantMessage:
-    content: list
-
-
 class FakeClient:
     """Mock ClaudeSDKClient that yields one turn per query."""
 
@@ -488,6 +471,26 @@ class FakeBrainClient(FakeClient):
         from bobi.brain import AssistantText, TurnResult
         yield AssistantText(text="Done.")
         yield TurnResult(session_id="test-session-id")
+
+
+def _recording_brain(*, capabilities=None):
+    """One recording FakeBrain; returns ``(brain, calls, clients)`` (Q110).
+
+    ``make_session`` records its kwargs into ``calls`` and returns a fresh
+    ``FakeBrainClient``, which is also appended to ``clients``.
+    """
+    calls, clients = [], []
+
+    class FakeBrain:
+        def make_session(self, **kwargs):
+            calls.append(kwargs)
+            client = FakeBrainClient()
+            clients.append(client)
+            return client
+
+    if capabilities is not None:
+        FakeBrain.capabilities = capabilities
+    return FakeBrain(), calls, clients
 
 
 class DefaultFakeBrain:
@@ -695,17 +698,8 @@ class TestRunWorkflow:
         assert name1 != name2
 
     def test_step_model_passed_to_brain_session(self, monkeypatch):
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="haiku"),
         ])
@@ -725,14 +719,8 @@ class TestRunWorkflow:
             "agent: test\nentry_point: manager\n"
             "roles:\n  scorer:\n    model: haiku\n"
         )
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kw):
-                calls.append(kw)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=steps)
         result = self._mock_asyncio_run(
             wf, task="t", repo="r", cwd="/tmp", run_key="1", **kwargs,
@@ -757,14 +745,8 @@ class TestRunWorkflow:
         assert models == expected
 
     def test_step_effort_passed_to_brain_session(self, monkeypatch):
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="implement", prompt="build", effort="xhigh"),
         ])
@@ -784,14 +766,8 @@ class TestRunWorkflow:
             "agent: test\nentry_point: manager\n"
             "roles:\n  scorer:\n    effort: low\n"
         )
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kw):
-                calls.append(kw)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=steps)
         result = self._mock_asyncio_run(
             wf, task="t", repo="r", cwd="/tmp", run_key="1", **kwargs,
@@ -818,14 +794,8 @@ class TestRunWorkflow:
         assert efforts == expected
 
     def test_env_effort_default_passed_to_brain_session(self, monkeypatch):
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         monkeypatch.setenv("BOBI_BRAIN_EFFORT", "medium")
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover"),
@@ -842,17 +812,8 @@ class TestRunWorkflow:
         """An effort-only step change is exempt from the resume guard (#778):
         the session reconnects natively under the new dial - same session id,
         no YAML reinject - even on a brain without cross_model_resume."""
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="draft", prompt="draft", effort="low"),
             StepDef(name="implement", prompt="build", effort="xhigh"),
@@ -910,14 +871,8 @@ class TestRunWorkflow:
         run.run_key = "1"
         run.save()
 
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -942,14 +897,8 @@ class TestRunWorkflow:
         assert calls[0]["options"]["effort"] == "xhigh"
 
     def test_env_model_default_passed_to_brain_session(self, monkeypatch):
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         monkeypatch.setenv("BOBI_BRAIN_MODEL", "sonnet")
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover"),
@@ -963,17 +912,8 @@ class TestRunWorkflow:
         assert calls[0]["options"]["model"] == "sonnet"
 
     def test_model_change_starts_fresh_session(self, monkeypatch):
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="haiku"),
             StepDef(name="score", prompt="score", model="sonnet"),
@@ -995,14 +935,8 @@ class TestRunWorkflow:
         assert "score" in clients[1].queries[0]
 
     def test_model_change_preserves_explicit_role(self, monkeypatch):
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         forced_role = paths.roles_dir() / "forced" / "ROLE.md"
         forced_role.parent.mkdir(parents=True, exist_ok=True)
         forced_role.write_text("PROMPT forced")
@@ -1029,19 +963,8 @@ class TestRunWorkflow:
         new model instead of fresh + YAML reinject (#642)."""
         from bobi.brain import BrainCapabilities
 
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            capabilities = BrainCapabilities(cross_model_resume=True)
-
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain(capabilities=BrainCapabilities(cross_model_resume=True))
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="haiku"),
             StepDef(name="score", prompt="score", model="sonnet"),
@@ -1072,14 +995,8 @@ class TestRunWorkflow:
     def test_model_change_records_new_model_on_save(self, monkeypatch):
         """Post-turn saves carry the model the session currently runs under,
         so the store record follows a mid-run switch (#642 stale-record fix)."""
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="haiku"),
             StepDef(name="score", prompt="score", model="sonnet"),
@@ -1108,19 +1025,8 @@ class TestRunWorkflow:
         transcript, even on a capable brain (#642 isolation rule)."""
         from bobi.brain import BrainCapabilities
 
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            capabilities = BrainCapabilities(cross_model_resume=True)
-
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain(capabilities=BrainCapabilities(cross_model_resume=True))
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
         for role_name in ("builder", "scorer"):
             role_md = paths.roles_dir() / role_name / "ROLE.md"
             role_md.parent.mkdir(parents=True, exist_ok=True)
@@ -1219,17 +1125,11 @@ class TestConnectIsNeverATurn:
         _bind_runtime_root(tmp_path, monkeypatch)
 
     def _run(self, workflow, saved_id="", **kwargs):
-        calls, clients, emits = [], [], []
-
-        class FakeBrain:
-            def make_session(self, **kw):
-                calls.append(kw)
-                c = FakeBrainClient()
-                clients.append(c)
-                return c
+        emits = []
+        brain, calls, clients = _recording_brain()
 
         cwd = kwargs.get("cwd", "/tmp")
-        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+        with patch("bobi.brain.get_brain", lambda kind=None: brain), \
              patch("bobi.workflow.orchestrator.get_registry") as mock_reg, \
              patch("bobi.workflow.orchestrator._emit_lifecycle_event",
                    side_effect=lambda t, d, **kw: emits.append((t, d))), \
@@ -1638,17 +1538,8 @@ class TestAwaitStep:
         run.run_key = "1"
         run.save()
 
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -1701,19 +1592,8 @@ class TestAwaitStep:
         run.run_key = "1"
         run.save()
 
-        calls = []
-        clients = []
-
-        class FakeBrain:
-            capabilities = BrainCapabilities(cross_model_resume=True)
-
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                client = FakeBrainClient()
-                clients.append(client)
-                return client
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, clients = _recording_brain(capabilities=BrainCapabilities(cross_model_resume=True))
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -1761,14 +1641,8 @@ class TestAwaitStep:
         run.run_key = "1"
         run.save()
 
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
@@ -1817,14 +1691,8 @@ class TestAwaitStep:
         run.run_key = "1"
         run.save()
 
-        calls = []
-
-        class FakeBrain:
-            def make_session(self, **kwargs):
-                calls.append(kwargs)
-                return FakeBrainClient()
-
-        monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
