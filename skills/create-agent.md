@@ -87,6 +87,13 @@ slack:
 
 linear:
   api_key: ${LINEAR_API_KEY}
+
+# Optional destination and labels for `bobi feedback bug|feature`.
+feedback:
+  repo: moda-labs/bobi-agent
+  labels:
+    bug: []
+    feature: []
 ```
 
 Only include services the team actually needs. `bobi agents install`
