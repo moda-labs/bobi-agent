@@ -13,6 +13,7 @@ import signal
 import time
 
 import pytest
+import yaml
 
 from bobi.sdk import DEAD_STATUSES
 
@@ -23,7 +24,23 @@ from bobi.sdk import DEAD_STATUSES
 # graph, resolves it to the selected env, and pins the stub brain on that leg.
 @pytest.fixture
 def bobi_env(dual_brain_env):
-    return dual_brain_env
+    # Lifecycle tests need inbox delivery, not an ungranted GitHub webhook
+    # subscription. Saved-identity repair correctly refuses that topic on restart.
+    from bobi import paths
+    config_path = paths.agent_yaml_path(dual_brain_env.project_path)
+    original = config_path.read_text()
+    original_mode = config_path.stat().st_mode
+    config = yaml.safe_load(original)
+    for service in config.get("services", []):
+        service["events"] = False
+    try:
+        config_path.chmod(0o644)
+        config_path.write_text(yaml.safe_dump(config))
+        yield dual_brain_env
+    finally:
+        config_path.chmod(0o644)
+        config_path.write_text(original)
+        config_path.chmod(original_mode)
 
 
 @pytest.fixture
@@ -230,7 +247,20 @@ class TestManagerMessaging:
         cli_run("stop", timeout=15)
         _wait_for_exit_file(pid_file)
 
-    def test_message_and_ask(self, cli_run):
+    def test_message_and_ask(self, bobi_env, cli_run):
+        # Exercise saved-deployment synchronization even when run in isolation.
+        log_file = bobi_env.state_dir / "manager.log"
+        log_pos = log_file.stat().st_size
+        restarted = cli_run("restart", timeout=45)
+        assert restarted.returncode == 0, restarted.stderr
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            new_log = log_file.read_text()[log_pos:]
+            if "Event client connected" in new_log and "Session 'bobi-test-repo-manager' ready" in new_log:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail(f"Restart did not restore subscription readiness: {new_log[-2000:]}")
         result = cli_run("message", "hello from integration test", timeout=30)
         assert result.returncode == 0
         assert "sent" in result.stdout.lower()
