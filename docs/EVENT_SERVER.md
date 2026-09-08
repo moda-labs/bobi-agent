@@ -376,76 +376,16 @@ sessions must not share a cursor):
   on connect.
 - The server replays each buffered event with `seq > last_seen` (from KV on the
   Worker, the in-memory buffer locally) as `{type: "replay"}` frames, then a
-  `{type: "connected", next_seq}` frame. Worker event TTL is 48h; local
-  delivery storage is an in-memory buffer.
+  `{type: "connected", next_seq}` frame. Buffer TTL is 48h.
 - The cursor advances only after the session successfully completes each
   delivered inbox message. Queued messages, provider-error turns, and turns
-  interrupted before their terminal result remain unacknowledged and can replay
-  after a process restart while the same deployment and server history survive.
+  interrupted before their terminal result remain unacknowledged and replay
+  after a process restart.
 - The local server treats `last_seen = 0` as a real cursor and replays every
   buffered event with `seq > 0`. This preserves the first unacknowledged event
   (`seq = 1`) across a manager restart.
 - The blocking-ask path still waits for the `connected` frame before publishing.
   That ordering keeps live request/reply delivery deterministic across backends.
-
-### Recovery limits and operator guidance
-
-Ordinary manager restart reuses the saved deployment and completion cursor,
-including when `event_server` is omitted and the default local server is used.
-Subscription update timeouts, network failures, HTTP 429/5xx, and other rejected
-updates retain that state and use the existing bounded startup probe and capped
-background retry. A degraded subscription does not terminate a healthy brain.
-
-HTTP 401/403 cannot establish whether the deployment disappeared or credentials
-are invalid: both missing deployment and invalid API key currently return
-`403 {"error":"unauthorized"}`. A bare 404 is not proof of eviction either.
-Warnings identify the session/deployment and explain that replay continuity is
-unverified. Check the configured server and credentials; check resource grants
-and subscription configuration for HTTP 400. Saved state is retained even if
-this leaves the subscription disconnected until an operator repairs it or
-deliberately resets. Fresh same-name registration supersedes the old deployment,
-so it is never used to probe availability.
-
-An interrupted turn stays unacknowledged. Replacing a brain after a decode error
-allows later work to run but does not replay that event in the current process.
-An ordinary manager restart may recover it through surviving server replay.
-Review prior tool side effects before resending instructions: delivery is
-at-least-once, and duplicates are possible. An older incomplete batch pins the
-contiguous cursor, so later completed work behind it can replay too. Successful
-model termination is the runtime ACK boundary, not proof of semantic completion
-of every instruction.
-
-Recovery is unavailable when the necessary identity/history is gone:
-
-- Both backends evict disconnected deployments after about 60 seconds (the local
-  sweep adds timing granularity). Worker KV event TTL does not preserve access
-  after deployment eviction.
-- Local server restart loses its in-memory delivery buffer. When that buffer
-  reaches 20,000 events it trims to the newest 10,000.
-- Worker events expire after 48 hours.
-- Explicit `restart --fresh` discards deployment/cursor state as well as
-  conversation identity. Do not use it to preserve pending replay.
-- Missing or invalid `bubble.json` does not trigger automatic registration.
-  The client still tries the saved deployment key and preserves its cursor on
-  failure. Repair credentials or deliberately reset after reviewing unfinished
-  work and prior side effects.
-
-Conversation resume only restores compatible model history; connecting is not
-execution. Image/model/brain changes, failed resume, and normal context rotation
-may create a fresh conversation without requiring fresh event transport state.
-
-**Chosen approach (D1):** preserve recoverable deployment/cursor state and provide
-explicit diagnostics. Completion ACKs and server replay already exist, so this
-addresses avoidable loss without changing the protocol or introducing another
-queue. Not every retention gap is detectable; receipt `events-*.jsonl` logs are
-not a completion journal and cannot supply exact lost-instruction counts.
-
-**Deferred approach (D2):** a durable local event journal could replay locally
-received events after server state loss. It requires crash-safe receipt/completion
-writes, locking, stable identities, deduplication, ordering, migration, retention,
-payload privacy, and disk-failure handling. It cannot recover events never received
-or guarantee exactly-once side effects. That separate storage subsystem is outside
-this bounded recovery design (MOD-289 / #867).
 
 ## Inter-agent messaging
 
