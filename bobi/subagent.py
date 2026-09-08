@@ -1673,7 +1673,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from bobi.config import Config
     from bobi.events.state import (
         load_deployment_state, save_deployment_state,
-        session_cursor_path, bubble_state_path,
+        session_cursor_path,
     )
     from bobi.events.client import EventServerClient
     from bobi.events.drain import drain_loop
@@ -1796,7 +1796,13 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         """
         nonlocal active_subscriptions
         try:
-            bubble = ensure_bubble(es_url, project_path)
+            # Saved deployments keep their original trust identity. Do not
+            # mint a replacement bubble while a transient PUT failure is
+            # still indistinguishable from server unavailability.
+            from bobi.events.state import load_bubble_state
+            bubble = load_bubble_state(project_path)
+            if not bubble:
+                raise RuntimeError("saved deployment has no valid bubble state")
             registered = (
                 _register_channel_credentials(es_url, bubble)
                 if has_external else {}
@@ -1868,14 +1874,6 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             log.info("Connected to existing local event server on port %d", es_port)
 
     if not (es_deployment and es_key):
-        es_deployment, es_key = _register_with_retry(es_url)
-    elif not bubble_state_path(project_path).exists():
-        log.warning(
-            "Event replay continuity will be reset for session %s, deployment %s: "
-            "legacy deployment has no bubble.json; pre-bubble migration requires "
-            "replacement. Prior unfinished events may be unavailable; review "
-            "prior side effects before resending.", session_name, es_deployment,
-        )
         es_deployment, es_key = _register_with_retry(es_url)
     else:
         es_deployment, es_key = _sync_saved_deployment(es_deployment, es_key)

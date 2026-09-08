@@ -1647,8 +1647,14 @@ class Session:
             # blocking start() for tens of seconds on a slow event server would
             # stall the manager's boot and trip liveness probes. The background
             # loop below owns the patient, backed-off retries instead.
-            self._subscription = _start_event_subscription(
+            subscription = _start_event_subscription(
                 self.name, keys, bobi_root(), register_attempts=1)
+            with self._sub_lock:
+                shutting_down = self._sub_retry_stop.is_set()
+                if not shutting_down:
+                    self._subscription = subscription
+            if shutting_down:
+                subscription.stop()
         except Exception:
             log.warning(
                 "Event subscription registration failed for '%s' — booting "

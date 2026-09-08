@@ -424,8 +424,11 @@ Recovery is unavailable when the necessary identity/history is gone:
   reaches 20,000 events it trims to the newest 10,000.
 - Worker events expire after 48 hours.
 - Explicit `restart --fresh` discards deployment/cursor state as well as
-  conversation identity. Do not use it to preserve pending replay. Legacy
-  pre-bubble migration also replaces identity, with a continuity warning.
+  conversation identity. Do not use it to preserve pending replay.
+- Missing or invalid `bubble.json` does not trigger automatic registration.
+  The client still tries the saved deployment key and preserves its cursor on
+  failure. Repair credentials or deliberately reset after reviewing unfinished
+  work and prior side effects.
 
 Conversation resume only restores compatible model history; connecting is not
 execution. Image/model/brain changes, failed resume, and normal context rotation
