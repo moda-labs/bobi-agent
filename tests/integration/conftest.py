@@ -433,7 +433,16 @@ def _drop_session(name):
     registry.mark_done(name)
     session_dir = registry.session_dir(name)
     if session_dir.exists():
-        shutil.rmtree(session_dir)
+        # Retries close the rmtree race on Linux when a dying child process is
+        # still flushing its final buffers into session_dir.
+        for attempt in range(10):
+            try:
+                shutil.rmtree(session_dir)
+                break
+            except OSError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.1)
 
 
 def _clean_session():

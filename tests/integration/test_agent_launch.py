@@ -242,6 +242,20 @@ class TestUnkeyedLaunchDedup:
         assert "subagents cancel" in loser_output, loser_output
         assert "Traceback" not in loser_output, loser_output
 
+        # Settle the winning detached run so its background process finishes
+        # writing before fixture teardown deletes the session directory (prevents
+        # the [Errno 39] Directory not empty rmtree race on Linux).
+        from bobi.sdk import get_registry
+        registry = get_registry()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            entry = registry.get(name)
+            if entry and entry.status not in ("starting", "running", "idle"):
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail(f"winning run never settled: {registry.get(name)}")
+
     def test_id_random_opts_back_into_parallel_fan_out(
         self, stub_bobi_env, stub_cli_run, stub_clean_session
     ):
