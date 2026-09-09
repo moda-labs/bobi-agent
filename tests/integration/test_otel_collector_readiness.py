@@ -69,23 +69,32 @@ class _PublishedPort:
                     return
                 continue
             with conn:
-                if self._ready.is_set():
-                    conn.settimeout(5.0)
-                    try:
-                        conn.recv(65536)
+                conn.settimeout(5.0)
+                try:
+                    # Read first either way. docker-proxy accepts the connection
+                    # before it dials the container, so the connect always
+                    # completes and the reset lands on the REQUEST. Resetting at
+                    # accept() time instead races the client's connect and
+                    # surfaces there, which is both unfaithful to the proxy and
+                    # a flake in the bare-connect test below.
+                    conn.recv(65536)
+                    if self._ready.is_set():
                         conn.sendall(
                             b"HTTP/1.1 404 Not Found\r\n"
                             b"Content-Length: 0\r\n"
                             b"Connection: close\r\n\r\n"
                         )
-                    except OSError:
-                        pass
-                else:
-                    # A zero linger turns close() into an RST, which is what the
-                    # client sees as `[Errno 104] Connection reset by peer`.
-                    conn.setsockopt(
-                        socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
-                    )
+                    else:
+                        # A zero linger turns close() into an RST, which is what
+                        # the client sees as `[Errno 104] Connection reset by
+                        # peer`.
+                        conn.setsockopt(
+                            socket.SOL_SOCKET,
+                            socket.SO_LINGER,
+                            struct.pack("ii", 1, 0),
+                        )
+                except OSError:
+                    pass
 
     def stop(self) -> None:
         self._stopping.set()
