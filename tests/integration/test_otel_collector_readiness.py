@@ -61,7 +61,13 @@ class _PublishedPort:
             except socket.timeout:
                 continue
             except OSError:
-                return
+                # Only a stop() teardown retires the loop. Returning on any
+                # accept error would leave the port accepting from the backlog
+                # with nothing answering, and the resulting timeout would blame
+                # `_await_ready` for a defect in this stub.
+                if self._stopping.is_set():
+                    return
+                continue
             with conn:
                 if self._ready.is_set():
                     conn.settimeout(5.0)
@@ -110,14 +116,13 @@ def test_a_bare_tcp_connect_is_not_readiness(published_port):
             "connect, otherwise this test is not reproducing the race"
         )
 
-    with pytest.raises(httpx.TransportError) as caught:
+    with pytest.raises(httpx.TransportError):
         httpx.post(
             f"http://127.0.0.1:{published_port.port}/v1/metrics",
             content=b"",
             headers={"Content-Type": "application/x-protobuf"},
             timeout=5.0,
         )
-    assert caught.value is not None
 
 
 def test_await_ready_blocks_until_the_collector_answers(published_port):
@@ -126,7 +131,10 @@ def test_await_ready_blocks_until_the_collector_answers(published_port):
 
     def probe() -> None:
         try:
-            _await_ready(published_port.port, _StubProc(), timeout=30.0)
+            # Under the join budget below, so a failed assertion cannot leave
+            # this thread polling a port the kernel has since handed to another
+            # test, turning one real failure into a second unrelated one.
+            _await_ready(published_port.port, _StubProc(), timeout=10.0)
         except BaseException as exc:  # noqa: BLE001 - reported to the assertion below
             raised.append(exc)
         finally:
