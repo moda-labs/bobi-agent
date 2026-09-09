@@ -9,8 +9,10 @@ the Claude leg exercises a real subagent locally - the same stub the private
 sidecar e2e uses.
 """
 
+import concurrent.futures
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -171,6 +173,74 @@ class TestUnkeyedLaunchDedup:
         assert "--id-random" in output, output
         assert "subagents cancel" in output, output
         assert "Traceback" not in output, output
+
+    def test_two_concurrent_processes_on_one_task_admit_exactly_one(
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
+    ):
+        """The cross-process race (#875 / MOD-303), driven for real.
+
+        The sibling above pins the first run and then launches the second, so
+        it proves the guard fires but not that check-and-register is *atomic*
+        across processes - the two launches never overlap inside admission.
+        Here they do: two `bobi ... subagents launch` processes on a
+        byte-identical un-keyed task, released together off a barrier so both
+        are inside `launch_agent`'s admission at once.
+
+        Before #1052 `_LAUNCH_ADMISSION_LOCK` was a process-local
+        `threading.Lock`, so both processes could read "no entry" and both
+        `register()`, leaving one live agent untracked. The fix serializes the
+        decision on `workflow.state.ledger_lock()` - a cross-process file lock -
+        and re-checks + registers in one held section. The invariant: the
+        sorted return codes are exactly ``[0, 1]``, the winner reports the
+        started agent, and the loser is refused as a duplicate with no
+        traceback (a traceback reads as a transient crash and invites a retry,
+        which is the launch storm the guard exists to stop).
+        """
+        cli_run = stub_cli_run
+        task = self._task("concurrent")
+        name = self._derived_session_name(stub_bobi_env, task)
+        stub_clean_session(name)
+
+        # Release both subprocesses at the same instant so their admission
+        # windows genuinely overlap - otherwise the first can finish before the
+        # second starts and the race is never exercised.
+        gate = threading.Barrier(2)
+
+        def _launch():
+            gate.wait(timeout=30)
+            return cli_run(
+                "subagents", "launch",
+                "-w", "adhoc", "--role", self.ROLE, "--task", task,
+                timeout=LAUNCH_TIMEOUT_S,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = (pool.submit(_launch), pool.submit(_launch))
+            results = [first.result(), second.result()]
+
+        codes = sorted(r.returncode for r in results)
+        detail = "\n".join(
+            f"[{i}] rc={r.returncode}\n stdout={r.stdout!r}\n stderr={r.stderr!r}"
+            for i, r in enumerate(results)
+        )
+        assert codes == [0, 1], (
+            "two concurrent un-keyed launches on one task were not "
+            f"serialized across processes - expected exactly one to win:\n{detail}"
+        )
+
+        winner = next(r for r in results if r.returncode == 0)
+        loser = next(r for r in results if r.returncode == 1)
+
+        assert f"Agent started: {name}" in winner.stdout, winner.stdout
+        # The winning launch is genuinely the un-keyed derived-key path, which
+        # is what makes admission load-bearing here.
+        assert "derived" in winner.stderr, winner.stderr
+
+        loser_output = loser.stdout + loser.stderr
+        assert "already active" in loser_output, loser_output
+        assert "--id-random" in loser_output, loser_output
+        assert "subagents cancel" in loser_output, loser_output
+        assert "Traceback" not in loser_output, loser_output
 
     def test_id_random_opts_back_into_parallel_fan_out(
         self, stub_bobi_env, stub_cli_run, stub_clean_session
