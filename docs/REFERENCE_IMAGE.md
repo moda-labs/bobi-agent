@@ -200,7 +200,10 @@ in `docker history`.
 
 ## Publishing (maintainers)
 
-`.github/workflows/release-image.yml` builds and pushes the image. It installs
+`.github/workflows/release-image.yml` builds a candidate and pushes it only under
+an attempt-specific candidate tag. The fleet canary consumes that candidate,
+and its verified `bobi-image-proven-v1` callback promotes the exact immutable
+digest to the public version and (when eligible) `latest` tags. It installs
 `bobi==<version>` **from PyPI**, so it runs *after* the public release is live —
 the published image must contain the exact bytes PyPI serves, not a
 separately-rebuilt wheel that merely claims the same version.
@@ -210,8 +213,13 @@ gh workflow run release-image.yml \
   -f version=0.51.1 -f claude-version=<pinned> -f source-sha=<sha>
 ```
 
-Dispatching any released version re-publishes that version's image from the
-current Dockerfile, which is also the hotfix path. `:latest` moves only when the
+This command creates a candidate; it does not publish the consumer version
+tag. A failed, skipped, expired, or mismatched fleet proof leaves all final
+tags unchanged. Do not re-run an old candidate to repair a tag: create a fresh
+candidate, prove it, and let the serialized promotion step perform the copy.
+
+Dispatching a released version creates a fresh candidate from the current
+Dockerfile, preserving the corrective hotfix path after fresh canary proof. `:latest` moves only when the
 version being published is this repository's newest non-prerelease release, so
 re-running an old release's job can never move it.
 
@@ -220,3 +228,9 @@ this repository to have write access to the `ghcr.io/moda-labs/bobi` package.
 That access is granted in the package's settings and is **not** implied by the
 `org.opencontainers.image.source` label, which only links the package to a
 repository for display.
+
+Use `-f dry-run=true` to build/check both native architectures without writing
+registry tags or dispatching a canary. Candidate creation and promotion are
+separate runs; follow the promotion run before declaring publication complete.
+See `docs/RELEASE_RUNBOOK.md` for CROSS_REPO_PAT prerequisites, private companion workflow
+requirements, proof retention and interrupted-promotion recovery.
