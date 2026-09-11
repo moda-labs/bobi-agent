@@ -81,6 +81,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "18"
 
       - name: Install dependencies
         # The deploy engine's own suite runs in its repo, not here.
@@ -421,6 +424,108 @@ jobs:
           pytest tests/integration/test_event_server.py -k wrangler
           --timeout=300 -v
 
+  diy-install-build:
+    name: Build DIY install artifact
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Build wheel and manifest
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet build
+          rm -rf diy-dist
+          python -m build --wheel --outdir diy-dist
+          wheel=$(find diy-dist -maxdepth 1 -name 'bobi-*.whl' -print -quit)
+          test -n "$wheel"
+          sha256sum "$wheel" > diy-dist/wheel.sha256
+          mkdir -p diy-dist/harness/scripts diy-dist/harness/tests/diy_install
+          cp scripts/smoke_diy_install.py diy-dist/harness/scripts/
+          cp tests/diy_install/test_diy_install.py diy-dist/harness/tests/diy_install/
+          cp scripts/assert_junit_ran.py diy-dist/harness/
+          python - <<'PY'
+          import importlib.metadata, json
+          json.dump({"version": importlib.metadata.version("bobi")}, open("diy-dist/manifest.json", "w"))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bobi-diy-wheel
+          path: diy-dist
+          if-no-files-found: error
+          retention-days: 3
+
+  diy-install:
+    name: DIY install (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    needs: [changes, diy-install-build]
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && needs.diy-install-build.result == 'success' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python-version: "3.11"}
+          - {os: ubuntu-latest, python-version: "3.12"}
+          - {os: ubuntu-latest, python-version: "3.13"}
+          - {os: macos-latest, python-version: "3.11"}
+          - {os: macos-latest, python-version: "3.12"}
+          - {os: macos-latest, python-version: "3.13"}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bobi-diy-wheel
+          path: diy-dist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install and smoke test the wheel outside the checkout
+        run: |
+          set -euo pipefail
+          export BOBI_DIY_NODE18="$(command -v node)"
+          python -m venv subject-venv
+          subject-venv/bin/python -m pip install --quiet diy-dist/*.whl
+          subject-venv/bin/python -m pip install --quiet pytest
+          export BOBI_TEST_WHEEL="$(find "$PWD/diy-dist" -name 'bobi-*.whl' -print -quit)"
+          cd diy-dist/harness
+          subject-venv/bin/python -m pytest tests/diy_install/test_diy_install.py --confcutdir=tests/diy_install --import-mode=importlib --junitxml="$GITHUB_WORKSPACE/diy-install.xml" -q
+          subject-venv/bin/python assert_junit_ran.py "$GITHUB_WORKSPACE/diy-install.xml" --expect-passed 9 \
+            --require test_wheel_identity_and_version \
+            --require test_doctor_fresh_install \
+            --require test_doctor_without_node \
+            --require test_doctor_with_old_node \
+            --require test_setup_shell_without_claude \
+            --require test_setup_hosted_assets_offline \
+            --require test_readonly_framework_startup \
+            --require test_unreadable_framework_diagnostic \
+            --require test_guard_keeps_pip_reinstall_working
+
+  diy-install-gate:
+    name: DIY install (gate)
+    needs: [changes, diy-install-build, diy-install]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every DIY install cell
+        env:
+          CHANGE_RESULT: ${{ needs.changes.result }}
+          BUILD_RESULT: ${{ needs.diy-install-build.result }}
+          CONSUMER_RESULT: ${{ needs.diy-install.result }}
+          CODE: ${{ needs.changes.outputs.code }}
+        run: |
+          set -euo pipefail
+          if [ "$CODE" = "false" ] && [ "$BUILD_RESULT" = "skipped" ] && [ "$CONSUMER_RESULT" = "skipped" ]; then
+            echo "docs/plans-only change: DIY install lane skipped"
+            exit 0
+          fi
+          test "$CHANGE_RESULT" = success
+          test "$BUILD_RESULT" = success
+          test "$CONSUMER_RESULT" = success
+
   # --------------------------------------------------------------------------
   # Dev channel (#740 Track A). When every gate above is green on a push to
   # main, advance `refs/heads/dev` to that commit. `dev` is the pre-release /
@@ -434,7 +539,7 @@ jobs:
     # becomes `dev` when the whole CI matrix proved it. `changes` is included
     # so a gate-job error on a push to main blocks promotion too (on push it
     # always reports code=true, so it never suppresses the heavy jobs here).
-    needs: [changes, unit-tests, unit-tests-gate, lint, event-server, wrangler, integration-fast, e2e]
+    needs: [changes, unit-tests, unit-tests-gate, lint, event-server, wrangler, integration-fast, e2e, diy-install-build, diy-install, diy-install-gate]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # Serialize promotions; the ancestor check below handles runs that
     # complete out of order.
