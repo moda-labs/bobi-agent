@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -11,15 +12,18 @@ _DROP_PREFIXES = ("AWS_", "AZURE_", "GITHUB_", "GOOGLE_", "OPENAI_", "ANTHROPIC_
 _DROP_NAMES = {"PYTHONPATH", "PYTHONHOME", "BOBI_ROOT", "CLAUDE_CODE_OAUTH_TOKEN"}
 
 
-def build_child_env(case_root: Path, subject_bin: Path, tool_bin: Path = Path()) -> dict[str, str]:
+def build_child_env(case_root: Path, subject_bin: Path, tool_bin: Path | None = None) -> dict[str, str]:
     """Return a deliberately small environment for installed-package children."""
     root = case_root.resolve()
     home = root / "home"
     bobi_home = root / "bobi-home"
     for path in (home, bobi_home):
         path.mkdir(parents=True, exist_ok=True)
+    browser = root / "browser"
+    browser.write_text("#!/bin/sh\nexit 0\n")
+    browser.chmod(0o755)
     path_entries = [str(subject_bin)]
-    if str(tool_bin):
+    if tool_bin is not None:
         path_entries.insert(0, str(tool_bin))
     env = {
         "HOME": str(home),
@@ -31,6 +35,7 @@ def build_child_env(case_root: Path, subject_bin: Path, tool_bin: Path = Path())
         "PYTHONDONTWRITEBYTECODE": "1",
         "BOBI_APP_PORT": "0",
         "PATH": os.pathsep.join(path_entries),
+        "BROWSER": str(browser),
     }
     for key, value in os.environ.items():
         if key in _DROP_NAMES or key.startswith(_DROP_PREFIXES):
@@ -62,3 +67,12 @@ def assert_wheel_identity(wheel: Path, manifest: dict[str, str]) -> None:
     if not wheel.name.startswith("bobi-") or not wheel.name.endswith(".whl"):
         raise AssertionError(f"unexpected wheel artifact: {wheel.name}")
 
+
+def read_manifest(path: Path) -> dict[str, str]:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AssertionError(f"invalid DIY wheel manifest: {exc}") from exc
+    if not isinstance(value, dict) or not value.get("version") or not value.get("sha256"):
+        raise AssertionError("DIY wheel manifest must contain version and sha256")
+    return value

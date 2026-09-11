@@ -81,9 +81,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: pyproject.toml
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "18"
 
       - name: Install dependencies
         # The deploy engine's own suite runs in its repo, not here.
@@ -395,7 +392,7 @@ jobs:
 
       # NODE 22 HERE, 20 EVERYWHERE ELSE - deliberate, do not "align" it.
       # wrangler refuses to start on anything below v22, while the embedded
-      # local-server artifact build requires EXACTLY 20
+      # local-server artifact uses Node 20 as its reproducible build baseline
       # (hatch_build.py::_require_build_node). The two cannot share a job.
       # This one gets away with 22 because it never builds that artifact: an
       # editable install returns early from the build hook (hatch_build.py:245,
@@ -435,6 +432,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
       - name: Build wheel and manifest
         run: |
           set -euo pipefail
@@ -449,8 +449,13 @@ jobs:
           cp tests/diy_install/test_diy_install.py diy-dist/harness/tests/diy_install/
           cp scripts/assert_junit_ran.py diy-dist/harness/
           python - <<'PY'
-          import importlib.metadata, json
-          json.dump({"version": importlib.metadata.version("bobi")}, open("diy-dist/manifest.json", "w"))
+          import hashlib, json, pathlib, zipfile
+          wheel = next(pathlib.Path("diy-dist").glob("bobi-*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              metadata = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+              version = next(line.split(":", 1)[1].strip() for line in archive.read(metadata).decode().splitlines() if line.startswith("Version:"))
+          digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+          json.dump({"version": version, "sha256": digest}, open("diy-dist/manifest.json", "w"))
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -483,17 +488,23 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "18"
       - name: Install and smoke test the wheel outside the checkout
         run: |
           set -euo pipefail
-          export BOBI_DIY_NODE18="$(command -v node)"
-          python -m venv subject-venv
-          subject-venv/bin/python -m pip install --quiet diy-dist/*.whl
-          subject-venv/bin/python -m pip install --quiet pytest
-          export BOBI_TEST_WHEEL="$(find "$PWD/diy-dist" -name 'bobi-*.whl' -print -quit)"
+          node18_bin="$(type -P node)"
+          [[ "$("$node18_bin" --version)" == v18.* ]] || { echo "setup-node did not provision Node 18" >&2; exit 1; }
+          export BOBI_DIY_NODE18="$node18_bin"
+          python -m venv driver-venv
+          driver-venv/bin/python -m pip install --quiet pytest pytest-timeout
+          wheel_path="$(find "$PWD/diy-dist" -name 'bobi-*.whl' -print -quit)"
+          export BOBI_TEST_WHEEL="$wheel_path"
+          export BOBI_TEST_MANIFEST="$PWD/diy-dist/manifest.json"
           cd diy-dist/harness
-          subject-venv/bin/python -m pytest tests/diy_install/test_diy_install.py --confcutdir=tests/diy_install --import-mode=importlib --junitxml="$GITHUB_WORKSPACE/diy-install.xml" -q
-          subject-venv/bin/python assert_junit_ran.py "$GITHUB_WORKSPACE/diy-install.xml" --expect-passed 9 \
+          "$GITHUB_WORKSPACE/driver-venv/bin/python" -m pytest tests/diy_install/test_diy_install.py --confcutdir=tests/diy_install --import-mode=importlib --junitxml="$GITHUB_WORKSPACE/diy-install.xml" -q
+          "$GITHUB_WORKSPACE/driver-venv/bin/python" assert_junit_ran.py "$GITHUB_WORKSPACE/diy-install.xml" --expect-passed 9 \
             --require test_wheel_identity_and_version \
             --require test_doctor_fresh_install \
             --require test_doctor_without_node \

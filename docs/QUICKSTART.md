@@ -43,6 +43,19 @@ have it troubleshoot with you.
 You do not need to clone the Bobi repo. Bobi is a published package - install
 the CLI and go.
 
+If you prefer plain pip, keep Bobi isolated in a virtual environment:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install bobi
+bobi --version
+```
+
+On a fresh install, `bobi agent <name> doctor` is expected to warn about missing Claude Code
+and Node.js 20+ until those prerequisites are available. The setup shell can
+start without Claude; opening an authoring session requires the Claude Code CLI.
+
 ## Step 1: Install and log in to Claude Code
 
 Bobi's setup client and (by default) each agent run on Claude Code. Skip this

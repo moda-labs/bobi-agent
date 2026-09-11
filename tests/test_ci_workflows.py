@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import subprocess
 
 from tests.workflow_utils import load_workflow
 
@@ -180,3 +182,49 @@ def test_promote_dev_advances_only_on_fully_green_main_push():
     # The ancestor check needs history; a shallow checkout would break it.
     checkout = next(s for s in job["steps"] if "checkout" in s.get("uses", ""))
     assert checkout["with"]["fetch-depth"] == 0
+
+
+def test_diy_install_lane_uses_one_wheel_across_supported_hosts():
+    workflow = _ci_workflow()
+    jobs = workflow["jobs"]
+    unit_steps = jobs["unit-tests"]["steps"]
+    assert not any(step.get("uses", "").startswith("actions/setup-node") for step in unit_steps)
+
+    build = jobs["diy-install-build"]
+    build_node = next(step for step in build["steps"] if step.get("uses", "").startswith("actions/setup-node"))
+    assert str(build_node["with"]["node-version"]) == "20"
+    producer = next(step for step in build["steps"] if step.get("name") == "Build wheel and manifest")["run"]
+    assert '"sha256": digest' in producer
+    assert "tests/diy_install/test_diy_install.py" in producer
+
+    consumer = jobs["diy-install"]
+    assert not any(step.get("uses", "").startswith("actions/checkout") for step in consumer["steps"])
+    assert consumer["strategy"]["fail-fast"] is False
+    assert consumer["strategy"]["matrix"]["include"] == [
+        {"os": os_name, "python-version": version}
+        for os_name in ("ubuntu-latest", "macos-latest")
+        for version in ("3.11", "3.12", "3.13")
+    ]
+    node = next(step for step in consumer["steps"] if step.get("uses", "").startswith("actions/setup-node"))
+    assert str(node["with"]["node-version"]) == "18"
+    smoke = next(step for step in consumer["steps"] if step.get("name") == "Install and smoke test the wheel outside the checkout")["run"]
+    assert "type -P node" in smoke and "v18.*" in smoke
+    assert "command -v node" not in smoke
+    assert "BOBI_TEST_MANIFEST" in smoke
+    assert "--expect-passed 9" in smoke
+    assert "subject-venv" not in smoke
+
+
+def test_diy_install_gate_fails_closed():
+    gate = _ci_workflow()["jobs"]["diy-install-gate"]
+    script = next(step for step in gate["steps"] if step.get("name") == "Require every DIY install cell")["run"]
+
+    def run(**values):
+        env = os.environ | {key: value for key, value in values.items()}
+        return subprocess.run(["bash", "-c", script], env=env, capture_output=True).returncode
+
+    assert run(CODE="true", CHANGE_RESULT="success", BUILD_RESULT="success", CONSUMER_RESULT="success") == 0
+    assert run(CODE="false", CHANGE_RESULT="success", BUILD_RESULT="skipped", CONSUMER_RESULT="skipped") == 0
+    assert run(CODE="true", CHANGE_RESULT="success", BUILD_RESULT="failure", CONSUMER_RESULT="skipped") != 0
+    assert run(CODE="true", CHANGE_RESULT="success", BUILD_RESULT="success", CONSUMER_RESULT="cancelled") != 0
+    assert run(CODE="", CHANGE_RESULT="success", BUILD_RESULT="skipped", CONSUMER_RESULT="skipped") != 0
