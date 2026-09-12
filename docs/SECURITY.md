@@ -147,16 +147,16 @@ therefore runs untrusted-author code against your credentials.
     Monitoring (FIM) check against the distribution's PEP 376 `RECORD` metadata.
     If any framework file is missing, unreadable, or has a mismatched SHA-256
     hash, the runtime fails closed immediately and refuses to launch.
-  - **Scope of that gate:** every `RECORD` entry except the event-server build
-    inputs (`bobi/event-server/` outside `dist/`). An installed Bobi loads only
+  - **Scope of that gate:** every `RECORD` entry. The one relaxation is that a
+    changed *digest* on an event-server build input (`bobi/event-server/`
+    outside `dist/`) does not block a launch. An installed Bobi executes only
     `bobi/event-server/dist/local.js`, which the gate still covers and which
     `validate_artifact` re-audits against `dist/local.inputs.json` on every
-    start. The exempt files are build inputs the installed runtime never reads,
-    so a changed digest there does not block a launch. It is still reported:
-    `bobi agent <name> doctor` runs the same check with
-    `include_event_server_build_inputs=True` and flags the mismatch. A missing
-    or unreadable input still fails the launch gate. The split exists so a file
-    the runtime never reads cannot crash-loop a live pod (#1087).
+    start; the exempt files are build inputs it never reads as code. A missing
+    or unreadable one still fails the launch gate, and full verification stays
+    the default for every other caller, so `bobi agent <name> doctor` reports
+    the mismatch. The split exists so a file the runtime does not execute
+    cannot crash-loop a live pod (#1087).
   - **In-session upgrades:** During a session, filesystem permissions on the
     framework package remain standard (`0644`/`0755`) so standard package managers
     (`uv tool upgrade bobi`, `pipx upgrade`, `pip`) can perform upgrades without

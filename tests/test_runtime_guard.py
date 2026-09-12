@@ -387,7 +387,9 @@ class TestBobiDistributionIntegrity:
             ],
         )
 
-        result = check_bobi_distribution_integrity(dist)
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        result = verify_framework_integrity_or_raise(dist)
 
         assert result.ok, result.detail
 
@@ -417,9 +419,7 @@ class TestBobiDistributionIntegrity:
             ],
         )
 
-        result = check_bobi_distribution_integrity(
-            dist, include_event_server_build_inputs=True,
-        )
+        result = check_bobi_distribution_integrity(dist)
 
         assert not result.ok
         assert "bobi/event-server/package-lock.json: sha256 mismatch" in result.detail
@@ -445,10 +445,10 @@ class TestBobiDistributionIntegrity:
             ],
         )
 
-        result = check_bobi_distribution_integrity(dist)
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
 
-        assert not result.ok
-        assert "bobi/event-server/package.json: missing" in result.detail
+        with pytest.raises(RuntimeError, match="package.json: missing"):
+            verify_framework_integrity_or_raise(dist)
 
     def test_event_server_bundle_mismatch_still_blocks_startup(
         self, tmp_path, monkeypatch,
@@ -476,11 +476,12 @@ class TestBobiDistributionIntegrity:
             ],
         )
 
-        result = check_bobi_distribution_integrity(dist)
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
 
-        assert not result.ok
-        assert "sha256 mismatch" in result.detail
-        assert "bobi/event-server/dist/local.js" in result.failures[0]
+        with pytest.raises(
+            RuntimeError, match=r"bobi/event-server/dist/local\.js: sha256 mismatch",
+        ):
+            verify_framework_integrity_or_raise(dist)
 
     def test_event_server_record_entry_outside_the_package_still_fails(
         self, tmp_path, monkeypatch,
@@ -506,10 +507,10 @@ class TestBobiDistributionIntegrity:
             ],
         )
 
-        result = check_bobi_distribution_integrity(dist)
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
 
-        assert not result.ok
-        assert "resolves outside Bobi distribution roots" in result.detail
+        with pytest.raises(RuntimeError, match="resolves outside Bobi distribution roots"):
+            verify_framework_integrity_or_raise(dist)
 
 
 def test_startup_integrity_exempts_exactly_the_event_server_build_inputs():

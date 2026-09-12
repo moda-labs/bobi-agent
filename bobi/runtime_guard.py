@@ -244,7 +244,12 @@ def verify_framework_integrity_or_raise(dist: Any = _UNSET) -> PolicyCheck:
     Fails closed by raising RuntimeError if any framework file is missing,
     unreadable, or has a mismatched SHA-256 digest.
     """
-    check = check_bobi_distribution_integrity(dist=dist)
+    # The launch gate is the ONE caller that tolerates a changed digest on the
+    # event-server build inputs; see the exemption note above.
+    check = check_bobi_distribution_integrity(
+        dist=dist,
+        tolerate_event_server_build_inputs=True,
+    )
     if not check.ok:
         raise RuntimeError(
             f"Bobi framework integrity violation detected: {check.detail}. "
@@ -309,16 +314,24 @@ def _urlsafe_b64_sha256(data: bytes) -> str:
 # build-tool versions), so dist/ keeps both this gate and its own audit.
 #
 # Everything outside dist/ is a declared BUILD input - package.json,
-# package-lock.json, tsconfig.json, src/**, core/** - whose CONTENTS an
-# installed Bobi never reads. artifact.locked_esbuild_version, the only
-# lockfile reader, is reached only under validate_artifact(verify_inputs=True),
-# which the source path alone uses.
+# package-lock.json, tsconfig.json, src/**, core/** - that an installed Bobi
+# never reads AS CODE. artifact.locked_esbuild_version, the only lockfile
+# reader, is reached only under validate_artifact(verify_inputs=True), which
+# the source path alone uses.
 #
-# Only the LAUNCH gate relaxes, and only on the digest. Nothing stops
-# reporting: doctor passes include_event_server_build_inputs=True and still
-# flags a modified input. A missing or unreadable input still fails closed
-# here too, because _find_event_server_dir probes for package.json, so an
-# absent one breaks startup for real.
+# "Not as code" is the exact claim, not "not at all": Node resolves the
+# nearest package.json for its `type` field when it loads dist/local.js, so
+# flipping that field to "module" breaks the CommonJS bundle with `require is
+# not defined in ES module scope`. That is a loud load failure, not attacker
+# code execution, so tolerating its digest is still right - but do not widen
+# this exemption on the belief that nothing reads these files at all.
+#
+# Only the LAUNCH gate relaxes, and only on the digest: full verification is
+# the default, and verify_framework_integrity_or_raise opts into the
+# tolerance. Every other caller (doctor) keeps reporting a modified input. A
+# missing or unreadable input still fails closed here too, because
+# _find_event_server_dir probes for package.json, so an absent one breaks
+# startup for real.
 #
 # The launch gate relaxes because the shipped tree is an npm workspace root
 # whose `worker` workspace is deliberately not distributed. Any npm command
@@ -340,7 +353,7 @@ def _is_event_server_build_input(record_path: str) -> bool:
 def check_bobi_distribution_integrity(
     dist: Any = _UNSET,
     *,
-    include_event_server_build_inputs: bool = False,
+    tolerate_event_server_build_inputs: bool = False,
 ) -> PolicyCheck:
     import bobi
 
@@ -386,7 +399,7 @@ def check_bobi_distribution_integrity(
         checked += 1
         if _urlsafe_b64_sha256(data) == digest[1]:
             continue
-        if not include_event_server_build_inputs and _is_event_server_build_input(
+        if tolerate_event_server_build_inputs and _is_event_server_build_input(
             Path(str(file)).as_posix()
         ):
             continue

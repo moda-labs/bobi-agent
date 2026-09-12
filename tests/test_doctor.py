@@ -495,7 +495,9 @@ def test_bobi_install_check_reports_event_server_build_inputs():
         result = doctor._check_bobi_install_integrity()
 
     assert result.ok
-    check.assert_called_once_with(include_event_server_build_inputs=True)
+    # No tolerate_* flag: doctor takes the full-verification default, so a
+    # rewritten lockfile that the launch gate waves through is still reported.
+    check.assert_called_once_with()
 
 
 def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):

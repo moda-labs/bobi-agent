@@ -749,16 +749,29 @@ INTEGRITY_PROBE = textwrap.dedent(
     sys.path.insert(0, os.environ["BOBI_TEST_INSTALL_DIR"])
 
     import bobi
-    from bobi.runtime_guard import check_bobi_distribution_integrity
+    from bobi.runtime_guard import (
+        check_bobi_distribution_integrity,
+        verify_framework_integrity_or_raise,
+    )
 
-    check = check_bobi_distribution_integrity()
+    # The launch gate is what a pod actually runs at startup.
+    try:
+        gate = verify_framework_integrity_or_raise()
+        gate_ok, gate_detail = gate.ok, gate.detail
+    except RuntimeError as exc:
+        gate_ok, gate_detail = False, str(exc)
+
+    # The full-verification default is what doctor reports.
+    full = check_bobi_distribution_integrity()
+
     Path(os.environ["BOBI_TEST_RESULT"]).write_text(
         json.dumps(
             {
                 "bobi_package": str(Path(bobi.__file__).resolve().parent),
-                "ok": check.ok,
-                "detail": check.detail,
-                "failures": check.failures,
+                "gate_ok": gate_ok,
+                "gate_detail": gate_detail,
+                "full_ok": full.ok,
+                "full_detail": full.detail,
             }
         )
     )
@@ -813,8 +826,8 @@ def _probe_installed_integrity(install_dir: Path, tmp_path: Path, name: str) -> 
     assert Path(result["bobi_package"]) == install_dir / "bobi", (
         f"probe imported {result['bobi_package']}, expected {install_dir / 'bobi'}"
     )
-    assert "hashed Bobi file(s) verified" in result["detail"] or result["failures"], (
-        f"probe did not hash the installed wheel: {result['detail']}"
+    assert "editable" not in result["gate_detail"], (
+        f"probe took the editable-install early return: {result['gate_detail']}"
     )
     return result
 
@@ -900,9 +913,20 @@ def test_npm_graph_reresolve_in_the_installed_tree_does_not_block_startup(
 
     result = _probe_installed_integrity(install_dir, tmp_path, "after-reresolve")
 
-    assert result["ok"], (
+    assert result["gate_ok"], (
         "a rewritten event-server lockfile still blocks startup: "
-        f"{result['detail']} {result['failures']}"
+        f"{result['gate_detail']}"
+    )
+    assert "hashed Bobi file(s) verified" in result["gate_detail"], (
+        f"the gate did not hash the installed wheel: {result['gate_detail']}"
+    )
+    # The other half of the split: startup tolerates it, doctor still reports it.
+    assert not result["full_ok"], (
+        "full verification stopped reporting the rewritten lockfile, so nothing "
+        "surfaces a modified build input any more"
+    )
+    assert "package-lock.json: sha256 mismatch" in result["full_detail"], (
+        f"unexpected full-verification detail: {result['full_detail']}"
     )
 
 
@@ -917,10 +941,11 @@ def test_tampered_packaged_bundle_still_blocks_startup(packaged_artifacts, tmp_p
 
     result = _probe_installed_integrity(install_dir, tmp_path, "after-tamper")
 
-    assert not result["ok"], "a tampered event-server bundle no longer blocks startup"
-    assert "sha256 mismatch" in result["detail"]
-    assert any(PACKAGED_BUNDLE in failure for failure in result["failures"]), (
-        f"bundle mismatch not reported: {result['failures']}"
+    assert not result["gate_ok"], (
+        "a tampered event-server bundle no longer blocks startup"
+    )
+    assert f"{PACKAGED_BUNDLE}: sha256 mismatch" in result["gate_detail"], (
+        f"bundle mismatch not reported: {result['gate_detail']}"
     )
 
 
