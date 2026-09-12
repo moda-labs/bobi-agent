@@ -739,6 +739,223 @@ def test_changed_source_archive_cannot_reuse_carried_artifact(
     assert "Node.js 20 or newer" in diagnostic
 
 
+INTEGRITY_PROBE = textwrap.dedent(
+    """
+    import json
+    import os
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, os.environ["BOBI_TEST_INSTALL_DIR"])
+
+    import bobi
+    from bobi.runtime_guard import (
+        check_bobi_distribution_integrity,
+        verify_framework_integrity_or_raise,
+    )
+
+    # The launch gate is what a pod actually runs at startup.
+    try:
+        gate = verify_framework_integrity_or_raise()
+        gate_ok, gate_detail = gate.ok, gate.detail
+    except RuntimeError as exc:
+        gate_ok, gate_detail = False, str(exc)
+
+    # The full-verification default is what doctor reports.
+    full = check_bobi_distribution_integrity()
+
+    Path(os.environ["BOBI_TEST_RESULT"]).write_text(
+        json.dumps(
+            {
+                "bobi_package": str(Path(bobi.__file__).resolve().parent),
+                "gate_ok": gate_ok,
+                "gate_detail": gate_detail,
+                "full_ok": full.ok,
+                "full_detail": full.detail,
+            }
+        )
+    )
+    """
+)
+
+
+def _install_wheel(wheel: Path, install_dir: Path, cwd: Path):
+    install = _run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-cache-dir",
+            "--no-compile",
+            "--no-deps",
+            "--target",
+            str(install_dir),
+            str(wheel),
+        ],
+        cwd=cwd,
+    )
+    assert install.returncode == 0, (
+        f"wheel install failed\nstdout:\n{install.stdout}\nstderr:\n{install.stderr}"
+    )
+
+
+def _probe_installed_integrity(install_dir: Path, tmp_path: Path, name: str) -> dict:
+    result_path = tmp_path / f"{name}.json"
+    env = _runtime_probe_environment()
+    env.update(
+        {
+            "BOBI_TEST_INSTALL_DIR": str(install_dir),
+            "BOBI_TEST_RESULT": str(result_path),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    probe = _run([sys.executable, "-c", INTEGRITY_PROBE], cwd=tmp_path, env=env)
+    assert probe.returncode == 0, (
+        f"integrity probe failed\nstdout:\n{probe.stdout}\nstderr:\n{probe.stderr}"
+    )
+    result = json.loads(result_path.read_text())
+    # Without these the positive assertion can pass vacuously: an outer
+    # editable bobi would satisfy the "editable/source install" early return
+    # instead of hashing the wheel we just installed.
+    assert Path(result["bobi_package"]) == install_dir / "bobi", (
+        f"probe imported {result['bobi_package']}, expected {install_dir / 'bobi'}"
+    )
+    assert "editable" not in result["gate_detail"], (
+        f"probe took the editable-install early return: {result['gate_detail']}"
+    )
+    return result
+
+
+def test_npm_graph_reresolve_in_the_installed_tree_does_not_block_startup(
+    packaged_artifacts, tmp_path,
+):
+    """An npm re-resolve rewrites the shipped lockfile; startup must survive (#1087).
+
+    The wheel's event-server is an npm workspace root that declares a `worker`
+    workspace the distribution deliberately omits. Any npm command that
+    re-resolves the dependency graph therefore cannot read `worker/package.json`,
+    prunes that workspace's transitive entries, and rewrites `package-lock.json`
+    in place. That file is a PEP 376 RECORD entry, so a fail-closed startup
+    preflight over it crash-loops every subsequent pod even though the installed
+    runtime never reads the lockfile.
+
+    This drives the REAL npm because the rewrite is npm's behaviour, not ours:
+    a stubbed npm would pin our belief about npm instead of npm itself.
+    """
+    npm = shutil.which("npm")
+    if npm is None:
+        pytest.skip("npm is required to re-resolve the shipped lockfile")
+
+    wheel = packaged_artifacts["sdist_wheel"]
+    # The exemption is keyed on dist/, so anything the runtime loads must ship
+    # there. Pin that the wheel carries nothing else outside dist/ beyond the
+    # artifact module's declared build inputs.
+    from bobi.events import artifact
+
+    with zipfile.ZipFile(wheel) as archive:
+        shipped = {
+            name for name in archive.namelist()
+            if name.startswith("bobi/event-server/")
+        }
+    outside_dist = {
+        name for name in shipped
+        if not name.startswith("bobi/event-server/dist/")
+    }
+    source = PACKAGE_ROOT / "event-server"
+    declared = {
+        f"bobi/event-server/{path.relative_to(source).as_posix()}"
+        for path in artifact.source_input_paths(source)
+    }
+    assert outside_dist == declared, (
+        "wheel ships event-server files outside dist/ that are not declared "
+        f"build inputs: {outside_dist - declared}"
+    )
+    from bobi.runtime_guard import _is_event_server_build_input
+
+    waived = {name for name in shipped if _is_event_server_build_input(name)}
+    assert waived == {
+        "bobi/event-server/package.json",
+        "bobi/event-server/package-lock.json",
+    }, f"launch-gate waiver is not the npm manifest pair: {waived}"
+
+    install_dir = tmp_path / "installed"
+    _install_wheel(wheel, install_dir, tmp_path)
+
+    event_server = install_dir / "bobi" / "event-server"
+    lockfile = event_server / "package-lock.json"
+    before = lockfile.read_bytes()
+
+    npm_cache = tmp_path / "npm-cache"
+    npm_cache.mkdir()
+    env = dict(os.environ)
+    env["NPM_CONFIG_CACHE"] = str(npm_cache)
+    # --package-lock-only --offline re-resolves the graph and writes the lockfile
+    # without touching the network or installing anything, which is the whole
+    # mechanism in ~0.5s.
+    rewrite = _run(
+        [
+            npm,
+            "install",
+            "--package-lock-only",
+            "--offline",
+            "--no-audit",
+            "--no-fund",
+        ],
+        cwd=event_server,
+        env=env,
+    )
+    assert rewrite.returncode == 0, (
+        f"npm re-resolve failed\nstdout:\n{rewrite.stdout}\nstderr:\n{rewrite.stderr}"
+    )
+    assert lockfile.read_bytes() != before, (
+        "npm no longer rewrites the shipped lockfile, so this regression test is "
+        "vacuous: re-derive the mechanism before trusting it again"
+    )
+
+    result = _probe_installed_integrity(install_dir, tmp_path, "after-reresolve")
+
+    assert result["gate_ok"], (
+        "a rewritten event-server lockfile still blocks startup: "
+        f"{result['gate_detail']}"
+    )
+    assert "hashed Bobi file(s) verified" in result["gate_detail"], (
+        f"the gate did not hash the installed wheel: {result['gate_detail']}"
+    )
+    assert "1 event-server manifest(s) tolerated" in result["gate_detail"], (
+        "the gate reported a clean verify over a file that failed its digest: "
+        f"{result['gate_detail']}"
+    )
+    # The other half of the split: startup tolerates it, doctor still reports it.
+    assert not result["full_ok"], (
+        "full verification stopped reporting the rewritten lockfile, so nothing "
+        "surfaces a modified build input any more"
+    )
+    assert "package-lock.json: sha256 mismatch" in result["full_detail"], (
+        f"unexpected full-verification detail: {result['full_detail']}"
+    )
+
+
+def test_tampered_packaged_bundle_still_blocks_startup(packaged_artifacts, tmp_path):
+    """The counter-test: exempting build inputs must not exempt what runs."""
+    install_dir = tmp_path / "installed"
+    _install_wheel(packaged_artifacts["sdist_wheel"], install_dir, tmp_path)
+
+    bundle = install_dir / PACKAGED_BUNDLE
+    assert bundle.is_file(), f"wheel is missing {PACKAGED_BUNDLE}"
+    bundle.write_bytes(bundle.read_bytes() + b"\n// tampered\n")
+
+    result = _probe_installed_integrity(install_dir, tmp_path, "after-tamper")
+
+    assert not result["gate_ok"], (
+        "a tampered event-server bundle no longer blocks startup"
+    )
+    assert f"{PACKAGED_BUNDLE}: sha256 mismatch" in result["gate_detail"], (
+        f"bundle mismatch not reported: {result['gate_detail']}"
+    )
+
+
 def test_installed_wheel_starts_without_mutating_frozen_event_server(
     packaged_artifacts, tmp_path,
 ):
@@ -766,25 +983,7 @@ def test_installed_wheel_starts_without_mutating_frozen_event_server(
         wheel_members = set(archive.namelist())
 
     install_dir = tmp_path / "installed"
-    install = _run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-cache-dir",
-            "--no-compile",
-            "--no-deps",
-            "--target",
-            str(install_dir),
-            str(wheel),
-        ],
-        cwd=tmp_path,
-    )
-    assert install.returncode == 0, (
-        f"wheel install failed\nstdout:\n{install.stdout}\nstderr:\n{install.stderr}"
-    )
+    _install_wheel(wheel, install_dir, tmp_path)
 
     real_npm = shutil.which("npm")
     assert real_npm, "npm is required to reproduce the affected installed startup"

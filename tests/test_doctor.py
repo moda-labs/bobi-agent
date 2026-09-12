@@ -481,6 +481,25 @@ class TestCheckSlackSocketMode:
             assert _check_slack_socket_mode() is None
 
 
+def test_bobi_install_check_reports_event_server_build_inputs():
+    """Doctor is the reporting half of the split launch gate (#1087).
+
+    The launch gate tolerates a changed digest on the event-server build
+    inputs; doctor is what still surfaces one, so it must ask for them.
+    """
+    from bobi import doctor
+    from bobi.runtime_guard import PolicyCheck
+
+    target = "bobi.runtime_guard.check_bobi_distribution_integrity"
+    with patch(target, return_value=PolicyCheck(ok=True, detail="ok")) as check:
+        result = doctor._check_bobi_install_integrity()
+
+    assert result.ok
+    # No tolerate_* flag: doctor takes the full-verification default, so a
+    # rewritten lockfile that the launch gate waves through is still reported.
+    check.assert_called_once_with()
+
+
 def test_run_doctor_surfaces_slack_socket_mode_check(monkeypatch):
     import bobi.doctor as doctor
 

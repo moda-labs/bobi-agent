@@ -147,6 +147,19 @@ therefore runs untrusted-author code against your credentials.
     Monitoring (FIM) check against the distribution's PEP 376 `RECORD` metadata.
     If any framework file is missing, unreadable, or has a mismatched SHA-256
     hash, the runtime fails closed immediately and refuses to launch.
+  - **Scope of that gate:** every `RECORD` entry. The one relaxation is that a
+    changed *digest* on `bobi/event-server/package.json` or
+    `package-lock.json` does not block a launch. Those two are npm-owned
+    manifests that an installed Bobi never reads as code; it executes only
+    `bobi/event-server/dist/local.js`, which the gate still covers and which
+    `validate_artifact` re-audits against `dist/local.inputs.json` on every
+    start. Everything else, including the TypeScript sources, stays fully
+    gated, as does a missing or unreadable manifest. A waiver is never silent:
+    it is logged at WARNING, excluded from the verified count, and named in the
+    check detail, and full verification stays the default for every other
+    caller so `bobi agent <name> doctor` reports the mismatch. The split exists
+    so a file the runtime does not execute cannot crash-loop a live pod
+    (#1087).
   - **In-session upgrades:** During a session, filesystem permissions on the
     framework package remain standard (`0644`/`0755`) so standard package managers
     (`uv tool upgrade bobi`, `pipx upgrade`, `pip`) can perform upgrades without
