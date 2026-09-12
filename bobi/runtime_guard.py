@@ -248,7 +248,12 @@ def verify_framework_integrity_or_raise(dist: Any = _UNSET) -> PolicyCheck:
     if not check.ok:
         raise RuntimeError(
             f"Bobi framework integrity violation detected: {check.detail}. "
-            "Installed framework files appear modified or corrupted."
+            "Installed framework files appear modified or corrupted. "
+            "Reinstall the exact version (`pip install --force-reinstall "
+            "--no-deps bobi==<version>`); installed package files are immutable "
+            "and cannot be repaired in place. If a container image rebuilds or "
+            "overlays anything under site-packages/bobi, drop that step: the "
+            "wheel already ships the runnable event-server bundle."
         )
     return check
 
@@ -295,6 +300,41 @@ def _urlsafe_b64_sha256(data: bytes) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
 
 
+# Event-server paths the fail-closed startup preflight deliberately skips.
+#
+# An installed Bobi loads exactly one file out of bobi/event-server/: the
+# prebuilt dist/local.js bundle. events.server._validate_packaged_artifact
+# re-validates that bundle on every start against dist/local.inputs.json
+# (digest and size of the bundle and the notice, the bundled-dependency
+# inventory, the build-tool versions), so dist/ stays fail-closed here AND
+# carries its own audit.
+#
+# Everything outside dist/ is a declared BUILD input - package.json,
+# package-lock.json, tsconfig.json, src/**, core/** - that an installed Bobi
+# never reads. artifact.locked_esbuild_version, the only lockfile reader, is
+# reached only under validate_artifact(verify_inputs=True), which the source
+# path alone uses.
+#
+# Skipping them costs no detection. dist/local.inputs.json records a SHA-256
+# for every declared input and is itself a RECORD entry this check still
+# covers, so `bobi doctor` and validate_artifact(verify_inputs=True) still
+# catch a modified input. What it stops is a file nothing loads crash-looping
+# a live pod: the shipped tree is an npm workspace root whose `worker`
+# workspace is deliberately not distributed, so any npm command that
+# re-resolves the graph (`npm install`, `npm dedupe`, `npm audit fix`) prunes
+# that workspace's transitive entries and rewrites package-lock.json in place.
+# That made every restart fail closed on a file the runtime does not use
+# (#1087). `npm ci` does not do this, so the documented build is unaffected.
+_EVENT_SERVER_PREFIX = "bobi/event-server/"
+_EVENT_SERVER_RUNTIME_PREFIX = "bobi/event-server/dist/"
+
+
+def _is_event_server_build_input(record_path: str) -> bool:
+    return record_path.startswith(_EVENT_SERVER_PREFIX) and not record_path.startswith(
+        _EVENT_SERVER_RUNTIME_PREFIX
+    )
+
+
 def check_bobi_distribution_integrity(dist: Any = _UNSET) -> PolicyCheck:
     import bobi
 
@@ -328,6 +368,8 @@ def check_bobi_distribution_integrity(dist: Any = _UNSET) -> PolicyCheck:
             if located.name in console_scripts:
                 continue
             failures.append(f"{file}: resolves outside Bobi distribution roots")
+            continue
+        if _is_event_server_build_input(Path(str(file)).as_posix()):
             continue
         try:
             data = located.read_bytes()

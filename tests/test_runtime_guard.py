@@ -355,6 +355,139 @@ class TestBobiDistributionIntegrity:
         assert result.ok
 
 
+    def test_event_server_build_input_mismatch_does_not_block_startup(
+        self, tmp_path, monkeypatch,
+    ):
+        """A rewritten event-server build input must not fail the preflight (#1087).
+
+        The shipped event-server is an npm workspace root whose `worker`
+        workspace is deliberately not distributed, so any npm command that
+        re-resolves the dependency graph prunes that workspace's entries and
+        rewrites package-lock.json in place. The installed runtime never reads
+        that file, so a fail-closed startup check over it only crash-loops a
+        live pod.
+        """
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        lockfile = package / "event-server" / "package-lock.json"
+        lockfile.parent.mkdir(parents=True)
+        lockfile.write_text('{"lockfileVersion": 3}\n')
+        stale = _sha256_record_value(b'{"lockfileVersion": 3, "packages": {}}\n')
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile("bobi/event-server/package-lock.json", stale),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        result = check_bobi_distribution_integrity(dist)
+
+        assert result.ok, result.detail
+
+    def test_event_server_bundle_mismatch_still_blocks_startup(
+        self, tmp_path, monkeypatch,
+    ):
+        """dist/ is the half an installed Bobi executes, so it stays fail-closed."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        bundle = package / "event-server" / "dist" / "local.js"
+        bundle.parent.mkdir(parents=True)
+        bundle.write_text("console.log('tampered')\n")
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile(
+                    "bobi/event-server/dist/local.js",
+                    _sha256_record_value(b"console.log('audited')\n"),
+                ),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        result = check_bobi_distribution_integrity(dist)
+
+        assert not result.ok
+        assert "sha256 mismatch" in result.detail
+        assert "bobi/event-server/dist/local.js" in result.failures[0]
+
+    def test_event_server_record_entry_outside_the_package_still_fails(
+        self, tmp_path, monkeypatch,
+    ):
+        """The exemption drops the digest requirement, not the containment one."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}\n")
+        (package / "event-server").mkdir()
+        (package / "event-server" / "package.json").symlink_to(outside)
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile("bobi/event-server/package.json", _sha256_record_value(b"{}\n")),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        result = check_bobi_distribution_integrity(dist)
+
+        assert not result.ok
+        assert "resolves outside Bobi distribution roots" in result.detail
+
+
+def test_startup_integrity_exempts_exactly_the_event_server_build_inputs():
+    """Pin the exemption boundary to the artifact module's declared input set.
+
+    A new event-server file that the runtime actually loads must land under
+    dist/, where the preflight still covers it. If one is ever added outside
+    dist/, this fails rather than silently dropping it from the check.
+    """
+    from bobi.events import artifact
+    from bobi.runtime_guard import _is_event_server_build_input
+
+    source = Path(__file__).resolve().parents[1] / "event-server"
+    build_inputs = [
+        f"bobi/event-server/{path.relative_to(source).as_posix()}"
+        for path in artifact.source_input_paths(source)
+    ]
+    assert build_inputs, "artifact module declared no event-server build inputs"
+
+    still_checked = [
+        path for path in build_inputs if not _is_event_server_build_input(path)
+    ]
+    assert not still_checked, (
+        "declared build inputs remain in the fail-closed startup preflight: "
+        f"{still_checked}"
+    )
+
+    runtime_files = [
+        f"bobi/event-server/dist/{name}"
+        for name in (artifact.BUNDLE_NAME, artifact.MANIFEST_NAME, artifact.NOTICE_NAME)
+    ]
+    exempted = [path for path in runtime_files if _is_event_server_build_input(path)]
+    assert not exempted, (
+        f"files the installed runtime loads were exempted from the preflight: {exempted}"
+    )
+
+
 class TestFrameworkIntegrityVerification:
     def test_verify_framework_integrity_or_raise_passes_for_clean_dist(self, tmp_path, monkeypatch):
         from bobi.runtime_guard import verify_framework_integrity_or_raise

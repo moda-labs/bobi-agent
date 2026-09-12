@@ -87,6 +87,10 @@ CI builds a wheel on a newer Node major and requires its shipped bundle to be by
 Release builds remain pinned to Node 20 for provenance, not because newer majors are unsupported.
 It never invokes npm, installs dependencies, builds JavaScript, or writes inside the installed package.
 
+Downstream container images must not rebuild or overlay the event server inside `site-packages/bobi/`.
+The wheel already ships the runnable bundle, so a `npm ci && npm run build:local` stage there is redundant, and an npm command that re-resolves the dependency graph (`npm install`, `npm dedupe`, `npm audit fix`) rewrites the shipped `package-lock.json` because the declared `worker` workspace is deliberately not distributed.
+Build a standalone server from a git checkout instead, per [SELF_HOSTED_EVENT_SERVER.md](SELF_HOSTED_EVENT_SERVER.md).
+
 A writable source checkout uses the same bundle contract with content hashes across manifests, lockfile, TypeScript configuration, root sources, and workspace sources.
 A fresh source bundle starts directly.
 A stale source bundle validates the ignored installed dependency stamp, uses exact `npm ci --no-audit --no-fund` only when the locked tree needs repair, and runs the single `npm run build:local` command.

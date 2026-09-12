@@ -739,6 +739,154 @@ def test_changed_source_archive_cannot_reuse_carried_artifact(
     assert "Node.js 20 or newer" in diagnostic
 
 
+INTEGRITY_PROBE = textwrap.dedent(
+    """
+    import json
+    import os
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, os.environ["BOBI_TEST_INSTALL_DIR"])
+
+    from bobi.runtime_guard import check_bobi_distribution_integrity
+
+    check = check_bobi_distribution_integrity()
+    Path(os.environ["BOBI_TEST_RESULT"]).write_text(
+        json.dumps(
+            {
+                "ok": check.ok,
+                "detail": check.detail,
+                "failures": check.failures,
+            }
+        )
+    )
+    """
+)
+
+
+def _install_wheel(wheel: Path, install_dir: Path, cwd: Path):
+    install = _run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-cache-dir",
+            "--no-compile",
+            "--no-deps",
+            "--target",
+            str(install_dir),
+            str(wheel),
+        ],
+        cwd=cwd,
+    )
+    assert install.returncode == 0, (
+        f"wheel install failed\nstdout:\n{install.stdout}\nstderr:\n{install.stderr}"
+    )
+
+
+def _probe_installed_integrity(install_dir: Path, tmp_path: Path, name: str) -> dict:
+    result_path = tmp_path / f"{name}.json"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in RUNTIME_ENVIRONMENT_DENYLIST
+    }
+    env.update(
+        {
+            "BOBI_TEST_INSTALL_DIR": str(install_dir),
+            "BOBI_TEST_RESULT": str(result_path),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    probe = _run([sys.executable, "-c", INTEGRITY_PROBE], cwd=tmp_path, env=env)
+    assert probe.returncode == 0, (
+        f"integrity probe failed\nstdout:\n{probe.stdout}\nstderr:\n{probe.stderr}"
+    )
+    return json.loads(result_path.read_text())
+
+
+def test_npm_graph_reresolve_in_the_installed_tree_does_not_block_startup(
+    packaged_artifacts, tmp_path,
+):
+    """An npm re-resolve rewrites the shipped lockfile; startup must survive (#1087).
+
+    The wheel's event-server is an npm workspace root that declares a `worker`
+    workspace the distribution deliberately omits. Any npm command that
+    re-resolves the dependency graph therefore cannot read `worker/package.json`,
+    prunes that workspace's transitive entries, and rewrites `package-lock.json`
+    in place. That file is a PEP 376 RECORD entry, so a fail-closed startup
+    preflight over it crash-loops every subsequent pod even though the installed
+    runtime never reads the lockfile.
+
+    This drives the REAL npm because the rewrite is npm's behaviour, not ours:
+    a stubbed npm would pin our belief about npm instead of npm itself.
+    """
+    npm = shutil.which("npm")
+    if npm is None:
+        pytest.skip("npm is required to re-resolve the shipped lockfile")
+
+    install_dir = tmp_path / "installed"
+    _install_wheel(packaged_artifacts["sdist_wheel"], install_dir, tmp_path)
+
+    event_server = install_dir / "bobi" / "event-server"
+    lockfile = event_server / "package-lock.json"
+    before = lockfile.read_bytes()
+
+    npm_cache = tmp_path / "npm-cache"
+    npm_cache.mkdir()
+    env = dict(os.environ)
+    env["NPM_CONFIG_CACHE"] = str(npm_cache)
+    # --package-lock-only --offline re-resolves the graph and writes the lockfile
+    # without touching the network or installing anything, which is the whole
+    # mechanism in ~0.5s.
+    rewrite = _run(
+        [
+            npm,
+            "install",
+            "--package-lock-only",
+            "--offline",
+            "--no-audit",
+            "--no-fund",
+        ],
+        cwd=event_server,
+        env=env,
+    )
+    assert rewrite.returncode == 0, (
+        f"npm re-resolve failed\nstdout:\n{rewrite.stdout}\nstderr:\n{rewrite.stderr}"
+    )
+    assert lockfile.read_bytes() != before, (
+        "npm no longer rewrites the shipped lockfile, so this regression test is "
+        "vacuous: re-derive the mechanism before trusting it again"
+    )
+
+    result = _probe_installed_integrity(install_dir, tmp_path, "after-reresolve")
+
+    assert result["ok"], (
+        "a rewritten event-server lockfile still blocks startup: "
+        f"{result['detail']} {result['failures']}"
+    )
+
+
+def test_tampered_packaged_bundle_still_blocks_startup(packaged_artifacts, tmp_path):
+    """The counter-test: exempting build inputs must not exempt what runs."""
+    install_dir = tmp_path / "installed"
+    _install_wheel(packaged_artifacts["sdist_wheel"], install_dir, tmp_path)
+
+    bundle = install_dir / PACKAGED_BUNDLE
+    assert bundle.is_file(), f"wheel is missing {PACKAGED_BUNDLE}"
+    bundle.write_bytes(bundle.read_bytes() + b"\n// tampered\n")
+
+    result = _probe_installed_integrity(install_dir, tmp_path, "after-tamper")
+
+    assert not result["ok"], "a tampered event-server bundle no longer blocks startup"
+    assert "sha256 mismatch" in result["detail"]
+    assert any(PACKAGED_BUNDLE in failure for failure in result["failures"]), (
+        f"bundle mismatch not reported: {result['failures']}"
+    )
+
+
 def test_installed_wheel_starts_without_mutating_frozen_event_server(
     packaged_artifacts, tmp_path,
 ):
