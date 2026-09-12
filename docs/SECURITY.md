@@ -152,9 +152,11 @@ therefore runs untrusted-author code against your credentials.
     `bobi/event-server/dist/local.js`, which the gate still covers and which
     `validate_artifact` re-audits against `dist/local.inputs.json` on every
     start. The exempt files are build inputs the installed runtime never reads,
-    and `dist/local.inputs.json` already records a SHA-256 for each of them, so
-    tampering stays detectable through `bobi agent <name> doctor` without a file
-    nothing loads being able to crash-loop a live pod (#1087).
+    so a changed digest there does not block a launch. It is still reported:
+    `bobi agent <name> doctor` runs the same check with
+    `include_event_server_build_inputs=True` and flags the mismatch. A missing
+    or unreadable input still fails the launch gate. The split exists so a file
+    the runtime never reads cannot crash-loop a live pod (#1087).
   - **In-session upgrades:** During a session, filesystem permissions on the
     framework package remain standard (`0644`/`0755`) so standard package managers
     (`uv tool upgrade bobi`, `pipx upgrade`, `pip`) can perform upgrades without

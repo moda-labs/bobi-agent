@@ -300,31 +300,33 @@ def _urlsafe_b64_sha256(data: bytes) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
 
 
-# Event-server paths the fail-closed startup preflight deliberately skips.
+# Event-server paths whose digest the fail-closed startup gate tolerates.
 #
 # An installed Bobi loads exactly one file out of bobi/event-server/: the
 # prebuilt dist/local.js bundle. events.server._validate_packaged_artifact
-# re-validates that bundle on every start against dist/local.inputs.json
-# (digest and size of the bundle and the notice, the bundled-dependency
-# inventory, the build-tool versions), so dist/ stays fail-closed here AND
-# carries its own audit.
+# re-validates it on every start against dist/local.inputs.json (digest and
+# size of the bundle and the notice, the bundled-dependency inventory, the
+# build-tool versions), so dist/ keeps both this gate and its own audit.
 #
 # Everything outside dist/ is a declared BUILD input - package.json,
-# package-lock.json, tsconfig.json, src/**, core/** - that an installed Bobi
-# never reads. artifact.locked_esbuild_version, the only lockfile reader, is
-# reached only under validate_artifact(verify_inputs=True), which the source
-# path alone uses.
+# package-lock.json, tsconfig.json, src/**, core/** - whose CONTENTS an
+# installed Bobi never reads. artifact.locked_esbuild_version, the only
+# lockfile reader, is reached only under validate_artifact(verify_inputs=True),
+# which the source path alone uses.
 #
-# Skipping them costs no detection. dist/local.inputs.json records a SHA-256
-# for every declared input and is itself a RECORD entry this check still
-# covers, so `bobi doctor` and validate_artifact(verify_inputs=True) still
-# catch a modified input. What it stops is a file nothing loads crash-looping
-# a live pod: the shipped tree is an npm workspace root whose `worker`
-# workspace is deliberately not distributed, so any npm command that
-# re-resolves the graph (`npm install`, `npm dedupe`, `npm audit fix`) prunes
-# that workspace's transitive entries and rewrites package-lock.json in place.
-# That made every restart fail closed on a file the runtime does not use
-# (#1087). `npm ci` does not do this, so the documented build is unaffected.
+# Only the LAUNCH gate relaxes, and only on the digest. Nothing stops
+# reporting: doctor passes include_event_server_build_inputs=True and still
+# flags a modified input. A missing or unreadable input still fails closed
+# here too, because _find_event_server_dir probes for package.json, so an
+# absent one breaks startup for real.
+#
+# The launch gate relaxes because the shipped tree is an npm workspace root
+# whose `worker` workspace is deliberately not distributed. Any npm command
+# that re-resolves the graph (`npm install`, `npm dedupe`, `npm audit fix`)
+# therefore prunes that workspace's transitive entries and rewrites
+# package-lock.json in place, which crash-looped every restart on a file the
+# runtime does not read (#1087). `npm ci` does not do this, so the documented
+# build is unaffected.
 _EVENT_SERVER_PREFIX = "bobi/event-server/"
 _EVENT_SERVER_RUNTIME_PREFIX = "bobi/event-server/dist/"
 
@@ -335,7 +337,11 @@ def _is_event_server_build_input(record_path: str) -> bool:
     )
 
 
-def check_bobi_distribution_integrity(dist: Any = _UNSET) -> PolicyCheck:
+def check_bobi_distribution_integrity(
+    dist: Any = _UNSET,
+    *,
+    include_event_server_build_inputs: bool = False,
+) -> PolicyCheck:
     import bobi
 
     package_root = Path(bobi.__file__).resolve().parent
@@ -369,8 +375,6 @@ def check_bobi_distribution_integrity(dist: Any = _UNSET) -> PolicyCheck:
                 continue
             failures.append(f"{file}: resolves outside Bobi distribution roots")
             continue
-        if _is_event_server_build_input(Path(str(file)).as_posix()):
-            continue
         try:
             data = located.read_bytes()
         except FileNotFoundError:
@@ -380,8 +384,13 @@ def check_bobi_distribution_integrity(dist: Any = _UNSET) -> PolicyCheck:
             failures.append(f"{file}: unreadable ({exc})")
             continue
         checked += 1
-        if _urlsafe_b64_sha256(data) != digest[1]:
-            failures.append(f"{file}: sha256 mismatch")
+        if _urlsafe_b64_sha256(data) == digest[1]:
+            continue
+        if not include_event_server_build_inputs and _is_event_server_build_input(
+            Path(str(file)).as_posix()
+        ):
+            continue
+        failures.append(f"{file}: sha256 mismatch")
 
     if failures:
         shown = "; ".join(failures[:3])

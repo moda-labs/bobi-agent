@@ -748,12 +748,14 @@ INTEGRITY_PROBE = textwrap.dedent(
 
     sys.path.insert(0, os.environ["BOBI_TEST_INSTALL_DIR"])
 
+    import bobi
     from bobi.runtime_guard import check_bobi_distribution_integrity
 
     check = check_bobi_distribution_integrity()
     Path(os.environ["BOBI_TEST_RESULT"]).write_text(
         json.dumps(
             {
+                "bobi_package": str(Path(bobi.__file__).resolve().parent),
                 "ok": check.ok,
                 "detail": check.detail,
                 "failures": check.failures,
@@ -804,7 +806,17 @@ def _probe_installed_integrity(install_dir: Path, tmp_path: Path, name: str) -> 
     assert probe.returncode == 0, (
         f"integrity probe failed\nstdout:\n{probe.stdout}\nstderr:\n{probe.stderr}"
     )
-    return json.loads(result_path.read_text())
+    result = json.loads(result_path.read_text())
+    # Without these the positive assertion can pass vacuously: an outer
+    # editable bobi would satisfy the "editable/source install" early return
+    # instead of hashing the wheel we just installed.
+    assert Path(result["bobi_package"]) == install_dir / "bobi", (
+        f"probe imported {result['bobi_package']}, expected {install_dir / 'bobi'}"
+    )
+    assert "hashed Bobi file(s) verified" in result["detail"] or result["failures"], (
+        f"probe did not hash the installed wheel: {result['detail']}"
+    )
+    return result
 
 
 def test_npm_graph_reresolve_in_the_installed_tree_does_not_block_startup(
@@ -827,8 +839,33 @@ def test_npm_graph_reresolve_in_the_installed_tree_does_not_block_startup(
     if npm is None:
         pytest.skip("npm is required to re-resolve the shipped lockfile")
 
+    wheel = packaged_artifacts["sdist_wheel"]
+    # The exemption is keyed on dist/, so anything the runtime loads must ship
+    # there. Pin that the wheel carries nothing else outside dist/ beyond the
+    # artifact module's declared build inputs.
+    from bobi.events import artifact
+
+    with zipfile.ZipFile(wheel) as archive:
+        shipped = {
+            name for name in archive.namelist()
+            if name.startswith("bobi/event-server/")
+        }
+    outside_dist = {
+        name for name in shipped
+        if not name.startswith("bobi/event-server/dist/")
+    }
+    source = PACKAGE_ROOT / "event-server"
+    declared = {
+        f"bobi/event-server/{path.relative_to(source).as_posix()}"
+        for path in artifact.source_input_paths(source)
+    }
+    assert outside_dist == declared, (
+        "wheel ships event-server files outside dist/ that are not declared "
+        f"build inputs, so the launch gate would skip them: {outside_dist - declared}"
+    )
+
     install_dir = tmp_path / "installed"
-    _install_wheel(packaged_artifacts["sdist_wheel"], install_dir, tmp_path)
+    _install_wheel(wheel, install_dir, tmp_path)
 
     event_server = install_dir / "bobi" / "event-server"
     lockfile = event_server / "package-lock.json"
@@ -914,25 +951,7 @@ def test_installed_wheel_starts_without_mutating_frozen_event_server(
         wheel_members = set(archive.namelist())
 
     install_dir = tmp_path / "installed"
-    install = _run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-cache-dir",
-            "--no-compile",
-            "--no-deps",
-            "--target",
-            str(install_dir),
-            str(wheel),
-        ],
-        cwd=tmp_path,
-    )
-    assert install.returncode == 0, (
-        f"wheel install failed\nstdout:\n{install.stdout}\nstderr:\n{install.stderr}"
-    )
+    _install_wheel(wheel, install_dir, tmp_path)
 
     real_npm = shutil.which("npm")
     assert real_npm, "npm is required to reproduce the affected installed startup"

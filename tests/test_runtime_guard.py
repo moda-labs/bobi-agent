@@ -391,6 +391,65 @@ class TestBobiDistributionIntegrity:
 
         assert result.ok, result.detail
 
+    def test_event_server_build_input_mismatch_is_still_reported_to_doctor(
+        self, tmp_path, monkeypatch,
+    ):
+        """The launch gate relaxes; reporting callers still see the mismatch."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        lockfile = package / "event-server" / "package-lock.json"
+        lockfile.parent.mkdir(parents=True)
+        lockfile.write_text('{"lockfileVersion": 3}\n')
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile(
+                    "bobi/event-server/package-lock.json",
+                    _sha256_record_value(b"pruned\n"),
+                ),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        result = check_bobi_distribution_integrity(
+            dist, include_event_server_build_inputs=True,
+        )
+
+        assert not result.ok
+        assert "bobi/event-server/package-lock.json: sha256 mismatch" in result.detail
+
+    def test_missing_event_server_build_input_still_blocks_startup(
+        self, tmp_path, monkeypatch,
+    ):
+        """events.server._find_event_server_dir probes package.json, so absence is fatal."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        (package / "event-server").mkdir()
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile("bobi/event-server/package.json", _sha256_record_value(b"{}\n")),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        result = check_bobi_distribution_integrity(dist)
+
+        assert not result.ok
+        assert "bobi/event-server/package.json: missing" in result.detail
+
     def test_event_server_bundle_mismatch_still_blocks_startup(
         self, tmp_path, monkeypatch,
     ):
@@ -454,11 +513,13 @@ class TestBobiDistributionIntegrity:
 
 
 def test_startup_integrity_exempts_exactly_the_event_server_build_inputs():
-    """Pin the exemption boundary to the artifact module's declared input set.
+    """Pin the exemption boundary against the artifact module's declared sets.
 
-    A new event-server file that the runtime actually loads must land under
-    dist/, where the preflight still covers it. If one is ever added outside
-    dist/, this fails rather than silently dropping it from the check.
+    Both directions: every declared build input is exempt from the launch
+    gate's digest check, and none of the three files the installed runtime
+    loads is. That the shipped tree contains nothing OUTSIDE dist/ beyond
+    these declared inputs is a packaging property, pinned on a real wheel by
+    tests/integration/test_packaged_event_server.py.
     """
     from bobi.events import artifact
     from bobi.runtime_guard import _is_event_server_build_input

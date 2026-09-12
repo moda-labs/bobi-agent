@@ -214,7 +214,11 @@ def _check_runtime_write_policy() -> CheckResult:
 def _check_bobi_install_integrity() -> CheckResult:
     from bobi.runtime_guard import check_bobi_distribution_integrity
 
-    result = check_bobi_distribution_integrity()
+    # Report the whole distribution, including the event-server build inputs
+    # the launch gate tolerates a digest change on (see runtime_guard).
+    result = check_bobi_distribution_integrity(
+        include_event_server_build_inputs=True,
+    )
     if result.ok:
         return CheckResult("Bobi install", ok=True, detail=result.detail)
     return CheckResult(
