@@ -393,6 +393,78 @@ class TestBobiDistributionIntegrity:
 
         assert result.ok, result.detail
 
+    def test_waived_manifest_is_not_counted_as_verified_and_is_logged(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """A waiver must never read as a clean verify, and must leave a trace.
+
+        prepare_brain_runtime discards the PolicyCheck, so the log line is the
+        only evidence a live deployment gets.
+        """
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        lockfile = package / "event-server" / "package-lock.json"
+        lockfile.parent.mkdir(parents=True)
+        lockfile.write_text('{"lockfileVersion": 3}\n')
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile(
+                    "bobi/event-server/package-lock.json",
+                    _sha256_record_value(b"pruned\n"),
+                ),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        with caplog.at_level("WARNING", logger="bobi.runtime_guard"):
+            result = check_bobi_distribution_integrity(
+                dist, tolerate_event_server_build_inputs=True,
+            )
+
+        assert result.ok
+        # One file actually verified, not two.
+        assert "1 hashed Bobi file(s) verified" in result.detail
+        assert "1 event-server manifest(s) tolerated" in result.detail
+        assert "package-lock.json" in caplog.text
+
+    def test_event_server_typescript_source_is_not_waived(self, tmp_path, monkeypatch):
+        """The waiver is the npm manifests only; npm never rewrites src/."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        local_ts = package / "event-server" / "src" / "local.ts"
+        local_ts.parent.mkdir(parents=True)
+        local_ts.write_text("// edited\n")
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile(
+                    "bobi/event-server/src/local.ts",
+                    _sha256_record_value(b"// shipped\n"),
+                ),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        with pytest.raises(
+            RuntimeError, match=r"bobi/event-server/src/local\.ts: sha256 mismatch",
+        ):
+            verify_framework_integrity_or_raise(dist)
+
     def test_event_server_build_input_mismatch_is_still_reported_to_doctor(
         self, tmp_path, monkeypatch,
     ):
@@ -514,13 +586,12 @@ class TestBobiDistributionIntegrity:
 
 
 def test_startup_integrity_exempts_exactly_the_event_server_build_inputs():
-    """Pin the exemption boundary against the artifact module's declared sets.
+    """Pin the waiver against the artifact module's declared sets.
 
-    Both directions: every declared build input is exempt from the launch
-    gate's digest check, and none of the three files the installed runtime
-    loads is. That the shipped tree contains nothing OUTSIDE dist/ beyond
-    these declared inputs is a packaging property, pinned on a real wheel by
-    tests/integration/test_packaged_event_server.py.
+    Both directions: the waiver is exactly the two npm-owned manifests out of
+    the declared build inputs, and none of the three files the installed
+    runtime loads is in it. Everything else the wheel ships outside dist/ is
+    pinned on a real wheel by tests/integration/test_packaged_event_server.py.
     """
     from bobi.events import artifact
     from bobi.runtime_guard import _is_event_server_build_input
@@ -532,13 +603,11 @@ def test_startup_integrity_exempts_exactly_the_event_server_build_inputs():
     ]
     assert build_inputs, "artifact module declared no event-server build inputs"
 
-    still_checked = [
-        path for path in build_inputs if not _is_event_server_build_input(path)
-    ]
-    assert not still_checked, (
-        "declared build inputs remain in the fail-closed startup preflight: "
-        f"{still_checked}"
-    )
+    waived = [path for path in build_inputs if _is_event_server_build_input(path)]
+    assert sorted(waived) == [
+        "bobi/event-server/package-lock.json",
+        "bobi/event-server/package.json",
+    ], f"the waiver is not exactly the npm-owned manifest pair: {waived}"
 
     runtime_files = [
         f"bobi/event-server/dist/{name}"

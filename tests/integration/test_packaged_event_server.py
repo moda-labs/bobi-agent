@@ -803,11 +803,7 @@ def _install_wheel(wheel: Path, install_dir: Path, cwd: Path):
 
 def _probe_installed_integrity(install_dir: Path, tmp_path: Path, name: str) -> dict:
     result_path = tmp_path / f"{name}.json"
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in RUNTIME_ENVIRONMENT_DENYLIST
-    }
+    env = _runtime_probe_environment()
     env.update(
         {
             "BOBI_TEST_INSTALL_DIR": str(install_dir),
@@ -874,8 +870,15 @@ def test_npm_graph_reresolve_in_the_installed_tree_does_not_block_startup(
     }
     assert outside_dist == declared, (
         "wheel ships event-server files outside dist/ that are not declared "
-        f"build inputs, so the launch gate would skip them: {outside_dist - declared}"
+        f"build inputs: {outside_dist - declared}"
     )
+    from bobi.runtime_guard import _is_event_server_build_input
+
+    waived = {name for name in shipped if _is_event_server_build_input(name)}
+    assert waived == {
+        "bobi/event-server/package.json",
+        "bobi/event-server/package-lock.json",
+    }, f"launch-gate waiver is not the npm manifest pair: {waived}"
 
     install_dir = tmp_path / "installed"
     _install_wheel(wheel, install_dir, tmp_path)
@@ -919,6 +922,10 @@ def test_npm_graph_reresolve_in_the_installed_tree_does_not_block_startup(
     )
     assert "hashed Bobi file(s) verified" in result["gate_detail"], (
         f"the gate did not hash the installed wheel: {result['gate_detail']}"
+    )
+    assert "1 event-server manifest(s) tolerated" in result["gate_detail"], (
+        "the gate reported a clean verify over a file that failed its digest: "
+        f"{result['gate_detail']}"
     )
     # The other half of the split: startup tolerates it, doctor still reports it.
     assert not result["full_ok"], (

@@ -225,7 +225,11 @@ def _check_bobi_install_integrity() -> CheckResult:
         detail=result.detail,
         hint=(
             "Reinstall or upgrade Bobi, and move any desired framework changes "
-            "into a source PR instead of editing the installed package."
+            "into a source PR instead of editing the installed package. If only "
+            "bobi/event-server/package.json or package-lock.json differ, an npm "
+            "command re-resolved the dependency graph inside the installed "
+            "package: the wheel already ships the runnable bundle, so drop any "
+            "event-server rebuild or overlay step from the image."
         ),
     )
 

@@ -313,11 +313,16 @@ def _urlsafe_b64_sha256(data: bytes) -> str:
 # size of the bundle and the notice, the bundled-dependency inventory, the
 # build-tool versions), so dist/ keeps both this gate and its own audit.
 #
-# Everything outside dist/ is a declared BUILD input - package.json,
-# package-lock.json, tsconfig.json, src/**, core/** - that an installed Bobi
-# never reads AS CODE. artifact.locked_esbuild_version, the only lockfile
-# reader, is reached only under validate_artifact(verify_inputs=True), which
-# the source path alone uses.
+# The waiver is exactly the two npm-owned manifests, not every build input.
+# npm is the only thing that legitimately rewrites a shipped file here, and it
+# rewrites only these two; the TypeScript sources and tsconfigs stay fully
+# gated, because nothing legitimate edits them in an installed tree and a
+# change there is a real "your install is modified" signal.
+#
+# Neither manifest is read AS CODE by an installed Bobi.
+# artifact.locked_esbuild_version, the only lockfile reader, is reached only
+# under validate_artifact(verify_inputs=True), which the source path alone
+# uses.
 #
 # "Not as code" is the exact claim, not "not at all": Node resolves the
 # nearest package.json for its `type` field when it loads dist/local.js, so
@@ -340,14 +345,16 @@ def _urlsafe_b64_sha256(data: bytes) -> str:
 # package-lock.json in place, which crash-looped every restart on a file the
 # runtime does not read (#1087). `npm ci` does not do this, so the documented
 # build is unaffected.
-_EVENT_SERVER_PREFIX = "bobi/event-server/"
-_EVENT_SERVER_RUNTIME_PREFIX = "bobi/event-server/dist/"
+_EVENT_SERVER_NPM_MANIFESTS = frozenset(
+    {
+        "bobi/event-server/package.json",
+        "bobi/event-server/package-lock.json",
+    }
+)
 
 
 def _is_event_server_build_input(record_path: str) -> bool:
-    return record_path.startswith(_EVENT_SERVER_PREFIX) and not record_path.startswith(
-        _EVENT_SERVER_RUNTIME_PREFIX
-    )
+    return record_path in _EVENT_SERVER_NPM_MANIFESTS
 
 
 def check_bobi_distribution_integrity(
@@ -377,6 +384,7 @@ def check_bobi_distribution_integrity(
     console_scripts = _console_script_names(resolved_dist)
 
     failures: list[str] = []
+    waived: list[str] = []
     checked = 0
     for file in resolved_dist.files:
         digest = _record_digest(file)
@@ -396,14 +404,28 @@ def check_bobi_distribution_integrity(
         except OSError as exc:
             failures.append(f"{file}: unreadable ({exc})")
             continue
-        checked += 1
         if _urlsafe_b64_sha256(data) == digest[1]:
+            checked += 1
             continue
         if tolerate_event_server_build_inputs and _is_event_server_build_input(
             Path(str(file)).as_posix()
         ):
+            # Counted as waived, never as verified: reporting "N verified" over
+            # a file that just failed its digest would launder the mismatch.
+            waived.append(str(file))
             continue
         failures.append(f"{file}: sha256 mismatch")
+
+    if waived:
+        # prepare_brain_runtime discards the PolicyCheck, so without this the
+        # waiver leaves no trace anywhere in a live deployment.
+        logger.warning(
+            "Launch gate tolerated %d modified event-server manifest(s) the "
+            "installed runtime does not execute: %s. Reinstall to restore the "
+            "shipped bytes; `bobi agent <name> doctor` reports them in full.",
+            len(waived),
+            ", ".join(sorted(waived)),
+        )
 
     if failures:
         shown = "; ".join(failures[:3])
@@ -418,4 +440,7 @@ def check_bobi_distribution_integrity(
             ok=False,
             detail="0 hashed Bobi file(s) verified (missing SHA-256 RECORD entries)",
         )
-    return PolicyCheck(ok=True, detail=f"{checked} hashed Bobi file(s) verified")
+    detail = f"{checked} hashed Bobi file(s) verified"
+    if waived:
+        detail += f"; {len(waived)} event-server manifest(s) tolerated"
+    return PolicyCheck(ok=True, detail=detail)
