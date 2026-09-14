@@ -36,6 +36,13 @@ def _reactor_from_shipped_config():
     assert all(r.get("dedup_only") for r in pr_comment_rules), (
         "PR comments must only be deduped structurally, not auto-dispatched"
     )
+    assert all(not r.get("workflow") for r in pr_comment_rules), (
+        "dedup-only rules must not name a workflow they never launch"
+    )
+    assert all(r.get("dedup_namespace") == "pr-comment-event-dedup"
+               for r in pr_comment_rules), (
+        "dedup-only rules must use an explicit dedup namespace"
+    )
     return EventReactor.from_config(rules, cwd="/tmp/proj-411",
                                     self_login=BOT_LOGIN)
 

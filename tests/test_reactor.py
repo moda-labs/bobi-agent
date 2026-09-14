@@ -758,13 +758,29 @@ class TestEventReactorFromConfig:
         config = [
             {
                 "event": "github.issue_comment",
-                "workflow": "pr-comment-event-dedup",
+                "dedup_namespace": "pr-comment-event-dedup",
                 "dedup_only": True,
             },
         ]
         reactor = EventReactor.from_config(config, cwd="/tmp/project")
         assert reactor.rules[0].dedup_only is True
-        assert reactor.rules[0].workflow == "pr-comment-event-dedup"
+        assert reactor.rules[0].workflow == ""
+        assert reactor.rules[0].dedup_namespace == "pr-comment-event-dedup"
+
+    def test_dedup_namespace_namespaces_without_a_workflow(self):
+        rule = AutoDispatchRule(
+            event="github.issue_comment",
+            workflow="",
+            dedup_namespace="pr-comment-event-dedup",
+            dedup_only=True,
+        )
+        event = {
+            "topics": ["github:moda-labs/test"],
+            "fields": {"number": 42, "comment_id": 7},
+        }
+        assert rule.dedup_key(event) == (
+            "pr-comment-event-dedup:github:moda-labs/test:42:comment:7"
+        )
 
     def test_from_config_hygiene_flags_default(self):
         """Self-author skip is on by default (allow_self_authored defaults

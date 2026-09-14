@@ -18,6 +18,18 @@ from bobi.cli import main as cli_main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+
+def test_eng_team_does_not_ship_an_unprovisioned_image_credential_guide():
+    """The pack must not teach roles to use a credential it never declares."""
+    guide = REPO_ROOT / "agents" / "eng-team" / "tools" / "image-gen.md"
+    assert not guide.exists()
+
+
+def test_base_prompt_does_not_assume_an_unprovisioned_image_credential():
+    prompt = (REPO_ROOT / "bobi" / "prompts" / "base.md").read_text()
+    assert "api.openai.com/v1/images/generations" not in prompt
+    assert "tools/image.md" not in prompt
+
 # Commands delivered by the private deploy plugin via `bobi.commands`
 # entry points (the plugin ships from a private consumer repo). The
 # public docs deliberately keep describing them - README's Cloud Deployment
