@@ -209,7 +209,7 @@ Runs after the last lane merges — lane gates prove the pieces, this proves the
 
 The roll also exposed a defect this gate exists to catch, in exactly the seam it names: `deploy-agent-teams.yml`'s moda-skills pin resolution had never once succeeded in CI, because `actions/checkout`'s persisted `http.extraheader` overrides URL-embedded credentials, so its `git ls-remote` authenticated as `GITHUB_TOKEN` and 404'd on the private repo. Every deploy since the pin landed (2026-08-01) had been of a team that does not pin moda-skills and took the early exit. Fixed in moda-agents #86. Two further never-run surfaces surfaced with it: `version-gate.yml` cannot push its own pin-bump PR (`GITHUB_TOKEN` has no `workflows` scope, and three of the four pins are workflow files), and `HOMEBREW_TAP_TOKEN` had expired.
 
-**Still blocking:** the Consumer proof below — a K8s pod running the sidecar against a Terraform-deployed Worker. A release does not close it.
+**Still blocking:** the Consumer proof below — a K8s pod running the sidecar against a Terraform-deployed Worker. A release does not close it. The public Terraform/Kubernetes example and a fork-safe manual/nightly CI lane now provide the executable proof; keep this gate open until that lane records its first successful live run.
 
 ## Proof of work
 
