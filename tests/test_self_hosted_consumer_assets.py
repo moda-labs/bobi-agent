@@ -45,6 +45,19 @@ def test_terraform_matches_the_shipped_worker_contract():
     assert "previews_enabled = false" in main
     assert 'strategy    = "percentage"' in main
     assert "percentage = 100" in main
+    assert 'resource "cloudflare_worker_version" "migration"' in main
+    assert 'resource "cloudflare_workers_deployment" "migration"' in main
+    assert "depends_on = [cloudflare_workers_deployment.migration]" in main
+    migration_version = main.split(
+        'resource "cloudflare_worker_version" "migration" {', 1
+    )[1].split('resource "cloudflare_workers_deployment" "migration" {', 1)[0]
+    serving_version = main.split(
+        'resource "cloudflare_worker_version" "events" {', 1
+    )[1].split('resource "cloudflare_workers_deployment" "events" {', 1)[0]
+    assert 'name       = "DEPLOYMENT_SESSION"' not in migration_version
+    assert 'new_sqlite_classes = ["DeploymentSession"]' in migration_version
+    assert 'name       = "DEPLOYMENT_SESSION"' in serving_version
+    assert "new_sqlite_classes" not in serving_version
     assert 'worker_name != "bobi-events"' in variables
     for secret in ("internal_do_secret", "fleet_operator_token"):
         assert f'variable "{secret}"' in variables
