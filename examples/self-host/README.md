@@ -58,10 +58,11 @@ terraform -chdir=examples/self-host/terraform apply
 export BOBI_EVENT_SERVER="$(terraform -chdir=examples/self-host/terraform output -raw worker_url)"
 ```
 
-The module creates one Worker, one isolated KV namespace, the
-`DEPLOYMENT_SESSION` Durable Object with the shipped `v1` SQLite migration, and
-the public workers.dev route. It keeps the compatibility date and
-`nodejs_compat` flag aligned with `event-server/worker/wrangler.jsonc`.
+The module creates one Worker and one isolated KV namespace, then applies the
+`DEPLOYMENT_SESSION` Durable Object's shipped `v1` SQLite migration in a
+migration-only version before deploying the serving version that binds the
+class. It also enables the public workers.dev route and keeps the compatibility
+date and `nodejs_compat` flag aligned with `event-server/worker/wrangler.jsonc`.
 
 Verify the deployed server before starting Kubernetes:
 

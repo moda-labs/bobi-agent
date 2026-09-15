@@ -343,8 +343,10 @@ you want the Worker and agent runtime to be managed as separate products:
 1. Build `event-server/worker/` with Wrangler's `--dry-run` bundle output.
 2. Apply `examples/self-host/terraform/` with a unique Worker name, an
    isolated KV namespace, and per-run `INTERNAL_DO_SECRET` and
-   `FLEET_OPERATOR_TOKEN` values. The module carries the shipped
-   `nodejs_compat` flag and `v1` SQLite Durable Object migration.
+   `FLEET_OPERATOR_TOKEN` values. The module first deploys a migration-only
+   Worker version so Cloudflare applies the shipped `v1` SQLite Durable Object
+   migration, then deploys the serving version with the binding and
+   `nodejs_compat` flag.
 3. Run the released `ghcr.io/moda-labs/bobi:<version>` image from
    `examples/self-host/kubernetes/deployment.yaml` with
    `shareProcessNamespace: true`, a fixed private health port, and the
