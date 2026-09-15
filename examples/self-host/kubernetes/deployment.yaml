@@ -49,6 +49,10 @@ spec:
               value: stub
             - name: BOBI_STUB_BRAIN
               value: "1"
+            # The image validates API-key mode before the stub team is installed;
+            # this sentinel is never sent to a model.
+            - name: ANTHROPIC_API_KEY
+              value: stub-not-used
             - name: BOBI_UI
               value: "0"
             - name: BOBI_HEALTH_BIND

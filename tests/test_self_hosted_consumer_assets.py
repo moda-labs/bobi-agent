@@ -86,6 +86,7 @@ def test_kubernetes_example_uses_the_public_image_and_k8s_identity_contract():
     assert container["image"] == "ghcr.io/moda-labs/bobi:latest"
     assert env["BOBI_BRAIN"]["value"] == "stub"
     assert env["BOBI_STUB_BRAIN"]["value"] == "1"
+    assert env["ANTHROPIC_API_KEY"]["value"] == "stub-not-used"
     assert env["BOBI_HEALTH_BIND"]["value"] == "0.0.0.0"
     assert env["BOBI_HEALTH_PORT"]["value"] == "8081"
     assert env["POD_NAME"]["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.name"

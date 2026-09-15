@@ -76,6 +76,10 @@ This example team uses Bobi's test-only stub brain so the proof exercises
 deployment and remote control without spending a model call. Use a real team
 and its matching credentials for an actual installation.
 
+The manifest's `ANTHROPIC_API_KEY=stub-not-used` is a non-secret startup
+sentinel. The reference image validates its default API-key mode before the
+stub team is installed; the stub brain never sends this value to a model.
+
 ```bash
 export BOBI_VERSION="$(tr -d '[:space:]' < VERSION)"
 export BOBI_IMAGE="ghcr.io/moda-labs/bobi:$BOBI_VERSION"
