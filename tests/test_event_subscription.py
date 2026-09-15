@@ -15,6 +15,11 @@ import pytest
 
 from bobi import paths
 from bobi import http as pooled
+from bobi.events.protocol import (
+    EVENT_PROTOCOL,
+    IncompatibleEventProtocol,
+    InvalidEventProtocol,
+)
 from bobi.subagent import _start_event_subscription
 
 
@@ -125,7 +130,10 @@ def test_deaf_reconnect_uses_filtered_registered_subscriptions(
     assert mock_register.call_args.args[2] == ["inbox/self"]
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
-    assert json.loads(put_reqs[0].content) == {"replace": ["inbox/self"]}
+    assert json.loads(put_reqs[0].content) == {
+        "replace": ["inbox/self"],
+        "protocol": EVENT_PROTOCOL,
+    }
 
 
 @patch("time.sleep")
@@ -145,6 +153,23 @@ def test_transient_register_failure_retries(mock_register, _client, _drain,
     assert mock_register.call_count == 2
     saved = json.loads(_state_file(project).read_text())
     assert saved["deployment_id"] == "dep-2"
+
+
+@patch("time.sleep")
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_protocol_incompatibility_does_not_retry_registration(
+        mock_register, _client, _drain, sleep, project):
+    mock_register.side_effect = IncompatibleEventProtocol(
+        "event protocol ranges do not overlap"
+    )
+
+    with pytest.raises(IncompatibleEventProtocol):
+        _start_event_subscription("sess", ["inbox/sess"], project)
+
+    mock_register.assert_called_once()
+    sleep.assert_not_called()
 
 
 @patch("time.sleep")
@@ -199,8 +224,100 @@ def test_saved_state_uses_put_not_register(mock_register,
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
     assert str(put_reqs[0].url) == f"{REMOTE_URL}/deployments/dep-3/subscriptions"
-    assert json.loads(put_reqs[0].content) == {"replace": ["github:o/r"]}
+    assert json.loads(put_reqs[0].content) == {
+        "replace": ["github:o/r"],
+        "protocol": EVENT_PROTOCOL,
+    }
     assert mock_client.call_args.kwargs["deployment_id"] == "dep-3"
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_saved_state_protocol_incompatibility_does_not_reregister(
+        mock_register, _client, _drain, project):
+    state = _state_file(project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-3", "api_key": "key-3"}))
+    _create_bubble(project)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            426,
+            json={
+                "error": "incompatible_protocol",
+                "detail": "event protocol ranges do not overlap",
+                "protocol": {"minimum": 2, "current": 2},
+            },
+            request=request,
+        )
+
+    with patch.object(
+        pooled,
+        "_client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    ):
+        with pytest.raises(IncompatibleEventProtocol):
+            _start_event_subscription("sess", ["inbox/sess"], project)
+
+    mock_register.assert_not_called()
+    assert json.loads(state.read_text()) == {
+        "deployment_id": "dep-3",
+        "api_key": "key-3",
+    }
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_saved_state_malformed_protocol_response_does_not_reregister(
+        mock_register, _client, _drain, project):
+    state = _state_file(project)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"deployment_id": "dep-3", "api_key": "key-3"}))
+    _create_bubble(project)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"protocol": {"minimum": 2, "current": 1}},
+            request=request,
+        )
+
+    with patch.object(
+        pooled,
+        "_client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    ):
+        with pytest.raises(InvalidEventProtocol):
+            _start_event_subscription("sess", ["inbox/sess"], project)
+
+    mock_register.assert_not_called()
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+@patch("bobi.events.server.register")
+def test_deaf_reconnect_validates_protocol_response(
+        mock_register, mock_client, _drain, project):
+    mock_register.return_value = ("dep-1", "key-1")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"protocol": {"minimum": 2, "current": 1}},
+            request=request,
+        )
+
+    with patch.object(
+        pooled,
+        "_client",
+        httpx.Client(transport=httpx.MockTransport(handler)),
+    ):
+        _start_event_subscription("sess", ["inbox/sess"], project)
+        on_deaf = mock_client.call_args.kwargs["on_deaf_reconnect"]
+        with pytest.raises(InvalidEventProtocol):
+            on_deaf()
 
 
 @patch("bobi.events.drain.drain_loop")
@@ -241,8 +358,14 @@ def test_saved_state_keeps_unbacked_global_topics_and_resubscribes_same(
     mock_register.assert_not_called()
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 2
-    assert json.loads(put_reqs[0].content) == {"replace": ["github:o/r", "inbox/self"]}
-    assert json.loads(put_reqs[1].content) == {"replace": ["github:o/r", "inbox/self"]}
+    assert json.loads(put_reqs[0].content) == {
+        "replace": ["github:o/r", "inbox/self"],
+        "protocol": EVENT_PROTOCOL,
+    }
+    assert json.loads(put_reqs[1].content) == {
+        "replace": ["github:o/r", "inbox/self"],
+        "protocol": EVENT_PROTOCOL,
+    }
 
 
 # --- the CONFIGURED-LOCAL arm -------------------------------------------------
@@ -340,7 +463,9 @@ def test_configured_local_keeps_unbacked_topics_when_the_grant_is_denied(
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r", "inbox/self"]}
+        "replace": ["github:o/r", "inbox/self"],
+        "protocol": EVENT_PROTOCOL,
+    }
     # The saved deployment survives — nothing was re-minted.
     assert json.loads(state.read_text()) == {
         "deployment_id": "dep-L", "api_key": "key-L"}
@@ -383,7 +508,10 @@ def test_authorization_raising_still_puts_the_raw_list(
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
     assert str(put_reqs[0].url) == f"{LOCAL_URL}/deployments/dep-L/subscriptions"
-    assert json.loads(put_reqs[0].content) == {"replace": ["github:o/r"]}
+    assert json.loads(put_reqs[0].content) == {
+        "replace": ["github:o/r"],
+        "protocol": EVENT_PROTOCOL,
+    }
     assert json.loads(state.read_text()) == {
         "deployment_id": "dep-L", "api_key": "key-L"}
 

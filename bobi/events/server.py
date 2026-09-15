@@ -815,23 +815,35 @@ def _post_register(base_url: str, name: str, subscriptions: list[str],
     returns its key once, sent unsigned); JOIN when signed with an existing
     bubble's key. Raises BubbleRejected on a 403 join so callers can re-mint.
     """
+    from bobi.events.protocol import (
+        protocol_payload,
+        raise_for_protocol_error,
+        validate_server_response,
+    )
     from bobi.events.signing import signed_request
 
     resp = signed_request(
         base_url, "POST", "/deployments",
-        {"name": name, "subscriptions": subscriptions},
+        {
+            "name": name,
+            "subscriptions": subscriptions,
+            "protocol": protocol_payload(),
+        },
         bubble_id, bubble_key, timeout=REGISTER_TIMEOUT,
     )
     if resp.status_code == 403:
         raise BubbleRejected(f"join rejected for bubble {bubble_id}")
+    try:
+        data = resp.json()
+    except Exception:
+        data = {}
     if resp.status_code == 400:
-        try:
-            data = resp.json()
-        except Exception:
-            data = {}
         if isinstance(data, dict) and data.get("error") == "unauthorized_topics":
             raise UnauthorizedTopics(list(data.get("topics") or []))
-    return resp.json()
+    raise_for_protocol_error(resp.status_code, data)
+    if 200 <= resp.status_code < 300:
+        validate_server_response(data)
+    return data
 
 
 def register(base_url: str, name: str, subscriptions: list[str],

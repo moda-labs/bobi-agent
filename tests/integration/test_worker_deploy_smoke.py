@@ -196,6 +196,7 @@ def test_deployed_worker_health(smoke_url: str):
 
     assert data["status"] == "ok"
     assert data["auth"] == "hmac"
+    assert data["protocol"] == {"current": 1, "minimum": 1}
 
     expected_sha = os.environ["BOBI_SMOKE_EXPECTED_SHA"]
     assert data["release"]["sha"] == expected_sha, (
