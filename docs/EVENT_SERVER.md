@@ -150,7 +150,9 @@ Non-overlapping ranges return HTTP 426 with
 `error: "incompatible_protocol"`. Both failures include the server's range and
 occur before registration or subscription state changes. The Python client
 treats either as a terminal compatibility error: it does not retry registration
-or reinterpret the failure as stale deployment credentials.
+or reinterpret the failure as stale deployment credentials. A mismatch found
+while re-subscribing after a deaf reconnect stops the event client and clears
+its live state instead of continuing on stale subscriptions.
 
 Breaking protocol revisions follow an expand/contract sequence:
 
