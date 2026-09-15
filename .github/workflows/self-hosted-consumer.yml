@@ -1,0 +1,240 @@
+name: Self-hosted consumer proof
+
+# Proves the repo-reorg acceptance seam from a clean public checkout:
+# Terraform deploys the public Worker, kind runs the published Bobi image under
+# the Kubernetes sidecar, and the runner observes + restarts it through the
+# public fleet API. No private repository or hosted Moda control plane exists in
+# this job. See issue #929 / Linear MOD-356.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - ".github/workflows/self-hosted-consumer.yml"
+      - "docs/REFERENCE_IMAGE.md"
+      - "docs/SELF_HOSTED_EVENT_SERVER.md"
+      - "event-server/worker/**"
+      - "examples/self-host/**"
+      - "scripts/await_worker_ready.py"
+      - "tests/integration/test_self_hosted_consumer.py"
+      - "tests/test_ci_live_wiring.py"
+      - "tests/test_self_hosted_consumer_assets.py"
+  schedule:
+    - cron: "15 7 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  consumer-proof:
+    name: Terraform Worker + Kubernetes sidecar
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Decide whether the live lane runs
+        id: live
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          HAS_LIVE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:live') }}
+        run: |
+          set -euo pipefail
+          run=false
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch)
+              run=true ;;
+            pull_request)
+              if [ "$PR_HEAD_REPO" != "$THIS_REPO" ]; then
+                echo "fork PR ($PR_HEAD_REPO) - consumer proof is inert"
+              elif [ "$HAS_LIVE_LABEL" = "true" ]; then
+                run=true
+              else
+                echo "no ci:live label - consumer proof is inert"
+              fi ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "consumer proof runs: $run (event=$EVENT_NAME)"
+
+      - name: Fail fast when the Cloudflare configuration is missing
+        if: steps.live.outputs.run == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is empty - the consumer proof cannot run"
+              exit 1
+            fi
+          done
+
+      - uses: actions/setup-node@v5
+        if: steps.live.outputs.run == 'true'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: event-server/package-lock.json
+
+      - uses: actions/setup-python@v6
+        if: steps.live.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+
+      - uses: hashicorp/setup-terraform@v4.0.1
+        if: steps.live.outputs.run == 'true'
+        with:
+          terraform_version: "1.16.2"
+
+      - name: Install the Worker build and Python test harnesses
+        if: steps.live.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          npm ci --prefix event-server --no-audit --no-fund
+          python -m pip install --disable-pip-version-check -e '.[dev]'
+
+      - name: Build the public Worker source for Terraform
+        if: steps.live.outputs.run == 'true'
+        working-directory: event-server
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.tmp/self-host-worker"
+          npx --no-install wrangler deploy --dry-run \
+            --config worker/wrangler.jsonc \
+            --outdir "$GITHUB_WORKSPACE/.tmp/self-host-worker"
+          test -s "$GITHUB_WORKSPACE/.tmp/self-host-worker/index.js"
+
+      - name: Prepare isolated deployment inputs
+        if: steps.live.outputs.run == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          internal="$(openssl rand -hex 32)"
+          operator="$(openssl rand -hex 32)"
+          echo "::add-mask::$internal"
+          echo "::add-mask::$operator"
+
+          version="$(tr -d '[:space:]' < VERSION)"
+          worker="bobi-self-host-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fleet="self-host-${GITHUB_RUN_ID}"
+          instance="consumer-${GITHUB_RUN_ATTEMPT}"
+          image="ghcr.io/moda-labs/bobi:${version}"
+
+          {
+            echo "TF_VAR_cloudflare_account_id=$CLOUDFLARE_ACCOUNT_ID"
+            echo "TF_VAR_worker_name=$worker"
+            echo "TF_VAR_worker_bundle_path=$GITHUB_WORKSPACE/.tmp/self-host-worker/index.js"
+            echo "TF_VAR_release_version=$version"
+            echo "TF_VAR_release_sha=$GITHUB_SHA"
+            echo "TF_VAR_internal_do_secret=$internal"
+            echo "TF_VAR_fleet_operator_token=$operator"
+            echo "BOBI_SELF_HOST_FLEET_OPERATOR_TOKEN=$operator"
+            echo "BOBI_SELF_HOST_FLEET=$fleet"
+            echo "BOBI_SELF_HOST_INSTANCE=$instance"
+            echo "BOBI_SELF_HOST_VERSION=$version"
+            echo "BOBI_SELF_HOST_IMAGE=$image"
+          } >> "$GITHUB_ENV"
+
+      - name: Initialize and validate the public Terraform example
+        if: steps.live.outputs.run == 'true'
+        working-directory: examples/self-host/terraform
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false
+          terraform validate
+
+      - name: Terraform the scratch Worker
+        id: terraform
+        if: steps.live.outputs.run == 'true'
+        working-directory: examples/self-host/terraform
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          terraform apply -input=false -auto-approve
+          worker_url="$(terraform output -raw worker_url)"
+          test -n "$worker_url"
+          echo "worker_url=$worker_url" >> "$GITHUB_OUTPUT"
+          echo "BOBI_SELF_HOST_EVENT_SERVER_URL=$worker_url" >> "$GITHUB_ENV"
+
+      - name: Wait for Terraform's Worker deployment
+        if: steps.live.outputs.run == 'true'
+        env:
+          BOBI_SMOKE_FLEET_OPERATOR_TOKEN: ${{ env.BOBI_SELF_HOST_FLEET_OPERATOR_TOKEN }}
+          WORKER_URL: ${{ steps.terraform.outputs.worker_url }}
+        run: |
+          python scripts/await_worker_ready.py \
+            --url "$WORKER_URL" \
+            --expect-sha "$GITHUB_SHA" \
+            --needed 5 \
+            --interval 3 \
+            --timeout 180
+
+      - name: Create the disposable Kubernetes cluster
+        if: steps.live.outputs.run == 'true'
+        uses: helm/kind-action@v1.15.0
+        with:
+          cluster_name: bobi-self-host
+          version: v0.33.0
+          wait: 120s
+
+      - name: Run the published image under the Kubernetes sidecar
+        if: steps.live.outputs.run == 'true'
+        env:
+          WORKER_URL: ${{ steps.terraform.outputs.worker_url }}
+        run: |
+          set -euo pipefail
+          kubectl create configmap bobi-self-host-team \
+            --from-file=agent.yaml=examples/self-host/kubernetes/team/agent.yaml \
+            --from-file=ROLE.md=examples/self-host/kubernetes/team/roles/manager/ROLE.md
+          kubectl create configmap bobi-self-host-runtime \
+            --from-literal=event_server_url="$WORKER_URL" \
+            --from-literal=fleet="$BOBI_SELF_HOST_FLEET" \
+            --from-literal=instance="$BOBI_SELF_HOST_INSTANCE" \
+            --from-literal=image="$BOBI_SELF_HOST_IMAGE"
+          sed "s|ghcr.io/moda-labs/bobi:latest|$BOBI_SELF_HOST_IMAGE|" \
+            examples/self-host/kubernetes/deployment.yaml | kubectl apply -f -
+          kubectl rollout status deployment/bobi-self-host-consumer --timeout=5m
+
+      - name: Prove heartbeat and remote restart from outside the cluster
+        if: steps.live.outputs.run == 'true'
+        env:
+          BOBI_SELF_HOST_EVENT_SERVER_URL: ${{ steps.terraform.outputs.worker_url }}
+          BOBI_SELF_HOST_FLEET_OPERATOR_TOKEN: ${{ env.BOBI_SELF_HOST_FLEET_OPERATOR_TOKEN }}
+        run: |
+          pytest tests/integration/test_self_hosted_consumer.py \
+            -m live -v --timeout=240 \
+            --junitxml=self-hosted-consumer.xml
+
+      - name: Assert the consumer proof actually ran
+        if: steps.live.outputs.run == 'true'
+        run: |
+          python scripts/assert_junit_ran.py self-hosted-consumer.xml \
+            --expect-passed 2 \
+            --require test_self_hosted_fleet_api_fails_closed_without_the_operator_token \
+            --require test_kubernetes_sidecar_heartbeats_and_restarts_from_outside_the_cluster
+
+      - name: Show Kubernetes logs on failure
+        if: always() && steps.live.outputs.run == 'true'
+        run: |
+          kubectl get pods -o wide || true
+          kubectl logs deployment/bobi-self-host-consumer --all-containers --tail=-1 || true
+
+      - name: Destroy the scratch Cloudflare resources
+        if: always() && steps.live.outputs.run == 'true'
+        working-directory: examples/self-host/terraform
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -d .terraform ]; then
+            terraform destroy -input=false -auto-approve
+          else
+            echo "Terraform was not initialized; no managed resources to destroy."
+          fi

@@ -27,6 +27,14 @@ registrations and buffered replay (see
 answer to exactly that trade-off, and it is self-hosted like the others — you
 run it on your own Cloudflare account.
 
+For a complete third-party consumer path, see
+[`examples/self-host/README.md`](../examples/self-host/README.md). It deploys
+this Worker with Terraform, runs the published reference image in a disposable
+Kubernetes pod, and observes plus restarts the sidecar through `/fleet` from
+outside the cluster. The example is public-repository-only and uses the
+test-only stub brain, so it proves the deployment and admin seams without model
+spend.
+
 ## Slack Socket Mode: no public ingress
 
 Socket Mode is an opt-in for the local Node runtime, whether that runtime is embedded beside one agent or runs standalone on another box.
@@ -271,12 +279,12 @@ replay in KV, so a restart loses nothing.
 
 **Prerequisites.** A Cloudflare account on the **Workers Paid** plan: the
 Durable Objects here are SQLite-backed (`new_sqlite_classes` in the `v1`
-migration), which the free plan does not offer. Node 20+ and `npm` locally.
+migration), which the free plan does not offer. Node 22+ and `npm` locally.
 
 ```bash
 git clone https://github.com/moda-labs/bobi-agent
 cd bobi-agent/event-server
-npm install                      # links the workspace, incl. events-core
+npm ci --no-audit --no-fund      # links the workspace, incl. events-core
 cd worker
 npx wrangler login
 ```
@@ -326,6 +334,29 @@ waiting entirely. Raise it if your instances are far from your Worker's region
 and commands routinely come back `pending`; lower it if a wedged instance
 holding a tool call for five seconds is worse for your agents than an extra
 round trip. Anything unparseable falls back to the default rather than to zero.
+
+### Terraform and Kubernetes consumer path
+
+The public example under `examples/self-host/` is the reproducible path when
+you want the Worker and agent runtime to be managed as separate products:
+
+1. Build `event-server/worker/` with Wrangler's `--dry-run` bundle output.
+2. Apply `examples/self-host/terraform/` with a unique Worker name, an
+   isolated KV namespace, and per-run `INTERNAL_DO_SECRET` and
+   `FLEET_OPERATOR_TOKEN` values. The module carries the shipped
+   `nodejs_compat` flag and `v1` SQLite Durable Object migration.
+3. Run the released `ghcr.io/moda-labs/bobi:<version>` image from
+   `examples/self-host/kubernetes/deployment.yaml` with
+   `shareProcessNamespace: true`, a fixed private health port, and the
+   Kubernetes downward API for pod/node identity.
+4. From the operator host, query the authenticated fleet detail route and POST
+   `{"command":"restart"}`. A successful proof observes a healthy manager,
+   `platform: "k8s"`, pod/node identity, a changed manager PID, and
+   `last_restart_reason: "operator"` on the next heartbeat.
+
+Terraform state contains the Worker secrets. Use a protected backend or destroy
+the scratch state and resources immediately after the run. The Cloudflare
+Workers Paid plan is required for the SQLite-backed Durable Object.
 
 **3. Deploy and verify.**
 
