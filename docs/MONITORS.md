@@ -250,6 +250,15 @@ reconcile path (`scheduler.py`):
 - A condition is recorded active **only after its event actually publishes**. A
   failed publish (event server briefly down) is **parked** with its payload in
   `pending_publish` and retried by the drain below, instead of being lost.
+- Published findings include `finding_key` and `monitor` in the payload. An
+  `auto_dispatch` rule written as `monitor/<type>` matches only a monitor event
+  whose source is `monitor`; the reactor uses the finding key as a bounded
+  replay identity, passes both values into workflow inputs, and refuses a
+  completed exact replay unless the launch explicitly uses `fresh`.
+- If a matching auto-dispatch launch fails, the reactor publishes one
+  `agent/auto_dispatch.failed` event with the workflow, original event type,
+  finding key, run key, and bounded error detail. Failure events are not
+  recursively re-alerted.
 - Out-of-band agent failures publish `system/monitor.error` with the monitor
   name, flavor, reason (`spawn-failed`, `timeout`, or
   `indeterminate-result`), and detail. The drain loop actively delivers the

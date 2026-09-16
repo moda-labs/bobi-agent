@@ -1450,12 +1450,12 @@ class TestPeriodAdmission:
 
     @staticmethod
     def _ledger_entry(status, run_key, session_name="", checkpoint=-1,
-                      repo="test"):
+                      repo="test", workflow="standup"):
         # repo defaults to what _resolve_project_name("/tmp/test") yields:
         # the ledger is repo-scoped, so an entry for another repo must not
         # block this one (see test_other_repos_period_does_not_block).
         from bobi.workflow.state import WorkflowRun
-        run = WorkflowRun.create("standup", {"data": {"run_key": run_key}})
+        run = WorkflowRun.create(workflow, {"data": {"run_key": run_key}})
         run.run_key = run_key
         run.status = status
         run.session_name = session_name
@@ -1612,6 +1612,49 @@ class TestPeriodAdmission:
         self._ledger_entry("completed", self._period_key())
         name = launch_agent(task="post it", cwd="/tmp/test",
                             workflow_name="standup", fresh=True)
+        assert name
+        mock_launch.assert_called_once()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_completed_finding_key_refuses_replay_but_fresh_allows(
+            self, mock_launch, mock_reg, mock_check):
+        from bobi.subagent import DuplicateRunError, launch_agent
+        (paths.workflows_dir() / "oneshot.yaml").write_text(
+            "name: oneshot\nsteps:\n  - name: go\n    prompt: go\n"
+        )
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        finding_run_key = "finding-standup-due-abc123"
+        self._ledger_entry("completed", finding_run_key, workflow="oneshot")
+
+        with pytest.raises(DuplicateRunError, match="already ran"):
+            launch_agent(task="post it", cwd="/tmp/test",
+                         workflow_name="oneshot", run_key=finding_run_key,
+                         finding_derived=True)
+        mock_launch.assert_not_called()
+
+        name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="oneshot", run_key=finding_run_key,
+                            finding_derived=True, fresh=True)
+        assert name
+        mock_launch.assert_called_once()
+
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_explicit_key_does_not_get_finding_replay_refusal(
+            self, mock_launch, mock_reg, mock_check):
+        from bobi.subagent import launch_agent
+        (paths.workflows_dir() / "oneshot.yaml").write_text(
+            "name: oneshot\nsteps:\n  - name: go\n    prompt: go\n"
+        )
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        finding_run_key = "finding-standup-due-abc123"
+        self._ledger_entry("completed", finding_run_key, workflow="oneshot")
+
+        name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="oneshot", run_key=finding_run_key)
         assert name
         mock_launch.assert_called_once()
 

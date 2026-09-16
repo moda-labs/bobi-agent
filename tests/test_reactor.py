@@ -41,6 +41,28 @@ class TestAutoDispatchRule:
         event = {"type": "github.issues", "fields": {}}
         assert rule.matches(event) is False
 
+    @pytest.mark.parametrize(
+        ("source", "event_type", "expected"),
+        [
+            ("monitor", "standup.due", True),
+            ("github", "standup.due", False),
+            ("monitor", "other.due", False),
+            (None, "standup.due", False),
+        ],
+    )
+    def test_source_qualified_rule_matches_only_its_source(
+        self, source, event_type, expected
+    ):
+        rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
+        event = {"type": event_type, "fields": {}}
+        if source is not None:
+            event["source"] = source
+        assert rule.matches(event) is expected
+
+    def test_exact_type_match_keeps_precedence_over_source(self):
+        rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
+        assert rule.matches({"type": "monitor/standup.due", "source": "other"})
+
     def test_matches_with_field_condition(self):
         rule = AutoDispatchRule(
             event="github.pull_request_review",
@@ -275,6 +297,23 @@ class TestAutoDispatchRule:
         assert key_a == "pr-feedback:github:moda-labs/test:42:review:555"
         assert key_a == key_b
 
+    def test_finding_key_controls_dedup_and_run_identity(self):
+        rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
+        base = {
+            "type": "standup.due",
+            "source": "monitor",
+            "topics": ["standup.due", "monitor/standup.due"],
+            "payload": {"finding_key": "2026-09-15T02:00:11Z", "monitor": "standup-due"},
+            "fields": {},
+        }
+        first = rule.dedup_key({**base, "id": "server-1"})
+        replay = rule.dedup_key({**base, "id": "server-2"})
+        assert first == replay
+        assert len(first) < 200
+        assert "2026-09-15" not in first
+        assert rule.run_key(base) == rule.run_key({**base, "id": "server-2"})
+        assert rule.run_key(base).startswith("finding-")
+
 
 class TestEventReactor:
     """EventReactor matches events to rules and dispatches workflows."""
@@ -476,6 +515,70 @@ class TestEventReactor:
         # Should not raise, should return "dispatched" (handled)
         result = reactor.process(event)
         assert result == "dispatched"
+
+    @pytest.mark.parametrize("failure", [RuntimeError("busy"), ValueError("broken")])
+    @patch("bobi.events.publish.post_event")
+    @patch("bobi.subagent.launch_agent")
+    def test_launch_failure_publishes_one_failure_event(
+        self, mock_launch, mock_post, failure
+    ):
+        mock_launch.side_effect = failure
+        reactor = self._make_reactor()
+
+        assert reactor.process(self._make_review_event()) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        deadline = time.time() + 2
+        while time.time() < deadline and not mock_post.called:
+            time.sleep(0.005)
+
+        mock_post.assert_called_once()
+        assert mock_post.call_args.args[0] == "agent/auto_dispatch.failed"
+        payload = mock_post.call_args.args[1]
+        assert payload["workflow"] == "pr-feedback"
+        assert payload["event_type"] == "github.pull_request_review"
+        assert "run_key" in payload
+        assert payload["error"] == str(failure)
+
+    @patch("bobi.events.publish.post_event")
+    @patch("bobi.subagent.launch_agent", side_effect=RuntimeError("busy"))
+    def test_finding_launch_failure_includes_replay_identity(
+        self, mock_launch, mock_post
+    ):
+        rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
+        reactor = EventReactor(rules=[rule], cwd="/tmp")
+        event = {
+            "type": "standup.due",
+            "source": "monitor",
+            "topics": ["standup.due", "monitor/standup.due"],
+            "fields": {},
+            "payload": {"finding_key": "finding-1", "monitor": "standup-due"},
+        }
+
+        assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        deadline = time.time() + 2
+        while time.time() < deadline and not mock_post.called:
+            time.sleep(0.005)
+        payload = mock_post.call_args.args[1]
+        assert payload["finding_key"] == "finding-1"
+        assert payload["run_key"].startswith("finding-")
+
+    @patch("bobi.events.publish.post_event")
+    @patch("bobi.subagent.launch_agent")
+    def test_failure_event_does_not_recurse(self, mock_launch, mock_post):
+        mock_launch.side_effect = RuntimeError("busy")
+        rule = AutoDispatchRule(event="agent/auto_dispatch.failed", workflow="alert")
+        reactor = EventReactor(rules=[rule], cwd="/tmp")
+
+        assert reactor.process({
+            "type": "agent/auto_dispatch.failed",
+            "source": "agent",
+            "fields": {},
+            "payload": {},
+        }) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        time.sleep(0.02)
+        mock_post.assert_not_called()
 
     @patch("bobi.subagent.launch_agent")
     def test_dispatch_does_not_block_on_slow_launch(self, mock_launch):
@@ -1111,6 +1214,55 @@ class TestPrFeedbackDispatchHygiene:
         _wait_calls(mock_launch, 1)
         assert mock_launch.call_args[1]["run_key"] == "7-review-4242"
         assert mock_launch.call_args[1]["random_key"] is False
+
+    @patch("bobi.subagent.launch_agent")
+    def test_finding_identity_reaches_launch_inputs(self, mock_launch):
+        mock_launch.return_value = "wf-x"
+        rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
+        reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="bobi")
+        event = {
+            "type": "standup.due",
+            "source": "monitor",
+            "id": "server-1",
+            "topics": ["standup.due", "monitor/standup.due"],
+            "fields": {"event_type": "spoofed", "number": 99},
+            "payload": {
+                "finding_key": "2026-09-15T02:00:11Z",
+                "monitor": "standup-due",
+                "event_type": "payload-spoofed",
+            },
+        }
+
+        assert reactor.process(event) == "dispatched"
+        _wait_calls(mock_launch, 1)
+        kwargs = mock_launch.call_args.kwargs
+        assert kwargs["input_fields"]["finding_key"] == "2026-09-15T02:00:11Z"
+        assert kwargs["input_fields"]["monitor"] == "standup-due"
+        assert kwargs["input_fields"]["event_type"] == "standup.due"
+        assert kwargs["input_fields"]["pr_number"] == 99
+        assert kwargs["finding_derived"] is True
+        assert kwargs["random_key"] is False
+
+    @patch("bobi.subagent.launch_agent")
+    def test_finding_replay_after_reactor_restart_keeps_one_run_key(self, mock_launch):
+        mock_launch.return_value = "wf-x"
+        rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
+        event = {
+            "type": "standup.due",
+            "source": "monitor",
+            "id": "server-1",
+            "topics": ["standup.due", "monitor/standup.due"],
+            "fields": {},
+            "payload": {"finding_key": "finding-1", "monitor": "standup-due"},
+        }
+        first = EventReactor(rules=[rule], cwd="/tmp")
+        second = EventReactor(rules=[rule], cwd="/tmp")
+        assert first.process(event) == "dispatched"
+        assert second.process({**event, "id": "server-2"}) == "dispatched"
+        _wait_calls(mock_launch, 2)
+        assert mock_launch.call_args_list[0].kwargs["run_key"] == (
+            mock_launch.call_args_list[1].kwargs["run_key"]
+        )
 
     @patch("bobi.subagent.launch_agent")
     def test_id_less_events_launch_with_an_explicitly_random_key(self, mock_launch):
