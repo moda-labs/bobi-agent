@@ -292,6 +292,32 @@ class TestConnectIsNeverATurn:
         )
 
 
+    def test_step_by_name(self):
+        from bobi.workflow.schema import Workflow, StepDef
+        wf = Workflow(
+            name="test",
+            steps=[
+                StepDef(name="a", prompt="do a"),
+                StepDef(name="b", prompt="do b"),
+            ],
+        )
+        assert wf.step_by_name("b").prompt == "do b"
+        assert wf.step_by_name("c") is None
+
+    def test_step_index(self):
+        from bobi.workflow.schema import Workflow, StepDef
+        wf = Workflow(
+            name="test",
+            steps=[
+                StepDef(name="a", prompt="do a"),
+                StepDef(name="b", prompt="do b"),
+            ],
+        )
+        assert wf.step_index("a") == 0
+        assert wf.step_index("b") == 1
+        assert wf.step_index("missing") == -1
+
+
 class TestLaunchNoteScopedToStep:
     """The launch brief stays background while each prompt owns one step."""
 
@@ -388,28 +414,3 @@ class TestLaunchNoteScopedToStep:
             assert not published.exists()
         else:
             assert published.read_text().strip() == "ok"
-
-    def test_step_by_name(self):
-        from bobi.workflow.schema import Workflow, StepDef
-        wf = Workflow(
-            name="test",
-            steps=[
-                StepDef(name="a", prompt="do a"),
-                StepDef(name="b", prompt="do b"),
-            ],
-        )
-        assert wf.step_by_name("b").prompt == "do b"
-        assert wf.step_by_name("c") is None
-
-    def test_step_index(self):
-        from bobi.workflow.schema import Workflow, StepDef
-        wf = Workflow(
-            name="test",
-            steps=[
-                StepDef(name="a", prompt="do a"),
-                StepDef(name="b", prompt="do b"),
-            ],
-        )
-        assert wf.step_index("a") == 0
-        assert wf.step_index("b") == 1
-        assert wf.step_index("missing") == -1
