@@ -65,6 +65,90 @@ class TestRuntimeWritePolicy:
         assert "writable" in result.detail
         assert "agent.yaml" in result.detail or result.failures
 
+    @pytest.mark.parametrize(
+        ("mode", "file_uid", "file_gid", "euid", "egid", "groups", "flagged"),
+        [
+            (0o644, 1001, 2001, 1001, 3001, [], True),
+            (0o644, 1001, 2001, 1002, 3001, [], False),
+            (0o464, 1001, 2001, 1002, 2001, [], True),
+            (0o464, 1001, 2001, 1002, 3001, [2001], True),
+            (0o464, 1001, 2001, 1002, 3001, [], False),
+            (0o446, 1001, 2001, 1002, 3001, [], True),
+            (0o644, 1001, 2001, 0, 0, [], True),
+            (0o464, 1001, 2001, 0, 0, [], True),
+            (0o446, 1001, 2001, 0, 0, [], True),
+            (0o444, 1001, 2001, 0, 0, [], False),
+        ],
+    )
+    def test_check_only_flags_write_bits_actionable_by_runtime_identity(
+        self, tmp_path, monkeypatch, mode, file_uid, file_gid,
+        euid, egid, groups, flagged,
+    ):
+        package = _write_runtime(tmp_path)
+        package.chmod(0o555)
+        role_dir = package / "roles"
+        role_dir.chmod(0o555)
+        target = role_dir / "ROLE.md"
+        target.chmod(mode)
+        real_lstat = Path.lstat
+
+        def lstat(path):
+            result = real_lstat(path)
+            if path != target:
+                return result
+            values = list(result)
+            values[4] = file_uid
+            values[5] = file_gid
+            return os.stat_result(values)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        monkeypatch.setattr(os, "geteuid", lambda: euid)
+        monkeypatch.setattr(os, "getegid", lambda: egid)
+        monkeypatch.setattr(os, "getgroups", lambda: groups)
+
+        result = check_runtime_write_policy(tmp_path)
+
+        target_failures = [entry for entry in result.failures if str(target) in entry]
+        assert bool(target_failures) is flagged
+
+    @pytest.mark.parametrize(
+        ("mode", "dir_uid", "euid", "flagged"),
+        [
+            (0o755, 1001, 1001, True),
+            (0o755, 1001, 1002, False),
+            (0o777, 1001, 1002, True),
+            (0o755, 1001, 0, True),
+            (0o555, 1001, 0, False),
+        ],
+    )
+    def test_check_flags_actionable_writable_directory(
+        self, tmp_path, monkeypatch, mode, dir_uid, euid, flagged,
+    ):
+        package = _write_runtime(tmp_path)
+        package.chmod(0o555)
+        role_dir = package / "roles"
+        role_dir.chmod(mode)
+        (role_dir / "ROLE.md").chmod(0o444)
+        real_lstat = Path.lstat
+
+        def lstat(path):
+            result = real_lstat(path)
+            if path != role_dir:
+                return result
+            values = list(result)
+            values[4] = dir_uid
+            return os.stat_result(values)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        monkeypatch.setattr(os, "geteuid", lambda: euid)
+        monkeypatch.setattr(os, "getegid", lambda: 3001)
+        monkeypatch.setattr(os, "getgroups", lambda: [])
+
+        result = check_runtime_write_policy(tmp_path)
+
+        dir_failures = [entry for entry in result.failures if str(role_dir) in entry]
+        assert bool(dir_failures) is flagged
+
     def test_apply_policy_tolerates_unowned_files(self, tmp_path, monkeypatch):
         package = _write_runtime(tmp_path)
         denied = package / "roles" / "ROLE.md"
@@ -353,6 +437,270 @@ class TestBobiDistributionIntegrity:
         result = check_bobi_distribution_integrity(dist)
 
         assert result.ok
+
+
+    def test_event_server_build_input_mismatch_does_not_block_startup(
+        self, tmp_path, monkeypatch,
+    ):
+        """A rewritten event-server build input must not fail the preflight (#1087).
+
+        The shipped event-server is an npm workspace root whose `worker`
+        workspace is deliberately not distributed, so any npm command that
+        re-resolves the dependency graph prunes that workspace's entries and
+        rewrites package-lock.json in place. The installed runtime never reads
+        that file, so a fail-closed startup check over it only crash-loops a
+        live pod.
+        """
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        lockfile = package / "event-server" / "package-lock.json"
+        lockfile.parent.mkdir(parents=True)
+        lockfile.write_text('{"lockfileVersion": 3}\n')
+        stale = _sha256_record_value(b'{"lockfileVersion": 3, "packages": {}}\n')
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile("bobi/event-server/package-lock.json", stale),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        result = verify_framework_integrity_or_raise(dist)
+
+        assert result.ok, result.detail
+
+    def test_waived_manifest_is_not_counted_as_verified_and_is_logged(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """A waiver must never read as a clean verify, and must leave a trace.
+
+        prepare_brain_runtime discards the PolicyCheck, so the log line is the
+        only evidence a live deployment gets.
+        """
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        lockfile = package / "event-server" / "package-lock.json"
+        lockfile.parent.mkdir(parents=True)
+        lockfile.write_text('{"lockfileVersion": 3}\n')
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile(
+                    "bobi/event-server/package-lock.json",
+                    _sha256_record_value(b"pruned\n"),
+                ),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        with caplog.at_level("WARNING", logger="bobi.runtime_guard"):
+            result = check_bobi_distribution_integrity(
+                dist, tolerate_event_server_build_inputs=True,
+            )
+
+        assert result.ok
+        # One file actually verified, not two.
+        assert "1 hashed Bobi file(s) verified" in result.detail
+        assert "1 event-server manifest(s) tolerated" in result.detail
+        assert "package-lock.json" in caplog.text
+
+    def test_event_server_typescript_source_is_not_waived(self, tmp_path, monkeypatch):
+        """The waiver is the npm manifests only; npm never rewrites src/."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        local_ts = package / "event-server" / "src" / "local.ts"
+        local_ts.parent.mkdir(parents=True)
+        local_ts.write_text("// edited\n")
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile(
+                    "bobi/event-server/src/local.ts",
+                    _sha256_record_value(b"// shipped\n"),
+                ),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        with pytest.raises(
+            RuntimeError, match=r"bobi/event-server/src/local\.ts: sha256 mismatch",
+        ):
+            verify_framework_integrity_or_raise(dist)
+
+    def test_event_server_build_input_mismatch_is_still_reported_to_doctor(
+        self, tmp_path, monkeypatch,
+    ):
+        """The launch gate relaxes; reporting callers still see the mismatch."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        lockfile = package / "event-server" / "package-lock.json"
+        lockfile.parent.mkdir(parents=True)
+        lockfile.write_text('{"lockfileVersion": 3}\n')
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile(
+                    "bobi/event-server/package-lock.json",
+                    _sha256_record_value(b"pruned\n"),
+                ),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        result = check_bobi_distribution_integrity(dist)
+
+        assert not result.ok
+        assert "bobi/event-server/package-lock.json: sha256 mismatch" in result.detail
+
+    def test_missing_event_server_build_input_still_blocks_startup(
+        self, tmp_path, monkeypatch,
+    ):
+        """events.server._find_event_server_dir probes package.json, so absence is fatal."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        (package / "event-server").mkdir()
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile("bobi/event-server/package.json", _sha256_record_value(b"{}\n")),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        with pytest.raises(RuntimeError, match="package.json: missing"):
+            verify_framework_integrity_or_raise(dist)
+
+    def test_event_server_bundle_mismatch_still_blocks_startup(
+        self, tmp_path, monkeypatch,
+    ):
+        """dist/ is the half an installed Bobi executes, so it stays fail-closed."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        bundle = package / "event-server" / "dist" / "local.js"
+        bundle.parent.mkdir(parents=True)
+        bundle.write_text("console.log('tampered')\n")
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile(
+                    "bobi/event-server/dist/local.js",
+                    _sha256_record_value(b"console.log('audited')\n"),
+                ),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        with pytest.raises(
+            RuntimeError, match=r"bobi/event-server/dist/local\.js: sha256 mismatch",
+        ):
+            verify_framework_integrity_or_raise(dist)
+
+    def test_event_server_record_entry_outside_the_package_still_fails(
+        self, tmp_path, monkeypatch,
+    ):
+        """The exemption drops the digest requirement, not the containment one."""
+        package = tmp_path / "site-packages" / "bobi"
+        dist_info = tmp_path / "site-packages" / "bobi-1.0.dist-info"
+        package.mkdir(parents=True)
+        dist_info.mkdir()
+        source = package / "__init__.py"
+        source.write_text("original\n")
+        monkeypatch.setattr("bobi.__file__", str(source))
+        outside = tmp_path / "outside.json"
+        outside.write_text("{}\n")
+        (package / "event-server").mkdir()
+        (package / "event-server" / "package.json").symlink_to(outside)
+        dist = _FakeDist(
+            tmp_path / "site-packages",
+            [
+                _FakeFile("bobi/__init__.py", _sha256_record_value(b"original\n")),
+                _FakeFile("bobi/event-server/package.json", _sha256_record_value(b"{}\n")),
+                _FakeFile("bobi-1.0.dist-info/RECORD"),
+            ],
+        )
+
+        from bobi.runtime_guard import verify_framework_integrity_or_raise
+
+        with pytest.raises(RuntimeError, match="resolves outside Bobi distribution roots"):
+            verify_framework_integrity_or_raise(dist)
+
+
+def test_startup_integrity_exempts_exactly_the_event_server_build_inputs():
+    """Pin the waiver against the artifact module's declared sets.
+
+    Both directions: the waiver is exactly the two npm-owned manifests out of
+    the declared build inputs, and none of the three files the installed
+    runtime loads is in it. Everything else the wheel ships outside dist/ is
+    pinned on a real wheel by tests/integration/test_packaged_event_server.py.
+    """
+    from bobi.events import artifact
+    from bobi.runtime_guard import _is_event_server_build_input
+
+    source = Path(__file__).resolve().parents[1] / "event-server"
+    build_inputs = [
+        f"bobi/event-server/{path.relative_to(source).as_posix()}"
+        for path in artifact.source_input_paths(source)
+    ]
+    assert build_inputs, "artifact module declared no event-server build inputs"
+
+    waived = [path for path in build_inputs if _is_event_server_build_input(path)]
+    assert sorted(waived) == [
+        "bobi/event-server/package-lock.json",
+        "bobi/event-server/package.json",
+    ], f"the waiver is not exactly the npm-owned manifest pair: {waived}"
+
+    runtime_files = [
+        f"bobi/event-server/dist/{name}"
+        for name in (artifact.BUNDLE_NAME, artifact.MANIFEST_NAME, artifact.NOTICE_NAME)
+    ]
+    exempted = [path for path in runtime_files if _is_event_server_build_input(path)]
+    assert not exempted, (
+        f"files the installed runtime loads were exempted from the preflight: {exempted}"
+    )
 
 
 class TestFrameworkIntegrityVerification:

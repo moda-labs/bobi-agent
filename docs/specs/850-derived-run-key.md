@@ -10,6 +10,16 @@
 > concurrency). The derivation dials themselves still describe current
 > behavior.
 
+> **2026-09-09, #875 (MOD-303):** "Making check-and-register atomic across
+> processes" - a Non-Goal below, and the "Cross-process admission is still
+> racy" risk under Rollout - was closed by #1052. `launch_agent` now runs
+> `_admit()` under `workflow.state.ledger_lock()`, a cross-process file lock,
+> and re-checks + `registry.register()`s inside ONE held section (the lock is
+> released only across the `_check_concurrency_semaphore` wait, which can block
+> for minutes). Two simultaneous un-keyed launches on one task now resolve to
+> exactly one start; the regression guard is
+> `tests/integration/test_agent_launch.py::TestUnkeyedLaunchDedup::test_two_concurrent_processes_on_one_task_admit_exactly_one`.
+
 ## Problem
 
 Bobi already rejects a second launch that lands on an active session name:
@@ -85,7 +95,8 @@ reactor calls, minted entropy instead.
   text, and **must not** be used as grounds to close #849.
 - **Fixing the `--wait` path's missing preflights.** Filed as #874, see Rollout.
 - **Making check-and-register atomic across processes.** Pre-existing; filed as
-  #875, see Rollout.
+  #875, see Rollout. *(Done in #1052 - see the 2026-09-09 amendment note at the
+  top of this spec.)*
 
 ## What Changed
 
@@ -297,6 +308,10 @@ pre-#850 behavior. The in-memory `dedup_key` still guards redelivery.
   this change an un-keyed launch always minted a unique name, so this shape was
   unreachable for exactly the case now routed through it. Sequential recursion
   (the incident's shape) is capped; a simultaneous burst is #875's to fix.
+  *(Resolved in #1052, 2026-09-09: the cross-process `ledger_lock` now spans
+  both the re-check and the `register()`, so the "both admit" window this
+  bullet describes is closed and a simultaneous burst resolves to exactly one
+  start - see the 2026-09-09 amendment note at the top.)*
 - **A suspended run that is abandoned holds its derived name.** Nothing reaps
   `waiting` - the reconciler skips it by design, since its dead pid is
   deliberate - and `cancel_agent` refuses it. The refusal therefore names the
@@ -327,4 +342,5 @@ persists new state to express something the run key already expresses, while the
 issue asked specifically for a derived key. The consequences it avoids are
 either already true of an explicit `--id` (directory reuse), addressed here
 (reaping), or latent (worktrees). Worth revisiting if #874's namespace
-unification or #875's atomicity work makes the coupling expensive.
+unification makes the coupling expensive (#875's cross-process atomicity work
+landed in #1052 without disturbing it).

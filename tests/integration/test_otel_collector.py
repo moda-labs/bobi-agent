@@ -140,24 +140,26 @@ class _Collector:
             self.proc.kill()
 
 
-def _await_ready(endpoint: str, proc: subprocess.Popen, log: Path,
+def _await_ready(port: int, proc: subprocess.Popen, log: Path,
                  timeout: float = 60.0) -> None:
-    """Ready = the OTLP receiver ANSWERS. A TCP connect proves the wrong thing.
+    """Block until the COLLECTOR answers HTTP, not merely until the port opens.
 
-    Under Docker's userland proxy, ``docker-proxy`` binds and accepts on the
-    published host port as soon as the container is created, before otelcol
-    binds 4318 inside it. A ``connect_ex`` probe therefore succeeds while the
-    receiver is still down, the proxy's dial into the container fails, and the
-    POST the test has already written comes back as ``[Errno 104] Connection
-    reset by peer``.
+    A bare TCP connect is not readiness on the `docker run -p` path. Docker
+    publishes the host port the moment the container is created, so a connect
+    succeeds while the collector inside is still booting. The proxy then fails
+    to dial the not-yet-listening container port and resets the first real
+    request, which surfaces to the client as `[Errno 104] Connection reset by
+    peer` and reddens whichever test POSTs first (#1083).
 
-    Any HTTP status answers the only question that matters, so the probe does
-    not check one. The body is empty, which is a valid empty
-    ``ExportMetricsServiceRequest``: the debug exporter renders nothing for it,
-    so the probe cannot pollute the pid-keyed marker assertions.
+    Speaking HTTP is what closes that window: docker forwards bytes and cannot
+    synthesize a response, so a status code proves the collector itself is on
+    the other end and its OTLP routes are mounted.
 
     Both ways of failing quote *log*, the launch log, so a failed image pull or
-    a rejected config says why instead of only that nothing ever answered.
+    a rejected config says why instead of only that nothing ever answered. On
+    the docker path that file is the only durable record: the fixture's
+    ``finally`` runs ``docker rm -f``, so ``docker logs`` is already gone by the
+    time anyone reads the failure.
     """
     import httpx
 
@@ -169,19 +171,25 @@ def _await_ready(endpoint: str, proc: subprocess.Popen, log: Path,
         return f"\nLaunch log:\n{text[-2000:]}" if text else ""
 
     deadline = time.monotonic() + timeout
+    last = "no attempt completed"
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(
                 f"collector exited early with {proc.returncode}{tail()}")
         try:
-            httpx.post(f"{endpoint}/v1/metrics", content=b"",
-                       headers={"Content-Type": "application/x-protobuf"},
-                       timeout=2.0)
+            # Any status is readiness. An unmapped path is deliberate: the OTLP
+            # receiver 404s it without reaching a pipeline, so the probe cannot
+            # pollute the debug output these tests assert on. Verified against
+            # otel/opentelemetry-collector 0.144.0: `GET /` returns 404.
+            httpx.get(f"http://127.0.0.1:{port}/", timeout=1.0)
             return
-        except httpx.HTTPError:
-            time.sleep(0.2)
+        except httpx.HTTPError as exc:
+            last = f"{type(exc).__name__}: {exc}"
+        time.sleep(0.2)
     raise AssertionError(
-        f"collector never answered on {endpoint} within {timeout}s{tail()}")
+        f"collector did not answer HTTP on {port} within {timeout}s "
+        f"(last: {last}){tail()}"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -219,7 +227,7 @@ def collector(tmp_path_factory):
 
     running = _Collector(proc, port, log, container)
     try:
-        _await_ready(running.endpoint, proc, log)
+        _await_ready(port, proc, log)
         yield running
     finally:
         running.stop()
