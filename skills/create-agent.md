@@ -123,13 +123,10 @@ The distinction is per source and there is no universal rule: GitHub emits
 Linear emits `linear.<type>.<action>` with the action *in* the type. A rule
 naming a type nothing emits fails silently — the deterministic dispatch it
 promises simply never happens and the work falls through to whatever the
-director LLM decides. Monitor findings carry `finding_key` and `monitor` in
-the event payload; matching dispatches use that key for replay identity and
-expose both values as workflow inputs. A launch failure emits
-`agent/auto_dispatch.failed` with the workflow, event type, finding key, run
-key, and bounded error detail. Startup preflight (`bobi agent <name> start`)
-warns about the shapes it recognizes, but it fails open on sources it has not
-been taught, so it is a safety net rather than a guarantee.
+director LLM decides. Monitor dispatches expose `finding_key` and `monitor` as
+workflow inputs, use a bounded replay identity, and report launch failures as
+`agent/auto_dispatch.failed`. Startup preflight (`bobi agent <name> start`)
+warns about recognized shapes but fails open on unknown sources.
 
 Structural dedup rules that only prevent redeliveries from reaching the
 director must set `dedup_only: true` and use `dedup_namespace:`. They do not

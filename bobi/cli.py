@@ -2150,13 +2150,10 @@ def _validate_event_publish_topic(topic: str) -> str:
         raise click.UsageError(
             "Topic must use source/type form, e.g. alert/firing."
         )
-    reserved_sources = {
-        "github", "linear", "slack", "monitor", "agent", "system", "inbox",
-    }
+    reserved_sources = {"github", "linear", "slack"}
     if source in reserved_sources:
         raise click.UsageError(
-            "github, linear, slack, monitor, agent, system, and inbox sources "
-            "are reserved for internal or webhook events."
+            "github, linear, and slack sources are reserved for webhooks."
         )
     global_prefixes = ("github:", "linear:", "slack:")
     if (

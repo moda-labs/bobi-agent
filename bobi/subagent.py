@@ -1286,7 +1286,6 @@ def launch_agent(
         "model": model,
         "effort": effort,
         "fresh": fresh,
-        "finding_derived": finding_derived,
     })
     script = (
         "import json, sys; "

@@ -858,10 +858,6 @@ class TestEventsCommand:
             "github/firing",
             "linear/firing",
             "slack/firing",
-            "monitor/firing",
-            "agent/firing",
-            "system/firing",
-            "inbox/firing",
         ]:
             result = CliRunner().invoke(
                 main,
@@ -872,7 +868,7 @@ class TestEventsCommand:
             )
 
             assert result.exit_code != 0
-            assert "sources are reserved" in result.output
+            assert "sources are reserved for webhooks" in result.output
 
     def test_publish_without_payload_does_not_read_interactive_stdin(
         self,

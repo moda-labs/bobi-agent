@@ -1618,7 +1618,7 @@ class TestPeriodAdmission:
     @patch("bobi.subagent.check_requires", return_value=[])
     @patch("bobi.subagent.get_registry")
     @patch("bobi.subagent._launch_detached")
-    def test_completed_finding_key_refuses_replay_but_fresh_allows(
+    def test_completed_finding_key_refuses_only_automatic_replay(
             self, mock_launch, mock_reg, mock_check):
         from bobi.subagent import DuplicateRunError, launch_agent
         (paths.workflows_dir() / "oneshot.yaml").write_text(
@@ -1635,28 +1635,14 @@ class TestPeriodAdmission:
         mock_launch.assert_not_called()
 
         name = launch_agent(task="post it", cwd="/tmp/test",
+                            workflow_name="oneshot", run_key=finding_run_key)
+        assert name
+
+        name = launch_agent(task="post it", cwd="/tmp/test",
                             workflow_name="oneshot", run_key=finding_run_key,
                             finding_derived=True, fresh=True)
         assert name
-        mock_launch.assert_called_once()
-
-    @patch("bobi.subagent.check_requires", return_value=[])
-    @patch("bobi.subagent.get_registry")
-    @patch("bobi.subagent._launch_detached")
-    def test_explicit_key_does_not_get_finding_replay_refusal(
-            self, mock_launch, mock_reg, mock_check):
-        from bobi.subagent import launch_agent
-        (paths.workflows_dir() / "oneshot.yaml").write_text(
-            "name: oneshot\nsteps:\n  - name: go\n    prompt: go\n"
-        )
-        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
-        finding_run_key = "finding-standup-due-abc123"
-        self._ledger_entry("completed", finding_run_key, workflow="oneshot")
-
-        name = launch_agent(task="post it", cwd="/tmp/test",
-                            workflow_name="oneshot", run_key=finding_run_key)
-        assert name
-        mock_launch.assert_called_once()
+        assert mock_launch.call_count == 2
 
     @patch("bobi.subagent.check_requires", return_value=[])
     @patch("bobi.subagent.get_registry")

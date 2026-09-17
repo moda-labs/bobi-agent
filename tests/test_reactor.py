@@ -523,33 +523,11 @@ class TestEventReactor:
         self, mock_launch, mock_post, failure
     ):
         mock_launch.side_effect = failure
-        reactor = self._make_reactor()
-
-        assert reactor.process(self._make_review_event()) == "dispatched"
-        _wait_calls(mock_launch, 1)
-        deadline = time.time() + 2
-        while time.time() < deadline and not mock_post.called:
-            time.sleep(0.005)
-
-        mock_post.assert_called_once()
-        assert mock_post.call_args.args[0] == "agent/auto_dispatch.failed"
-        payload = mock_post.call_args.args[1]
-        assert payload["workflow"] == "pr-feedback"
-        assert payload["event_type"] == "github.pull_request_review"
-        assert "run_key" in payload
-        assert payload["error"] == str(failure)
-
-    @patch("bobi.events.publish.post_event")
-    @patch("bobi.subagent.launch_agent", side_effect=RuntimeError("busy"))
-    def test_finding_launch_failure_includes_replay_identity(
-        self, mock_launch, mock_post
-    ):
         rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
         reactor = EventReactor(rules=[rule], cwd="/tmp")
         event = {
             "type": "standup.due",
             "source": "monitor",
-            "topics": ["standup.due", "monitor/standup.due"],
             "fields": {},
             "payload": {"finding_key": "finding-1", "monitor": "standup-due"},
         }
@@ -559,9 +537,15 @@ class TestEventReactor:
         deadline = time.time() + 2
         while time.time() < deadline and not mock_post.called:
             time.sleep(0.005)
+
+        mock_post.assert_called_once()
+        assert mock_post.call_args.args[0] == "agent/auto_dispatch.failed"
         payload = mock_post.call_args.args[1]
+        assert payload["workflow"] == "standup"
+        assert payload["event_type"] == "standup.due"
         assert payload["finding_key"] == "finding-1"
         assert payload["run_key"].startswith("finding-")
+        assert payload["error"] == str(failure)
 
     @patch("bobi.events.publish.post_event")
     @patch("bobi.subagent.launch_agent")
@@ -1216,7 +1200,7 @@ class TestPrFeedbackDispatchHygiene:
         assert mock_launch.call_args[1]["random_key"] is False
 
     @patch("bobi.subagent.launch_agent")
-    def test_finding_identity_reaches_launch_inputs(self, mock_launch):
+    def test_finding_identity_reaches_launch_and_survives_restart(self, mock_launch):
         mock_launch.return_value = "wf-x"
         rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
         reactor = EventReactor(rules=[rule], cwd="/tmp", self_login="bobi")
@@ -1225,44 +1209,27 @@ class TestPrFeedbackDispatchHygiene:
             "source": "monitor",
             "id": "server-1",
             "topics": ["standup.due", "monitor/standup.due"],
-            "fields": {"event_type": "spoofed", "number": 99},
+            "fields": {"number": 99},
             "payload": {
                 "finding_key": "2026-09-15T02:00:11Z",
                 "monitor": "standup-due",
-                "event_type": "payload-spoofed",
             },
         }
 
         assert reactor.process(event) == "dispatched"
-        _wait_calls(mock_launch, 1)
-        kwargs = mock_launch.call_args.kwargs
+        assert EventReactor(rules=[rule], cwd="/tmp").process(
+            {**event, "id": "server-2"}
+        ) == "dispatched"
+        _wait_calls(mock_launch, 2)
+        first, second = (call.kwargs for call in mock_launch.call_args_list)
+        assert first["run_key"] == second["run_key"]
+        kwargs = first
         assert kwargs["input_fields"]["finding_key"] == "2026-09-15T02:00:11Z"
         assert kwargs["input_fields"]["monitor"] == "standup-due"
         assert kwargs["input_fields"]["event_type"] == "standup.due"
         assert kwargs["input_fields"]["pr_number"] == 99
         assert kwargs["finding_derived"] is True
         assert kwargs["random_key"] is False
-
-    @patch("bobi.subagent.launch_agent")
-    def test_finding_replay_after_reactor_restart_keeps_one_run_key(self, mock_launch):
-        mock_launch.return_value = "wf-x"
-        rule = AutoDispatchRule(event="monitor/standup.due", workflow="standup")
-        event = {
-            "type": "standup.due",
-            "source": "monitor",
-            "id": "server-1",
-            "topics": ["standup.due", "monitor/standup.due"],
-            "fields": {},
-            "payload": {"finding_key": "finding-1", "monitor": "standup-due"},
-        }
-        first = EventReactor(rules=[rule], cwd="/tmp")
-        second = EventReactor(rules=[rule], cwd="/tmp")
-        assert first.process(event) == "dispatched"
-        assert second.process({**event, "id": "server-2"}) == "dispatched"
-        _wait_calls(mock_launch, 2)
-        assert mock_launch.call_args_list[0].kwargs["run_key"] == (
-            mock_launch.call_args_list[1].kwargs["run_key"]
-        )
 
     @patch("bobi.subagent.launch_agent")
     def test_id_less_events_launch_with_an_explicitly_random_key(self, mock_launch):

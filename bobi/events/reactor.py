@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,13 +23,6 @@ log = logging.getLogger(__name__)
 DEFAULT_COOLDOWN = 1800  # 30 minutes
 _MAX_DEDUP_ENTRIES = 500
 _FINDING_DIGEST_LENGTH = 16
-_ERROR_DETAIL_MAX = 500
-
-
-def _slug(value: object, fallback: str) -> str:
-    """Return a short path-safe label; identity comes from the digest."""
-    label = re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
-    return (label or fallback)[:48].rstrip("-")
 
 
 @dataclass
@@ -181,10 +173,9 @@ class AutoDispatchRule:
         finding_key = payload.get("finding_key")
         if finding_key is None or str(finding_key) == "":
             return None
-        monitor = str(payload.get("monitor") or event.get("source") or "finding")
+        monitor = str(payload.get("monitor") or event.get("source") or "")
         raw = f"{monitor}\0{finding_key}"
-        digest = hashlib.sha256(raw.encode()).hexdigest()[:_FINDING_DIGEST_LENGTH]
-        return f"{_slug(monitor, 'finding')}-{digest}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:_FINDING_DIGEST_LENGTH]
 
     def skip_reason(self, event: dict, self_login: str | None) -> str | None:
         """Return a reason to skip dispatch for this matched event, or None.
@@ -313,14 +304,12 @@ class EventReactor:
 
         # Pass event fields into the workflow's input scope so native
         # actions and route conditions can resolve ${{ input.* }} variables.
-        input_fields = dict(fields)
-        # Transport-derived values are authoritative; event content must not
-        # spoof the routing context passed to workflow variables.
-        input_fields.update({
+        input_fields = {
             "event_type": event_type,
             "repo": repo,
             "pr_number": number,
-        })
+        }
+        input_fields.update(fields)
         payload = event.get("payload")
         if isinstance(payload, dict):
             for name in ("finding_key", "monitor"):
@@ -395,7 +384,7 @@ class EventReactor:
                 "event_type": event_type,
                 "finding_key": finding_key,
                 "run_key": run_key,
-                "error": detail[:_ERROR_DETAIL_MAX],
+                "error": detail[:500],
             })
         except Exception:
             log.exception("Failed to publish auto-dispatch failure for %s", rule.workflow)
