@@ -1128,10 +1128,15 @@ def _channels_reply_send(conversation, text, edit_ref, files=None):
         _unescape_shell_literals(text),
         mode="final", edit_ref=edit_ref, files=files,
     )
+    # Preserve the gateway's message identity so workflow steps can edit it.
+    ts = result.get("ts") if isinstance(result, dict) else None
     if edit_ref:
-        click.echo(f"Updated {edit_ref} in {conversation}")
+        click.echo(f"Updated {ts or edit_ref} in {conversation}")
     else:
-        click.echo(f"Sent to {conversation}")
+        if ts:
+            click.echo(f"Sent to {conversation} (ts={ts})")
+        else:
+            click.echo(f"Sent to {conversation}")
     return result
 
 
