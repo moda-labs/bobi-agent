@@ -386,6 +386,29 @@ while True:
             f"{sorted(p.name for p in session_dir.iterdir())}"
         )
 
+    def test_reaping_never_signals_the_process_that_asked_for_it(self):
+        """The reaper must not take the suite down with the session it drops.
+
+        `_drop_session` reaps whatever pid the registry recorded, and the
+        in-process execution path records the RUNNING process's pid
+        (`bobi/subagent.py`: `registry.update(session_name, pid=os.getpid())`).
+        Dropping such a session from inside that process hands the reaper its
+        own pid, and under pytest that is the runner: an unguarded `killpg`
+        SIGTERMs the entire run, which dies mid-file with no failure report at
+        all and reads as an infrastructure flake rather than a test defect.
+
+        Reaching the assertion IS the assertion - an unguarded reaper never
+        gets here, because it has already signalled this process.
+        """
+        from .conftest import _reap_process_group
+
+        _reap_process_group(os.getpid())
+        _reap_process_group(os.getpgid(0))
+
+        # Signal 0 raises once a group is empty, so this pins that the reaper
+        # left our own group intact rather than merely failing to reach us.
+        os.killpg(os.getpgid(0), 0)
+
 
 @pytest.mark.timeout(240)
 class TestWaitRunsThroughTheExecutor:

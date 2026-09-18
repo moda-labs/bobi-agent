@@ -436,8 +436,18 @@ def _reap_process_group(pid: int, grace: float = 5.0) -> None:
     Bounded and best effort. SIGKILL after the grace period, and return
     regardless once it expires: a process that took SIGKILL cannot execute
     another instruction, which is the property the caller actually needs.
+
+    Never signals this process or the group it belongs to. The in-process
+    execution path records the RUNNING process's pid (``bobi/subagent.py``:
+    ``registry.update(session_name, pid=os.getpid())``), so a session dropped
+    from inside that process hands us our own pid - under pytest, the test
+    runner's. ``killpg`` on it SIGTERMs the whole suite, which dies mid-file
+    with no failure report and reads as infrastructure flake rather than a
+    defect. Such a pid is by construction not a detached agent, so there is
+    nothing here to reap; the rmtree retry in the caller absorbs whatever that
+    session is still writing.
     """
-    if pid <= 0:
+    if pid <= 0 or pid == os.getpid() or pid == os.getpgid(0):
         return
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 2.0)):
         try:
