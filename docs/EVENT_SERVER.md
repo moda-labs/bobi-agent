@@ -311,6 +311,7 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 | `system/brain.auth.failed` | a brain account requires operator re-authentication; deduped until recovery | |
 | `system/brain.credits.exhausted` | a brain account exhausted credits/quota; deduped until recovery | |
 | `system/brain.recovered` | a successful turn cleared a persisted brain availability incident | |
+| `agent/auto_dispatch.failed` | a matched workflow launch failed; includes workflow, source event, replay key, and bounded error detail | |
 
 `github:`, `linear:`, `slack:`, `whatsapp:`, and `discord:` are **global** topics (cross-bubble, gated by
 resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
@@ -501,8 +502,10 @@ Properties:
   `webhook_bad_signature` on `/health`; 413/429 policy rejections do not
   pollute that counter.
 - **Topic shape.** `source/type` form from `[A-Za-z0-9_.-]` segments; the
-  `github`/`linear`/`slack` sources and `:`-style global keys are rejected at
-  mint, so an ingest token can never reach a provider or global topic.
+  `github`/`linear`/`slack` webhook sources and the internal `monitor`/`agent`/
+  `system`/`inbox` sources are rejected at mint, along with `:`-style global
+  keys. An ingest token can therefore never impersonate a provider or a
+  Bobi-owned event namespace.
 
 ### Proof-of-access: resource grants
 
