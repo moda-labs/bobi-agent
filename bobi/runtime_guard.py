@@ -48,10 +48,6 @@ class PolicyCheck:
     failures: list[str] = field(default_factory=list)
 
 
-def _writable_bits(mode: int) -> int:
-    return mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
-
-
 def _readonly_mode(mode: int) -> int:
     return mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
 
@@ -172,10 +168,34 @@ def apply_runtime_write_policy(runtime_root: Path | None) -> GuardReport:
     return report
 
 
+def _actionable_writable_bits(
+    st: os.stat_result,
+    *,
+    euid: int,
+    groups: set[int],
+) -> int:
+    """Return write bits the current runtime identity can actually exercise.
+
+    Note that this check asserts that the running identity cannot modify
+    protected runtime files, not that the files are globally immutable across
+    all UIDs/GIDs. For root (euid == 0), any set write bit is actionable.
+    """
+    if euid == 0:
+        return st.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+    writable = st.st_mode & stat.S_IWOTH
+    if st.st_uid == euid:
+        writable |= st.st_mode & stat.S_IWUSR
+    if st.st_gid in groups:
+        writable |= st.st_mode & stat.S_IWGRP
+    return writable
+
+
 def _check_root(root: ProtectedRoot) -> list[str]:
     failures: list[str] = []
     if not root.path.exists():
         return failures
+    euid = os.geteuid()
+    groups = {os.getegid(), *os.getgroups()}
     for path in [root.path, *root.path.rglob("*")]:
         try:
             st = path.lstat()
@@ -190,12 +210,13 @@ def _check_root(root: ProtectedRoot) -> list[str]:
             if not _is_relative_to(resolved, root.path):
                 failures.append(f"{path}: symlink escapes protected root")
             continue
-        if _writable_bits(st.st_mode):
+        if _actionable_writable_bits(st, euid=euid, groups=groups):
             failures.append(f"{path}: writable mode {stat.filemode(st.st_mode)}")
     return failures
 
 
 def check_runtime_write_policy(runtime_root: Path | None) -> PolicyCheck:
+    """Check that protected runtime roots cannot be modified by the current runtime identity."""
     roots = protected_runtime_roots(runtime_root)
     failures: list[str] = []
     for root in roots:

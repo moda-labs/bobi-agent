@@ -25,7 +25,7 @@ _MAX_DEDUP_ENTRIES = 500
 
 @dataclass
 class AutoDispatchRule:
-    """A rule that matches an event type + optional field conditions to a workflow."""
+    """A rule that matches an event type + optional field conditions."""
 
     event: str
     workflow: str
@@ -41,6 +41,10 @@ class AutoDispatchRule:
     # Track stable ids without launching a workflow. The first delivery reaches
     # the director; redeliveries are dropped by the drain loop.
     dedup_only: bool = False
+    # Namespace used for in-memory deduplication when no workflow is launched.
+    # Kept separate from workflow so config cannot imply a route that does not
+    # exist (or is never invoked).
+    dedup_namespace: str = ""
     task: str | None = None
     # A truthy role forces the whole workflow to use it. An omitted or empty role
     # defers to per-step agents, which still switch only when model/effort changes.
@@ -98,7 +102,8 @@ class AutoDispatchRule:
         topic = topics[0] if topics else "unknown"
         fields = event.get("fields", {})
         number = fields.get("number", "unknown")
-        base = f"{self.workflow}:{topic}:{number}"
+        namespace = self.dedup_namespace or self.workflow
+        base = f"{namespace}:{topic}:{number}"
         comment_id = fields.get("comment_id")
         if comment_id is not None:
             return f"{base}:comment:{comment_id}"
@@ -188,6 +193,7 @@ class EventReactor:
                 suppress=entry.get("suppress", False),
                 allow_self_authored=entry.get("allow_self_authored", False),
                 dedup_only=entry.get("dedup_only", False),
+                dedup_namespace=entry.get("dedup_namespace", ""),
                 task=task,
                 role=entry.get("role") or "",
             ))

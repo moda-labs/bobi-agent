@@ -65,6 +65,90 @@ class TestRuntimeWritePolicy:
         assert "writable" in result.detail
         assert "agent.yaml" in result.detail or result.failures
 
+    @pytest.mark.parametrize(
+        ("mode", "file_uid", "file_gid", "euid", "egid", "groups", "flagged"),
+        [
+            (0o644, 1001, 2001, 1001, 3001, [], True),
+            (0o644, 1001, 2001, 1002, 3001, [], False),
+            (0o464, 1001, 2001, 1002, 2001, [], True),
+            (0o464, 1001, 2001, 1002, 3001, [2001], True),
+            (0o464, 1001, 2001, 1002, 3001, [], False),
+            (0o446, 1001, 2001, 1002, 3001, [], True),
+            (0o644, 1001, 2001, 0, 0, [], True),
+            (0o464, 1001, 2001, 0, 0, [], True),
+            (0o446, 1001, 2001, 0, 0, [], True),
+            (0o444, 1001, 2001, 0, 0, [], False),
+        ],
+    )
+    def test_check_only_flags_write_bits_actionable_by_runtime_identity(
+        self, tmp_path, monkeypatch, mode, file_uid, file_gid,
+        euid, egid, groups, flagged,
+    ):
+        package = _write_runtime(tmp_path)
+        package.chmod(0o555)
+        role_dir = package / "roles"
+        role_dir.chmod(0o555)
+        target = role_dir / "ROLE.md"
+        target.chmod(mode)
+        real_lstat = Path.lstat
+
+        def lstat(path):
+            result = real_lstat(path)
+            if path != target:
+                return result
+            values = list(result)
+            values[4] = file_uid
+            values[5] = file_gid
+            return os.stat_result(values)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        monkeypatch.setattr(os, "geteuid", lambda: euid)
+        monkeypatch.setattr(os, "getegid", lambda: egid)
+        monkeypatch.setattr(os, "getgroups", lambda: groups)
+
+        result = check_runtime_write_policy(tmp_path)
+
+        target_failures = [entry for entry in result.failures if str(target) in entry]
+        assert bool(target_failures) is flagged
+
+    @pytest.mark.parametrize(
+        ("mode", "dir_uid", "euid", "flagged"),
+        [
+            (0o755, 1001, 1001, True),
+            (0o755, 1001, 1002, False),
+            (0o777, 1001, 1002, True),
+            (0o755, 1001, 0, True),
+            (0o555, 1001, 0, False),
+        ],
+    )
+    def test_check_flags_actionable_writable_directory(
+        self, tmp_path, monkeypatch, mode, dir_uid, euid, flagged,
+    ):
+        package = _write_runtime(tmp_path)
+        package.chmod(0o555)
+        role_dir = package / "roles"
+        role_dir.chmod(mode)
+        (role_dir / "ROLE.md").chmod(0o444)
+        real_lstat = Path.lstat
+
+        def lstat(path):
+            result = real_lstat(path)
+            if path != role_dir:
+                return result
+            values = list(result)
+            values[4] = dir_uid
+            return os.stat_result(values)
+
+        monkeypatch.setattr(Path, "lstat", lstat)
+        monkeypatch.setattr(os, "geteuid", lambda: euid)
+        monkeypatch.setattr(os, "getegid", lambda: 3001)
+        monkeypatch.setattr(os, "getgroups", lambda: [])
+
+        result = check_runtime_write_policy(tmp_path)
+
+        dir_failures = [entry for entry in result.failures if str(role_dir) in entry]
+        assert bool(dir_failures) is flagged
+
     def test_apply_policy_tolerates_unowned_files(self, tmp_path, monkeypatch):
         package = _write_runtime(tmp_path)
         denied = package / "roles" / "ROLE.md"

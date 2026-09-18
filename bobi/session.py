@@ -1291,7 +1291,11 @@ class Session:
             if response is None:
                 log.error(
                     "Inbox message %s for '%s' did not reach a terminal result; "
-                    "leaving it unacknowledged for replay (state=%s)",
+                    "leaving it unacknowledged (state=%s). Brain replacement does not "
+                    "replay this message in the current process. An ordinary manager "
+                    "restart may recover it only while the deployment and server "
+                    "history survive. Review prior side effects before resending; "
+                    "do not use --fresh to preserve pending replay.",
                     msg.id,
                     self.name,
                     self._state,
@@ -1643,13 +1647,20 @@ class Session:
             # blocking start() for tens of seconds on a slow event server would
             # stall the manager's boot and trip liveness probes. The background
             # loop below owns the patient, backed-off retries instead.
-            self._subscription = _start_event_subscription(
+            subscription = _start_event_subscription(
                 self.name, keys, bobi_root(), register_attempts=1)
+            with self._sub_lock:
+                shutting_down = self._sub_retry_stop.is_set()
+                if not shutting_down:
+                    self._subscription = subscription
+            if shutting_down:
+                subscription.stop()
         except Exception:
             log.warning(
                 "Event subscription registration failed for '%s' — booting "
                 "anyway and retrying in the background; queued events resume "
-                "on reconnect", self.name, exc_info=True,
+                "on reconnect only while deployment and server history survive",
+                self.name, exc_info=True,
             )
             self._retry_subscription_in_background(keys)
 

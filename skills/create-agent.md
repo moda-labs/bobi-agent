@@ -126,6 +126,18 @@ director LLM decides. Startup preflight (`bobi agent <name> start`) warns
 about the shapes it recognizes, but it fails open on sources it has not been
 taught, so it is a safety net rather than a guarantee.
 
+Structural dedup rules that only prevent redeliveries from reaching the
+director must set `dedup_only: true` and use `dedup_namespace:`. They do not
+launch a workflow, so they must not name a nonexistent or unused `workflow:`:
+
+```yaml
+  - event: github.issue_comment
+    match:
+      is_pull_request: true
+    dedup_namespace: pr-comment-event-dedup
+    dedup_only: true
+```
+
 To give the team host tools, skills, or MCP servers, declare them under
 `tool_library:` (a named catalog entry like `- venn`, or an inline dependency
 with a required `success:`). See `docs/TOOL_LIBRARY.md` for the two ways to
