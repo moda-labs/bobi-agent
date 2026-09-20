@@ -94,7 +94,9 @@ class SlackAlerter(SupervisorObserver):
         if state_path is None:
             from bobi import paths
             state_path = paths.state_path(project_root) / STATE_FILE
-        self._state_path = Path(state_path)
+        # Bind the incident record to the selected runtime, never to the
+        # supervisor's current working directory.
+        self._state_path = Path(state_path).resolve()
         self._incident: dict | None = self._load()
         # Recovery tracking (per-boot, in-memory: a machine restart that stays
         # healthy will simply re-derive it before closing the incident).
@@ -114,7 +116,8 @@ class SlackAlerter(SupervisorObserver):
 
     def _save(self) -> None:
         try:
-            atomic_write_json(self._state_path, self._incident or {}, indent=None)
+            atomic_write_json(self._state_path, self._incident or {},
+                              indent=None, fsync=True)
         except Exception:
             log.debug("supervisor: could not persist incident state",
                       exc_info=True)
@@ -189,9 +192,13 @@ class SlackAlerter(SupervisorObserver):
                               "exhaust_cycles": 0}
         cycles = int(self._incident.get("exhaust_cycles") or 0) + 1
         self._incident["exhaust_cycles"] = cycles
+        # Publish the recovery-resistant incident marker before making the
+        # synchronous alert request. The supervisor returns exit 70 immediately
+        # after this lifecycle edge; persistence must survive that boundary even
+        # when the alert transport is slow or fails.
+        self._save()
         if self._post(self._exhausted_message(fields, cycles)):
             self._exhaustion_posted = True
-        self._save()
 
     def _currently_healthy(self, state: SupervisorState) -> bool:
         """The manager is healthy RIGHT NOW, not merely 'was healthy this

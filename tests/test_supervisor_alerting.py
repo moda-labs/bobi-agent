@@ -123,6 +123,55 @@ class TestSoftAlert:
 
 class TestExhaustionAlert:
 
+    def test_default_state_path_stays_under_runtime_root_across_cwd_drift(
+            self, tmp_path, monkeypatch):
+        runtime_root = tmp_path / "agent" / "run"
+        other_cwd = tmp_path / "unrelated-cwd"
+        runtime_root.mkdir(parents=True)
+        other_cwd.mkdir()
+        monkeypatch.chdir(other_cwd)
+
+        a = SlackAlerter(project_root=runtime_root, config=_cfg(),
+                         identity=IDENTITY, now_fn=Clock(),
+                         post_fn=lambda message: True)
+        expected = runtime_root / "state" / "supervisor-incident.json"
+
+        a.lifecycle("budget_exhausted", reason="crash loop", restart_count=1)
+
+        assert a._state_path == expected.resolve()
+        assert expected.is_file()
+
+    def test_persists_incident_before_alert_and_exit(self, tmp_path):
+        """The exhaustion file must exist before alert dispatch can finish."""
+        events = []
+        state_path = tmp_path / "incident.json"
+
+        def post(message):
+            events.append(("alert_start", state_path.exists()))
+            events.append(("alert_complete", state_path.exists()))
+            return True
+
+        a = SlackAlerter(project_root=None, config=_cfg(max_restarts=1),
+                         identity=IDENTITY, now_fn=Clock(), post_fn=post,
+                         state_path=state_path)
+        sup = Supervisor([], _cfg(max_restarts=1), now_fn=Clock(),
+                         spawn_fn=lambda: FakeProc(returncode=70),
+                         health_fn=lambda: None,
+                         observer=CompositeObserver([a]),
+                         announce_fn=a.announce_fallback,
+                         sleep_fn=lambda d: None)
+        # Make the next fast crash the budget-exhaustion edge.
+        sup._budget.record(1000.0)
+
+        code = sup.run()
+        events.append(("exit", code, state_path.exists()))
+
+        assert events == [
+            ("alert_start", True),
+            ("alert_complete", True),
+            ("exit", EXIT_BUDGET_EXHAUSTED, True),
+        ]
+
     def test_posts_with_cycle_counter_and_suppresses_plain_announce(
             self, tmp_path):
         a, posts, _ = _alerter(tmp_path)
@@ -138,6 +187,7 @@ class TestExhaustionAlert:
     def test_plain_announce_fires_when_rich_post_failed(self, tmp_path):
         a, posts, _ = _alerter(tmp_path, post_result=False)
         a.lifecycle("budget_exhausted", reason="crash loop", restart_count=3)
+        assert (tmp_path / "incident.json").is_file()
         a.announce_fallback("plain ported message")
         assert posts[-1] == "plain ported message"
 
