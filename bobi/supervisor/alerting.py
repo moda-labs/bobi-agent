@@ -94,9 +94,7 @@ class SlackAlerter(SupervisorObserver):
         if state_path is None:
             from bobi import paths
             state_path = paths.state_path(project_root) / STATE_FILE
-        # Bind the incident record to the selected runtime, never to the
-        # supervisor's current working directory.
-        self._state_path = Path(state_path).resolve()
+        self._state_path = Path(state_path)
         self._incident: dict | None = self._load()
         # Recovery tracking (per-boot, in-memory: a machine restart that stays
         # healthy will simply re-derive it before closing the incident).
@@ -116,8 +114,7 @@ class SlackAlerter(SupervisorObserver):
 
     def _save(self) -> None:
         try:
-            atomic_write_json(self._state_path, self._incident or {},
-                              indent=None, fsync=True)
+            atomic_write_json(self._state_path, self._incident or {}, indent=None)
         except Exception:
             log.debug("supervisor: could not persist incident state",
                       exc_info=True)

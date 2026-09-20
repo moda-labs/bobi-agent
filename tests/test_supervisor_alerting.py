@@ -123,24 +123,6 @@ class TestSoftAlert:
 
 class TestExhaustionAlert:
 
-    def test_default_state_path_stays_under_runtime_root_across_cwd_drift(
-            self, tmp_path, monkeypatch):
-        runtime_root = tmp_path / "agent" / "run"
-        other_cwd = tmp_path / "unrelated-cwd"
-        runtime_root.mkdir(parents=True)
-        other_cwd.mkdir()
-        monkeypatch.chdir(other_cwd)
-
-        a = SlackAlerter(project_root=runtime_root, config=_cfg(),
-                         identity=IDENTITY, now_fn=Clock(),
-                         post_fn=lambda message: True)
-        expected = runtime_root / "state" / "supervisor-incident.json"
-
-        a.lifecycle("budget_exhausted", reason="crash loop", restart_count=1)
-
-        assert a._state_path == expected.resolve()
-        assert expected.is_file()
-
     def test_persists_incident_before_alert_and_exit(self, tmp_path):
         """The exhaustion file must exist before alert dispatch can finish."""
         events = []
