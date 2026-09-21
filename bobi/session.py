@@ -418,6 +418,8 @@ class Session:
     def _set_state(self, state: str) -> None:
         """Update state and wake any waiter when the session becomes idle or terminal."""
         self._state = state
+        if state == "error":
+            self.inbox.mark_unreadable()
         if state in ("waiting_input", "stopped", "error") and self._input_ready:
             self._input_ready.set()
 
@@ -1457,7 +1459,6 @@ class Session:
         while True:
             await self._commit_ready_rotation()
             if self._state == "error":
-                self.inbox.mark_unreadable()
                 return
             msg = await loop.run_in_executor(
                 None, lambda: self.inbox.recv(timeout=2.0)
@@ -1472,7 +1473,6 @@ class Session:
                     # the message in memory as well as leaving its cursor
                     # unacknowledged for the supervisor-driven restart.
                     self.inbox.push(msg, priority=True)
-                self.inbox.mark_unreadable()
                 return
             if msg is None:
                 if self._keep_alive and self._keep_alive.is_set():
@@ -1491,6 +1491,13 @@ class Session:
                     )
                 continue
 
+            from bobi.events.client import stale_event_annotation
+            stale_notes = [
+                note for timestamp in msg.event_timestamps
+                if (note := stale_event_annotation(timestamp)) is not None
+            ]
+            if stale_notes:
+                msg.text += "\n" + "\n".join(stale_notes)
             queued_for = max(0.0, time.monotonic() - msg.enqueued_at)
             log.info(
                 "Consuming inbox message for %s (queued %.1fs, depth=%d)",
@@ -1498,7 +1505,6 @@ class Session:
             )
             await self._process_message(msg)
             if self._state == "error":
-                self.inbox.mark_unreadable()
                 return
             if self._rotate_pending:
                 reason = self._rotate_reason
@@ -1512,7 +1518,6 @@ class Session:
                 # terminal failure leaves following events unacknowledged.
                 await self._commit_ready_rotation(wait=True)
                 if self._state == "error":
-                    self.inbox.mark_unreadable()
                     return
 
     async def _run(self, startup_prompt: str | None = None) -> None:

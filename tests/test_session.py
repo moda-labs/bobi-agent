@@ -1087,3 +1087,39 @@ class TestTurnErrorRecovery:
         await session._inbox_loop()
 
         assert session.inbox.readable is False
+
+    @pytest.mark.asyncio
+    async def test_inbox_loop_marks_event_stale_when_consumed(
+        self, session, monkeypatch
+    ):
+        timestamp = "2026-08-21T19:58:47+00:00"
+        message = Message(
+            id="stale-1",
+            sender="event-bus",
+            text="fresh when queued",
+            event_timestamps=(timestamp,),
+        )
+        received = iter((message, None))
+        session.inbox.recv = lambda timeout=2.0: next(received)
+        session._keep_alive = asyncio.Event()
+
+        async def no_rotation(*args, **kwargs):
+            return None
+
+        consumed = []
+
+        async def process(msg):
+            consumed.append(msg.text)
+            session._keep_alive.set()
+
+        session._commit_ready_rotation = no_rotation
+        session._process_message = process
+        monkeypatch.setattr("bobi.events.client.epoch_seconds", lambda _: 1000.0)
+        monkeypatch.setattr("bobi.events.client.time.time", lambda: 1120.0)
+
+        await session._inbox_loop()
+
+        assert consumed == [
+            "fresh when queued\n"
+            "  [STALE: queued 2026-08-21T19:58:47+00:00, age 2m]"
+        ]

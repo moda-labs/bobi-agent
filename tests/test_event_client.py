@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 from bobi.events.client import (
     format_event_for_manager,
     event_queue,
+    stale_event_annotation,
     _log_event,
 )
 
@@ -141,18 +142,15 @@ class TestFormatEventForManager:
         text = format_event_for_manager(event)
         assert "thread_ts" not in text
 
-    def test_stale_event_names_original_timestamp_and_age(self):
-        event = {
-            "v": 2, "source": "slack", "type": "slack.dm",
-            "timestamp": "2026-08-21T19:58:47+00:00",
-            "text": "old question", "fields": {},
-        }
-        with patch("bobi.events.client.epoch_seconds", return_value=1000.0), \
-                patch("bobi.events.client.time.time", return_value=3760.0):
-            text = format_event_for_manager(event)
+    def test_stale_annotation_is_calculated_at_consumption_time(self):
+        timestamp = "2026-08-21T19:58:47+00:00"
+        with patch("bobi.events.client.epoch_seconds", return_value=1000.0):
+            assert stale_event_annotation(timestamp, now=1119.0) is None
+            note = stale_event_annotation(timestamp, now=3760.0)
 
-        assert "[STALE: queued 2026-08-21T19:58:47+00:00" in text
-        assert "age 46m" in text
+        assert note is not None
+        assert "[STALE: queued 2026-08-21T19:58:47+00:00" in note
+        assert "age 46m" in note
 
     def test_recent_event_is_not_marked_stale(self):
         event = {
@@ -160,8 +158,7 @@ class TestFormatEventForManager:
             "timestamp": "2026-08-21T19:58:47+00:00",
             "text": "current question", "fields": {},
         }
-        with patch("bobi.events.client.epoch_seconds", return_value=1000.0), \
-                patch("bobi.events.client.time.time", return_value=1100.0):
+        with patch("bobi.events.client.epoch_seconds", return_value=1000.0):
             text = format_event_for_manager(event)
 
         assert "STALE" not in text

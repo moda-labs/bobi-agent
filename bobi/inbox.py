@@ -56,6 +56,10 @@ class Message:
     # queued (#688). In-memory only; never crosses the wire.
     on_done: Callable[[], None] | None = field(
         default=None, repr=False, compare=False)
+    # Source timestamps are retained so stale context is rendered when the
+    # session consumes the message, not when the drain enqueues it.
+    event_timestamps: tuple[str, ...] = field(
+        default_factory=tuple, repr=False, compare=False)
     # Monotonic enqueue time, populated by Inbox.push().
     enqueued_at: float = field(default=0.0, repr=False, compare=False)
 

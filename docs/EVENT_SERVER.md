@@ -443,6 +443,10 @@ sessions must not share a cursor):
   delivered inbox message. Queued messages, provider-error turns, and turns
   interrupted before their terminal result remain unacknowledged and replay
   after a process restart.
+- `last_seen` is only the reconnect replay position. Local delivery health
+  advances `last_acked_seq` and reduces `pending_events` only after a WebSocket
+  ACK frame confirms processing; reconnecting past an in-memory queue does not
+  report that queue as complete.
 - The local server treats `last_seen = 0` as a real cursor and replays every
   buffered event with `seq > 0`. This preserves the first unacknowledged event
   (`seq = 1`) across a manager restart.

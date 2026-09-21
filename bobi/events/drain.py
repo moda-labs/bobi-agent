@@ -21,8 +21,6 @@ DRAIN_INTERVAL = 2
 _DRAIN_STOP = object()
 _MONITOR_ERROR_DELIVERED: dict[tuple[str, str, str, str], int] = {}
 _MONITOR_ERROR_REPEAT_PUSH_EVERY = 3
-_DEAD_INBOX_WARNED_AT: dict[str, float] = {}
-_DEAD_INBOX_WARN_INTERVAL = 60.0
 
 
 def _get_project_root():
@@ -65,25 +63,6 @@ def _is_monitor_error(event: dict) -> bool:
     """Whether an event is a monitor failure signal that should push actively."""
     etype = str(event.get("type", ""))
     return etype == "monitor.error" or etype.endswith("/monitor.error")
-
-
-def _warn_if_session_dead(session_name: str) -> None:
-    """Warn when registry state races ahead of the inbox reader flag."""
-    try:
-        from bobi.sdk import DEAD_STATUSES, get_registry
-        entry = get_registry().get(session_name)
-    except Exception:
-        return
-    if entry is None or entry.status not in DEAD_STATUSES:
-        return
-    now = time.monotonic()
-    if now - _DEAD_INBOX_WARNED_AT.get(session_name, float("-inf")) < \
-            _DEAD_INBOX_WARN_INTERVAL:
-        return
-    _DEAD_INBOX_WARNED_AT[session_name] = now
-    log.warning("Session %s is %s but its local inbox is still readable; "
-                "delivery may be replayed after restart",
-                session_name, entry.status)
 
 
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
@@ -289,8 +268,6 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 return
             continue
 
-        _warn_if_session_dead(session_name)
-
         # inbox/* events are already addressed agent→agent messages: deliver
         # them raw and skip auto-dispatch (they're not external triggers to
         # route) and skip formatting (the text is the message itself).
@@ -410,6 +387,10 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
 
             inbox.push(
                 Message(id=_msg_id(), sender="event-bus", text=text,
+                        event_timestamps=tuple(
+                            e["timestamp"] for _, e in group
+                            if isinstance(e.get("timestamp"), str)
+                        ),
                         on_done=batch_ack.attach() if batch_ack else None),
                 priority=is_chat,
             )

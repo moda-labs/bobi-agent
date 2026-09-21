@@ -757,12 +757,6 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, 
 			Number.isSafeInteger(requestedLastSeen) && requestedLastSeen >= 0
 				? requestedLastSeen
 				: 0;
-		// The persisted reconnect cursor is authoritative when an ACK frame was
-		// lost after the client saved it locally.
-		dep.lastAckedSeq = Math.max(
-			dep.lastAckedSeq,
-			Math.min(lastSeen, dep.nextSeq - 1),
-		);
 		// Zero is a real cursor: the client has processed nothing yet. Skipping
 		// replay at zero silently lost an unacked first event (seq=1) whenever a
 		// manager restarted before finishing it (#799).

@@ -15,6 +15,8 @@ import time
 import logging
 from unittest.mock import patch
 
+import pytest
+
 from bobi.inbox import (
     Inbox,
     Message,
@@ -101,7 +103,7 @@ class TestInboxQueue:
         inbox.push(msg, priority=True)
 
         assert msg.enqueued_at == original
-        assert inbox.oldest_age() == 30.0
+        assert inbox.oldest_age() == pytest.approx(30.0)
         inbox.close()
 
     def test_oldest_age_warning_fires_without_another_push(

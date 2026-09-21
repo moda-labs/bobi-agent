@@ -24,6 +24,23 @@ log = logging.getLogger(__name__)
 
 STALE_EVENT_AGE_SECONDS = 120.0
 
+
+def stale_event_annotation(timestamp: object, *, now: float | None = None) -> str | None:
+    """Render stale context using the time the session consumes an event."""
+    if not isinstance(timestamp, str):
+        return None
+    queued_at = epoch_seconds(timestamp)
+    age = (time.time() if now is None else now) - queued_at if queued_at else 0.0
+    if age < STALE_EVENT_AGE_SECONDS:
+        return None
+    minutes = max(1, int(age // 60))
+    age_text = (
+        f"{minutes // 60}h {minutes % 60}m"
+        if minutes >= 60 else f"{minutes}m"
+    )
+    return f"  [STALE: queued {timestamp}, age {age_text}]"
+
+
 def _state_path(name: str) -> Path:
     from bobi import paths
     return paths.state_dir() / name
@@ -134,17 +151,6 @@ def format_event_for_manager(event: dict) -> str:
     lifecycle_data = event.get("data", event.get("payload", {}))
     if isinstance(lifecycle_data, dict) and lifecycle_data.get("requested_by"):
         lines.append(f"  requested_by: {_format_requester(lifecycle_data['requested_by'])}")
-
-    timestamp = event.get("timestamp")
-    queued_at = epoch_seconds(timestamp) if isinstance(timestamp, str) else 0.0
-    age = time.time() - queued_at if queued_at else 0.0
-    if age >= STALE_EVENT_AGE_SECONDS:
-        minutes = max(1, int(age // 60))
-        if minutes >= 60:
-            age_text = f"{minutes // 60}h {minutes % 60}m"
-        else:
-            age_text = f"{minutes}m"
-        lines.append(f"  [STALE: queued {timestamp}, age {age_text}]")
 
     return "\n".join(lines)
 

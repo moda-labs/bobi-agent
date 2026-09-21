@@ -91,6 +91,14 @@ def _chat(seq, text="chat message"):
 
 
 class TestAckAfterProcessing:
+    def test_external_event_retains_timestamp_until_consumption(self):
+        event = _bulk(5)
+        event["timestamp"] = "2026-08-21T19:58:47+00:00"
+
+        inbox, _ = _run_drain([[event]])
+
+        assert inbox.messages[0].event_timestamps == (event["timestamp"],)
+
     def test_no_ack_at_push_time(self):
         inbox, acks = _run_drain([[_bulk(5)]])
         assert len(inbox.messages) == 1
