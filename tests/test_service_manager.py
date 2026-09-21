@@ -168,6 +168,31 @@ def test_launchd_restart_bootstraps_an_installed_but_stopped_agent(
     ]
 
 
+def test_systemd_uninstall_stops_removes_and_reloads(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    home = tmp_path / "home"
+    target = home / ".config" / "systemd" / "user" / "bobi.service"
+    target.parent.mkdir(parents=True)
+    target.write_text("unit")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(service_manager.os, "geteuid", lambda: 501)
+    calls = []
+
+    def run(command, timeout=30):
+        calls.append(command)
+        return _ok(command)
+
+    monkeypatch.setattr(service_manager, "_run", run)
+
+    assert service_manager.uninstall(platform="linux") == target
+    assert not target.exists()
+    assert calls == [
+        ["systemctl", "--user", "disable", "--now", "bobi"],
+        ["systemctl", "--user", "daemon-reload"],
+    ]
+
+
 def test_stop_delegates_to_launchd(bobi_install, monkeypatch):
     actions = []
     monkeypatch.setattr("bobi.cli._active_service_manager", lambda: "launchd")
