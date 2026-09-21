@@ -21,6 +21,8 @@ DRAIN_INTERVAL = 2
 _DRAIN_STOP = object()
 _MONITOR_ERROR_DELIVERED: dict[tuple[str, str, str, str], int] = {}
 _MONITOR_ERROR_REPEAT_PUSH_EVERY = 3
+_DEAD_INBOX_WARNED_AT: dict[str, float] = {}
+_DEAD_INBOX_WARN_INTERVAL = 60.0
 
 
 def _get_project_root():
@@ -63,6 +65,25 @@ def _is_monitor_error(event: dict) -> bool:
     """Whether an event is a monitor failure signal that should push actively."""
     etype = str(event.get("type", ""))
     return etype == "monitor.error" or etype.endswith("/monitor.error")
+
+
+def _warn_if_session_dead(session_name: str) -> None:
+    """Warn when registry state races ahead of the inbox reader flag."""
+    try:
+        from bobi.sdk import DEAD_STATUSES, get_registry
+        entry = get_registry().get(session_name)
+    except Exception:
+        return
+    if entry is None or entry.status not in DEAD_STATUSES:
+        return
+    now = time.monotonic()
+    if now - _DEAD_INBOX_WARNED_AT.get(session_name, float("-inf")) < \
+            _DEAD_INBOX_WARN_INTERVAL:
+        return
+    _DEAD_INBOX_WARNED_AT[session_name] = now
+    log.warning("Session %s is %s but its local inbox is still readable; "
+                "delivery may be replayed after restart",
+                session_name, entry.status)
 
 
 def _prepare_chat_events(events: list[dict]) -> list[dict]:
@@ -257,7 +278,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         # straight into the session's in-process inbox queue — never back
         # through the transport (which would re-deliver to this same drain).
         inbox = get_local_inbox(session_name)
-        if inbox is None:
+        if inbox is None or not getattr(inbox, "readable", True):
             # batch_ack is deliberately never closed: the seq stays
             # outstanding, holding the ack floor so the server replays these
             # events after a restart instead of losing them.
@@ -267,6 +288,8 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             if stop_after:
                 return
             continue
+
+        _warn_if_session_dead(session_name)
 
         # inbox/* events are already addressed agent→agent messages: deliver
         # them raw and skip auto-dispatch (they're not external triggers to
@@ -385,13 +408,14 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
                 lines.append(formatted)
             text = "\n\n".join(lines)
 
-            log.info("Delivering %d event(s) to %s (batch seq<=%d)",
-                     len(group), session_name, max_seq)
             inbox.push(
                 Message(id=_msg_id(), sender="event-bus", text=text,
                         on_done=batch_ack.attach() if batch_ack else None),
                 priority=is_chat,
             )
+            log.info("Enqueued %d event(s) for %s (batch seq<=%d, depth=%d)",
+                     len(group), session_name, max_seq,
+                     getattr(inbox, "depth", lambda: 0)())
 
         # The cursor is NOT acked here: each pushed message carries a
         # completion callback, and the watermark acks the batch seq only

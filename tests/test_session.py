@@ -1075,3 +1075,15 @@ class TestTurnErrorRecovery:
         await session._process_message(_make_msg(wait=True))
 
         assert called["n"] >= 1, "status indicator was not cleared on a dropped message"
+
+    @pytest.mark.asyncio
+    async def test_terminal_inbox_loop_marks_reader_unavailable(self, session):
+        async def no_rotation(*args, **kwargs):
+            return None
+
+        session._commit_ready_rotation = no_rotation
+        session._set_state("error")
+
+        await session._inbox_loop()
+
+        assert session.inbox.readable is False

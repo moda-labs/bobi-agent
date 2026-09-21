@@ -88,6 +88,7 @@ interface LocalDeployment {
 	bubbleId: string;
 	subscriptions: string[];
 	nextSeq: number;
+	lastAckedSeq: number;
 	eventBuffer: Array<NormalizedEvent & { seq: number }>;
 	websockets: Set<WebSocket>;
 	// Timestamp (ms) when the last WebSocket disconnected, or null if at
@@ -232,6 +233,7 @@ const storage: StorageAdapter = {
 				bubbleId: record.bubble_id,
 				subscriptions: [...record.subscriptions],
 				nextSeq: 1,
+				lastAckedSeq: 0,
 				eventBuffer: [],
 				websockets: new Set(),
 				disconnectedAt: Date.now(),
@@ -454,6 +456,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 				sha: releaseSha,
 			},
 			bubbles: bubbles.size,
+			delivery: [...deployments.values()].map((dep) => ({
+				deployment_id: dep.id,
+				name: dep.name,
+				next_seq: dep.nextSeq,
+				last_acked_seq: dep.lastAckedSeq,
+				pending_events: Math.max(0, dep.nextSeq - 1 - dep.lastAckedSeq),
+			})),
 			rejections: getAuthRejectionCounters(),
 			...(discordHealth.length > 0 ? { discord_gateway: discordHealth } : {}),
 			...(slackHealth.length > 0 ? { slack_socket: slackHealth } : {}),
@@ -748,6 +757,12 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, 
 			Number.isSafeInteger(requestedLastSeen) && requestedLastSeen >= 0
 				? requestedLastSeen
 				: 0;
+		// The persisted reconnect cursor is authoritative when an ACK frame was
+		// lost after the client saved it locally.
+		dep.lastAckedSeq = Math.max(
+			dep.lastAckedSeq,
+			Math.min(lastSeen, dep.nextSeq - 1),
+		);
 		// Zero is a real cursor: the client has processed nothing yet. Skipping
 		// replay at zero silently lost an unacked first event (seq=1) whenever a
 		// manager restarted before finishing it (#799).
@@ -775,7 +790,14 @@ function handleUpgrade(req: http.IncomingMessage, socket: Duplex, head: Buffer, 
 		ws.on("message", (raw) => {
 			try {
 				const msg = JSON.parse(raw.toString());
-				if (msg.type === "ping") {
+				if (
+					msg.type === "ack"
+					&& Number.isSafeInteger(msg.seq)
+					&& msg.seq >= dep.lastAckedSeq
+					&& msg.seq < dep.nextSeq
+				) {
+					dep.lastAckedSeq = msg.seq;
+				} else if (msg.type === "ping") {
 					ws.send(JSON.stringify({ type: "pong" }));
 				}
 			} catch {

@@ -1727,6 +1727,8 @@ def _print_transcript_entry(line: str) -> None:
 @main.command()
 def status():
     """Show active agents — manager + engineer sub-agents."""
+    import time as _time
+
     project_path = _detect_project_root()
 
     from bobi.service import team_status
@@ -1745,7 +1747,18 @@ def status():
     click.echo(f"  Sub-agents: {len(active)} active")
     for e in active:
         rotation_info = f", rotations={e.rotation_count}" if e.rotation_count else ""
-        click.echo(f"    {e.name} ({e.role}) — {e.status}{rotation_info}")
+        inbox_info = ""
+        if e.inbox_depth:
+            oldest_age = e.inbox_oldest_age_seconds
+            if e.inbox_oldest_enqueued_at:
+                oldest_age = max(
+                    oldest_age, _time.time() - e.inbox_oldest_enqueued_at)
+            inbox_info = (
+                f", inbox={e.inbox_depth}, oldest={int(oldest_age)}s"
+            )
+        click.echo(
+            f"    {e.name} ({e.role}) — {e.status}{rotation_info}{inbox_info}"
+        )
 
 
 @main.command()

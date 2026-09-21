@@ -149,7 +149,9 @@ health port private to the pod network** — `/health` reports process and sessi
 status for operators, so it does not belong behind a public Service or Ingress.
 The manager block includes its persisted `error` and `terminal_at`; a brain
 authentication failure therefore reports `status: error` instead of looking
-like a healthy idle director.
+like a healthy idle director. It also includes an `inbox` block with the queued
+message count and oldest-message age; every active session entry carries the
+same block. `bobi agent <name> status` prints that backlog when it is non-empty.
 
 ## Build it yourself
 

@@ -339,7 +339,7 @@ class Session:
         # Extra event topics beyond this session's own inbox/<self> (e.g. the
         # manager's external resource topics). inbox/<self> is always added.
         self._subscribe = list(subscribe or [])
-        self.inbox = Inbox(name)
+        self.inbox = Inbox(name, stats_callback=self._record_inbox_stats)
         self._system_prompt = system_prompt or {
             "type": "preset",
             "preset": "claude_code",
@@ -405,6 +405,15 @@ class Session:
 
     def detect_state(self) -> str:
         return self._state
+
+    def _record_inbox_stats(self, depth: int, oldest_age: float) -> None:
+        """Persist queue telemetry without treating queue movement as progress."""
+        try:
+            get_registry().update_inbox_stats(
+                self.name, depth=depth, oldest_age=oldest_age)
+        except Exception:
+            log.debug("Could not persist inbox stats for '%s'", self.name,
+                      exc_info=True)
 
     def _set_state(self, state: str) -> None:
         """Update state and wake any waiter when the session becomes idle or terminal."""
@@ -1448,6 +1457,7 @@ class Session:
         while True:
             await self._commit_ready_rotation()
             if self._state == "error":
+                self.inbox.mark_unreadable()
                 return
             msg = await loop.run_in_executor(
                 None, lambda: self.inbox.recv(timeout=2.0)
@@ -1462,6 +1472,7 @@ class Session:
                     # the message in memory as well as leaving its cursor
                     # unacknowledged for the supervisor-driven restart.
                     self.inbox.push(msg, priority=True)
+                self.inbox.mark_unreadable()
                 return
             if msg is None:
                 if self._keep_alive and self._keep_alive.is_set():
@@ -1480,8 +1491,14 @@ class Session:
                     )
                 continue
 
+            queued_for = max(0.0, time.monotonic() - msg.enqueued_at)
+            log.info(
+                "Consuming inbox message for %s (queued %.1fs, depth=%d)",
+                self.name, queued_for, self.inbox.depth(),
+            )
             await self._process_message(msg)
             if self._state == "error":
+                self.inbox.mark_unreadable()
                 return
             if self._rotate_pending:
                 reason = self._rotate_reason
@@ -1495,6 +1512,7 @@ class Session:
                 # terminal failure leaves following events unacknowledged.
                 await self._commit_ready_rotation(wait=True)
                 if self._state == "error":
+                    self.inbox.mark_unreadable()
                     return
 
     async def _run(self, startup_prompt: str | None = None) -> None:

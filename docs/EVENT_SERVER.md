@@ -118,6 +118,16 @@ The inbox completion callback advances the cursor (`cursor.json`) only after the
 session finishes a successful model turn. A transport ping alone can't
 prove a hibernated Cloudflare socket is still being fed, so the client also runs an
 app-level heartbeat and force-reconnects + re-subscribes if it goes "deaf".
+The embedded local server records those WebSocket ACK frames and exposes each
+deployment's `next_seq`, `last_acked_seq`, and `pending_events` under
+the `delivery` field of `GET /health`; the cursor file remains the replay authority after a
+client restart.
+
+The manager's separate `GET /health` payload reports each active session's
+in-memory inbox `depth` and `oldest_age_seconds`. Drain logs say `Enqueued` when
+an event enters that inbox and `Consuming` only when the session reads it, so a
+slow consumer is distinguishable from stopped delivery. Events older than two
+minutes also carry a `[STALE: ...]` note in the text shown to the agent.
 
 ### Client/server protocol compatibility
 

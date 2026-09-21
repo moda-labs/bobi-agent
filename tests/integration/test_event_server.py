@@ -539,6 +539,84 @@ class TestEventServerLifecycle:
         data = _get_json(f"{base_url}/health")
         assert data["deployments"] >= 1
 
+    @pytest.mark.local_only
+    def test_local_health_tracks_client_ack_progress(self, event_server):
+        base_url, *_ = event_server
+        dep = _register(base_url, "ack-health", ["inbox/ack-health"])
+        ws_url = base_url.replace("http://", "ws://")
+        ws = websocket.create_connection(
+            f"{ws_url}/deployments/{dep['deployment_id']}/subscribe?last_seen=0",
+            header=[f"Authorization: Bearer {dep['api_key']}"],
+            timeout=5,
+        )
+        try:
+            assert json.loads(ws.recv())["type"] == "connected"
+            _post_event_signed(
+                base_url,
+                "inbox/ack-health",
+                {"source": "inbox", "payload": {"text": "queued"}},
+                dep["bubble_id"],
+                dep["bubble_key"],
+            )
+            delivered = json.loads(ws.recv())
+            seq = delivered["data"]["seq"]
+
+            before = next(
+                item for item in _get_json(f"{base_url}/health")["delivery"]
+                if item["deployment_id"] == dep["deployment_id"]
+            )
+            assert before["next_seq"] == seq + 1
+            assert before["last_acked_seq"] == 0
+            assert before["pending_events"] == 1
+
+            # Reconnect cursor recovers progress when the live ACK frame was
+            # lost after the client persisted its cursor.
+            ws.close()
+            ws = websocket.create_connection(
+                f"{ws_url}/deployments/{dep['deployment_id']}"
+                f"/subscribe?last_seen={seq}",
+                header=[f"Authorization: Bearer {dep['api_key']}"],
+                timeout=5,
+            )
+            assert json.loads(ws.recv())["type"] == "connected"
+            deadline = time.monotonic() + 2
+            after = before
+            while time.monotonic() < deadline:
+                after = next(
+                    item for item in _get_json(f"{base_url}/health")["delivery"]
+                    if item["deployment_id"] == dep["deployment_id"]
+                )
+                if after["last_acked_seq"] == seq:
+                    break
+                time.sleep(0.05)
+
+            assert after["last_acked_seq"] == seq
+            assert after["pending_events"] == 0
+
+            _post_event_signed(
+                base_url,
+                "inbox/ack-health",
+                {"source": "inbox", "payload": {"text": "live ack"}},
+                dep["bubble_id"],
+                dep["bubble_key"],
+            )
+            live = json.loads(ws.recv())
+            live_seq = live["data"]["seq"]
+            ws.send(json.dumps({"type": "ack", "seq": live_seq}))
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                after = next(
+                    item for item in _get_json(f"{base_url}/health")["delivery"]
+                    if item["deployment_id"] == dep["deployment_id"]
+                )
+                if after["last_acked_seq"] == live_seq:
+                    break
+                time.sleep(0.05)
+            assert after["last_acked_seq"] == live_seq
+            assert after["pending_events"] == 0
+        finally:
+            ws.close()
+
 
 class TestGitHubWebhook:
 

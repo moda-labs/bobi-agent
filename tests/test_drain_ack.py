@@ -51,10 +51,14 @@ class _CaptureInbox:
     def __init__(self):
         self.messages = []
         self.priorities = []
+        self.readable = True
 
     def push(self, msg, priority=False):
         self.messages.append(msg)
         self.priorities.append(priority)
+
+    def depth(self):
+        return len(self.messages)
 
 
 def _run_drain(batches):
@@ -150,6 +154,25 @@ class TestAckAfterProcessing:
         assert inbox.messages[0].on_done is not None
         inbox.messages[0].on_done()
         assert acks == [31]
+
+    def test_unreadable_inbox_drops_without_ack_for_restart_replay(self):
+        inbox = _CaptureInbox()
+        inbox.readable = False
+        acks = []
+        register_local_inbox("ack-test", inbox)
+        try:
+            with patch("bobi.events.drain.time.sleep"):
+                try:
+                    drain_loop("ack-test", queue=_ScriptedQueue([[_bulk(5)]]),
+                               formatter=lambda e: e.get("text", ""),
+                               cursor_ack=acks.append)
+                except KeyboardInterrupt:
+                    pass
+        finally:
+            unregister_local_inbox("ack-test")
+
+        assert inbox.messages == []
+        assert acks == []
 
 
 class TestAckWatermark:

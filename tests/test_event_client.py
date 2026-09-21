@@ -141,6 +141,31 @@ class TestFormatEventForManager:
         text = format_event_for_manager(event)
         assert "thread_ts" not in text
 
+    def test_stale_event_names_original_timestamp_and_age(self):
+        event = {
+            "v": 2, "source": "slack", "type": "slack.dm",
+            "timestamp": "2026-08-21T19:58:47+00:00",
+            "text": "old question", "fields": {},
+        }
+        with patch("bobi.events.client.epoch_seconds", return_value=1000.0), \
+                patch("bobi.events.client.time.time", return_value=3760.0):
+            text = format_event_for_manager(event)
+
+        assert "[STALE: queued 2026-08-21T19:58:47+00:00" in text
+        assert "age 46m" in text
+
+    def test_recent_event_is_not_marked_stale(self):
+        event = {
+            "v": 2, "source": "slack", "type": "slack.dm",
+            "timestamp": "2026-08-21T19:58:47+00:00",
+            "text": "current question", "fields": {},
+        }
+        with patch("bobi.events.client.epoch_seconds", return_value=1000.0), \
+                patch("bobi.events.client.time.time", return_value=1100.0):
+            text = format_event_for_manager(event)
+
+        assert "STALE" not in text
+
     def test_renders_requested_by_from_data(self):
         event = {
             "v": 2, "type": "agent/session.completed", "source": "engineer",

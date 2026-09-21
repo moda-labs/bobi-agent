@@ -132,14 +132,37 @@ def _manager_block_from_registry(manager_session: str | None):
             "status": "starting",
             "last_activity": None,
             "idle_seconds": 0.0,
+            "inbox": {"depth": 0, "oldest_age_seconds": 0.0},
         }
     return {
         "session": entry.name,
         "status": entry.status,
         "last_activity": entry.last_activity,
         "idle_seconds": max(0.0, time.time() - entry.last_activity),
+        "inbox": _inbox_status(entry),
         "error": getattr(entry, "error", "") or None,
         "terminal_at": getattr(entry, "terminal_at", 0.0) or None,
+    }
+
+
+def _inbox_status(entry) -> dict:
+    """Return live queue telemetry when this process owns the inbox."""
+    depth = getattr(entry, "inbox_depth", 0)
+    oldest_age = getattr(entry, "inbox_oldest_age_seconds", 0.0)
+    oldest_enqueued_at = getattr(entry, "inbox_oldest_enqueued_at", 0.0)
+    if depth and oldest_enqueued_at:
+        oldest_age = max(oldest_age, time.time() - oldest_enqueued_at)
+    try:
+        from bobi.inbox import get_local_inbox
+        inbox = get_local_inbox(entry.name)
+        if inbox is not None:
+            depth = inbox.depth()
+            oldest_age = inbox.oldest_age()
+    except Exception:
+        pass
+    return {
+        "depth": max(0, int(depth)),
+        "oldest_age_seconds": round(max(0.0, float(oldest_age)), 1),
     }
 
 
@@ -150,7 +173,12 @@ def _session_status_from_registry():
         registry = get_registry()
         active = registry.list_active()
         return [
-            {"name": e.name, "role": e.role, "status": e.status}
+            {
+                "name": e.name,
+                "role": e.role,
+                "status": e.status,
+                "inbox": _inbox_status(e),
+            }
             for e in active
         ]
     except Exception:
