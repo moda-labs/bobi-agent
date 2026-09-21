@@ -168,6 +168,29 @@ def test_launchd_restart_bootstraps_an_installed_but_stopped_agent(
     ]
 
 
+def test_unloaded_launchd_unit_is_configured_but_not_active(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    home = tmp_path / "home"
+    target = home / "Library" / "LaunchAgents" / (
+        service_manager.LAUNCHD_LABEL + ".plist"
+    )
+    target.parent.mkdir(parents=True)
+    target.write_text("unit")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.os, "getuid", lambda: 501)
+    monkeypatch.setattr(
+        service_manager, "_run",
+        lambda command, timeout=30: subprocess.CompletedProcess(
+            command, 113, stdout="", stderr="not loaded",
+        ),
+    )
+
+    assert service_manager.active_manager() is None
+    assert service_manager.configured_manager() == "launchd"
+
+
 def test_systemd_uninstall_stops_removes_and_reloads(tmp_path, monkeypatch):
     from bobi import service_manager
 
@@ -244,7 +267,7 @@ def test_stop_force_bypasses_launchd(bobi_install, monkeypatch):
 
 def test_restart_delegates_to_launchd_and_reports_pid(bobi_install, monkeypatch):
     actions = []
-    monkeypatch.setattr("bobi.cli._active_service_manager", lambda: "launchd")
+    monkeypatch.setattr("bobi.cli._configured_service_manager", lambda: "launchd")
     monkeypatch.setattr(
         "bobi.cli._service_action",
         lambda manager, action: actions.append((manager, action)) or True,
@@ -267,7 +290,7 @@ def test_restart_delegates_to_launchd_and_reports_pid(bobi_install, monkeypatch)
 def test_restart_does_not_claim_success_when_launchd_fails(
     bobi_install, monkeypatch,
 ):
-    monkeypatch.setattr("bobi.cli._active_service_manager", lambda: "launchd")
+    monkeypatch.setattr("bobi.cli._configured_service_manager", lambda: "launchd")
     monkeypatch.setattr(
         "bobi.service_manager.service_action",
         lambda manager, action: (_ for _ in ()).throw(RuntimeError("launchd failed")),

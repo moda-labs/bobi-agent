@@ -129,6 +129,15 @@ def has_launchd_service() -> bool:
 def active_manager() -> str | None:
     if sys.platform.startswith("linux") and has_systemd_service():
         return "systemd"
+    if sys.platform == "darwin" and has_launchd_service():
+        return "launchd"
+    return None
+
+
+def configured_manager() -> str | None:
+    """Return the manager with a generated unit, even when it is stopped."""
+    if sys.platform.startswith("linux") and systemd_path().exists():
+        return "systemd"
     if sys.platform == "darwin" and launchd_path().exists():
         return "launchd"
     return None

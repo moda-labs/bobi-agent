@@ -457,6 +457,11 @@ def _active_service_manager() -> str | None:
     return active_manager()
 
 
+def _configured_service_manager() -> str | None:
+    from bobi.service_manager import configured_manager
+    return configured_manager()
+
+
 def _service_action(manager: str, action: str) -> bool:
     from bobi.service_manager import service_action
     try:
@@ -1138,7 +1143,7 @@ def restart(fresh):
         bobi agent eng restart
         bobi agent eng restart --fresh   # fresh manager session
     """
-    manager = _active_service_manager()
+    manager = _configured_service_manager()
     if manager:
         # Resolve before touching the service manager so a missing installation fails
         # here, not after the service has already been restarted.
