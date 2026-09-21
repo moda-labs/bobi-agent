@@ -452,30 +452,22 @@ def agent(ctx, name):
     ctx.obj = {"agent": name, "root": root}
 
 
-def _has_systemd_service() -> bool:
-    """Check if bobi is managed by a systemd user service."""
-    svc = Path.home() / ".config" / "systemd" / "user" / "bobi.service"
-    if not svc.exists():
-        return False
+def _active_service_manager() -> str | None:
+    from bobi.service_manager import active_manager
+    return active_manager()
+
+
+def _service_action(manager: str, action: str) -> bool:
+    from bobi.service_manager import service_action
     try:
-        result = subprocess.run(
-            ["systemctl", "--user", "is-enabled", "bobi"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+        return service_action(manager, action)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
-def _systemctl(action: str) -> bool:
-    result = subprocess.run(
-        ["systemctl", "--user", action, "bobi"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        click.echo(f"systemctl {action} failed: {result.stderr.strip()}", err=True)
-        return False
-    return True
+def _service_pid(manager: str) -> str:
+    from bobi.service_manager import service_pid
+    return service_pid(manager)
 
 
 
@@ -1102,9 +1094,10 @@ def stop(force):
         bobi agent eng stop
         bobi agent eng stop --force
     """
-    if _has_systemd_service() and not force:
-        click.echo("Stopping via systemd...")
-        _systemctl("stop")
+    manager = _active_service_manager()
+    if manager and not force:
+        click.echo(f"Stopping via {manager}...")
+        _service_action(manager, "stop")
         return
 
     project_path = _detect_project_root()
@@ -1145,8 +1138,9 @@ def restart(fresh):
         bobi agent eng restart
         bobi agent eng restart --fresh   # fresh manager session
     """
-    if _has_systemd_service():
-        # Resolve before touching systemd so a missing installation fails
+    manager = _active_service_manager()
+    if manager:
+        # Resolve before touching the service manager so a missing installation fails
         # here, not after the service has already been restarted.
         project_path = _detect_project_root()
         if fresh:
@@ -1158,13 +1152,9 @@ def restart(fresh):
             from bobi.service import clear_manager_session
             clear_manager_session(project_path)
             click.echo("Cleared manager session — starting fresh.")
-        click.echo("Restarting via systemd...")
-        _systemctl("restart")
-        result = subprocess.run(
-            ["systemctl", "--user", "show", "bobi", "--property=MainPID", "--value"],
-            capture_output=True, text=True, timeout=5,
-        )
-        pid = result.stdout.strip()
+        click.echo(f"Restarting via {manager}...")
+        _service_action(manager, "restart")
+        pid = _service_pid(manager)
         log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
@@ -1172,6 +1162,33 @@ def restart(fresh):
     ctx = click.get_current_context()
     ctx.invoke(stop)
     ctx.invoke(start, fresh=fresh)
+
+
+@main.command("install-service")
+def install_service():
+    """Install and start a user-level service for this Bobi Agent."""
+    project_path = _detect_project_root()
+    name = paths.agent_name_for_root(project_path)
+    from bobi import service_manager
+
+    try:
+        target = service_manager.install(name, project_path)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    manager = "launchd" if sys.platform == "darwin" else "systemd"
+    click.echo(f"Installed and started {manager} service: {target}")
+
+
+@main.command("uninstall-service")
+def uninstall_service():
+    """Stop and remove this Bobi Agent's user-level service."""
+    from bobi import service_manager
+
+    try:
+        target = service_manager.uninstall()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Removed service: {target}")
 
 
 def _resolve_address(to: str | None) -> str | None:
@@ -4007,7 +4024,7 @@ def costs_backfill(claude_config_dir, write, dry_run):
 for _cmd_name in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "login-bootstrap", "recall-memory",
-    "supervise",
+    "supervise", "install-service", "uninstall-service",
 ]:
     if _cmd_name in main.commands:
         agent.add_command(main.commands[_cmd_name])
@@ -4024,6 +4041,7 @@ for _old_top_level in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "transcript", "workflows", "roles", "monitors", "kb",
     "event-server", "login-bootstrap", "recall-memory", "install", "supervise",
+    "install-service", "uninstall-service",
 ]:
     main.commands.pop(_old_top_level, None)
 

@@ -291,9 +291,21 @@ lives long-term.
 daemon with a loopback event server, reacts to its scheduled monitors, and
 answers `ask`/`message` from your terminal. If you're on hardware that stays
 on - a Mac mini, a home server, a remote box - this can be your permanent
-deployment. Have Claude Code or Codex help you configure the event server and
-deployment for your machine: open a session and ask it to read
-[EVENT_SERVER.md](EVENT_SERVER.md) and set things up with you.
+deployment. Install Bobi's user-level service so the supervisor starts at login
+and the OS restarts it if it exits:
+
+```bash
+bobi agent my-agent install-service
+```
+
+This installs a LaunchAgent on macOS or a systemd user service on Linux. It
+runs `bobi agent my-agent supervise -- --foreground`; `stop` and `restart`
+delegate to that service manager. Remove it with
+`bobi agent my-agent uninstall-service`.
+
+Have Claude Code or Codex help you configure the event server and deployment
+for your machine: open a session and ask it to read [EVENT_SERVER.md](EVENT_SERVER.md)
+and set things up with you.
 
 Two limits to know about:
 
