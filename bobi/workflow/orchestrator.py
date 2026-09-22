@@ -1597,6 +1597,15 @@ _NATIVE_ACTIONS: dict = {
     "cleanup_worktree": _cleanup_worktree_action,
 }
 
+_NATIVE_ACTION_INPUTS: dict[str, tuple[str, ...]] = {
+    "cleanup_worktree": ("repo", "pr_number", "head_branch"),
+}
+
+
+def native_action_required_inputs(action: str) -> tuple[str, ...]:
+    """Return input fields a native action cannot operate without."""
+    return _NATIVE_ACTION_INPUTS.get(action, ())
+
 
 def _execute_native_action(step: StepDef, ctx: VariableContext, cwd: str) -> dict:
     """Run a registered native action. Returns the action's result dict."""

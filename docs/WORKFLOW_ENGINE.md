@@ -309,7 +309,8 @@ through a small recursive-descent parser.
 **Scopes** are named dictionaries on the run's `VariableContext`:
 
 - `input` — `task`, `repo`, `run_key`, plus any `input_fields` from the trigger
-  (for example `input.pr_number`, `input.head_branch`).
+  or manual `subagents launch --input KEY=VALUE` / `--input-json` options (for
+  example `input.pr_number`, `input.head_branch`).
 - `requested_by` — who triggered the run (channel, thread) for notify routing.
 - `worktree` — `worktree.path` when the run uses an isolated git worktree.
 - `event` — the payload of the event that resumed a suspended run.
@@ -317,8 +318,10 @@ through a small recursive-descent parser.
   finishes, `${{pr.pr_url}}` holds its handoff `pr_url` field.
 
 **Filters**: `${{scope.key | lower}}` and `${{scope.key | upper}}`. A reference
-to a missing scope or key resolves to an empty string and logs a warning rather
-than failing the run.
+to a missing scope or key resolves to an empty string and logs a warning. Native
+actions declare their required inputs and reject the launch before execution
+when one is absent, so a deterministic action cannot silently complete as a
+no-op.
 
 **Conditions** in route steps use bare names (resolved from a flat namespace of
 all step outputs) and support `==`, `!=`, `in`, `not in`, `and`, `or`, `not`,

@@ -58,6 +58,10 @@ class DuplicateRunError(RuntimeError):
         self.status = status
         self.derived_key = derived_key
 
+
+class WorkflowInputError(ValueError):
+    """A workflow launch omitted inputs required by deterministic steps."""
+
 PHASE_TIMEOUT = {
     "pickup": 1800,
     "triage": 1800,
@@ -690,7 +694,8 @@ def _load_long_term_memory_prompt() -> str:
 
 
 def derive_run_key(workflow_name: str, task: str, *, project: str = "",
-                   role: str = "", model: str = "", effort: str = "") -> str:
+                   role: str = "", model: str = "", effort: str = "",
+                   input_fields: dict | None = None) -> str:
     """The default run key for a launch that carries no explicit one (#850).
 
     Duplicate-run suppression keys off the session name, and the session name
@@ -724,9 +729,15 @@ def derive_run_key(workflow_name: str, task: str, *, project: str = "",
     second silently takes over the first. The key and the name agree about what
     identifies a run.
     """
-    dials = "\n".join([workflow_name, project, role, model, effort,
-                       " ".join(task.split())])
-    return f"adhoc-{hashlib.sha256(dials.encode()).hexdigest()[:12]}"
+    dials = [workflow_name, project, role, model, effort]
+    if input_fields:
+        dials.append(json.dumps(
+            input_fields, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=True,
+        ))
+    dials.append(" ".join(task.split()))
+    encoded = "\n".join(dials)
+    return f"adhoc-{hashlib.sha256(encoded.encode()).hexdigest()[:12]}"
 
 
 def _workflow_period_key(workflow_name: str) -> str:
@@ -747,7 +758,8 @@ def _workflow_period_key(workflow_name: str) -> str:
 
 def _resolve_run_key(workflow_name: str, task: str, run_key: str | None,
                      random_key: bool, *, project: str = "", role: str = "",
-                     model: str = "", effort: str = "") -> tuple[str, bool]:
+                     model: str = "", effort: str = "",
+                     input_fields: dict | None = None) -> tuple[str, bool]:
     """Resolve a launch's run key. Returns ``(run_key, derived)``.
 
     ``derived`` tells the caller the key was inferred rather than chosen, which
@@ -768,7 +780,36 @@ def _resolve_run_key(workflow_name: str, task: str, run_key: str | None,
     if run_key:
         return run_key, False
     return derive_run_key(workflow_name, task, project=project, role=role,
-                          model=model, effort=effort), True
+                          model=model, effort=effort,
+                          input_fields=input_fields), True
+
+
+def validate_workflow_inputs(workflow_name: str,
+                             input_fields: dict | None) -> None:
+    """Reject launches missing inputs required by deterministic actions."""
+    from bobi.workflow.orchestrator import native_action_required_inputs
+    from bobi.workflow.triggers import find_installed_workflow
+
+    workflow = find_installed_workflow(workflow_name)
+    if workflow is None:
+        return
+    # ``task`` and ``run_key`` are always supplied by the launcher. ``repo``
+    # identifies the installed agent project, not necessarily the GitHub slug
+    # a native action must operate on, so callers must bind it explicitly.
+    supplied = {"task": True, "run_key": True}
+    supplied.update(input_fields or {})
+    missing = sorted({
+        key
+        for step in workflow.steps
+        for key in native_action_required_inputs(step.action)
+        if key not in supplied or supplied[key] in (None, "")
+    })
+    if missing:
+        flags = " ".join(f"--input {key}=..." for key in missing)
+        raise WorkflowInputError(
+            f"Workflow '{workflow_name}' requires input(s): "
+            f"{', '.join(missing)}. Supply {flags}."
+        )
 
 
 def run_persistent_agent(
@@ -1201,9 +1242,12 @@ def launch_agent(
         run_key, derived_key = _resolve_run_key(workflow_name, task, run_key,
                                                 random_key, project=project,
                                                 role=role, model=model,
-                                                effort=effort)
+                                                effort=effort,
+                                                input_fields=input_fields)
     finding_replay = finding_derived and not period_key
     fresh = fresh or derived_key
+
+    validate_workflow_inputs(workflow_name, input_fields)
 
     if persistent:
         session_name = run_key
