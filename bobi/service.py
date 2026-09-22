@@ -487,6 +487,11 @@ def run_team_foreground(
     set_process_brain_from_config(cfg)
     _validate_or_raise(project_path)
     _check_nested_runtime(project_path)
+    pid_path = paths.manager_pid_path(project_path)
+    if pid_path.exists():
+        pid = _read_pid(pid_path)
+        if pid and pid != os.getpid() and _pid_alive(pid):
+            raise AlreadyRunning(pid)
     if fresh:
         clear_manager_session(project_path)
     else:

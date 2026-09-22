@@ -299,9 +299,14 @@ bobi agent my-agent install-service
 ```
 
 This installs a LaunchAgent on macOS or a systemd user service on Linux. It
-runs `bobi agent my-agent supervise -- --foreground`; `stop` and `restart`
-delegate to that service manager. Remove it with
+runs `bobi agent my-agent supervise -- --foreground`; `start`, `stop`, `restart`,
+and the local web app delegate to that service manager. Remove it with
 `bobi agent my-agent uninstall-service`.
+
+Note: Bobi provisions one user-level service per machine user (`bobi.service` on
+Linux / `com.moda-labs.bobi` on macOS). Installing a service for a different agent
+replaces the existing service definition. On headless Linux systems without auto-login,
+enable lingering so the user service starts at boot: `loginctl enable-linger $USER`.
 
 Have Claude Code or Codex help you configure the event server and deployment
 for your machine: open a session and ask it to read [EVENT_SERVER.md](EVENT_SERVER.md)

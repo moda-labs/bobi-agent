@@ -116,6 +116,16 @@ def has_systemd_service() -> bool:
     return result.returncode == 0
 
 
+def is_systemd_service_active() -> bool:
+    if not systemd_path().exists():
+        return False
+    try:
+        result = _run(["systemctl", "--user", "is-active", SERVICE_NAME], timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def has_launchd_service() -> bool:
     if not launchd_path().exists():
         return False
@@ -126,20 +136,80 @@ def has_launchd_service() -> bool:
     return result.returncode == 0
 
 
-def active_manager() -> str | None:
-    if sys.platform.startswith("linux") and has_systemd_service():
+def configured_agent(platform: str | None = None) -> str | None:
+    """Return the name of the agent currently configured in the service unit, if any."""
+    platform = sys.platform if platform is None else platform
+    if platform == "darwin":
+        path = launchd_path()
+        if not path.exists():
+            return None
+        try:
+            payload = plistlib.loads(path.read_bytes())
+            args = payload.get("ProgramArguments", [])
+            if "agent" in args:
+                idx = args.index("agent")
+                if idx + 1 < len(args):
+                    return args[idx + 1]
+        except Exception:
+            return None
+    elif platform.startswith("linux"):
+        path = systemd_path()
+        if not path.exists():
+            return None
+        try:
+            content = path.read_text()
+            match = re.search(r"^Description=Bobi Agent\s+(.+)$", content, re.MULTILINE)
+            if match:
+                return match.group(1).strip()
+            match = re.search(r"agent\s+([^\s]+)\s+supervise", content)
+            if match:
+                return match.group(1).strip()
+        except Exception:
+            return None
+    return None
+
+
+def active_manager(agent_name: str | None = None, platform: str | None = None) -> str | None:
+    platform = sys.platform if platform is None else platform
+    if agent_name is not None:
+        current = configured_agent(platform=platform)
+        if current != agent_name:
+            return None
+    if platform.startswith("linux") and has_systemd_service() and is_systemd_service_active():
         return "systemd"
-    if sys.platform == "darwin" and has_launchd_service():
+    if platform == "darwin" and has_launchd_service():
         return "launchd"
     return None
 
 
-def configured_manager() -> str | None:
+def configured_manager(agent_name: str | None = None, platform: str | None = None) -> str | None:
     """Return the manager with a generated unit, even when it is stopped."""
-    if sys.platform.startswith("linux") and systemd_path().exists():
+    platform = sys.platform if platform is None else platform
+    if agent_name is not None:
+        current = configured_agent(platform=platform)
+        if current != agent_name:
+            return None
+    if platform.startswith("linux") and has_systemd_service():
         return "systemd"
-    if sys.platform == "darwin" and launchd_path().exists():
+    if platform == "darwin" and launchd_path().exists():
         return "launchd"
+    return None
+
+
+def stop_manager(agent_name: str | None = None, platform: str | None = None) -> str | None:
+    """Service a stop command must signal.
+
+    A running service is always included. On Linux an enabled unit that is
+    not active is included too: systemd may be waiting out RestartSec, and
+    only ``systemctl stop`` cancels that timer. An unloaded LaunchAgent
+    plist is not included, so stop falls through to the direct process.
+    """
+    platform = sys.platform if platform is None else platform
+    active = active_manager(agent_name, platform=platform)
+    if active:
+        return active
+    if platform.startswith("linux"):
+        return configured_manager(agent_name, platform=platform)
     return None
 
 
@@ -204,10 +274,51 @@ def service_pid(manager: str) -> str:
     return match.group(1) if match else "unknown"
 
 
+def wait_for_manager_pid(root: Path, timeout: float = 3.0) -> int | None:
+    """Wait for manager.pid to appear and be alive."""
+    import time
+    from bobi import service
+    pid_path = paths.manager_pid_path(root)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pid_path.exists():
+            pid = service._read_pid(pid_path)
+            if pid and service._pid_alive(pid):
+                return pid
+        time.sleep(0.1)
+    if pid_path.exists():
+        pid = service._read_pid(pid_path)
+        if pid and service._pid_alive(pid):
+            return pid
+    return None
+
+
 def install(name: str, root: Path, platform: str | None = None) -> Path:
     if getattr(os, "geteuid", lambda: -1)() == 0:
         raise RuntimeError("refusing to install a root-owned service; run as the Bobi user")
     platform = sys.platform if platform is None else platform
+    if not (platform == "darwin" or platform.startswith("linux")):
+        raise RuntimeError(f"unsupported platform {platform!r}; use macOS or Linux")
+
+    # Stop any directly running manager before the service starts one.
+    # SIGTERM first; SIGKILL if it ignores that. A survivor would make the
+    # new supervisor exit on AlreadyRunning and crash-loop under KeepAlive
+    # or Restart=on-failure.
+    from bobi import service
+    stopped = service.stop_team(root)
+    if stopped.permission_denied or stopped.still_running:
+        stopped = service.stop_team(root, force=True)
+    if stopped.permission_denied or stopped.still_running:
+        raise RuntimeError(
+            f"manager pid {stopped.pid} is still running; "
+            "refusing to install a service beside it"
+        )
+
+    # If a service was previously configured for a different agent, stop that service
+    current = configured_agent(platform=platform)
+    if current and current != name:
+        uninstall(platform=platform)
+
     if platform == "darwin":
         target = launchd_path()
         was_loaded = has_launchd_service()
@@ -239,10 +350,16 @@ def install(name: str, root: Path, platform: str | None = None) -> Path:
     raise RuntimeError(f"unsupported platform {platform!r}; use macOS or Linux")
 
 
-def uninstall(platform: str | None = None) -> Path:
+def uninstall(agent_name: str | None = None, platform: str | None = None) -> Path:
     if getattr(os, "geteuid", lambda: -1)() == 0:
         raise RuntimeError("refusing to remove a root-owned service; run as the Bobi user")
     platform = sys.platform if platform is None else platform
+    current = configured_agent(platform=platform)
+    if agent_name is not None and current is not None and current != agent_name:
+        raise RuntimeError(
+            f"service is configured for agent '{current}', not '{agent_name}'; "
+            f"run `bobi agent {current} uninstall-service`"
+        )
     if platform == "darwin":
         target = launchd_path()
         if has_launchd_service():
@@ -258,7 +375,7 @@ def uninstall(platform: str | None = None) -> Path:
             except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
                 raise RuntimeError(f"systemctl uninstall unavailable: {exc}") from exc
             _report_failure(command, result)
-            target.unlink()
+            target.unlink(missing_ok=True)
             reload_command = ["systemctl", "--user", "daemon-reload"]
             try:
                 result = _run(reload_command)

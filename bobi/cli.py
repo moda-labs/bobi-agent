@@ -452,14 +452,14 @@ def agent(ctx, name):
     ctx.obj = {"agent": name, "root": root}
 
 
-def _active_service_manager() -> str | None:
+def _active_service_manager(agent: str | None = None) -> str | None:
     from bobi.service_manager import active_manager
-    return active_manager()
+    return active_manager(agent_name=agent)
 
 
-def _configured_service_manager() -> str | None:
+def _configured_service_manager(agent: str | None = None) -> str | None:
     from bobi.service_manager import configured_manager
-    return configured_manager()
+    return configured_manager(agent_name=agent)
 
 
 def _service_action(manager: str, action: str) -> bool:
@@ -473,6 +473,41 @@ def _service_action(manager: str, action: str) -> bool:
 def _service_pid(manager: str) -> str:
     from bobi.service_manager import service_pid
     return service_pid(manager)
+
+
+def _stop_service_manager(agent: str | None = None) -> str | None:
+    """Service ``stop`` must signal, including a Linux unit in RestartSec."""
+    active = _active_service_manager(agent)
+    if active:
+        return active
+    from bobi.service_manager import stop_manager
+    return stop_manager(agent_name=agent)
+
+
+def _echo_stop_result(result) -> None:
+    if result.invalid_pid:
+        click.echo("Invalid PID file — cleaning up.")
+    elif result.stale:
+        click.echo(f"Process {result.pid} not found — cleaning up stale PID file.")
+    elif result.permission_denied:
+        click.echo(f"No permission to signal process {result.pid}.", err=True)
+    elif result.stopped:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Stopped.")
+    elif result.killed:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Killed.")
+    elif result.still_running:
+        click.echo(f"Stopping bobi (pid {result.pid})...")
+        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
+    else:
+        click.echo("No PID file found — bobi is not running.")
+
+    if result.event_server_running:
+        click.echo(
+            f"Event server is still running on port {result.event_server_port}. "
+            "Use `bobi agent <name> event-server stop` to stop it."
+        )
 
 
 
@@ -535,6 +570,36 @@ def start(foreground, fresh, subscribe):
     )
 
     project_path = _detect_project_root()
+    agent_name = paths.agent_name_for_root(project_path)
+
+    if not foreground:
+        manager = _configured_service_manager(agent_name)
+        if manager:
+            if subscribe:
+                raise click.ClickException(
+                    f"Agent '{agent_name}' is managed by {manager}. "
+                    "Custom --subscribe is not supported through the OS service; "
+                    "configure subscriptions in agent.yaml or run directly with `start --foreground`."
+                )
+            if _active_service_manager(agent_name):
+                from bobi.service_manager import wait_for_manager_pid
+                pid = wait_for_manager_pid(project_path, timeout=0.5) or _service_pid(manager)
+                click.echo(
+                    f"Already running via {manager} (pid {pid}). "
+                    f"Use `bobi agent {agent_name} restart`."
+                )
+                return
+            if fresh:
+                from bobi.service import clear_manager_session
+                clear_manager_session(project_path)
+                click.echo("Cleared manager session — starting fresh.")
+            click.echo(f"Starting via {manager}...")
+            _service_action(manager, "restart")
+            from bobi.service_manager import wait_for_manager_pid
+            pid = wait_for_manager_pid(project_path) or _service_pid(manager)
+            log_path = paths.manager_log_path(project_path)
+            click.echo(f"Bobi started (pid {pid}). Logs: {log_path}")
+            return
 
     click.echo("Running preflight checks...")
     try:
@@ -1099,39 +1164,32 @@ def stop(force):
         bobi agent eng stop
         bobi agent eng stop --force
     """
-    manager = _active_service_manager()
-    if manager and not force:
+    project_path = _detect_project_root()
+    agent_name = paths.agent_name_for_root(project_path)
+    active = _active_service_manager(agent_name)
+    manager = _stop_service_manager(agent_name)
+    if manager:
         click.echo(f"Stopping via {manager}...")
         _service_action(manager, "stop")
+        # --force SIGKILLs a child the service stop left behind. An enabled
+        # unit that is not active (Linux RestartSec) is not running the
+        # manager, so a directly started process may still hold the pid.
+        if force or active is None:
+            from bobi.service import stop_team
+            result = stop_team(project_path, force=force)
+            # The unit was not running the manager. Report a directly
+            # started process; a quiet pid file means there was nothing else.
+            if active is None and (
+                result.pid or result.invalid_pid or result.stopped
+                or result.killed or result.still_running
+                or result.permission_denied or result.stale
+            ):
+                _echo_stop_result(result)
         return
 
-    project_path = _detect_project_root()
     from bobi.service import stop_team
 
-    result = stop_team(project_path, force=force)
-    if result.invalid_pid:
-        click.echo("Invalid PID file — cleaning up.")
-    elif result.stale:
-        click.echo(f"Process {result.pid} not found — cleaning up stale PID file.")
-    elif result.permission_denied:
-        click.echo(f"No permission to signal process {result.pid}.", err=True)
-    elif result.stopped:
-        click.echo(f"Stopping bobi (pid {result.pid})...")
-        click.echo("Stopped.")
-    elif result.killed:
-        click.echo(f"Stopping bobi (pid {result.pid})...")
-        click.echo("Killed.")
-    elif result.still_running:
-        click.echo(f"Stopping bobi (pid {result.pid})...")
-        click.echo("Process didn't exit — try: bobi agent <name> stop --force")
-    else:
-        click.echo("No PID file found — bobi is not running.")
-
-    if result.event_server_running:
-        click.echo(
-            f"Event server is still running on port {result.event_server_port}. "
-            "Use `bobi agent <name> event-server stop` to stop it."
-        )
+    _echo_stop_result(stop_team(project_path, force=force))
 
 
 @main.command()
@@ -1143,11 +1201,12 @@ def restart(fresh):
         bobi agent eng restart
         bobi agent eng restart --fresh   # fresh manager session
     """
-    manager = _configured_service_manager()
+    project_path = _detect_project_root()
+    agent_name = paths.agent_name_for_root(project_path)
+    manager = _configured_service_manager(agent_name)
     if manager:
         # Resolve before touching the service manager so a missing installation fails
         # here, not after the service has already been restarted.
-        project_path = _detect_project_root()
         if fresh:
             # Wipes the saved session ID, the bubble credential, and the
             # per-session deployment/cursor state together: a fresh start mints
@@ -1159,7 +1218,8 @@ def restart(fresh):
             click.echo("Cleared manager session — starting fresh.")
         click.echo(f"Restarting via {manager}...")
         _service_action(manager, "restart")
-        pid = _service_pid(manager)
+        from bobi.service_manager import wait_for_manager_pid
+        pid = wait_for_manager_pid(project_path) or _service_pid(manager)
         log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
@@ -1176,6 +1236,10 @@ def install_service():
     name = paths.agent_name_for_root(project_path)
     from bobi import service_manager
 
+    previous = service_manager.configured_agent()
+    if previous and previous != name:
+        click.echo(f"Replacing existing service for agent '{previous}'...")
+
     try:
         target = service_manager.install(name, project_path)
     except RuntimeError as exc:
@@ -1187,10 +1251,12 @@ def install_service():
 @main.command("uninstall-service")
 def uninstall_service():
     """Stop and remove this Bobi Agent's user-level service."""
+    project_path = _detect_project_root()
+    name = paths.agent_name_for_root(project_path)
     from bobi import service_manager
 
     try:
-        target = service_manager.uninstall()
+        target = service_manager.uninstall(agent_name=name)
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Removed service: {target}")
