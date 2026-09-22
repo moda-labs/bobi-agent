@@ -1250,10 +1250,8 @@ class TestConnectIsNeverATurn:
         assert calls == [] and clients == []
         assert any(t == "agent/workflow.brief_undelivered" for t, _ in emits)
 
-    def test_unreached_prompt_step_reports_undelivered_brief(self):
-        """The pr-closed shape (spec §5.2): the only prompt step sits behind
-        a route the run does not take. The run must not silently swallow the
-        launch brief — it completes, opens no session, and says so."""
+    def test_native_action_error_fails_the_workflow(self):
+        """A deterministic action error is a failed step, never completion."""
         wf = Workflow(name="pr-closed", steps=[
             StepDef(name="cleanup", action="not-a-registered-action"),
             StepDef(name="route-merged", condition="merged_live == true",
@@ -1264,11 +1262,19 @@ class TestConnectIsNeverATurn:
         result, calls, clients, emits = self._run(
             wf, task="Run cleanup.", repo="r", cwd="/tmp", run_key="1",
         )
-        assert result is True
-        # The route took else: the prompt step never ran, so no session —
-        # and, critically, no un-stepped turn performed the cleanup by hand.
+        assert result is False
         assert clients == []
-        assert any(t == "agent/workflow.brief_undelivered" for t, _ in emits)
+        step_failed = next(
+            data for event, data in emits if event == "agent/step.failed"
+        )
+        assert step_failed["step"] == "cleanup"
+        assert "unknown action" in step_failed["error"]
+        assert all(event != "agent/step.completed" for event, _ in emits)
+
+        run = WorkflowRun.find_by_run_key("pr-closed", "1", repo="r")
+        assert run is not None
+        assert run.status == "failed"
+        assert "unknown action" in run.error
 
     def test_delivered_brief_emits_no_undelivered_event(self):
         wf = Workflow(name="t", steps=[StepDef(name="s", prompt="go")])

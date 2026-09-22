@@ -299,6 +299,11 @@ nothing unless that live read says merged - never the `input.merged` the run
 was launched with, which is the webhook's snapshot and stale by arrival. It
 publishes the verdict it acted on as `merged_live`, and downstream routes key
 off that, so the branch taken cannot disagree with what happened on disk.
+An action result with `status: error` is a fatal step failure: the engine emits
+`agent/step.failed`, preserves the error for retry, and records the workflow as
+failed. A verified unmerged PR returns `status: preserved` and completes; an
+unreadable merge-state response preserves the worktree but returns `status:
+error` so it cannot masquerade as a successful no-op.
 
 ## Variables and templating
 
