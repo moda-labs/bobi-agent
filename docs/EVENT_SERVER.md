@@ -244,7 +244,9 @@ signed body, never from client input**:
 - **GitHub** (`POST /webhooks/github`): `type = github.<event>`, key
   `github:<owner>/<repo>` from `repository.full_name`. Signature
   (`X-Hub-Signature-256`, HMAC-SHA256) is verified when `WEBHOOK_SECRET`
-  (local: `BOBI_ES_WEBHOOK_SECRET`) is set.
+  (local: `BOBI_ES_WEBHOOK_SECRET`) is set. Pull-request events expose
+  `fields.pr_author` from `pull_request.user.login`, separately from the
+  review sender, for ownership-aware dispatch.
 - **Slack** (`POST /webhooks/slack`): the pipeline's pre-verify stage handles the
   `url_verification` challenge and retry dedup (both must run before the signature
   check); then verifies the `v0=` signature within a ±300s window, with the signing
