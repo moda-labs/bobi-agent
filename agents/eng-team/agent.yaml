@@ -91,12 +91,14 @@ auto_dispatch:
     suppress: true
     allow_self_authored: true
 
-  # Formal changes-requested reviews still dispatch deterministically. PR
+  # Formal changes-requested reviews on fleet-authored PRs dispatch
+  # deterministically. PR
   # comments are routed by director markdown policy below, because question-only
   # comments need direct answers rather than feedback workers.
   - event: github.pull_request_review
     match:
       review_state: changes_requested
+      pr_author: $self
     workflow: pr-feedback
     cooldown: 1800
 
