@@ -573,6 +573,24 @@ class TestGitHubWebhook:
         pr_events = [e for e in events if e.get("type") == "github.pull_request"]
         assert len(pr_events) >= 1
 
+    def test_github_pr_review_preserves_author_and_reviewer(self, deployment):
+        base_url, dep_id, api_key = deployment
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
+            f"{base_url}/webhooks/github",
+            {"action": "submitted",
+             "sender": {"login": "reviewer"},
+             "pull_request": {"number": 1071, "title": "Fix runtime",
+                              "user": {"login": "bobi"}},
+             "review": {"id": 5253223366, "state": "changes_requested"},
+             "repository": {"full_name": "test-org/test-repo"}},
+            headers={"x-github-event": "pull_request_review",
+                     "x-github-delivery": "test-398"},
+        ))
+        review = next(e for e in events if e.get("type") == "github.pull_request_review")
+        assert review["fields"]["pr_author"] == "bobi"
+        assert review["fields"]["sender"] == "reviewer"
+        assert review["fields"]["review_state"] == "changes_requested"
+
 
 class TestLinearWebhook:
 

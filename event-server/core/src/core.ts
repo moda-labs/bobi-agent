@@ -1611,11 +1611,13 @@ export async function handleTopicEvent(
 // An ingest topic in the token store: `source/type` form like a CLI publish
 // topic (e.g. "alert/firing"), from a charset that never URL-encodes so the
 // wire path and the stored binding compare byte-for-byte. The first segment
-// must not impersonate a webhook provider, and the `:` exclusion structurally
-// rules out every global (github:/linear:/slack:) routing key.
+// must not impersonate a webhook provider or Bobi-owned namespace, and the
+// `:` exclusion structurally rules out every global routing key.
 const INGEST_TOPIC_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
 const INGEST_TOPIC_MAX_LENGTH = 200;
-const INGEST_RESERVED_SOURCES = new Set(["github", "linear", "slack"]);
+const INGEST_RESERVED_SOURCES = new Set([
+	"github", "linear", "slack", "monitor", "agent", "system", "inbox",
+]);
 
 export function validateIngestTopic(topic: string): string | null {
 	if (!topic || topic.length > INGEST_TOPIC_MAX_LENGTH) {
@@ -1629,7 +1631,7 @@ export function validateIngestTopic(topic: string): string | null {
 		return "topic segments must be non-empty [A-Za-z0-9_.-]";
 	}
 	if (INGEST_RESERVED_SOURCES.has(segments[0])) {
-		return "github, linear, and slack sources are reserved for webhooks";
+		return "github, linear, slack, monitor, agent, system, and inbox sources are reserved for internal or webhook events";
 	}
 	return null;
 }

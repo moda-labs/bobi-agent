@@ -198,6 +198,18 @@ describe("normalizeGitHubPayload", () => {
 		expect(event!.fields!.review_state).toBe("changes_requested");
 	});
 
+	it("extracts PR author separately from the review sender", () => {
+		const event = normalizeGitHubPayload("pull_request_review", "d-owner", {
+			action: "submitted",
+			repository: { full_name: "org/repo" },
+			sender: { login: "reviewer" },
+			pull_request: { number: 1071, user: { login: "bobi" } },
+			review: { id: 5253223366, state: "changes_requested" },
+		});
+		expect(event!.fields!.sender).toBe("reviewer");
+		expect(event!.fields!.pr_author).toBe("bobi");
+	});
+
 	it("omits comment_id when absent (plain issue)", () => {
 		const event = normalizeGitHubPayload("issues", "d-plain", {
 			action: "opened",
@@ -1236,7 +1248,9 @@ describe("ingest tokens (#640)", () => {
 		});
 
 		it("rejects webhook-reserved sources", () => {
-			for (const s of ["github", "linear", "slack"]) {
+			for (const s of [
+				"github", "linear", "slack", "monitor", "agent", "system", "inbox",
+			]) {
 				expect(validateIngestTopic(`${s}/thing`)).not.toBeNull();
 			}
 		});
