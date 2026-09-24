@@ -81,7 +81,8 @@ def test_agent_help_lists_runtime_commands(bobi_install):
     result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "--help"])
     assert result.exit_code == 0, result.output
     for cmd in ["start", "stop", "status", "workflows", "monitors",
-                "subagents", "event-server", "login-bootstrap", "otel"]:
+                "subagents", "event-server", "login-bootstrap", "otel",
+                "install-service", "uninstall-service"]:
         assert cmd in result.output
 
 
