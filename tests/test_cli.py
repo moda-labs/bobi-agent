@@ -402,6 +402,57 @@ class TestSubagents:
         assert result.exit_code == 0, result.output
         assert mock.call_args[1]["random_key"] is True
 
+    def test_workflow_inputs_are_passed_from_flags_and_json(self, bobi_install):
+        with patch(
+            "bobi.subagent.launch_agent", return_value="wf-pr-closed-x"
+        ) as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "pr-closed", "--role", "engineer",
+                "--input", "repo=moda-labs/bobi-agent",
+                "--input", "head_branch=agent/123",
+                "--input-json", '{"pr_number":123,"merged":true}',
+                "--task", "Recover PR cleanup",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args.kwargs["input_fields"] == {
+            "repo": "moda-labs/bobi-agent",
+            "head_branch": "agent/123",
+            "pr_number": 123,
+            "merged": True,
+        }
+
+    def test_invalid_workflow_input_syntax_is_rejected(self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer",
+                "--input", "missing-separator", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert "KEY=VALUE" in result.output
+        mock.assert_not_called()
+
+    def test_missing_native_action_inputs_refuse_the_launch(self, bobi_install):
+        workflows = bobi_install.repo_path / "package" / "workflows"
+        workflows.mkdir(exist_ok=True)
+        (workflows / "pr-closed.yaml").write_text(
+            "name: pr-closed\nsteps:\n"
+            "  - name: cleanup\n    action: cleanup_worktree\n"
+        )
+
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "subagents", "launch",
+            "-w", "pr-closed", "--role", "engineer",
+            "--task", "Recover PR cleanup",
+        ])
+
+        assert result.exit_code == 1
+        assert "Launch refused" in result.output
+        assert "head_branch" in result.output
+        assert "pr_number" in result.output
+        assert "--input" in result.output
+
     def test_id_random_reaches_the_wait_path_too(self, bobi_install):
         """--wait needs its OWN --id-random passthrough (#850).
 
@@ -457,6 +508,17 @@ class TestSubagents:
         assert mock.call_args[1]["wait"] is True
         assert mock.call_args[1]["run_key"] is None
         assert mock.call_args[1]["workflow_name"] == "adhoc"
+
+    def test_wait_passes_workflow_inputs(self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            mock.return_value = MagicMock(final_text="", success=True, error="")
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--wait",
+                "--input", "mode=recovery", "--task", "Recover",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args.kwargs["input_fields"] == {"mode": "recovery"}
 
     def test_id_and_id_random_are_mutually_exclusive(self, bobi_install):
         with patch("bobi.subagent.launch_agent") as mock:

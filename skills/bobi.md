@@ -159,6 +159,9 @@ them for delegated work and workflow steps.
 bobi agent <name> subagents launch -w adhoc --role engineer --task "Fix CI"
 bobi agent <name> subagents launch -w adhoc --role engineer --wait --task "Fix CI"
 bobi agent <name> subagents launch -w adhoc --role monitor --as-check --task "Check prod"
+bobi agent <name> subagents launch -w pr-closed --role engineer \
+  --input repo=moda-labs/bobi-agent --input pr_number=123 \
+  --input head_branch=agent/123 --task "Recover PR cleanup"
 bobi agent <name> subagents list
 bobi agent <name> subagents show <id>
 bobi agent <name> subagents cancel <id>
@@ -174,8 +177,9 @@ not.
 - `--id <key>` sets it explicitly. Use it for work with a natural identity - an
   issue number, a checklist unit. Relaunching that key resumes that run.
 - With no `--id` the key is **derived** from the launch itself - workflow,
-  project, role, model, effort and the task text - so relaunching an identical
-  one while the first is still running is refused. That is the guardrail
+  project, role, model, effort, workflow inputs and the task text - so
+  relaunching an identical one while the first is still running is refused.
+  That is the guardrail
   against a dispatch chain that keeps launching itself; rewording the task to
   get past it defeats it. Fanning one task across two roles is fine: they
   derive different keys.
@@ -192,6 +196,12 @@ Relaunching a key whose previous run **failed** resumes from its step
 checkpoint rather than replaying completed steps, with the new `--task` and
 `--input` values taking effect from the resumed step onward. `--fresh`
 replays from step 0.
+
+Workflow inputs are supplied as repeatable `--input KEY=VALUE` options or one
+`--input-json '{"key":"value"}'` object. They are available as
+`${{input.key}}` alongside the built-in `task`, `repo`, and `run_key` values.
+Deterministic native actions reject a launch that omits an input they require,
+instead of silently completing without doing work.
 
 A derived key also implies `--fresh`: it is an inference about the launch, not a
 caller pointing at a run to continue. It additionally refuses to land on a

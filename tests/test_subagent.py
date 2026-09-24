@@ -578,6 +578,39 @@ class TestLaunchAgent:
         parsed = json.loads(args[0])
         assert parsed["requested_by"] == req
 
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_passes_workflow_inputs_to_child(self, mock_launch, mock_reg,
+                                             mock_check):
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+
+        fields = {
+            "repo": "moda-labs/bobi-agent",
+            "pr_number": 123,
+            "head_branch": "agent/123",
+        }
+        launch_agent(task="Recover cleanup", cwd="/tmp/test",
+                     workflow_name="adhoc", input_fields=fields)
+
+        parsed = json.loads(mock_launch.call_args[0][1][0])
+        assert parsed["input_fields"] == fields
+
+    def test_rejects_missing_native_action_inputs(self, tmp_path):
+        from bobi.subagent import WorkflowInputError, validate_workflow_inputs
+        from bobi.workflow.schema import StepDef, Workflow
+
+        workflow = Workflow(name="pr-closed", steps=[
+            StepDef(name="cleanup", action="cleanup_worktree"),
+        ])
+        with patch("bobi.workflow.triggers.find_installed_workflow",
+                   return_value=workflow):
+            with pytest.raises(WorkflowInputError, match="head_branch"):
+                validate_workflow_inputs(
+                    "pr-closed", {"repo": "org/repo", "pr_number": 123}
+                )
+
     @patch("bobi.subagent._alert_requires_failure")
     @patch("bobi.subagent.get_registry")
     @patch("bobi.subagent._launch_detached")
@@ -803,6 +836,32 @@ class TestDeriveRunKey:
         from bobi.subagent import derive_run_key
         assert (derive_run_key("adhoc", "t")
                 != derive_run_key("adhoc", "t", model="opus"))
+
+    def test_workflow_inputs_participate_canonically(self):
+        from bobi.subagent import derive_run_key
+
+        first = derive_run_key(
+            "pr-closed", "recover",
+            input_fields={"pr_number": 1, "merged": True},
+        )
+        reordered = derive_run_key(
+            "pr-closed", "recover",
+            input_fields={"merged": True, "pr_number": 1},
+        )
+        different = derive_run_key(
+            "pr-closed", "recover",
+            input_fields={"pr_number": 2, "merged": True},
+        )
+
+        assert first == reordered
+        assert first != different
+
+    def test_empty_workflow_inputs_preserve_the_existing_key(self):
+        from bobi.subagent import derive_run_key
+
+        assert derive_run_key("adhoc", "same task") == derive_run_key(
+            "adhoc", "same task", input_fields={}
+        )
 
     def test_key_is_twelve_hex_chars(self):
         """48 bits is what makes an accidental collision negligible; a shorter
