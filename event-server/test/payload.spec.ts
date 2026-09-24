@@ -116,6 +116,14 @@ describe("normalizeGitHubWebhook narrowing", () => {
 		expect(event.fields!.number).toBeUndefined();
 	});
 
+	it("omits a malformed PR author so ownership matching fails closed", () => {
+		const event = normalizeGitHubWebhook("pull_request_review", "d-owner", payload({
+			pull_request: { number: 7, user: { login: 42 } },
+			review: { state: "changes_requested" },
+		}))!;
+		expect(event.fields!.pr_author).toBeUndefined();
+	});
+
 	it("still extracts a well-formed payload unchanged", () => {
 		const event = normalizeGitHubWebhook("pull_request", "d2", payload({
 			action: "closed",

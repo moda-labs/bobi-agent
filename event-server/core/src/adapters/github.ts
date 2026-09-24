@@ -56,6 +56,8 @@ export function normalizeGitHubWebhook(
 		const headRef = stringField(asRecord(pr.head), "ref");
 		if (headRef) fields.head_branch = headRef;
 		if (typeof pr.merged === "boolean") fields.merged = pr.merged;
+		const prAuthor = stringField(asRecord(pr.user), "login");
+		if (prAuthor) fields.pr_author = prAuthor;
 	}
 
 	// Review-specific fields — pull_request_review and pull_request_review_comment
