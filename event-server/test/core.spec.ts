@@ -1248,7 +1248,9 @@ describe("ingest tokens (#640)", () => {
 		});
 
 		it("rejects webhook-reserved sources", () => {
-			for (const s of ["github", "linear", "slack"]) {
+			for (const s of [
+				"github", "linear", "slack", "monitor", "agent", "system", "inbox",
+			]) {
 				expect(validateIngestTopic(`${s}/thing`)).not.toBeNull();
 			}
 		});

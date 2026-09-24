@@ -1127,6 +1127,7 @@ def launch_agent(
     effort: str = "",
     fresh: bool = False,
     random_key: bool = False,
+    finding_derived: bool = False,
     wait: bool = False,
 ) -> "str | AgentResult":
     """Launch an agent as a detached subprocess and return immediately.
@@ -1163,6 +1164,11 @@ def launch_agent(
     asserting "this is that run again", and before #850 such a launch always
     got a brand-new name and so a clean transcript.
 
+    ``finding_derived=True`` marks an explicit key derived from a monitor
+    finding. Unlike a normal caller-chosen ``run_key``, it refuses an exact
+    replay after the matching workflow run completed; ``fresh=True`` remains
+    the deliberate operator override.
+
     With ``persistent=True``, the agent stays alive after its initial
     task, accepting messages via its inbox. Uses run_persistent_agent()
     directly instead of the workflow orchestrator.
@@ -1196,6 +1202,7 @@ def launch_agent(
                                                 random_key, project=project,
                                                 role=role, model=model,
                                                 effort=effort)
+    finding_replay = finding_derived and not period_key
     fresh = fresh or derived_key
 
     if persistent:
@@ -1318,21 +1325,30 @@ def launch_agent(
         # status has already been closed - its ledger entry is then flipped
         # to failed rather than left "running" to block the period forever
         # (the liveness check the naive period-key design lacked).
-        if period_key:
+        if period_key or finding_replay:
             prior_run = WorkflowRun.find_by_run_key(workflow_name, run_key,
                                                     repo=project)
             if prior_run and prior_run.status == "completed" and not fresh:
                 # ``fresh`` is the deliberate escape hatch: an operator who
                 # KNOWS the completed run did nothing useful re-runs the
                 # period explicitly. Automatic dispatchers never pass it.
+                if period_key:
+                    detail = (
+                        f"This period already ran: {run_key} completed at "
+                        f"{prior_run.completed_at}. The next period admits the "
+                        "next run; pass --fresh to deliberately run it again."
+                    )
+                else:
+                    detail = (
+                        f"This finding already ran: {run_key} completed at "
+                        f"{prior_run.completed_at}. Pass --fresh to deliberately "
+                        "run the same finding again."
+                    )
                 raise DuplicateRunError(
-                    f"This period already ran: {run_key} completed at "
-                    f"{prior_run.completed_at}. The next period admits the "
-                    f"next run; pass --fresh to deliberately run it again.",
-                    session_name=session_name, status="completed",
-                    derived_key=False,
+                    detail, session_name=session_name, status="completed",
+                    derived_key=finding_replay,
                 )
-            if prior_run and prior_run.status == "waiting":
+            if period_key and prior_run and prior_run.status == "waiting":
                 raise DuplicateRunError(
                     f"This period's run is suspended: {run_key} is awaiting "
                     f"{prior_run.await_event or 'an event'}. It resumes on "
@@ -1341,7 +1357,8 @@ def launch_agent(
                     session_name=session_name, status=prior_run.status,
                     derived_key=False,
                 )
-            if (prior_run and prior_run.status in ("running", "resuming")
+            if (period_key and prior_run
+                    and prior_run.status in ("running", "resuming")
                     and not (existing and existing.status in ACTIVE_STATUSES)):
                 # The ledger says running (or stuck mid-claim at "resuming",
                 # the D071 orphan) but no live process holds the session -
@@ -1364,7 +1381,7 @@ def launch_agent(
         # its ledger refusal above already said so - this is the registry's
         # matching backstop.
         blocking = ACTIVE_STATUSES + (
-            ("waiting",) if (derived_key or period_key) else ())
+            ("waiting",) if (derived_key or period_key or finding_replay) else ())
         if existing and existing.status in blocking:
             # A caller that never chose this key cannot act on the session name
             # alone - it has to be told the key came from its own task text,
@@ -1412,7 +1429,7 @@ def launch_agent(
                 f"(status={existing.status}, task: {existing.title!r}). "
                 f"{remedy}{hint}",
                 session_name=session_name, status=existing.status,
-                derived_key=derived_key,
+                derived_key=derived_key or finding_replay,
             )
 
     existing = None

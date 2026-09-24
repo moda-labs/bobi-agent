@@ -127,7 +127,7 @@ def validate_config(project_path: Path) -> ValidationResult:
 # Event-type shapes the ingress can actually deliver, by source.
 #
 # Hand-maintained from the event-server adapters: they are TypeScript, so
-# nothing here can import them, and `tests/test_event_type_shapes.py` reads
+# nothing here can import them, and `tests/test_pack_routing_validation.py` reads
 # those sources and fails when this table drifts — the same pin the design
 # tokens use.
 #
@@ -152,8 +152,19 @@ def _unmatchable_reason(event_type: str) -> str:
     a new adapter — or a pack this table has never heard of — is never
     blocked by a check that simply has not been taught about it yet.
     """
-    if not event_type or "/" in event_type:      # system/* is published in-process
+    if not event_type:
         return ""
+    if "/" in event_type:
+        qualified_source, qualified_type = event_type.split("/", 1)
+        if qualified_source == "system":
+            return ""
+        if qualified_source not in _EVENT_TYPE_SHAPES:
+            return ""
+        # Only validate a known adapter's canonical dotted type. Other
+        # qualified namespaces are custom and remain fail-open.
+        if qualified_type.split(".", 1)[0] != qualified_source:
+            return ""
+        event_type = qualified_type
     source = event_type.split(".", 1)[0]
     shape = _EVENT_TYPE_SHAPES.get(source)
     if shape is None:
