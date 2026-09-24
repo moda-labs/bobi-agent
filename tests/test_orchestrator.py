@@ -1276,6 +1276,27 @@ class TestConnectIsNeverATurn:
         assert run.status == "failed"
         assert "unknown action" in run.error
 
+    def test_unreached_prompt_step_reports_undelivered_brief(self):
+        """A successful deterministic route may complete without a prompt."""
+        wf = Workflow(name="pr-closed", steps=[
+            StepDef(name="cleanup", action="cleanup_worktree"),
+            StepDef(name="route-merged", condition="merged_live == true",
+                    goto="close-issue", else_goto="done"),
+            StepDef(name="close-issue", prompt="close the issue"),
+            StepDef(name="done", condition="1 == 1"),
+        ])
+        with patch(
+            "bobi.workflow.orchestrator._execute_native_action",
+            return_value={"status": "preserved", "merged_live": False},
+        ):
+            result, calls, clients, emits = self._run(
+                wf, task="Run cleanup.", repo="r", cwd="/tmp", run_key="1",
+            )
+
+        assert result is True
+        assert calls == [] and clients == []
+        assert any(t == "agent/workflow.brief_undelivered" for t, _ in emits)
+
     def test_delivered_brief_emits_no_undelivered_event(self):
         wf = Workflow(name="t", steps=[StepDef(name="s", prompt="go")])
         result, _, clients, emits = self._run(
