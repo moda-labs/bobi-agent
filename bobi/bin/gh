@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "${BOBI_PYTHON_EXECUTABLE:-python3}" -m bobi.github_redaction "$@"

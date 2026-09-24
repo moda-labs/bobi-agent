@@ -486,6 +486,29 @@ def test_comment_rejects_a_url_for_another_issue():
     assert exc.value.code == "github_invalid_response"
 
 
+def test_comment_redacts_secrets_before_posting():
+    seen = {}
+    secret = "github_pat_" + "A" * 30
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)["body"]
+        return httpx.Response(201, json={
+            "html_url": (
+                "https://github.com/example/support/issues/12#issuecomment-1"
+            ),
+        })
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    comment_on_issue(
+        "example/support", 12, f"diagnostic output: {secret}",
+        token="t", client=client,
+    )
+
+    assert secret not in seen["body"]
+    assert seen["body"] == "diagnostic output: [redacted]"
+
+
 def test_recurrence_comment_is_short_and_carries_no_second_footer():
     context = FeedbackContext(
         bobi_version="1.2.3", agent_slot="eng", package="eng-team",

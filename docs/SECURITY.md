@@ -32,6 +32,9 @@ be served over TLS.
   `Config.load()` resolves them at runtime through one path.
 - **Never committed.** `run/.env` and the bubble key live under `run/` and are
   gitignored. Treat them like any credential; never copy them off the host.
+- **GitHub comments are scrubbed.** Bobi redacts secret-shaped text from
+  feedback recurrence comments and agent `gh issue comment` / `gh pr comment`
+  bodies before they are sent to GitHub.
 - **Deployed secrets** are stored as Fly secrets (the runtime store) and reconciled
   to the team's declared set on each deploy, so the store converges on exactly what
   `agent.yaml` declares (see the private deploy repo's
