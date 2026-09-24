@@ -7,10 +7,18 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from click.testing import CliRunner
 
 from bobi.cli import main
 from tests.conftest import TEST_AGENT_NAME
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """Unit files land under HOME; never the developer's real one. Tests that
+    need a specific HOME set it again."""
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
 
 
 def _ok(command, stdout=""):
@@ -32,6 +40,9 @@ def test_systemd_unit_runs_the_supervisor(bobi_install, monkeypatch):
     ) in unit
     assert "Restart=on-failure" in unit
     assert "RestartSec=30" in unit
+    assert "StartLimitIntervalSec=300" in unit
+    assert "StartLimitBurst=4" in unit
+    assert "network-online.target" not in unit
     assert f"BOBI_HOME={bobi_install.agents_dir.parent}" in unit
     assert str(bobi_install.state_dir / "manager.log") in unit
 
@@ -51,7 +62,7 @@ def test_launchd_plist_runs_the_supervisor(bobi_install, monkeypatch):
         "supervise", "--", "--foreground",
     ]
     assert payload["RunAtLoad"] is True
-    assert payload["KeepAlive"] is True
+    assert payload["KeepAlive"] == {"SuccessfulExit": False}
     assert payload["ThrottleInterval"] == 30
     assert payload["EnvironmentVariables"]["BOBI_HOME"] == str(
         bobi_install.agents_dir.parent
@@ -100,6 +111,7 @@ def test_launchd_install_reloads_an_existing_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(service_manager.os, "geteuid", lambda: 501)
     monkeypatch.setattr(service_manager.os, "getuid", lambda: 501)
     monkeypatch.setattr(service_manager.shutil, "which", lambda _: "/bin/bobi")
+    monkeypatch.setattr(service_manager, "_uid_target", lambda: "gui/501")
     calls = []
     existing = home / "Library" / "LaunchAgents" / (
         service_manager.LAUNCHD_LABEL + ".plist"
@@ -151,6 +163,7 @@ def test_launchd_restart_bootstraps_an_installed_but_stopped_agent(
     target.write_text("unit")
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(service_manager.os, "getuid", lambda: 501)
+    monkeypatch.setattr(service_manager, "_uid_target", lambda: "gui/501")
     calls = []
 
     def run(command, timeout=30):
@@ -249,6 +262,7 @@ def test_launchd_uninstall_stops_and_removes(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(service_manager.os, "geteuid", lambda: 501)
     monkeypatch.setattr(service_manager.os, "getuid", lambda: 501)
+    monkeypatch.setattr(service_manager, "_uid_target", lambda: "gui/501")
     calls = []
 
     def run(command, timeout=30):
@@ -715,3 +729,311 @@ def test_install_validates_platform_before_stopping(tmp_path, monkeypatch):
         raise AssertionError("Expected unsupported platform to error")
 
     assert stopped == []
+
+
+def test_systemd_unit_escapes_percent_specifiers(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    monkeypatch.setattr(service_manager.shutil, "which", lambda _: "/opt/bin/bobi")
+    percent_root = tmp_path / "agent%path"
+    unit = service_manager.render_systemd_unit("test-agent", percent_root)
+    assert "agent%%path" in unit
+
+
+def test_handwritten_systemd_unit_delegates_to_service(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    home = tmp_path / "home"
+    target = home / ".config" / "systemd" / "user" / "bobi.service"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "[Unit]\n"
+        "Description=My Hand Crafted Bobi\n"
+        "[Service]\n"
+        "ExecStart=/usr/local/bin/bobi agent eng start --foreground\n"
+        "Restart=always\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr(service_manager, "_run", lambda cmd, **kw: _ok(cmd))
+
+    # Matches via ExecStart agent <name> start
+    assert service_manager.configured_agent(platform="linux") == "eng"
+    assert service_manager.configured_manager("eng", platform="linux") == "systemd"
+    assert service_manager.stop_manager("eng", platform="linux") == "systemd"
+
+    # Even a unit without any agent name (legacy unit) falls back to managing the agent
+    target.write_text("[Unit]\nDescription=Generic Bobi\n[Service]\nExecStart=/bin/true\n")
+    assert service_manager.configured_agent(platform="linux") is None
+    assert service_manager.configured_manager("eng", platform="linux") == "systemd"
+    assert service_manager.stop_manager("eng", platform="linux") == "systemd"
+
+
+def test_uid_target_falls_back_to_user_domain(monkeypatch):
+    from bobi import service_manager
+
+    monkeypatch.setattr(service_manager.os, "getuid", lambda: 501)
+    monkeypatch.setattr(service_manager, "_gui_available", lambda uid: False)
+    assert service_manager._uid_target() == "user/501"
+
+    monkeypatch.setattr(service_manager, "_gui_available", lambda uid: True)
+    assert service_manager._uid_target() == "gui/501"
+
+
+def test_launchd_service_active_distinguishes_running_state(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    home = tmp_path / "home"
+    target = home / "Library" / "LaunchAgents" / (
+        service_manager.LAUNCHD_LABEL + ".plist"
+    )
+    target.parent.mkdir(parents=True)
+    target.write_text("unit")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.os, "getuid", lambda: 501)
+    monkeypatch.setattr(service_manager, "_gui_available", lambda uid: True)
+
+    # When loaded but waiting/idle (not running)
+    monkeypatch.setattr(
+        service_manager, "_run",
+        lambda cmd, timeout=30: subprocess.CompletedProcess(
+            cmd, 0, stdout="gui/501/com.moda-labs.bobi = {\n\tstate = waiting\n}\n", stderr="",
+        ),
+    )
+    assert service_manager.has_launchd_service() is True
+    assert service_manager.is_launchd_service_active() is False
+    assert service_manager.active_manager() is None
+    # Loaded service still delegates to launchd for stop
+    assert service_manager.stop_manager() == "launchd"
+
+    # When running
+    monkeypatch.setattr(
+        service_manager, "_run",
+        lambda cmd, timeout=30: subprocess.CompletedProcess(
+            cmd, 0, stdout="gui/501/com.moda-labs.bobi = {\n\tstate = running\n\tpid = 4321\n}\n", stderr="",
+        ),
+    )
+    assert service_manager.is_launchd_service_active() is True
+    assert service_manager.active_manager() == "launchd"
+
+
+def test_wait_for_manager_pid_excludes_stale_pid(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    pid_path = tmp_path / "state" / "manager.pid"
+    pid_path.parent.mkdir(parents=True)
+    pid_path.write_text("1111\n")
+
+    monkeypatch.setattr("bobi.paths.manager_pid_path", lambda root: pid_path)
+    monkeypatch.setattr("bobi.service._pid_alive", lambda pid: True)
+
+    # If exclude_pid is 1111, it will not return 1111
+    assert service_manager.wait_for_manager_pid(tmp_path, timeout=0.2, exclude_pid=1111) is None
+
+    # Once pid changes to 2222, it returns 2222
+    pid_path.write_text("2222\n")
+    assert service_manager.wait_for_manager_pid(tmp_path, timeout=0.2, exclude_pid=1111) == 2222
+
+
+def test_start_via_service_sweeps_direct_manager(bobi_install, monkeypatch):
+    from bobi import paths
+
+    monkeypatch.setattr("bobi.cli._configured_service_manager", lambda agent=None: "launchd")
+    monkeypatch.setattr("bobi.cli._active_service_manager", lambda agent=None: None)
+    monkeypatch.setattr("bobi.cli._service_action", lambda manager, action: True)
+
+    stopped_roots = []
+
+    def fake_stop(root, force=False):
+        stopped_roots.append((root, force))
+        return SimpleNamespace(still_running=False, permission_denied=False, pid=999)
+
+    monkeypatch.setattr("bobi.service.stop_team", fake_stop)
+    excluded = []
+
+    def fake_wait(root, timeout=3.0, exclude_pid=None):
+        excluded.append(exclude_pid)
+        return 1234
+
+    monkeypatch.setattr("bobi.service_manager.wait_for_manager_pid", fake_wait)
+    pid_path = paths.manager_pid_path(bobi_install.repo_path)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text("999\n")
+
+    result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "start"])
+
+    assert result.exit_code == 0, result.output
+    assert len(stopped_roots) >= 1
+    assert stopped_roots[0][0] == bobi_install.repo_path
+    assert excluded == [999]
+    assert "Bobi started (pid 1234)" in result.output
+
+
+def test_foreground_start_rejects_active_service(bobi_install, monkeypatch):
+    monkeypatch.setattr("bobi.cli._active_service_manager", lambda agent=None: "launchd")
+    monkeypatch.setattr("bobi.service_manager.wait_for_manager_pid", lambda root, **kw: 5555)
+
+    # When BOBI_SUPERVISED is unset, foreground start should reject with ClickException
+    monkeypatch.delenv("BOBI_SUPERVISED", raising=False)
+    result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "start", "--foreground"])
+
+    assert result.exit_code != 0
+    assert "managed by launchd service (pid 5555)" in result.output
+
+    # When BOBI_SUPERVISED is set (supervisor child), foreground start proceeds past service guard
+    ran_foreground = []
+    monkeypatch.setenv("BOBI_SUPERVISED", "1")
+    monkeypatch.setattr(
+        "bobi.service.run_team_foreground",
+        lambda root, **kw: ran_foreground.append(root),
+    )
+    result_supervised = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "start", "--foreground"])
+    assert result_supervised.exit_code == 0, result_supervised.output
+    assert ran_foreground == [bobi_install.repo_path]
+
+
+def test_sweep_direct_manager_ignores_current_pid(tmp_path, monkeypatch):
+    import os
+    from bobi import paths, service
+
+    pid_path = paths.manager_pid_path(tmp_path)
+    pid_path.parent.mkdir(parents=True)
+    my_pid = os.getpid()
+    pid_path.write_text(f"{my_pid}\n")
+
+    stopped = []
+    monkeypatch.setattr("bobi.service.stop_team", lambda root, **kw: stopped.append(root))
+
+    res = service.sweep_direct_manager(tmp_path)
+    assert res.pid == 0
+    assert stopped == []
+    assert not pid_path.exists()
+
+
+def test_darwin_stop_manager_scoping_ignores_mismatched_agent(monkeypatch):
+    from bobi import service_manager
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "has_launchd_service", lambda: True)
+    monkeypatch.setattr(service_manager, "is_launchd_service_active", lambda: True)
+    monkeypatch.setattr(service_manager, "configured_agent", lambda platform="darwin": "agent-a")
+
+    assert service_manager.stop_manager("agent-a", platform="darwin") == "launchd"
+    assert service_manager.stop_manager("agent-b", platform="darwin") is None
+
+
+def test_foreground_start_allowed_after_linux_stop(bobi_install, monkeypatch):
+    """A stopped-but-enabled unit must not block `start --foreground`: that is
+    where `stop` leaves a Linux install, and where --subscribe is sent."""
+    from bobi import service_manager
+
+    home = Path(bobi_install.agents_dir.parent)
+    unit = home / ".config" / "systemd" / "user" / service_manager.SYSTEMD_UNIT
+    unit.parent.mkdir(parents=True)
+    unit.write_text(service_manager.render_systemd_unit(
+        TEST_AGENT_NAME, bobi_install.repo_path,
+    ))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr("bobi.cli.sys.platform", "linux")
+
+    def fake_run(cmd, timeout=30):
+        # Enabled, but inactive after `systemctl --user stop`.
+        rc = 3 if "is-active" in cmd else 0
+        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+
+    monkeypatch.setattr(service_manager, "_run", fake_run)
+    monkeypatch.delenv("BOBI_SUPERVISED", raising=False)
+    ran = []
+    monkeypatch.setattr(
+        "bobi.service.run_team_foreground", lambda root, **kw: ran.append(root),
+    )
+
+    result = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, "start", "--foreground"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ran == [bobi_install.repo_path]
+    assert "systemd service is installed" in result.output
+
+
+def test_stop_team_removes_invalid_pid_file(tmp_path):
+    from bobi import paths, service
+
+    pid_path = paths.manager_pid_path(tmp_path)
+    pid_path.parent.mkdir(parents=True)
+    pid_path.write_text("garbage\n")
+
+    result = service.stop_team(tmp_path)
+
+    assert result.invalid_pid is True
+    assert not pid_path.exists()
+
+
+def _spawn_fake_manager(root):
+    import sys as _sys
+    from bobi import paths
+
+    proc = subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"])
+    pid_path = paths.manager_pid_path(root)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(f"{proc.pid}\n")
+    return proc
+
+
+def test_supervisor_sweeps_only_under_os_service(tmp_path, monkeypatch):
+    """Without the unit/plist marker (a container) the supervisor must not
+    signal whatever pid manager.pid names."""
+    from bobi.service_manager import OS_SERVICE_ENV
+    from bobi.supervisor.__main__ import _sweep_if_os_service
+
+    proc = _spawn_fake_manager(tmp_path)
+    try:
+        monkeypatch.delenv(OS_SERVICE_ENV, raising=False)
+        assert _sweep_if_os_service(tmp_path) is False
+        assert proc.poll() is None
+
+        monkeypatch.setenv(OS_SERVICE_ENV, "1")
+        assert _sweep_if_os_service(tmp_path) is True
+        assert proc.wait(timeout=10) is not None
+        import os as _os
+        assert OS_SERVICE_ENV not in _os.environ
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+
+def test_generated_units_carry_os_service_marker(bobi_install, monkeypatch):
+    from bobi import service_manager
+
+    monkeypatch.setattr(service_manager.shutil, "which", lambda _: "/opt/bin/bobi")
+    unit = service_manager.render_systemd_unit(TEST_AGENT_NAME, bobi_install.repo_path)
+    plist = plistlib.loads(service_manager.render_launchd_plist(
+        TEST_AGENT_NAME, bobi_install.repo_path,
+    ).encode())
+
+    assert f"Environment={service_manager.OS_SERVICE_ENV}=1" in unit
+    assert plist["EnvironmentVariables"][service_manager.OS_SERVICE_ENV] == "1"
+
+
+def test_unnamed_unit_serves_nobody_with_several_agents(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    home = tmp_path / "home"
+    target = home / ".config" / "systemd" / "user" / "bobi.service"
+    target.parent.mkdir(parents=True)
+    target.write_text("[Unit]\nDescription=Generic Bobi\n[Service]\nExecStart=/bin/true\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(service_manager, "_run", lambda cmd, **kw: _ok(cmd))
+    monkeypatch.setattr(service_manager.paths, "list_agents", lambda: ["alpha", "beta"])
+
+    for name in ("alpha", "beta"):
+        assert service_manager.configured_manager(name, platform="linux") is None
+        assert service_manager.active_manager(name, platform="linux") is None
+
+    monkeypatch.setattr(service_manager.paths, "list_agents", lambda: ["alpha"])
+    assert service_manager.configured_manager("alpha", platform="linux") == "systemd"
+    assert service_manager.active_manager("alpha", platform="linux") == "systemd"

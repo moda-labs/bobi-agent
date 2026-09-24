@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import plistlib
 import re
@@ -18,10 +19,42 @@ SERVICE_NAME = "bobi"
 LAUNCHD_LABEL = "com.moda-labs.bobi"
 SYSTEMD_UNIT = f"{SERVICE_NAME}.service"
 LAUNCHD_PLIST = f"{LAUNCHD_LABEL}.plist"
+# Set only by the generated unit/plist. The supervisor sweeps a directly
+# started manager only when it sees this, never in a container.
+OS_SERVICE_ENV = "BOBI_OS_SERVICE"
+
+
+@functools.lru_cache(maxsize=None)
+def _gui_available(uid: int) -> bool:
+    try:
+        result = _run(["launchctl", "print", f"gui/{uid}"], timeout=3)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _find_loaded_domain(uid: int) -> str | None:
+    domains = ([f"gui/{uid}"] if _gui_available(uid) else []) + [f"user/{uid}"]
+    for dom in domains:
+        try:
+            res = _run(["launchctl", "print", f"{dom}/{LAUNCHD_LABEL}"], timeout=3)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+        if res.returncode == 0:
+            return dom
+    return None
 
 
 def _uid_target() -> str:
-    return f"gui/{os.getuid()}"
+    """launchd domain for the LaunchAgent: where it is loaded, else ``gui``
+    when there is a login session, else ``user`` (SSH to a headless Mac)."""
+    uid = os.getuid()
+    loaded = _find_loaded_domain(uid)
+    if loaded is not None:
+        return loaded
+    if _gui_available(uid):
+        return f"gui/{uid}"
+    return f"user/{uid}"
 
 
 def _command() -> list[str]:
@@ -49,26 +82,41 @@ def launchd_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / LAUNCHD_PLIST
 
 
+def launchd_domain_is_user() -> bool:
+    """True when the LaunchAgent lives in the ``user`` domain, which launchd
+    does not reload at boot; it returns only after a GUI login."""
+    return _uid_target().startswith("user/")
+
+
 def _launchd_target() -> str:
     return f"{_uid_target()}/{LAUNCHD_LABEL}"
 
 
+def _escape_systemd_specifiers(value: str) -> str:
+    """Escape % as %% so systemd does not interpret paths as specifiers (%h, %u, etc)."""
+    return value.replace("%", "%%")
+
+
 def render_systemd_unit(name: str, root: Path) -> str:
-    args = shlex.join(_arguments(name))
-    log_path = shlex.quote(str(paths.manager_log_path(root)))
+    args = _escape_systemd_specifiers(shlex.join(_arguments(name)))
+    root_str = _escape_systemd_specifiers(str(root))
+    home_str = _escape_systemd_specifiers(str(paths.home_dir()))
+    path_env_str = _escape_systemd_specifiers(_path_env())
+    log_path = _escape_systemd_specifiers(str(paths.manager_log_path(root)))
     return (
         "[Unit]\n"
         f"Description=Bobi Agent {name}\n"
-        "After=network-online.target\n"
-        "Wants=network-online.target\n\n"
+        "StartLimitIntervalSec=300\n"
+        "StartLimitBurst=4\n\n"
         "[Service]\n"
         "Type=simple\n"
         f"ExecStart={args}\n"
-        f"WorkingDirectory={shlex.quote(str(root))}\n"
-        f"Environment=BOBI_HOME={shlex.quote(str(paths.home_dir()))}\n"
-        f"Environment=PATH={shlex.quote(_path_env())}\n"
-        f"StandardOutput=append:{log_path}\n"
-        f"StandardError=append:{log_path}\n"
+        f"WorkingDirectory={shlex.quote(root_str)}\n"
+        f"Environment=BOBI_HOME={shlex.quote(home_str)}\n"
+        f"Environment={OS_SERVICE_ENV}=1\n"
+        f"Environment=PATH={shlex.quote(path_env_str)}\n"
+        f"StandardOutput=append:{shlex.quote(log_path)}\n"
+        f"StandardError=append:{shlex.quote(log_path)}\n"
         "Restart=on-failure\n"
         "RestartSec=30\n\n"
         "[Install]\n"
@@ -84,9 +132,10 @@ def render_launchd_plist(name: str, root: Path) -> str:
         "EnvironmentVariables": {
             "BOBI_HOME": str(paths.home_dir()),
             "PATH": _path_env(),
+            OS_SERVICE_ENV: "1",
         },
         "RunAtLoad": True,
-        "KeepAlive": True,
+        "KeepAlive": {"SuccessfulExit": False},
         "ThrottleInterval": 30,
         "StandardOutPath": str(paths.manager_log_path(root)),
         "StandardErrorPath": str(paths.manager_log_path(root)),
@@ -136,6 +185,18 @@ def has_launchd_service() -> bool:
     return result.returncode == 0
 
 
+def is_launchd_service_active() -> bool:
+    if not launchd_path().exists():
+        return False
+    try:
+        result = _run(["launchctl", "print", _launchd_target()], timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    return bool(re.search(r"^\s*state\s*=\s*running\b", result.stdout, re.MULTILINE))
+
+
 def configured_agent(platform: str | None = None) -> str | None:
     """Return the name of the agent currently configured in the service unit, if any."""
     platform = sys.platform if platform is None else platform
@@ -161,7 +222,7 @@ def configured_agent(platform: str | None = None) -> str | None:
             match = re.search(r"^Description=Bobi Agent\s+(.+)$", content, re.MULTILINE)
             if match:
                 return match.group(1).strip()
-            match = re.search(r"agent\s+([^\s]+)\s+supervise", content)
+            match = re.search(r"agent\s+([^\s]+)\s+(?:supervise|start)", content)
             if match:
                 return match.group(1).strip()
         except Exception:
@@ -169,15 +230,28 @@ def configured_agent(platform: str | None = None) -> str | None:
     return None
 
 
+def _unit_serves(agent_name: str | None, platform: str) -> bool:
+    """Whether the installed unit manages ``agent_name``.
+
+    A unit naming another agent never does. A unit naming no agent (hand
+    written) is taken to serve the one installed agent, and nobody when
+    several are installed, since it cannot say which.
+    """
+    if agent_name is None:
+        return True
+    current = configured_agent(platform=platform)
+    if current is not None:
+        return current == agent_name
+    return len(paths.list_agents()) <= 1
+
+
 def active_manager(agent_name: str | None = None, platform: str | None = None) -> str | None:
     platform = sys.platform if platform is None else platform
-    if agent_name is not None:
-        current = configured_agent(platform=platform)
-        if current != agent_name:
-            return None
+    if not _unit_serves(agent_name, platform):
+        return None
     if platform.startswith("linux") and has_systemd_service() and is_systemd_service_active():
         return "systemd"
-    if platform == "darwin" and has_launchd_service():
+    if platform == "darwin" and has_launchd_service() and is_launchd_service_active():
         return "launchd"
     return None
 
@@ -185,10 +259,8 @@ def active_manager(agent_name: str | None = None, platform: str | None = None) -
 def configured_manager(agent_name: str | None = None, platform: str | None = None) -> str | None:
     """Return the manager with a generated unit, even when it is stopped."""
     platform = sys.platform if platform is None else platform
-    if agent_name is not None:
-        current = configured_agent(platform=platform)
-        if current != agent_name:
-            return None
+    if not _unit_serves(agent_name, platform):
+        return None
     if platform.startswith("linux") and has_systemd_service():
         return "systemd"
     if platform == "darwin" and launchd_path().exists():
@@ -210,6 +282,9 @@ def stop_manager(agent_name: str | None = None, platform: str | None = None) -> 
         return active
     if platform.startswith("linux"):
         return configured_manager(agent_name, platform=platform)
+    if platform == "darwin":
+        if has_launchd_service():
+            return configured_manager(agent_name, platform=platform)
     return None
 
 
@@ -274,7 +349,9 @@ def service_pid(manager: str) -> str:
     return match.group(1) if match else "unknown"
 
 
-def wait_for_manager_pid(root: Path, timeout: float = 3.0) -> int | None:
+def wait_for_manager_pid(
+    root: Path, timeout: float = 3.0, exclude_pid: int | None = None,
+) -> int | None:
     """Wait for manager.pid to appear and be alive."""
     import time
     from bobi import service
@@ -283,12 +360,12 @@ def wait_for_manager_pid(root: Path, timeout: float = 3.0) -> int | None:
     while time.monotonic() < deadline:
         if pid_path.exists():
             pid = service._read_pid(pid_path)
-            if pid and service._pid_alive(pid):
+            if pid and (exclude_pid is None or pid != exclude_pid) and service._pid_alive(pid):
                 return pid
         time.sleep(0.1)
     if pid_path.exists():
         pid = service._read_pid(pid_path)
-        if pid and service._pid_alive(pid):
+        if pid and (exclude_pid is None or pid != exclude_pid) and service._pid_alive(pid):
             return pid
     return None
 
@@ -305,9 +382,7 @@ def install(name: str, root: Path, platform: str | None = None) -> Path:
     # new supervisor exit on AlreadyRunning and crash-loop under KeepAlive
     # or Restart=on-failure.
     from bobi import service
-    stopped = service.stop_team(root)
-    if stopped.permission_denied or stopped.still_running:
-        stopped = service.stop_team(root, force=True)
+    stopped = service.sweep_direct_manager(root)
     if stopped.permission_denied or stopped.still_running:
         raise RuntimeError(
             f"manager pid {stopped.pid} is still running; "

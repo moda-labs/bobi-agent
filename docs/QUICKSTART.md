@@ -292,7 +292,7 @@ daemon with a loopback event server, reacts to its scheduled monitors, and
 answers `ask`/`message` from your terminal. If you're on hardware that stays
 on - a Mac mini, a home server, a remote box - this can be your permanent
 deployment. Install Bobi's user-level service so the supervisor starts at login
-and the OS restarts it if it exits:
+and the OS restarts it on failure (clean exits stay stopped):
 
 ```bash
 bobi agent my-agent install-service
@@ -300,8 +300,16 @@ bobi agent my-agent install-service
 
 This installs a LaunchAgent on macOS or a systemd user service on Linux. It
 runs `bobi agent my-agent supervise -- --foreground`; `start`, `stop`, `restart`,
-and the local web app delegate to that service manager. Remove it with
+and the local web app delegate to that service manager. When the service starts,
+it stops any manager you started directly (for example with `start --foreground`
+after `stop`), so the two never run side by side. Remove it with
 `bobi agent my-agent uninstall-service`.
+
+On a Mac with no desktop login (for example, installed over SSH), the service
+loads into the launchd `user` domain instead of `gui`; `install-service` warns
+when this happens. launchd does not reload that domain at boot, so after a
+reboot the agent stays down until the user logs in to the desktop. Enable
+automatic login on an always-on Mac.
 
 Note: Bobi provisions one user-level service per machine user (`bobi.service` on
 Linux / `com.moda-labs.bobi` on macOS). Installing a service for a different agent

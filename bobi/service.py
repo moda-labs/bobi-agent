@@ -687,7 +687,7 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     else:
         pid = _read_pid(pid_path)
         result_kwargs["pid"] = pid
-        if not pid:
+        if not pid or pid == os.getpid():
             pid_path.unlink(missing_ok=True)
             result_kwargs["invalid_pid"] = True
         else:
@@ -726,6 +726,26 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     result_kwargs["event_server_port"] = es_port
     result_kwargs["event_server_running"] = bool(health(f"http://localhost:{es_port}"))
     return StopResult(**result_kwargs)
+
+
+def sweep_direct_manager(project_path: Path) -> StopResult:
+    """Sweep any directly running manager process before service start.
+
+    Stops a running process with SIGTERM first, escalating to SIGKILL if needed.
+    Guards against signalling os.getpid() or treating current process as a rogue.
+    """
+    project_path = Path(project_path)
+    pid_path = paths.manager_pid_path(project_path)
+    if pid_path.exists():
+        pid = _read_pid(pid_path)
+        if pid == os.getpid():
+            pid_path.unlink(missing_ok=True)
+            return StopResult(pid=0, invalid_pid=True)
+
+    stopped = stop_team(project_path)
+    if stopped.permission_denied or stopped.still_running:
+        stopped = stop_team(project_path, force=True)
+    return stopped
 
 
 def team_status(project_path: Path) -> TeamStatus:

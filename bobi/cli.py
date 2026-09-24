@@ -579,7 +579,8 @@ def start(foreground, fresh, subscribe):
                 raise click.ClickException(
                     f"Agent '{agent_name}' is managed by {manager}. "
                     "Custom --subscribe is not supported through the OS service; "
-                    "configure subscriptions in agent.yaml or run directly with `start --foreground`."
+                    "configure subscriptions in agent.yaml, or run directly: "
+                    f"`bobi agent {agent_name} stop`, then `start --foreground --subscribe ...`."
                 )
             if _active_service_manager(agent_name):
                 from bobi.service_manager import wait_for_manager_pid
@@ -593,13 +594,42 @@ def start(foreground, fresh, subscribe):
                 from bobi.service import clear_manager_session
                 clear_manager_session(project_path)
                 click.echo("Cleared manager session — starting fresh.")
+            # Sweep any directly running manager before delegating to the service.
+            from bobi import service
+            pid_file = paths.manager_pid_path(project_path)
+            prev_pid = service._read_pid(pid_file) if pid_file.exists() else None
+            stopped = service.sweep_direct_manager(project_path)
+            if stopped.permission_denied or stopped.still_running:
+                raise click.ClickException(
+                    f"manager pid {stopped.pid} is still running; "
+                    "refusing to start service beside it"
+                )
             click.echo(f"Starting via {manager}...")
             _service_action(manager, "restart")
             from bobi.service_manager import wait_for_manager_pid
-            pid = wait_for_manager_pid(project_path) or _service_pid(manager)
+            pid = wait_for_manager_pid(project_path, exclude_pid=prev_pid) or _service_pid(manager)
             log_path = paths.manager_log_path(project_path)
             click.echo(f"Bobi started (pid {pid}). Logs: {log_path}")
             return
+
+    if foreground and not os.environ.get("BOBI_SUPERVISED"):
+        active = _active_service_manager(agent_name)
+        if active:
+            from bobi.service_manager import wait_for_manager_pid
+            pid = wait_for_manager_pid(project_path, timeout=0.5) or _service_pid(active)
+            raise click.ClickException(
+                f"Agent '{agent_name}' is managed by {active} service (pid {pid}). "
+                f"Stop the service first with `bobi agent {agent_name} stop` before running in the foreground."
+            )
+        # An installed but stopped service does not block a foreground run,
+        # but its next start sweeps this process.
+        configured = _configured_service_manager(agent_name)
+        if configured:
+            click.echo(
+                f"Note: a {configured} service is installed for '{agent_name}'; "
+                "its next start (login, reboot, or `start`) will stop this process.",
+                err=True,
+            )
 
     click.echo("Running preflight checks...")
     try:
@@ -629,6 +659,8 @@ def start(foreground, fresh, subscribe):
             f"Already running (pid {exc.pid}). "
             f"Use `bobi agent {paths.agent_name_for_root(project_path)} restart`."
         )
+        if foreground:
+            raise SystemExit(1)
         return
     except NestedRuntimeError as exc:
         click.echo(
@@ -1246,6 +1278,13 @@ def install_service():
         raise click.ClickException(str(exc)) from exc
     manager = "launchd" if sys.platform == "darwin" else "systemd"
     click.echo(f"Installed and started {manager} service: {target}")
+    if manager == "launchd" and service_manager.launchd_domain_is_user():
+        click.echo(
+            "Warning: no GUI login session, so the service was loaded into the "
+            "launchd user domain. It will not start again after a reboot until "
+            "this user logs in to the desktop.",
+            err=True,
+        )
 
 
 @main.command("uninstall-service")
