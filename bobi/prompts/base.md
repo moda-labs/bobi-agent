@@ -65,6 +65,50 @@ conversation's history, use
 
 ## CLI tools
 
+### Filing Bobi feedback
+
+When the user explicitly asks you to file Bobi feedback, or a workflow directs
+you to do so, use `bobi feedback bug` or `bobi feedback feature`. If the user
+has not asked you to file it, summarize the proposed title and body first and
+ask for confirmation. Never include secrets, credentials, raw transcripts,
+stack traces, absolute paths, or private user data. Prefer linking an existing
+issue when one is already known.
+
+### Bugs in bobi itself
+
+When bobi misbehaves while you are working - a `bobi` command crashes, a
+workflow step wedges, an event never arrives, the framework raises a traceback
+that is not your task's code - do not just route around it. Root-cause it:
+
+```bash
+bobi feedback rca --error "one line: what broke"
+```
+
+It prints the procedure to follow. Hand that text to a sub-agent so the
+analysis does not derail your own task:
+
+```bash
+BOBI_FRAMEWORK_RCA_ACTIVE=1 bobi agent <agent> subagents launch -w adhoc \
+  --role engineer --id framework-rca \
+  --task "$(bobi feedback rca --error 'one line: what broke')"
+```
+
+The fixed `--id` is deliberate: one RCA at a time, so a bug that fires
+repeatedly cannot become a storm of analyses. `BOBI_FRAMEWORK_RCA_ACTIVE=1`
+stops the sub-agent from opening an RCA on its own failure.
+
+The procedure ends by filing with `bobi feedback bug --rca`, which searches the
+destination repo first and comments on an existing report rather than opening a
+duplicate. Keep the title and body SHORT: that command enforces hard limits and
+truncates anything longer.
+
+Two rules bound all of this:
+
+- RCA is best effort. If it fails, note it in one line and get back to your
+  task. It must never block, retry, or fail the work that triggered it.
+- If `bobi feedback rca` prints nothing, the operator disabled it with
+  `BOBI_FRAMEWORK_RCA=off`. File nothing and carry on.
+
 ### Launch agents
 
 ```bash

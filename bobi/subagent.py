@@ -1690,7 +1690,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from bobi.config import Config
     from bobi.events.state import (
         load_deployment_state, save_deployment_state,
-        session_cursor_path, bubble_state_path,
+        session_cursor_path,
     )
     from bobi.events.client import EventServerClient
     from bobi.events.drain import drain_loop
@@ -1698,6 +1698,12 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         ensure_running, ensure_bubble, register, register_slack_workspaces,
         register_whatsapp_numbers, register_discord_apps, authorize_resources,
         local_port_from_url, BubbleRejected,
+    )
+    from bobi.events.protocol import (
+        EventProtocolError,
+        protocol_payload,
+        raise_for_protocol_error,
+        validate_server_response,
     )
 
     cfg = Config.load(project_path)
@@ -1786,6 +1792,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 # cursor would skip or mis-replay events on first connect.
                 cursor_path.unlink(missing_ok=True)
                 return dep, key
+            except EventProtocolError:
+                raise
             except Exception as e:
                 last_err = e
                 if attempt < attempts - 1:
@@ -1800,7 +1808,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             f"after {attempts} attempts: {last_err}"
         ) from last_err
 
-    def _sync_or_reregister(dep: str, key: str) -> tuple[str, str]:
+    def _sync_saved_deployment(dep: str, key: str) -> tuple[str, str]:
         """Sync this session's current subscribe list onto its saved deployment.
 
         Authorize resource grants first (#488) so a global topic added since the
@@ -1808,12 +1816,18 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         anyway (``filter_unauthorized=False``): the server may already hold a
         no-expiry grant from an earlier start, and dropping the topic would
         silently unsubscribe a valid deployment. The server stays authoritative
-        and rejects the update if the grant is truly absent — at which point
-        re-registering is the recovery.
+        and rejects the update if the grant is truly absent. Failed updates
+        retain replay identity; registration would supersede that deployment.
         """
         nonlocal active_subscriptions
         try:
-            bubble = ensure_bubble(es_url, project_path)
+            # Saved deployments keep their original trust identity. Do not
+            # mint a replacement bubble while a transient PUT failure is
+            # still indistinguishable from server unavailability.
+            from bobi.events.state import load_bubble_state
+            bubble = load_bubble_state(project_path)
+            if not bubble:
+                raise RuntimeError("saved deployment has no valid bubble state")
             registered = (
                 _register_channel_credentials(es_url, bubble)
                 if has_external else {}
@@ -1825,68 +1839,80 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 whatsapp_registered=registered.get("whatsapp"),
                 discord_registered=registered.get("discord"),
             )
-        except Exception as e:
-            log.info("Pre-PUT resource authorization unavailable (%s)", e)
+        except Exception:
+            log.info("Pre-PUT resource authorization unavailable; keeping configured topics")
             authorized = subscribe
-        from bobi import http as pooled
         try:
-            resp = pooled.put(
-                f"{es_url}/deployments/{dep}/subscriptions",
-                json={"replace": authorized},
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                timeout=10.0,
-            )
-            resp.raise_for_status()
+            _put_subscriptions(dep, key, authorized)
             active_subscriptions = list(authorized)
             return dep, key
+        except EventProtocolError:
+            raise
         except Exception as e:
-            log.info("Subscription update failed (%s) — re-registering", e)
-            return _register_with_retry(es_url)
+            import httpx
+
+            if isinstance(e, httpx.HTTPStatusError):
+                status = e.response.status_code
+                if status in (401, 403):
+                    reason = (
+                        "deployment may be missing/expired or credentials may be invalid; "
+                        "replay continuity is unverified; check server and credentials "
+                        "before deliberately resetting"
+                    )
+                elif status == 429 or status >= 500:
+                    reason = f"temporary server failure (HTTP {status})"
+                elif status == 400:
+                    reason = "subscription configuration or resource grants rejected (HTTP 400)"
+                else:
+                    reason = f"unexpected subscription response (HTTP {status}); check server configuration"
+            elif isinstance(e, (httpx.TransportError, TimeoutError, OSError)):
+                reason = "temporary transport failure"
+            else:
+                reason = "unexpected subscription failure; check server configuration"
+            message = (
+                f"Event subscription unavailable for session {session_name}, deployment {dep}: "
+                f"{reason}; saved deployment and completion cursor retained; retry pending"
+            )
+            log.warning("%s", message)
+            # The startup caller logs tracebacks. Suppress the original HTTP
+            # exception, whose URL/body can contain credentials or payloads.
+            raise RuntimeError(message) from None
+
+    def _put_subscriptions(dep: str, key: str, subscriptions: list[str]) -> None:
+        from bobi import http as pooled
+
+        resp = pooled.put(
+            f"{es_url}/deployments/{dep}/subscriptions",
+            json={"replace": subscriptions, "protocol": protocol_payload()},
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            timeout=10.0,
+        )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        raise_for_protocol_error(resp.status_code, data)
+        resp.raise_for_status()
+        if not isinstance(data, dict) or "error" in data:
+            raise ValueError("Unexpected subscription reply")
+        validate_server_response(data)
 
     if not es_url:
-        # Nothing configured: default to a local server on 8080 and always
-        # register fresh against it. Saved deployment state is deliberately
-        # NOT reused here — an unconfigured local server is ephemeral, so the
-        # deployment it once issued is not something to sync onto.
-        es_port = 8080
-        es_url = f"http://localhost:{es_port}"
+        es_url = "http://localhost:8080"
+    if (es_port := local_port_from_url(es_url)) is not None:
         result = ensure_running(es_port, project_path=project_path)
         if result == "started":
-            log.info("No event server configured — started local server on port %d", es_port)
+            log.info("Local event server started on port %d", es_port)
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
+
+    if not (es_deployment and es_key):
         es_deployment, es_key = _register_with_retry(es_url)
     else:
-        # A configured local URL additionally starts/attaches the server; from
-        # there the decision is identical for local and remote, so it is made
-        # once rather than mirrored per transport.
-        if (es_port := local_port_from_url(es_url)) is not None:
-            result = ensure_running(es_port, project_path=project_path)
-            if result == "started":
-                log.info("Configured local event server started on port %d", es_port)
-            elif result == "connected":
-                log.info("Connected to configured local event server on port %d", es_port)
-
-        if not (es_deployment and es_key):
-            # No saved deployment for this session — register fresh rather
-            # than PUT to a guaranteed-400 empty deployment URL.
-            es_deployment, es_key = _register_with_retry(es_url)
-        elif not bubble_state_path(project_path).exists():
-            # Pre-bubble upgrade: saved deployment_state from a version that
-            # predates auth bubbles. The old api_key can't sign publishes
-            # against a v0.21+ server → 403. Drop the stale state and
-            # re-register through ensure_bubble to mint/join a bubble.
-            log.info("Saved deployment but no bubble.json — pre-bubble upgrade, re-registering")
-            cursor_path.unlink(missing_ok=True)
-            es_deployment, es_key = _register_with_retry(es_url)
-        else:
-            # This session restarting with its own saved deployment — sync any
-            # new subscription keys onto it. Never PUT to another session's
-            # deployment; state is per-session by construction.
-            es_deployment, es_key = _sync_or_reregister(es_deployment, es_key)
+        es_deployment, es_key = _sync_saved_deployment(es_deployment, es_key)
 
     # Note: Slack-bot registration (signed, also writing the #487 outbound record
     # and the #488 slack grant) now happens in `_authorize_subscriptions` BEFORE
@@ -1908,16 +1934,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         dropped from the index during a long redeploy gap) by re-adding every
         key. Idempotent — the server dedups keys already present (#425).
         """
-        from bobi import http as pooled
-        pooled.put(
-            f"{es_url}/deployments/{es_deployment}/subscriptions",
-            json={"replace": active_subscriptions},
-            headers={
-                "Authorization": f"Bearer {es_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=10.0,
-        )
+        _put_subscriptions(es_deployment, es_key, active_subscriptions)
 
     client = EventServerClient(
         server_url=es_url,

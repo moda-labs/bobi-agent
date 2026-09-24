@@ -1,4 +1,4 @@
-import { buildBubbleSignature, parseGlobalTopic } from "@moda-labs/bobi-events-core";
+import { EVENT_PROTOCOL, buildBubbleSignature, parseGlobalTopic } from "@moda-labs/bobi-events-core";
 import { SELF, env } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/index";
@@ -124,11 +124,13 @@ describe("event-server", () => {
 		const body = await response.json() as {
 			status: string;
 			auth: string;
+			protocol: unknown;
 			release: { version: string; sha: string };
 			worker: { version_id: string | null; version_tag: string | null; version_timestamp: string | null };
 		};
 		expect(body.status).toBe("ok");
 		expect(body.auth).toBe("hmac");
+		expect(body.protocol).toEqual(EVENT_PROTOCOL);
 		expect(body.release).toEqual({ version: "test-version", sha: "test-sha" });
 		expect(typeof body.worker.version_id === "string" || body.worker.version_id === null).toBe(true);
 		expect(typeof body.worker.version_tag === "string" || body.worker.version_tag === null).toBe(true);

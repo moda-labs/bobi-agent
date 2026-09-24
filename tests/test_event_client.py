@@ -453,6 +453,50 @@ class TestRecordDisconnect:
         assert c._short_drop_streak == 0
 
 
+class TestDeafReconnectResubscribe:
+    def _client(self, tmp_path):
+        from bobi.events.client import EventServerClient
+        return EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=tmp_path / "cursor.json",
+        )
+
+    def test_protocol_failure_stops_client_and_clears_liveness(
+            self, tmp_path, caplog):
+        from bobi.events.protocol import IncompatibleEventProtocol
+
+        client = self._client(tmp_path)
+        client._connected.set()
+        client._ws = MagicMock()
+
+        def incompatible():
+            raise IncompatibleEventProtocol("event protocol ranges do not overlap")
+
+        with caplog.at_level("ERROR", logger="bobi.events.client"):
+            client._safe_resubscribe(incompatible)
+
+        assert client._stop.is_set()
+        assert not client._connected.is_set()
+        client._ws.close.assert_called_once_with()
+        assert "Event protocol negotiation failed" in caplog.text
+
+    def test_generic_failure_remains_best_effort(self, tmp_path):
+        client = self._client(tmp_path)
+        client._connected.set()
+        client._ws = MagicMock()
+
+        def transient_failure():
+            raise RuntimeError("temporary failure")
+
+        client._safe_resubscribe(transient_failure)
+
+        assert not client._stop.is_set()
+        assert client._connected.is_set()
+        client._ws.close.assert_not_called()
+
+
 class TestEventQueue:
 
     def test_queue_starts_empty(self):

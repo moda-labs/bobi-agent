@@ -134,7 +134,18 @@ def test_a_bare_tcp_connect_is_not_readiness(published_port):
         )
 
 
-def test_await_ready_blocks_until_the_collector_answers(published_port):
+@pytest.fixture
+def launch_log(tmp_path):
+    """`_await_ready` quotes the collector's launch log in both failures.
+
+    The stub here is not a real launch, so there is nothing to quote: the path
+    stays absent and the gate's reader falls back to quoting nothing. That is
+    the same branch a binary-path run takes before the collector writes a line.
+    """
+    return tmp_path / "collector.log"
+
+
+def test_await_ready_blocks_until_the_collector_answers(published_port, launch_log):
     finished = threading.Event()
     raised: list[BaseException] = []
 
@@ -143,7 +154,7 @@ def test_await_ready_blocks_until_the_collector_answers(published_port):
             # Under the join budget below, so a failed assertion cannot leave
             # this thread polling a port the kernel has since handed to another
             # test, turning one real failure into a second unrelated one.
-            _await_ready(published_port.port, _StubProc(), timeout=10.0)
+            _await_ready(published_port.port, _StubProc(), launch_log, timeout=10.0)
         except BaseException as exc:  # noqa: BLE001 - reported to the assertion below
             raised.append(exc)
         finally:
@@ -164,11 +175,12 @@ def test_await_ready_blocks_until_the_collector_answers(published_port):
         thread.join(timeout=15)
 
 
-def test_await_ready_gives_up_when_nothing_ever_answers(published_port):
+def test_await_ready_gives_up_when_nothing_ever_answers(published_port, launch_log):
     with pytest.raises(AssertionError, match="did not answer HTTP"):
-        _await_ready(published_port.port, _StubProc(), timeout=2.0)
+        _await_ready(published_port.port, _StubProc(), launch_log, timeout=2.0)
 
 
-def test_await_ready_reports_a_collector_that_exited(published_port):
+def test_await_ready_reports_a_collector_that_exited(published_port, launch_log):
     with pytest.raises(AssertionError, match="exited early with 1"):
-        _await_ready(published_port.port, _StubProc(returncode=1), timeout=5.0)
+        _await_ready(published_port.port, _StubProc(returncode=1), launch_log,
+                     timeout=5.0)

@@ -16,6 +16,7 @@ from queue import SimpleQueue
 import certifi
 import websocket
 
+from bobi.events.protocol import EventProtocolError
 from bobi.fsutil import atomic_write_json
 from bobi.timeutil import now_iso
 
@@ -476,13 +477,24 @@ class EventServerClient:
             hb_stop.set()
 
     def _safe_resubscribe(self, cb: callable) -> None:
-        """Run the deaf-reconnect resubscribe hook, swallowing its errors.
+        """Run the deaf-reconnect resubscribe hook.
 
         The hook re-asserts this deployment's subscriptions (and re-registers on
         failure) so a reconnect restores delivery even when the server-side
-        subscription index — not just the socket — went stale.
+        subscription index — not just the socket — went stale. Transport errors
+        remain best-effort; a confirmed protocol failure is terminal because the
+        reconnected client cannot safely continue receiving events.
         """
         try:
             cb()
+        except EventProtocolError as e:
+            self._connected.clear()
+            self._last_ws_error = e
+            log.error(
+                "Event protocol negotiation failed after deaf reconnect; "
+                "stopping client: %s",
+                e,
+            )
+            self.stop()
         except Exception as e:
             log.debug("Resubscribe after deaf reconnect failed: %s", e)
