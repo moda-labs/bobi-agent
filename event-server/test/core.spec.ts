@@ -61,6 +61,7 @@ import {
 	resetIngestRateLimiter,
 	INGEST_RATE_LIMIT,
 	INGEST_MAX_BODY_BYTES,
+	EVENT_PROTOCOL,
 } from "@moda-labs/bobi-events-core";
 import { hmacHex } from "./helpers";
 import { bridgeSlackWebhook } from "@moda-labs/bobi-events-core/adapters/chat-sdk-slack";
@@ -195,6 +196,18 @@ describe("normalizeGitHubPayload", () => {
 		});
 		expect(event!.fields!.review_id).toBe(4242);
 		expect(event!.fields!.review_state).toBe("changes_requested");
+	});
+
+	it("extracts PR author separately from the review sender", () => {
+		const event = normalizeGitHubPayload("pull_request_review", "d-owner", {
+			action: "submitted",
+			repository: { full_name: "org/repo" },
+			sender: { login: "reviewer" },
+			pull_request: { number: 1071, user: { login: "bobi" } },
+			review: { id: 5253223366, state: "changes_requested" },
+		});
+		expect(event!.fields!.sender).toBe("reviewer");
+		expect(event!.fields!.pr_author).toBe("bobi");
 	});
 
 	it("omits comment_id when absent (plain issue)", () => {
@@ -1235,7 +1248,9 @@ describe("ingest tokens (#640)", () => {
 		});
 
 		it("rejects webhook-reserved sources", () => {
-			for (const s of ["github", "linear", "slack"]) {
+			for (const s of [
+				"github", "linear", "slack", "monitor", "agent", "system", "inbox",
+			]) {
 				expect(validateIngestTopic(`${s}/thing`)).not.toBeNull();
 			}
 		});
@@ -1910,11 +1925,12 @@ describe("handleRegisterDeployment", () => {
 		const raw = JSON.stringify(body);
 		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
 		expect(result.status).toBe(201);
-		const resp = result.body as { deployment_id: string; api_key: string; bubble_id: string; bubble_key: string };
+		const resp = result.body as { deployment_id: string; api_key: string; bubble_id: string; bubble_key: string; protocol: unknown };
 		expect(resp.deployment_id).toBeTruthy();
 		expect(resp.api_key).toMatch(/^moda_/);
 		expect(resp.bubble_id).toMatch(/^bub_/);
 		expect(resp.bubble_key).toMatch(/^bkey_/); // returned ONCE at mint
+		expect(resp.protocol).toEqual(EVENT_PROTOCOL); // legacy request is protocol v1
 		expect(store.bubbles.has(resp.bubble_id)).toBe(true);
 
 		expect(store.deployments.size).toBe(1);
@@ -1922,6 +1938,71 @@ describe("handleRegisterDeployment", () => {
 		expect(store.subscriptions.get(`${resp.bubble_id}:_bootstrap`)?.has(resp.deployment_id)).toBe(true);
 		expect(store.initCalls).toHaveLength(1);
 		expect(store.initCalls[0].deploymentId).toBe(resp.deployment_id);
+	});
+
+	it("accepts an overlapping protocol range and advertises the server range", async () => {
+		const store = createMockStorage();
+		const body = {
+			name: "compatible",
+			subscriptions: ["inbox/compatible"],
+			protocol: { minimum: 1, current: 2, ignored: true },
+		};
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+
+		expect(result.status).toBe(201);
+		expect((result.body as { protocol: unknown }).protocol).toEqual(EVENT_PROTOCOL);
+		expect(store.deployments.size).toBe(1);
+	});
+
+	it.each([
+		null,
+		"1",
+		{},
+		{ minimum: 1 },
+		{ minimum: true, current: 1 },
+		{ minimum: 2, current: 1 },
+		{ minimum: 1, current: Number.MAX_SAFE_INTEGER + 1 },
+	])("rejects malformed protocol metadata before minting: %j", async (protocol) => {
+		const store = createMockStorage();
+		const body = { name: "invalid", subscriptions: ["inbox/invalid"], protocol };
+		const raw = JSON.stringify(body);
+		const result = await handleRegisterDeployment(store, body, mintCtx("POST", "/deployments", raw));
+
+		expect(result.status).toBe(400);
+		expect((result.body as { error: string }).error).toBe("invalid_protocol");
+		expect(store.bubbles.size).toBe(0);
+		expect(store.deployments.size).toBe(0);
+		expect(store.subscriptions.size).toBe(0);
+	});
+
+	it("rejects a non-overlapping protocol before replacing an existing deployment", async () => {
+		const store = createMockStorage();
+		const bubble = seedBubble(store);
+		const prior: DeploymentRecord = {
+			id: "prior", name: "worker", api_key: "key", bubble_id: bubble.id,
+			subscriptions: ["inbox/worker"],
+		};
+		store.deployments.set(prior.id, prior);
+		store.apiKeyIndex.set(prior.api_key, prior.id);
+		store.subscriptions.set(`${bubble.id}:inbox/worker`, new Set([prior.id]));
+		const body = {
+			name: "worker",
+			subscriptions: ["inbox/worker"],
+			protocol: { minimum: 2, current: 2 },
+		};
+		const raw = JSON.stringify(body);
+		const ctx = await signCtx(bubble, "POST", "/deployments", raw);
+		const result = await handleRegisterDeployment(store, body, ctx);
+
+		expect(result.status).toBe(426);
+		expect(result.body).toMatchObject({
+			error: "incompatible_protocol",
+			protocol: EVENT_PROTOCOL,
+		});
+		expect(store.deployments.get(prior.id)).toEqual(prior);
+		expect(store.deployments.size).toBe(1);
+		expect(store.subscriptions.get(`${bubble.id}:inbox/worker`)).toEqual(new Set([prior.id]));
 	});
 
 	it("indexes a granted global topic on JOIN; hard-rejects an ungranted one (#488)", async () => {
@@ -2130,10 +2211,41 @@ describe("handleUpdateSubscriptions", () => {
 			add: ["linear:PROJ"],
 		});
 		expect(result.status).toBe(200);
-		const body = result.body as { subscriptions: string[]; added: number };
+		const body = result.body as { subscriptions: string[]; added: number; protocol: unknown };
 		expect(body.added).toBe(1);
+		expect(body.protocol).toEqual(EVENT_PROTOCOL); // missing request metadata is legacy v1
 		expect(body.subscriptions).toContain("github:org/repo");
 		expect(body.subscriptions).toContain("linear:PROJ");
+	});
+
+	it.each([
+		["invalid", { minimum: 1 }, 400, "invalid_protocol"],
+		["incompatible", { minimum: 2, current: 2 }, 426, "incompatible_protocol"],
+	] as const)("rejects %s protocol metadata before changing subscriptions", async (
+		_name,
+		protocol,
+		status,
+		error,
+	) => {
+		const store = createMockStorage();
+		const dep: DeploymentRecord = {
+			id: "d1", name: "test", api_key: "key1", bubble_id: "bub_test",
+			subscriptions: ["inbox/old"],
+		};
+		store.deployments.set("d1", dep);
+		store.apiKeyIndex.set("key1", "d1");
+		store.subscriptions.set("bub_test:inbox/old", new Set(["d1"]));
+
+		const result = await handleUpdateSubscriptions(store, "d1", "key1", {
+			replace: ["inbox/new"],
+			protocol,
+		});
+
+		expect(result.status).toBe(status);
+		expect(result.body).toMatchObject({ error, protocol: EVENT_PROTOCOL });
+		expect(store.deployments.get("d1")?.subscriptions).toEqual(["inbox/old"]);
+		expect(store.subscriptions.get("bub_test:inbox/old")).toEqual(new Set(["d1"]));
+		expect(store.subscriptions.has("bub_test:inbox/new")).toBe(false);
 	});
 
 	it("namespaces a non-global added subscription to the deployment's bubble", async () => {

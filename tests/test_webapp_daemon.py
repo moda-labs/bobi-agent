@@ -63,6 +63,28 @@ class TestLifecycle:
         st = daemon.stop()
         assert st.running is False
 
+    def test_start_persists_token_before_spawning_child(self, home, monkeypatch):
+        seen = {}
+
+        class Child:
+            pid = 1234
+
+            def poll(self):
+                return None
+
+        def fake_popen(*args, **kwargs):
+            seen["token"] = (home / "webapp" / "app.token").read_text()
+            return Child()
+
+        monkeypatch.setattr(daemon.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(daemon, "_ping", lambda port, token, timeout=1.0: True)
+        (home / "webapp").mkdir(parents=True)
+        (home / "webapp" / "app.port").write_text("1234")
+
+        daemon.start(open_browser=False)
+
+        assert seen["token"] == daemon.ensure_token()
+
 
 class TestStopIdentity:
     """D037 — a stale pidfile plus pid reuse made `bobi app stop` a weapon.

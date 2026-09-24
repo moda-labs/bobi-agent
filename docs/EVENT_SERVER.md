@@ -87,6 +87,10 @@ CI builds a wheel on a newer Node major and requires its shipped bundle to be by
 Release builds remain pinned to Node 20 for provenance, not because newer majors are unsupported.
 It never invokes npm, installs dependencies, builds JavaScript, or writes inside the installed package.
 
+Downstream container images must not rebuild or overlay the event server inside `site-packages/bobi/`.
+The wheel already ships the runnable bundle, so a `npm ci && npm run build:local` stage there is redundant, and an npm command that re-resolves the dependency graph (`npm install`, `npm dedupe`, `npm audit fix`) rewrites the shipped `package-lock.json` because the declared `worker` workspace is deliberately not distributed.
+Build a standalone server from a git checkout instead, per [SELF_HOSTED_EVENT_SERVER.md](SELF_HOSTED_EVENT_SERVER.md).
+
 A writable source checkout uses the same bundle contract with content hashes across manifests, lockfile, TypeScript configuration, root sources, and workspace sources.
 A fresh source bundle starts directly.
 A stale source bundle validates the ignored installed dependency stamp, uses exact `npm ci --no-audit --no-fund` only when the locked tree needs repair, and runs the single `npm run build:local` command.
@@ -114,6 +118,51 @@ The inbox completion callback advances the cursor (`cursor.json`) only after the
 session finishes a successful model turn. A transport ping alone can't
 prove a hibernated Cloudflare socket is still being fed, so the client also runs an
 app-level heartbeat and force-reconnects + re-subscribes if it goes "deaf".
+
+### Client/server protocol compatibility
+
+The deployment handshake has its own integer protocol version, independent of
+the Bobi package version and of the `NormalizedEvent.v` envelope field. Clients
+advertise the inclusive range they support on fresh registration and
+subscription sync:
+
+```json
+{"protocol":{"current":1,"minimum":1}}
+```
+
+`current` is the highest supported event protocol and `minimum` is the oldest.
+The server returns its range in every successful `POST /deployments` and
+`PUT /deployments/{id}/subscriptions` response, and exposes the same object at
+`GET /health` under `protocol`. Unknown fields are ignored so the object remains
+additive.
+
+A missing `protocol` field means legacy protocol v1. This rule applies in both
+directions: a current server accepts an older client request without the field,
+and a current client accepts an older server response without it. Explicit
+ranges are compatible when they overlap:
+
+```text
+client.current >= server.minimum AND server.current >= client.minimum
+```
+
+Malformed metadata returns HTTP 400 with `error: "invalid_protocol"`.
+Non-overlapping ranges return HTTP 426 with
+`error: "incompatible_protocol"`. Both failures include the server's range and
+occur before registration or subscription state changes. The Python client
+treats either as a terminal compatibility error: it does not retry registration
+or reinterpret the failure as stale deployment credentials. A mismatch found
+while re-subscribing after a deaf reconnect stops the event client and clears
+its live state instead of continuing on stale subscriptions.
+
+Breaking protocol revisions follow an expand/contract sequence:
+
+1. Ship client and server support for both the existing and new protocols.
+2. Roll clients while both directions overlap.
+3. Remove the previous protocol only in a later release.
+
+A release that introduces a new event protocol must support the immediately
+preceding protocol in both directions for at least one release. Additive fields
+that older peers can safely ignore do not require a protocol increment.
 
 ## The event envelope
 
@@ -195,7 +244,9 @@ signed body, never from client input**:
 - **GitHub** (`POST /webhooks/github`): `type = github.<event>`, key
   `github:<owner>/<repo>` from `repository.full_name`. Signature
   (`X-Hub-Signature-256`, HMAC-SHA256) is verified when `WEBHOOK_SECRET`
-  (local: `BOBI_ES_WEBHOOK_SECRET`) is set.
+  (local: `BOBI_ES_WEBHOOK_SECRET`) is set. Pull-request events expose
+  `fields.pr_author` from `pull_request.user.login`, separately from the
+  review sender, for ownership-aware dispatch.
 - **Slack** (`POST /webhooks/slack`): the pipeline's pre-verify stage handles the
   `url_verification` challenge and retry dedup (both must run before the signature
   check); then verifies the `v0=` signature within a ±300s window, with the signing
@@ -307,6 +358,7 @@ prefixed by the subscriber's bubble id for tenant isolation (see Security).
 | `system/brain.auth.failed` | a brain account requires operator re-authentication; deduped until recovery | |
 | `system/brain.credits.exhausted` | a brain account exhausted credits/quota; deduped until recovery | |
 | `system/brain.recovered` | a successful turn cleared a persisted brain availability incident | |
+| `agent/auto_dispatch.failed` | a matched workflow launch failed; includes workflow, source event, replay key, and bounded error detail | |
 
 `github:`, `linear:`, `slack:`, `whatsapp:`, and `discord:` are **global** topics (cross-bubble, gated by
 resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
@@ -497,8 +549,10 @@ Properties:
   `webhook_bad_signature` on `/health`; 413/429 policy rejections do not
   pollute that counter.
 - **Topic shape.** `source/type` form from `[A-Za-z0-9_.-]` segments; the
-  `github`/`linear`/`slack` sources and `:`-style global keys are rejected at
-  mint, so an ingest token can never reach a provider or global topic.
+  `github`/`linear`/`slack` webhook sources and the internal `monitor`/`agent`/
+  `system`/`inbox` sources are rejected at mint, along with `:`-style global
+  keys. An ingest token can therefore never impersonate a provider or a
+  Bobi-owned event namespace.
 
 ### Proof-of-access: resource grants
 

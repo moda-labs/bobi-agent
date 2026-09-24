@@ -21,6 +21,7 @@ import {
 	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
+	EVENT_PROTOCOL,
 	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleIngestTokenCreate,
@@ -420,6 +421,7 @@ export default {
 			return Response.json({
 				status: "ok",
 				auth: "hmac",
+				protocol: EVENT_PROTOCOL,
 				release: {
 					version: env.BOBI_RELEASE_VERSION || "dev",
 					sha: env.BOBI_RELEASE_SHA || "dev",

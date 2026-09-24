@@ -154,6 +154,10 @@ def start(*, open_browser: bool = True) -> AppStatus:
             _open_browser(st.url)
         return st
 
+    # Mint the shared token before spawning the child. If both parent and
+    # child observe a missing file, they can otherwise mint different tokens;
+    # the child then rejects the parent's readiness probe forever.
+    token = ensure_token()
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     with open(_log_path(), "a") as lf:
@@ -166,7 +170,6 @@ def start(*, open_browser: bool = True) -> AppStatus:
         )
     _pid_path().write_text(str(proc.pid))
 
-    token = ensure_token()
     deadline = time.monotonic() + START_TIMEOUT
     while time.monotonic() < deadline:
         if proc.poll() is not None:

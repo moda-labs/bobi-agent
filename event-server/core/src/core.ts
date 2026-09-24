@@ -21,6 +21,67 @@ export interface NormalizedEvent {
 	bubble_id?: string;
 }
 
+export interface EventProtocolRange {
+	current: number;
+	minimum: number;
+}
+
+// Independent of package releases. Missing wire metadata is the legacy v1
+// range, which makes this additive for existing clients and servers.
+export const EVENT_PROTOCOL: Readonly<EventProtocolRange> = Object.freeze({
+	current: 1,
+	minimum: 1,
+});
+
+function checkEventProtocol(body: Record<string, unknown>): HandlerResult | null {
+	if (!("protocol" in body)) return null;
+
+	const value = body.protocol;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return invalidEventProtocol();
+	}
+	const range = value as Record<string, unknown>;
+	const minimum = range.minimum;
+	const current = range.current;
+	if (
+		typeof minimum !== "number"
+		|| typeof current !== "number"
+		|| !Number.isSafeInteger(minimum)
+		|| !Number.isSafeInteger(current)
+		|| minimum < 1
+		|| current < 1
+		|| minimum > current
+	) {
+		return invalidEventProtocol();
+	}
+
+	if (
+		current < EVENT_PROTOCOL.minimum
+		|| EVENT_PROTOCOL.current < minimum
+	) {
+		return {
+			status: 426,
+			body: {
+				error: "incompatible_protocol",
+				detail: `event protocol ranges do not overlap (client ${minimum}..${current}; server ${EVENT_PROTOCOL.minimum}..${EVENT_PROTOCOL.current}); upgrade or downgrade Bobi or the event server`,
+				protocol: EVENT_PROTOCOL,
+			},
+		};
+	}
+	return null;
+}
+
+function invalidEventProtocol(): HandlerResult {
+	return {
+		status: 400,
+		body: {
+			error: "invalid_protocol",
+			detail: "protocol.minimum and protocol.current must be positive integers with minimum <= current",
+			protocol: EVENT_PROTOCOL,
+		},
+	};
+}
+
 /**
  * A null `event` IS the skip signal (Q101). There was a separate `skip:
  * boolean` alongside it, but every return site paired skip:true with
@@ -1350,6 +1411,8 @@ export async function handleRegisterDeployment(
 	let bubble: BubbleRecord;
 	const minting = !hasBubbleSignature(ctx);
 	if (minting) {
+		const protocolError = checkEventProtocol(body);
+		if (protocolError) return protocolError;
 		bubble = {
 			id: randomToken("bub"),
 			key: randomToken("bkey"),
@@ -1359,6 +1422,8 @@ export async function handleRegisterDeployment(
 	} else {
 		const authed = await authenticateBubble(storage, ctx);
 		if (!authed) return { status: 403, body: { error: "forbidden" } };
+		const protocolError = checkEventProtocol(body);
+		if (protocolError) return protocolError;
 		bubble = authed;
 	}
 
@@ -1409,6 +1474,7 @@ export async function handleRegisterDeployment(
 		deployment_id: deploymentId,
 		api_key: apiKey,
 		bubble_id: bubble.id,
+		protocol: EVENT_PROTOCOL,
 	};
 	// The bubble key transits exactly once, at mint, over TLS. Never on join.
 	if (minting) resp.bubble_key = bubble.key;
@@ -1424,6 +1490,8 @@ export async function handleUpdateSubscriptions(
 ): Promise<HandlerResult> {
 	const deployment = await authenticateDeployment(storage, apiKey, deploymentId);
 	if (!deployment) return { status: 403, body: { error: "unauthorized" } };
+	const protocolError = checkEventProtocol(body);
+	if (protocolError) return protocolError;
 
 	const replaceSubs = body.replace as string[] | undefined;
 	const addSubs = body.add as string[] | undefined;
@@ -1466,7 +1534,10 @@ export async function handleUpdateSubscriptions(
 		}
 		deployment.subscriptions = desired;
 		await storage.putDeployment(deployment);
-		return { status: 200, body: { subscriptions: deployment.subscriptions, added, removed } };
+		return {
+			status: 200,
+			body: { subscriptions: deployment.subscriptions, added, removed, protocol: EVENT_PROTOCOL },
+		};
 	}
 
 	let added = 0;
@@ -1480,7 +1551,10 @@ export async function handleUpdateSubscriptions(
 
 	await storage.putDeployment(deployment);
 
-	return { status: 200, body: { subscriptions: deployment.subscriptions, added } };
+	return {
+		status: 200,
+		body: { subscriptions: deployment.subscriptions, added, protocol: EVENT_PROTOCOL },
+	};
 }
 
 export async function handleDeregisterDeployment(
@@ -1537,11 +1611,13 @@ export async function handleTopicEvent(
 // An ingest topic in the token store: `source/type` form like a CLI publish
 // topic (e.g. "alert/firing"), from a charset that never URL-encodes so the
 // wire path and the stored binding compare byte-for-byte. The first segment
-// must not impersonate a webhook provider, and the `:` exclusion structurally
-// rules out every global (github:/linear:/slack:) routing key.
+// must not impersonate a webhook provider or Bobi-owned namespace, and the
+// `:` exclusion structurally rules out every global routing key.
 const INGEST_TOPIC_SEGMENT_RE = /^[A-Za-z0-9_.-]+$/;
 const INGEST_TOPIC_MAX_LENGTH = 200;
-const INGEST_RESERVED_SOURCES = new Set(["github", "linear", "slack"]);
+const INGEST_RESERVED_SOURCES = new Set([
+	"github", "linear", "slack", "monitor", "agent", "system", "inbox",
+]);
 
 export function validateIngestTopic(topic: string): string | null {
 	if (!topic || topic.length > INGEST_TOPIC_MAX_LENGTH) {
@@ -1555,7 +1631,7 @@ export function validateIngestTopic(topic: string): string | null {
 		return "topic segments must be non-empty [A-Za-z0-9_.-]";
 	}
 	if (INGEST_RESERVED_SOURCES.has(segments[0])) {
-		return "github, linear, and slack sources are reserved for webhooks";
+		return "github, linear, slack, monitor, agent, system, and inbox sources are reserved for internal or webhook events";
 	}
 	return null;
 }

@@ -688,8 +688,20 @@ async def _run_workflow_async(
                 return candidate
         return None
 
+    def _step_header(step: StepDef) -> str:
+        """Frame each model turn with the workflow's current step."""
+        steps = ", ".join(
+            f"[{candidate.name}]" if candidate is step else candidate.name
+            for candidate in workflow.steps
+        )
+        return (
+            f"Workflow `{workflow.name}` steps: {steps} — you are on "
+            f"[{step.name}]. Do only this step's instruction; routing may "
+            "skip or repeat steps.\n\n"
+        )
+
     def _context_prefix() -> str:
-        """The run's context as a labelled block prepended to a step prompt.
+        """The run's background as a labelled block before a step prompt.
 
         This is the ONLY delivery of the launch task and persisted scopes
         (#1016): it rides the first step prompt of a fresh transcript instead
@@ -703,9 +715,9 @@ async def _run_workflow_async(
         }
         context_yaml = yaml.safe_dump(scopes, sort_keys=True).strip()
         return (
-            f"Workflow `{workflow.name}` context for issue #{run_key} — the "
-            "original input and prior handoffs, as reference for the "
-            "instruction that follows:\n\n"
+            f"Workflow `{workflow.name}` background for run `{run_key}` — "
+            "the launch input and prior handoffs. The step instruction below "
+            "is what you do now; if it restates the task, do it.\n\n"
             "```yaml\n"
             f"{context_yaml}\n"
             "```\n\n"
@@ -1186,6 +1198,7 @@ async def _run_workflow_async(
             })
 
             prompt = _build_step_prompt(step, ctx, session_name, step.name)
+            prompt = _step_header(step) + prompt
             if context_pending:
                 prompt = _context_prefix() + prompt
                 context_pending = False

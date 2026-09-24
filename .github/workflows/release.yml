@@ -188,7 +188,7 @@ jobs:
           {
             echo "## Release pins"
             echo
-            echo "Dispatch \`release-image.yml\` with these EXACT values:"
+            echo "Create an image candidate with these EXACT values (final tags await fleet proof):"
             echo
             echo '```'
             echo "gh workflow run release-image.yml --ref main \\"

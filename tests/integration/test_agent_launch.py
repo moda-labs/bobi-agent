@@ -9,8 +9,14 @@ the Claude leg exercises a real subagent locally - the same stub the private
 sidecar e2e uses.
 """
 
+import concurrent.futures
+import contextlib
 import json
 import os
+import signal
+import subprocess
+import sys
+import threading
 import time
 
 import pytest
@@ -172,6 +178,88 @@ class TestUnkeyedLaunchDedup:
         assert "subagents cancel" in output, output
         assert "Traceback" not in output, output
 
+    def test_two_concurrent_processes_on_one_task_admit_exactly_one(
+        self, stub_bobi_env, stub_cli_run, stub_clean_session
+    ):
+        """The cross-process race (#875 / MOD-303), driven for real.
+
+        The sibling above pins the first run and then launches the second, so
+        it proves the guard fires but not that check-and-register is *atomic*
+        across processes - the two launches never overlap inside admission.
+        Here they do: two `bobi ... subagents launch` processes on a
+        byte-identical un-keyed task, released together off a barrier so both
+        are inside `launch_agent`'s admission at once.
+
+        Before #1052 `_LAUNCH_ADMISSION_LOCK` was a process-local
+        `threading.Lock`, so both processes could read "no entry" and both
+        `register()`, leaving one live agent untracked. The fix serializes the
+        decision on `workflow.state.ledger_lock()` - a cross-process file lock -
+        and re-checks + registers in one held section. The invariant: the
+        sorted return codes are exactly ``[0, 1]``, the winner reports the
+        started agent, and the loser is refused as a duplicate with no
+        traceback (a traceback reads as a transient crash and invites a retry,
+        which is the launch storm the guard exists to stop).
+        """
+        cli_run = stub_cli_run
+        task = self._task("concurrent")
+        name = self._derived_session_name(stub_bobi_env, task)
+        stub_clean_session(name)
+
+        # Release both subprocesses at the same instant so their admission
+        # windows genuinely overlap - otherwise the first can finish before the
+        # second starts and the race is never exercised.
+        gate = threading.Barrier(2)
+
+        def _launch():
+            gate.wait(timeout=30)
+            return cli_run(
+                "subagents", "launch",
+                "-w", "adhoc", "--role", self.ROLE, "--task", task,
+                timeout=LAUNCH_TIMEOUT_S,
+            )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = (pool.submit(_launch), pool.submit(_launch))
+            results = [first.result(), second.result()]
+
+        codes = sorted(r.returncode for r in results)
+        detail = "\n".join(
+            f"[{i}] rc={r.returncode}\n stdout={r.stdout!r}\n stderr={r.stderr!r}"
+            for i, r in enumerate(results)
+        )
+        assert codes == [0, 1], (
+            "two concurrent un-keyed launches on one task were not "
+            f"serialized across processes - expected exactly one to win:\n{detail}"
+        )
+
+        winner = next(r for r in results if r.returncode == 0)
+        loser = next(r for r in results if r.returncode == 1)
+
+        assert f"Agent started: {name}" in winner.stdout, winner.stdout
+        # The winning launch is genuinely the un-keyed derived-key path, which
+        # is what makes admission load-bearing here.
+        assert "derived" in winner.stderr, winner.stderr
+
+        loser_output = loser.stdout + loser.stderr
+        assert "already active" in loser_output, loser_output
+        assert "--id-random" in loser_output, loser_output
+        assert "subagents cancel" in loser_output, loser_output
+        assert "Traceback" not in loser_output, loser_output
+
+        # Settle the winning detached run so its background process finishes
+        # writing before fixture teardown deletes the session directory (prevents
+        # the [Errno 39] Directory not empty rmtree race on Linux).
+        from bobi.sdk import get_registry
+        registry = get_registry()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            entry = registry.get(name)
+            if entry and entry.status not in ("starting", "running", "idle"):
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail(f"winning run never settled: {registry.get(name)}")
+
     def test_id_random_opts_back_into_parallel_fan_out(
         self, stub_bobi_env, stub_cli_run, stub_clean_session
     ):
@@ -197,6 +285,129 @@ class TestUnkeyedLaunchDedup:
     # concurrency semaphore rather than dedup and fails on a loaded box for a
     # reason unrelated to what it claims. It is pinned deterministically at
     # tests/test_subagent.py::TestLaunchAgentUnkeyedDedup instead.
+
+
+@pytest.mark.timeout(120)
+class TestSessionCleanupReapsBeforeRemoving:
+    """The suite's own teardown must not race a live agent.
+
+    ``_drop_session`` used to ``rmtree`` a session directory milliseconds after
+    a detached launch returned, while the agent was still writing into it:
+    ``OSError: [Errno 39] Directory not empty``, on roughly 3% of CI runs and
+    twice red on main this month. The claim is about the PROCESS, so this
+    asserts the group is gone rather than looping a launch until a flake stops
+    reproducing.
+    """
+
+    # A stand-in for a detached agent, with the launch path's topology.
+    # `launcher` starts `leader` in its own session (as `_launch_detached`
+    # does) and exits, so the leader is reparented exactly as a real agent is
+    # once the `bobi` CLI returns, and is never this process's child. `leader`
+    # then starts a child of its own, as an agent starts its node processes.
+    # Both write into the session directory continuously, so a teardown that
+    # removes without reaping meets the same ENOTEMPTY CI did.
+    STUB_AGENT = """\
+import os
+import subprocess
+import sys
+import time
+
+session_dir, mode = sys.argv[1], sys.argv[2]
+if mode == "launcher":
+    subprocess.Popen([sys.executable, __file__, session_dir, "leader"],
+                     start_new_session=True)
+    raise SystemExit(0)
+if mode == "leader":
+    subprocess.Popen([sys.executable, __file__, session_dir, "child"])
+probe = os.path.join(session_dir, "%s-%d.probe" % (mode, os.getpid()))
+while True:
+    with open(probe, "w") as handle:
+        handle.write("x")
+    time.sleep(0.005)
+"""
+
+    @staticmethod
+    def _await_writers(session_dir, timeout=30.0):
+        """Block until leader AND child are both writing into *session_dir*.
+
+        Non-vacuity gate: a teardown that reaps nothing proves nothing unless
+        there was something live to reap.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            found = {}
+            for probe in session_dir.glob("*.probe"):
+                mode, _, pid = probe.stem.rpartition("-")
+                found[mode] = int(pid)
+            if {"leader", "child"} <= found.keys():
+                return found
+            time.sleep(0.05)
+        raise AssertionError(
+            f"stub agent never wrote into {session_dir}: "
+            f"{sorted(p.name for p in session_dir.iterdir())}"
+        )
+
+    def test_drop_session_reaps_the_group_before_removing_the_directory(
+        self, stub_bobi_env, tmp_path
+    ):
+        from bobi.sdk import SessionEntry, get_registry
+
+        from .conftest import _drop_session
+
+        registry = get_registry()
+        name = "wf-adhoc-test-repo-reap-probe"
+        registry.register(SessionEntry(name=name, role="engineer",
+                                       status="running"))
+        session_dir = registry.session_dir(name)
+
+        script = tmp_path / "stub_agent.py"
+        script.write_text(self.STUB_AGENT)
+        subprocess.run(
+            [sys.executable, str(script), str(session_dir), "launcher"],
+            check=True, timeout=30,
+        )
+        writers = self._await_writers(session_dir)
+        registry.update(name, pid=writers["leader"])
+
+        try:
+            _drop_session(name)
+        finally:
+            # Never leave the stand-in spinning, even on a failed assertion.
+            with contextlib.suppress(OSError):
+                os.killpg(writers["leader"], signal.SIGKILL)
+
+        # The load-bearing assertion: by the time _drop_session returns, the
+        # whole group is gone - leader and its child, not just the pid the
+        # registry knew about. Signal 0 to an empty group is ESRCH.
+        with pytest.raises(ProcessLookupError):
+            os.killpg(writers["leader"], 0)
+        assert not session_dir.exists(), (
+            "the session directory survived teardown: "
+            f"{sorted(p.name for p in session_dir.iterdir())}"
+        )
+
+    def test_reaping_never_signals_the_process_that_asked_for_it(self):
+        """The reaper must not take the suite down with the session it drops.
+
+        `_drop_session` reaps whatever pid the registry recorded, and the
+        in-process execution path records the RUNNING process's pid
+        (`bobi/subagent.py`: `registry.update(session_name, pid=os.getpid())`).
+        Dropping such a session from inside that process hands the reaper its
+        own pid, and under pytest that is the runner: an unguarded `killpg`
+        SIGTERMs the entire run, which dies mid-file with no failure report at
+        all and reads as an infrastructure flake rather than a test defect.
+
+        Reaching the assertion IS the assertion - an unguarded reaper never
+        gets here, because it has already signalled this process.
+        """
+        from .conftest import _reap_process_group
+
+        _reap_process_group(os.getpid())
+        _reap_process_group(os.getpgid(0))
+
+        # Signal 0 raises once a group is empty, so this pins that the reaper
+        # left our own group intact rather than merely failing to reach us.
+        os.killpg(os.getpgid(0), 0)
 
 
 @pytest.mark.timeout(240)

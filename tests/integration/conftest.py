@@ -6,6 +6,7 @@ real ~/.bobi directory or any production state.
 
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -422,18 +423,80 @@ def dual_brain_cli_run(dual_brain_env):
     return _make_cli_run(dual_brain_env)
 
 
+def _reap_process_group(pid: int, grace: float = 5.0) -> None:
+    """Terminate the process group led by *pid*, then WAIT for it to empty.
+
+    A launch is detached with ``start_new_session=True``
+    (``bobi/subagent.py::_launch_detached``), so the agent leads its own
+    process group and ``killpg`` takes its node children with it. The wait is
+    the load-bearing part, and it is why ``cancel_agent`` is not enough here:
+    that SIGTERMs and returns immediately, leaving the agent free to keep
+    writing while the caller removes its directory.
+
+    Bounded and best effort. SIGKILL after the grace period, and return
+    regardless once it expires: a process that took SIGKILL cannot execute
+    another instruction, which is the property the caller actually needs.
+
+    Never signals this process or the group it belongs to. The in-process
+    execution path records the RUNNING process's pid (``bobi/subagent.py``:
+    ``registry.update(session_name, pid=os.getpid())``), so a session dropped
+    from inside that process hands us our own pid - under pytest, the test
+    runner's. ``killpg`` on it SIGTERMs the whole suite, which dies mid-file
+    with no failure report and reads as infrastructure flake rather than a
+    defect. Such a pid is by construction not a detached agent, so there is
+    nothing here to reap; the rmtree retry in the caller absorbs whatever that
+    session is still writing.
+    """
+    if pid <= 0 or pid == os.getpid() or pid == os.getpgid(0):
+        return
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 2.0)):
+        try:
+            os.killpg(pid, sig)
+        except OSError:
+            return  # no such group: already gone, or not ours to signal
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pid, 0)
+            except OSError:
+                return
+            time.sleep(0.02)
+
+
 def _drop_session(name):
     """Retire *name* from whichever install this process is bound to.
+
+    Reap, THEN remove. A launch is detached by design, so the agent is still
+    writing into its session directory when the test that launched it cleans
+    up. Removing first raced that writer and raised ``OSError: [Errno 39]
+    Directory not empty`` on roughly 3% of CI runs; killing the writer removes
+    the race outright instead of narrowing it.
+
+    It does NOT close the suite's orphaned-node leak. The CI runner still
+    terminates the same 5 orphan ``node`` processes after this change, so those
+    come from launches that never reach this fixture, not from the sessions it
+    drops. Measured on the run for PR #1076, not assumed.
 
     The registry is resolved per call, never cached: the bound root is pinned
     per test, so a registry captured at fixture setup would outlive its env.
     """
     from bobi.sdk import get_registry
     registry = get_registry()
+    entry = registry.get(name)
+    _reap_process_group(entry.pid if entry else 0)
     registry.mark_done(name)
     session_dir = registry.session_dir(name)
     if session_dir.exists():
-        shutil.rmtree(session_dir)
+        # Retries close the rmtree race on Linux when a dying child process is
+        # still flushing its final buffers into session_dir.
+        for attempt in range(10):
+            try:
+                shutil.rmtree(session_dir)
+                break
+            except OSError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.1)
 
 
 def _clean_session():

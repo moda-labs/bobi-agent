@@ -189,9 +189,13 @@ class SlackAlerter(SupervisorObserver):
                               "exhaust_cycles": 0}
         cycles = int(self._incident.get("exhaust_cycles") or 0) + 1
         self._incident["exhaust_cycles"] = cycles
+        # Publish the recovery-resistant incident marker before making the
+        # synchronous alert request. The supervisor returns exit 70 immediately
+        # after this lifecycle edge; persistence must survive that boundary even
+        # when the alert transport is slow or fails.
+        self._save()
         if self._post(self._exhausted_message(fields, cycles)):
             self._exhaustion_posted = True
-        self._save()
 
     def _currently_healthy(self, state: SupervisorState) -> bool:
         """The manager is healthy RIGHT NOW, not merely 'was healthy this

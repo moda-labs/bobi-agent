@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import yaml
 
+from bobi.events.client import format_event_for_manager
 from bobi.events.reactor import EventReactor
 
 from tests.drain_utils import drain_one_batch
@@ -35,6 +36,13 @@ def _reactor_from_shipped_config():
     assert pr_comment_rules, "PR comment redelivery must have structural dedup"
     assert all(r.get("dedup_only") for r in pr_comment_rules), (
         "PR comments must only be deduped structurally, not auto-dispatched"
+    )
+    assert all(not r.get("workflow") for r in pr_comment_rules), (
+        "dedup-only rules must not name a workflow they never launch"
+    )
+    assert all(r.get("dedup_namespace") == "pr-comment-event-dedup"
+               for r in pr_comment_rules), (
+        "dedup-only rules must use an explicit dedup namespace"
     )
     return EventReactor.from_config(rules, cwd="/tmp/proj-411",
                                     self_login=BOT_LOGIN)
@@ -68,6 +76,75 @@ def _drain_sequentially(events, reactor):
         delivered.extend(drain_one_batch(
             [event], session="test-session-411", reactor=reactor))
     return delivered
+
+
+def _pr_review(*, pr_author):
+    fields = {
+        "action": "submitted",
+        "number": 1071,
+        "review_state": "changes_requested",
+        "review_id": 5253223366,
+        "sender": "reviewer",
+        "pr_author": pr_author,
+    }
+    if pr_author is None:
+        fields.pop("pr_author")
+    return {
+        "type": "github.pull_request_review",
+        "id": "review-delivery",
+        "source": "github",
+        "delivery": "bulk",
+        "topics": ["github:moda-labs/bobi-agent"],
+        "text": "[moda-labs/bobi-agent] submitted PR #1071",
+        "fields": fields,
+    }
+
+
+@patch("bobi.subagent.launch_agent")
+def test_human_pr_review_reaches_director_without_dispatch(mock_launch):
+    event = _pr_review(pr_author="cuongbytedev")
+    delivered = _drain_sequentially([event], _reactor_from_shipped_config())
+
+    assert len(delivered) == 1
+    assert "AUTO-DISPATCHED" not in delivered[0]
+    assert "pr_author: cuongbytedev" in format_event_for_manager(event)
+    mock_launch.assert_not_called()
+
+
+@patch("bobi.subagent.launch_agent")
+def test_unknown_pr_author_does_not_dispatch(mock_launch):
+    delivered = _drain_sequentially(
+        [_pr_review(pr_author=None)], _reactor_from_shipped_config())
+
+    assert len(delivered) == 1
+    assert "AUTO-DISPATCHED" not in delivered[0]
+    mock_launch.assert_not_called()
+
+
+@patch("bobi.subagent.launch_agent")
+def test_unresolved_fleet_login_does_not_dispatch(mock_launch):
+    cfg = yaml.safe_load(ENG_TEAM_AGENT_YAML.read_text())
+    reactor = EventReactor.from_config(
+        cfg["auto_dispatch"], cwd="/tmp/proj-398", self_login=None)
+    delivered = _drain_sequentially([_pr_review(pr_author=BOT_LOGIN)], reactor)
+
+    assert len(delivered) == 1
+    assert "AUTO-DISPATCHED" not in delivered[0]
+    mock_launch.assert_not_called()
+
+
+@patch("bobi.subagent.launch_agent")
+def test_fleet_pr_review_still_dispatches(mock_launch):
+    delivered = _drain_sequentially(
+        [_pr_review(pr_author=BOT_LOGIN)], _reactor_from_shipped_config())
+
+    assert len(delivered) == 1
+    assert "AUTO-DISPATCHED" in delivered[0]
+    deadline = time.monotonic() + 2
+    while mock_launch.call_count == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    mock_launch.assert_called_once()
+    assert mock_launch.call_args.kwargs["workflow_name"] == "pr-feedback"
 
 
 @patch("bobi.subagent.launch_agent")

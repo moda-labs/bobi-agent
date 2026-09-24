@@ -24,6 +24,7 @@ import {
 	matchWebhookSource,
 	handleRegisterDeployment,
 	handleUpdateSubscriptions,
+	EVENT_PROTOCOL,
 	handleDeregisterDeployment,
 	handleTopicEvent,
 	handleIngestTokenCreate,
@@ -447,6 +448,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 			mode: "local",
 			deployments: deployments.size,
 			auth: "hmac",
+			protocol: EVENT_PROTOCOL,
 			release: {
 				version: releaseVersion,
 				sha: releaseSha,
