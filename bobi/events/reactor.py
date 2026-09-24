@@ -10,6 +10,7 @@ Rules are defined in agent.yaml under ``auto_dispatch``.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -21,6 +22,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN = 1800  # 30 minutes
 _MAX_DEDUP_ENTRIES = 500
+_FINDING_DIGEST_LENGTH = 16
 
 
 @dataclass
@@ -52,7 +54,11 @@ class AutoDispatchRule:
 
     def matches(self, event: dict, self_login: str | None = None) -> bool:
         """Return True if the event matches this rule's type and field conditions."""
-        if event.get("type") != self.event:
+        event_type = event.get("type")
+        exact = event_type == self.event
+        source = event.get("source")
+        qualified = bool(source) and self.event == f"{source}/{event_type}"
+        if not (exact or qualified):
             return False
         fields = event.get("fields", {})
         if not self.match:
@@ -89,8 +95,9 @@ class AutoDispatchRule:
         cooldown treats a reviewer's follow-up comments as duplicates of the
         first and silently drops them (issue #326).
 
-        Prefer a STABLE per-comment / per-review identifier (``comment_id`` /
-        ``review_id``). It is distinct per comment — so genuinely new comments
+        Prefer a monitor finding identity when ``payload.finding_key`` is
+        present. Otherwise prefer a STABLE per-comment / per-review identifier
+        (``comment_id`` / ``review_id``). It is distinct per comment — so genuinely new comments
         each dispatch (#326) — yet identical across *every* delivery of that one
         comment, so a comment that reaches the reactor more than once (a webhook
         plus a monitor re-poll, each stamped with a different per-delivery id)
@@ -98,6 +105,13 @@ class AutoDispatchRule:
         (issue #411). Fall back to the per-delivery event id (distinct per
         delivery, stable across stream replay), then to the PR-level key.
         """
+        finding_identity = self.finding_identity(event)
+        if finding_identity:
+            source = event.get("source")
+            event_type = event.get("type", "unknown")
+            qualified_type = f"{source}/{event_type}" if source else event_type
+            return f"{self.workflow}:{qualified_type}:{finding_identity}"
+
         topics = event.get("topics", [])
         topic = topics[0] if topics else "unknown"
         fields = event.get("fields", {})
@@ -114,7 +128,7 @@ class AutoDispatchRule:
         return f"{base}:{event_id}" if event_id else base
 
     def run_key(self, event: dict) -> str | None:
-        """Deterministic launch key anchored on the stable comment/review id.
+        """Deterministic launch key anchored on finding/comment/review identity.
 
         The dedup dict (``dedup_key``) only guards a single reactor process; the
         observed #411 fan-out (#416/#417/#418) came from *concurrent* sessions,
@@ -129,6 +143,10 @@ class AutoDispatchRule:
         collapse two genuinely different reviews into one and drop the second
         (#326). The in-memory ``dedup_key`` still guards redelivery.
         """
+        finding_identity = self.finding_identity(event)
+        if finding_identity:
+            return f"finding-{finding_identity}"
+
         fields = event.get("fields", {})
         number = fields.get("number")
         if number is None:
@@ -140,6 +158,24 @@ class AutoDispatchRule:
         if review_id is not None:
             return f"{number}-review-{review_id}"
         return None
+
+    @staticmethod
+    def finding_identity(event: dict) -> str | None:
+        """Bounded identity for an exact monitor finding replay.
+
+        Finding text can be arbitrary model output, so it never becomes a raw
+        registry key, branch name, or worktree path. The monitor label keeps
+        the key recognizable while the digest preserves the exact identity.
+        """
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        finding_key = payload.get("finding_key")
+        if finding_key is None or str(finding_key) == "":
+            return None
+        monitor = str(payload.get("monitor") or event.get("source") or "")
+        raw = f"{monitor}\0{finding_key}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:_FINDING_DIGEST_LENGTH]
 
     def skip_reason(self, event: dict, self_login: str | None) -> str | None:
         """Return a reason to skip dispatch for this matched event, or None.
@@ -274,6 +310,11 @@ class EventReactor:
             "pr_number": number,
         }
         input_fields.update(fields)
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            for name in ("finding_key", "monitor"):
+                if name in payload:
+                    input_fields[name] = payload[name]
 
         task = self._build_task(rule, event_type, fields, number, repo,
                                 input_fields)
@@ -286,6 +327,7 @@ class EventReactor:
         # them and drop the second - the silent-drop #326 fixed. A random key
         # keeps the documented pre-#850 behavior for id-less events.
         random_key = run_key is None
+        finding_derived = rule.finding_identity(event) is not None
 
         log.info("Auto-dispatching %s for %s", rule.workflow, key)
 
@@ -304,17 +346,48 @@ class EventReactor:
                     role=rule.role,
                     run_key=run_key,
                     random_key=random_key,
+                    finding_derived=finding_derived,
                     input_fields=input_fields,
                 )
             except RuntimeError as e:
                 # Session already active / cap timeout — the workflow is either
                 # already handling this PR or the slot never opened.
                 log.info("Auto-dispatch launch skipped: %s — %s", key, e)
-            except Exception:
+                self._publish_launch_failure(rule, event, run_key, e)
+            except Exception as e:
                 log.exception("Auto-dispatch failed for %s", key)
+                self._publish_launch_failure(rule, event, run_key, e)
 
         threading.Thread(
             target=_launch, name=f"dispatch-{key}", daemon=True).start()
+
+    def _publish_launch_failure(
+        self, rule: AutoDispatchRule, event: dict, run_key: str | None,
+        error: Exception,
+    ) -> None:
+        """Publish one best-effort alert without creating a failure loop."""
+        event_type = str(event.get("type", ""))
+        source = str(event.get("source", ""))
+        if event_type == "agent/auto_dispatch.failed" or (
+            source == "agent" and event_type == "auto_dispatch.failed"
+        ):
+            return
+
+        payload = event.get("payload")
+        finding_key = payload.get("finding_key") if isinstance(payload, dict) else None
+        detail = str(error).strip() or type(error).__name__
+        try:
+            from bobi.events.publish import post_event
+
+            post_event("agent/auto_dispatch.failed", {
+                "workflow": rule.workflow,
+                "event_type": event_type,
+                "finding_key": finding_key,
+                "run_key": run_key,
+                "error": detail[:500],
+            })
+        except Exception:
+            log.exception("Failed to publish auto-dispatch failure for %s", rule.workflow)
 
     @staticmethod
     def _build_task(rule: AutoDispatchRule, event_type: str, fields: dict,

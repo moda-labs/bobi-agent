@@ -106,9 +106,10 @@ goes on describing how to handle Slack messages.
 
 #### auto_dispatch: `event:` is a type, never a type + action
 
-`auto_dispatch` rules match the event **type** by exact equality, and the type
-is whatever the adapter emits (`docs/EVENT_SERVER.md` lists them per source).
-Anything narrower belongs in `match:`, against the event's fields:
+`auto_dispatch` rules first match the event **type** by exact equality. For
+source-qualified internal events, a rule may use `source/type`; it then matches
+only when both the event's `source` and `type` agree. Anything narrower belongs
+in `match:`, against the event's fields:
 
 ```yaml
 auto_dispatch:
@@ -129,9 +130,10 @@ The distinction is per source and there is no universal rule: GitHub emits
 Linear emits `linear.<type>.<action>` with the action *in* the type. A rule
 naming a type nothing emits fails silently — the deterministic dispatch it
 promises simply never happens and the work falls through to whatever the
-director LLM decides. Startup preflight (`bobi agent <name> start`) warns
-about the shapes it recognizes, but it fails open on sources it has not been
-taught, so it is a safety net rather than a guarantee.
+director LLM decides. Monitor dispatches expose `finding_key` and `monitor` as
+workflow inputs, use a bounded replay identity, and report launch failures as
+`agent/auto_dispatch.failed`. Startup preflight (`bobi agent <name> start`)
+warns about recognized shapes but fails open on unknown sources.
 
 Structural dedup rules that only prevent redeliveries from reaching the
 director must set `dedup_only: true` and use `dedup_namespace:`. They do not
