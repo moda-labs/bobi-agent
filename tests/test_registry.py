@@ -431,3 +431,19 @@ raise SystemExit(1)
         assert r.get("agent-42").status == "done"
         assert len(r.list_active()) == 0
         assert len(r.list_all()) == 1
+
+    def test_inbox_stats_update_does_not_advance_session_activity(
+        self, tmp_registry, monkeypatch
+    ):
+        tmp_registry.register(SessionEntry(
+            name="agent-42", status="idle", last_activity=123.0))
+        monkeypatch.setattr(sdk.time, "time", lambda: 1000.0)
+
+        tmp_registry.update_inbox_stats(
+            "agent-42", depth=3, oldest_age=25.0)
+
+        entry = tmp_registry.get("agent-42")
+        assert entry.last_activity == 123.0
+        assert entry.inbox_depth == 3
+        assert entry.inbox_oldest_age_seconds == 25.0
+        assert entry.inbox_oldest_enqueued_at == 975.0

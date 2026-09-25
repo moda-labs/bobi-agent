@@ -12,7 +12,10 @@ that topic (``Inbox.respond``).
 import os
 import queue
 import time
+import logging
 from unittest.mock import patch
+
+import pytest
 
 from bobi.inbox import (
     Inbox,
@@ -70,6 +73,67 @@ class TestInboxQueue:
         assert inbox.empty()
         inbox.close()
 
+    def test_depth_oldest_age_and_stats_callback(self, monkeypatch):
+        samples = []
+        inbox = Inbox("test-stats", stats_callback=lambda depth, age: samples.append(
+            (depth, age)))
+        msg = Message(id="1", sender="s", text="x")
+        inbox.push(msg)
+        monkeypatch.setattr("bobi.inbox.time.monotonic",
+                            lambda: msg.enqueued_at + 12.5)
+
+        assert inbox.depth() == 1
+        assert inbox.oldest_age() == pytest.approx(12.5)
+        assert samples[0][0] == 1
+
+        assert inbox.recv(timeout=1) is msg
+        assert inbox.depth() == 0
+        assert inbox.oldest_age() == 0.0
+        assert samples[-1] == (0, 0.0)
+        inbox.close()
+
+    def test_requeue_preserves_original_enqueue_time(self, monkeypatch):
+        inbox = Inbox("test-requeue")
+        msg = Message(id="1", sender="s", text="x")
+        inbox.push(msg)
+        original = msg.enqueued_at
+        inbox.recv(timeout=1)
+        monkeypatch.setattr("bobi.inbox.time.monotonic", lambda: original + 30.0)
+
+        inbox.push(msg, priority=True)
+
+        assert msg.enqueued_at == original
+        assert inbox.oldest_age() == pytest.approx(30.0)
+        inbox.close()
+
+    def test_oldest_age_warning_fires_without_another_push(
+        self, monkeypatch, caplog
+    ):
+        inbox = Inbox("test-aged-warning")
+        msg = Message(id="1", sender="s", text="x")
+        inbox.push(msg)
+        inbox._cancel_backlog_check()
+        monkeypatch.setattr("bobi.inbox.time.monotonic",
+                            lambda: msg.enqueued_at + 301.0)
+
+        with caplog.at_level(logging.WARNING, logger="bobi.inbox"):
+            inbox._run_backlog_check()
+
+        assert "depth=1 oldest_age=301.0s" in caplog.text
+        inbox.close()
+
+    def test_depth_warning_is_rate_limited(self, monkeypatch, caplog):
+        inbox = Inbox("test-depth-warning")
+        monkeypatch.setattr(inbox, "_schedule_backlog_check", lambda: None)
+
+        with caplog.at_level(logging.WARNING, logger="bobi.inbox"):
+            for i in range(17):
+                inbox.push(Message(id=str(i), sender="s", text="x"))
+
+        assert caplog.text.count("Inbox backlog for 'test-depth-warning'") == 1
+        assert "depth=16" in caplog.text
+        inbox.close()
+
 
 class TestChatPriority:
     """Chat messages jump queued bulk work; FIFO holds within each class (#688)."""
@@ -107,6 +171,15 @@ class TestLocalInboxRegistry:
 
     def test_get_unknown_returns_none(self):
         assert get_local_inbox("never-registered") is None
+
+    def test_unreadable_inbox_stays_registered(self):
+        inbox = Inbox("test-unreadable")
+        inbox.start()
+        inbox.mark_unreadable()
+
+        assert get_local_inbox("test-unreadable") is inbox
+        assert inbox.readable is False
+        inbox.close()
 
 
 class TestRespond:

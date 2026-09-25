@@ -51,10 +51,14 @@ class _CaptureInbox:
     def __init__(self):
         self.messages = []
         self.priorities = []
+        self.readable = True
 
     def push(self, msg, priority=False):
         self.messages.append(msg)
         self.priorities.append(priority)
+
+    def depth(self):
+        return len(self.messages)
 
 
 def _run_drain(batches):
@@ -87,6 +91,14 @@ def _chat(seq, text="chat message"):
 
 
 class TestAckAfterProcessing:
+    def test_external_event_retains_timestamp_until_consumption(self):
+        event = _bulk(5)
+        event["timestamp"] = "2026-08-21T19:58:47+00:00"
+
+        inbox, _ = _run_drain([[event]])
+
+        assert inbox.messages[0].event_timestamps == (event["timestamp"],)
+
     def test_no_ack_at_push_time(self):
         inbox, acks = _run_drain([[_bulk(5)]])
         assert len(inbox.messages) == 1
@@ -150,6 +162,25 @@ class TestAckAfterProcessing:
         assert inbox.messages[0].on_done is not None
         inbox.messages[0].on_done()
         assert acks == [31]
+
+    def test_unreadable_inbox_drops_without_ack_for_restart_replay(self):
+        inbox = _CaptureInbox()
+        inbox.readable = False
+        acks = []
+        register_local_inbox("ack-test", inbox)
+        try:
+            with patch("bobi.events.drain.time.sleep"):
+                try:
+                    drain_loop("ack-test", queue=_ScriptedQueue([[_bulk(5)]]),
+                               formatter=lambda e: e.get("text", ""),
+                               cursor_ack=acks.append)
+                except KeyboardInterrupt:
+                    pass
+        finally:
+            unregister_local_inbox("ack-test")
+
+        assert inbox.messages == []
+        assert acks == []
 
 
 class TestAckWatermark:
