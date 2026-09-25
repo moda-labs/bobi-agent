@@ -48,6 +48,9 @@ Bobi is an event-driven AI agent framework.
 - `docs/OTEL.md`: agent-authored OTLP telemetry (`bobi agent <name> otel`) -
   operator setup, the resource-attribute table, collector bring-up, and the
   write-only per-instance token requirement.
+- `docs/FINE_GRAINED_METRICS.md`: implementation and operations guide for the
+  planned session/turn/invocation/tool usage pipeline, schema, Admin/MCP
+  queries, performance gates, live smokes, and recovery.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.
