@@ -958,6 +958,38 @@ class TestRunWorkflow:
         assert all("PROMPT forced" in prompt for prompt in prompts), prompts
         assert all("PROMPT scorer" not in prompt for prompt in prompts)
 
+    def test_empty_role_runs_each_step_as_its_own_agent(self, monkeypatch):
+        """The role-less launch (auto-dispatch, and `subagents launch` with no
+        --role): every prompt step is framed by its own agent's prompt, the
+        first step's agent first - the counterpart of the forced-role pin
+        above."""
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        for role_name in ("pm", "engineer"):
+            role_md = paths.roles_dir() / role_name / "ROLE.md"
+            role_md.parent.mkdir(parents=True, exist_ok=True)
+            role_md.write_text(f"PROMPT {role_name}")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="draft", prompt="draft", agent="pm"),
+            StepDef(name="build", prompt="build", agent="engineer"),
+            StepDef(name="review", prompt="review", agent="pm"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", role="",
+        )
+
+        assert result is True
+        prompts = [c["system_prompt"]["append"] for c in calls]
+        assert len(prompts) == 3, prompts
+        acting = [("pm" if "PROMPT pm" in p else "engineer"
+                   if "PROMPT engineer" in p else "?") for p in prompts]
+        assert acting == ["pm", "engineer", "pm"]
+        # Each agent change is a fresh session at IDENTICAL dials - no step
+        # here moves model/effort/max_turns - never the previous agent's
+        # transcript resumed under a new prompt.
+        assert all(c["resume"] is None for c in calls[1:]), calls
+
     def test_model_change_resumes_natively_on_capable_brain(self, monkeypatch):
         """A brain with cross_model_resume continues the SAME session on the
         new model instead of fresh + YAML reinject (#642)."""

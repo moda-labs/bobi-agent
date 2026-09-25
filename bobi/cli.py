@@ -3254,7 +3254,11 @@ main.add_command(event_server_cmd)
 
 @subagents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
-@click.option("--role", required=True, help="Agent role (see 'bobi agent <name> roles list')")
+@click.option("--role", default="",
+              help="Agent role (see 'bobi agent <name> roles list'). Given, "
+                   "it runs EVERY step of the workflow. Omit it only for a "
+                   "workflow whose every prompt step names its own agent: - "
+                   "each step then runs as that agent.")
 @click.option("--id", "run_key", default=None,
               help="Explicit run key for correlation (e.g. an issue number). "
                    "Relaunching the same key resumes that run. Default: a key "
@@ -3310,12 +3314,18 @@ def subagents_launch(workflow, role, run_key, random_key, task, timeout, wait,
                      persistent, subscribe, model, effort, fresh):
     """Launch a sub-agent with a workflow and role.
 
-    Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
+    Every sub-agent runs a workflow. Use 'adhoc' for open-ended tasks.
     Use 'bobi agent <name> roles list' to see available roles.
+
+    --role pins every step of the workflow to that role. Omit it to run a
+    multi-role workflow (steps with different agent: values) as written:
+    each step runs as its own agent:. That is only allowed when every
+    prompt step names one; otherwise --role is required.
 
     Examples:
         bobi agent eng subagents launch -w issue-lifecycle --role engineer --id 42 --task "Fix moda-labs/bobi-agent#42"
         bobi agent eng subagents launch -w adhoc --role engineer --task "Why is CI failing?"
+        bobi agent eng subagents launch -w issue-lifecycle --id 42 --task "Fix moda-labs/bobi-agent#42"  # each step as its agent:
     """
     if subscribe:
         persistent = True
@@ -3347,6 +3357,52 @@ def _parse_requested_by(requested_by: str | None) -> dict:
         click.echo("--requested-by must be a JSON object", err=True)
         raise SystemExit(1)
     return parsed
+
+
+def _require_known_role(role: str, cwd: str, where: str = "") -> None:
+    """Exit with the available roles listed when *role* is not installed."""
+    from .prompts.resolver import validate_role, discover_roles
+    if validate_role(role, Path(cwd)):
+        return
+    available = discover_roles(Path(cwd))
+    names = ", ".join(r["name"] for r in available) if available else "(none)"
+    click.echo(f"Unknown role '{role}'{where}. Available: {names}", err=True)
+    raise SystemExit(1)
+
+
+def _require_step_roles(workflow: str, cwd: str, *, persistent: bool) -> None:
+    """Admit a launch with no --role only when the workflow names every role.
+
+    A launch role pins every step to it (the executor's ``role or
+    step.agent``), so the role-less launch is the only way to run a
+    multi-role workflow as written - the same ``role=""`` auto-dispatch
+    passes. Every prompt step must name its agent: an agent-less one would
+    run as whichever agent ran before it, or with no role prompt at all
+    when first. Each named role must be installed: an unknown one would
+    otherwise surface mid-run, after earlier steps already spent.
+    """
+    if persistent:
+        # A persistent session never runs the workflow's steps, so their
+        # agent: fields cannot supply its role - it would run role-less.
+        raise click.UsageError(
+            "--role is required with --persistent/--subscribe: a persistent "
+            "session does not run the workflow's steps, so their agent: "
+            "fields cannot supply its role")
+    from .workflow.triggers import find_installed_workflow
+    wf = find_installed_workflow(workflow)
+    if wf is None:
+        raise click.UsageError(
+            f"--role is required: workflow {workflow} was not found, so its "
+            f"steps' agent: roles cannot be read")
+    prompt_steps = [s for s in wf.steps if s.is_prompt_step]
+    agentless = [s.name for s in prompt_steps if not s.agent]
+    if agentless:
+        raise click.UsageError(
+            f"--role is required: workflow {workflow} has steps without an "
+            f"agent: ({', '.join(agentless)})")
+    for step in prompt_steps:
+        _require_known_role(step.agent, cwd,
+                            where=f" (workflow {workflow}, step '{step.name}')")
 
 
 def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
@@ -3383,17 +3439,18 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
                    "key already opts out of task-derived dedup)", err=True)
         raise SystemExit(1)
 
+    if not role:
+        # Before --as-check on purpose: omitting --role is allowed only where
+        # the workflow itself names every step's role, whatever other flags
+        # ride along.
+        _require_step_roles(workflow, cwd, persistent=persistent)
+
     if as_check:
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
         return
 
-    # --- Validate role ---
-    from .prompts.resolver import validate_role, discover_roles
-    if not validate_role(role, Path(cwd)):
-        available = discover_roles(Path(cwd))
-        names = ", ".join(r["name"] for r in available) if available else "(none)"
-        click.echo(f"Unknown role '{role}'. Available: {names}", err=True)
-        raise SystemExit(1)
+    if role:
+        _require_known_role(role, cwd)
 
     if wait:
         with _launch_refusal_is_readable(project_path):
