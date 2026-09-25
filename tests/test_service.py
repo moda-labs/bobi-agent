@@ -123,13 +123,24 @@ def test_caller_is_manager_descendant(
 
     (bobi_install.state_dir / "manager.pid").write_text("100")
     monkeypatch.setattr(
-        "subprocess.check_output",
-        lambda *args, **kwargs: "100 50\n200 100\n300 200\n400 1\n",
+        "bobi.service._process_parent_map",
+        lambda: {100: 50, 200: 100, 300: 200, 400: 1},
     )
 
     assert caller_is_manager_descendant(
         bobi_install.repo_path, caller_pid=caller_pid,
     ) is expected
+
+
+def test_process_parent_map_reads_linux_proc_stat(tmp_path):
+    from bobi.service import _process_parent_map
+
+    (tmp_path / "100").mkdir()
+    (tmp_path / "100" / "stat").write_text(
+        "100 (manager with spaces) S 50 0 0 0 0 0 0 0 0 0 0 0\n"
+    )
+
+    assert _process_parent_map(tmp_path) == {100: 50}
 
 
 def test_run_team_foreground_loads_runtime_dotenv(bobi_install, monkeypatch):

@@ -308,20 +308,7 @@ def caller_is_manager_descendant(
     if not manager_pid:
         return False
 
-    try:
-        output = subprocess.check_output(
-            ["ps", "-axo", "pid=,ppid="], text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-    parents: dict[int, int] = {}
-    for line in output.splitlines():
-        try:
-            pid_text, parent_text = line.split()
-            parents[int(pid_text)] = int(parent_text)
-        except ValueError:
-            continue
+    parents = _process_parent_map()
 
     current = caller_pid or os.getpid()
     seen: set[int] = set()
@@ -331,6 +318,38 @@ def caller_is_manager_descendant(
         seen.add(current)
         current = parents.get(current, 0)
     return False
+
+
+def _process_parent_map(proc_root: Path = Path("/proc")) -> dict[int, int]:
+    if proc_root.is_dir():
+        parents: dict[int, int] = {}
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+                fields = stat[stat.rfind(")") + 2:].split()
+                parents[int(entry.name)] = int(fields[1])
+            except (OSError, ValueError, IndexError):
+                continue
+        if parents:
+            return parents
+
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,ppid="], text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    parents = {}
+    for line in output.splitlines():
+        try:
+            pid_text, parent_text = line.split()
+            parents[int(pid_text)] = int(parent_text)
+        except ValueError:
+            continue
+    return parents
 
 
 def _wait_for_manager_entry(
