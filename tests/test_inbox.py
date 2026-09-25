@@ -83,7 +83,7 @@ class TestInboxQueue:
                             lambda: msg.enqueued_at + 12.5)
 
         assert inbox.depth() == 1
-        assert inbox.oldest_age() == 12.5
+        assert inbox.oldest_age() == pytest.approx(12.5)
         assert samples[0][0] == 1
 
         assert inbox.recv(timeout=1) is msg
