@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bobi-self-host-consumer
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bobi-self-host-consumer
+  template:
+    metadata:
+      labels:
+        app: bobi-self-host-consumer
+    spec:
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: bobi
+          image: ghcr.io/moda-labs/bobi:latest
+          imagePullPolicy: Always
+          env:
+            - name: BOBI_AGENT
+              value: self-host-consumer
+            - name: BOBI_TEAM
+              value: /opt/bobi-self-host-team
+            - name: BOBI_EVENT_SERVER
+              valueFrom:
+                configMapKeyRef:
+                  name: bobi-self-host-runtime
+                  key: event_server_url
+            - name: BOBI_FLEET
+              valueFrom:
+                configMapKeyRef:
+                  name: bobi-self-host-runtime
+                  key: fleet
+            - name: BOBI_INSTANCE
+              valueFrom:
+                configMapKeyRef:
+                  name: bobi-self-host-runtime
+                  key: instance
+            - name: BOBI_IMAGE
+              valueFrom:
+                configMapKeyRef:
+                  name: bobi-self-host-runtime
+                  key: image
+            - name: BOBI_BRAIN
+              value: stub
+            - name: BOBI_STUB_BRAIN
+              value: "1"
+            # The image validates API-key mode before the stub team is installed;
+            # this sentinel is never sent to a model.
+            - name: ANTHROPIC_API_KEY
+              value: stub-not-used
+            - name: BOBI_UI
+              value: "0"
+            - name: BOBI_HEALTH_BIND
+              value: 0.0.0.0
+            - name: BOBI_HEALTH_PORT
+              value: "8081"
+            - name: WATCHDOG_POLL_INTERVAL
+              value: "1"
+            - name: WATCHDOG_MIN_HEALTHY_UPTIME
+              value: "0"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: health
+              containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: state
+              mountPath: /data
+            - name: team
+              mountPath: /opt/bobi-self-host-team
+              readOnly: true
+      volumes:
+        - name: state
+          emptyDir: {}
+        - name: team
+          configMap:
+            name: bobi-self-host-team
+            items:
+              - key: agent.yaml
+                path: agent.yaml
+              - key: ROLE.md
+                path: roles/manager/ROLE.md

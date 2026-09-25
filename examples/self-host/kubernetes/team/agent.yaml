@@ -1,0 +1,6 @@
+version: "1.0.0"
+agent: self-host-consumer
+entry_point: manager
+brain:
+  kind: stub
+event_server: ${BOBI_EVENT_SERVER}
