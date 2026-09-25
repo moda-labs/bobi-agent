@@ -159,10 +159,17 @@ them for delegated work and workflow steps.
 bobi agent <name> subagents launch -w adhoc --role engineer --task "Fix CI"
 bobi agent <name> subagents launch -w adhoc --role engineer --wait --task "Fix CI"
 bobi agent <name> subagents launch -w adhoc --role monitor --as-check --task "Check prod"
+bobi agent <name> subagents launch -w issue-lifecycle --id 42 --task "Fix #42"
 bobi agent <name> subagents list
 bobi agent <name> subagents show <id>
 bobi agent <name> subagents cancel <id>
 ```
+
+`--role` pins every step of the workflow to that role. Omit it to run a
+multi-role workflow as written - each step as its own `agent:` - which is
+allowed only when every prompt step of the workflow names one (so `-w adhoc`
+normally still needs `--role`). A persistent launch (`--persistent` /
+`--subscribe`) always needs `--role`.
 
 ### Run keys and duplicate suppression
 
