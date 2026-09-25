@@ -928,6 +928,32 @@ Security and privacy:
 - Hash assignment keys with a deployment-specific salt.
 - Apply local retention to raw segments and normalized rows; return retention/coverage boundaries to callers.
 
+### Local operator commands
+
+These commands act on one installed agent's local metrics state. They are not
+Admin wire commands and do not require the fleet Worker:
+
+```text
+bobi agent <name> metrics status --json
+bobi agent <name> metrics reconcile [--turn-id <id>] --wait --json
+bobi agent <name> metrics rebuild --wait --json
+bobi agent <name> metrics prune --dry-run --json
+bobi agent <name> metrics prune --apply --json
+```
+
+- `status` reports producer, spool, collector, projection, reconciliation,
+  retention, backup, database, and query-executor health.
+- `reconcile` is idempotent and may scope work to one turn.
+- `rebuild` creates and validates a new read model from retained sources,
+  preserves the previous database for forensics, and atomically activates the
+  new file only after integrity and logical-checksum checks pass.
+- `prune --dry-run` reports the exact covered history and bytes that the active
+  policy would remove. `--apply` executes that same safe policy. The two flags
+  are mutually exclusive.
+- Direct SQL mutation, manual spool deletion, and `VACUUM` against an active
+  collector are unsupported because they bypass cursor, backup, and coverage
+  invariants.
+
 ## Part V: implementation roadmap and testing
 
 ### Phase 0.0 - close the implementation contract
