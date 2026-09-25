@@ -435,9 +435,9 @@ Work through these in order:
    bobi agent my-agent restart
    ```
 
-   Restart uses a detached worker, so it can complete when requested from
-   inside the runtime. Its latest record is stored at
-   `~/.bobi/agents/<name>/run/state/restart.log`.
+   Run `stop` and `restart` from a shell outside `my-agent`. Bobi refuses these
+   commands from inside the target runtime so the manager cannot terminate the
+   process responsible for completing or reporting the lifecycle operation.
 
 4. **Start fresh.** If a session is wedged, wipe it and start clean (your
    workspace files and credentials are kept):

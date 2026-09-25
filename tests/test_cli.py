@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1283,112 +1282,35 @@ class TestFindTranscript:
         assert find("worker") is None
 
 
-class TestRestartCommand:
-    def test_restart_delegates_without_stopping_in_caller(
-        self, bobi_install, monkeypatch,
-    ):
-        from bobi import service
+@pytest.mark.parametrize(
+    ("arguments", "expected_command"),
+    [
+        (["stop", "--force"], f"bobi agent {TEST_AGENT_NAME} stop --force"),
+        (["restart", "--fresh"], f"bobi agent {TEST_AGENT_NAME} restart --fresh"),
+    ],
+)
+def test_lifecycle_command_is_refused_inside_target_runtime(
+    bobi_install, monkeypatch, arguments, expected_command,
+):
+    from bobi import service
 
-        seen = {}
+    monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
+    monkeypatch.setattr(service, "caller_is_manager_descendant", lambda root: True)
+    monkeypatch.setattr(
+        service,
+        "stop_team",
+        lambda *args, **kwargs: pytest.fail("stop reached the manager signal path"),
+    )
+    monkeypatch.setattr(
+        service,
+        "spawn_team",
+        lambda *args, **kwargs: pytest.fail("restart reached the start path"),
+    )
 
-        def fake_restart(project_path, *, fresh=False, **kwargs):
-            seen["project_path"] = project_path
-            seen["fresh"] = fresh
-            return service.RestartResult(
-                pid=4242,
-                log_file=bobi_install.state_dir / "restart.log",
-                output="Restart worker finished.\n",
-            )
+    result = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, *arguments]
+    )
 
-        monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
-        monkeypatch.setattr(service, "restart_team", fake_restart)
-        monkeypatch.setattr(
-            service,
-            "stop_team",
-            lambda *args, **kwargs: pytest.fail("restart stopped in the caller"),
-        )
-
-        result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "restart"])
-
-        assert result.exit_code == 0, result.output
-        assert seen == {"project_path": bobi_install.repo_path, "fresh": False}
-        assert "Restart worker finished." in result.output
-
-    def test_restart_forwards_fresh(self, bobi_install, monkeypatch):
-        from bobi import service
-
-        seen = {}
-
-        def fake_restart(project_path, *, fresh=False, **kwargs):
-            seen["fresh"] = fresh
-            return service.RestartResult(
-                pid=4242,
-                log_file=bobi_install.state_dir / "restart.log",
-            )
-
-        monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
-        monkeypatch.setattr(service, "restart_team", fake_restart)
-
-        result = CliRunner().invoke(
-            main, ["agent", TEST_AGENT_NAME, "restart", "--fresh"]
-        )
-
-        assert result.exit_code == 0, result.output
-        assert seen["fresh"] is True
-
-    def test_restart_reports_worker_failure(self, bobi_install, monkeypatch):
-        from bobi import service
-
-        def fail_restart(project_path, **kwargs):
-            raise service.RestartFailed(
-                "restart failed (worker exit 1)",
-                bobi_install.state_dir / "restart.log",
-                "missing SLACK_BOT_TOKEN",
-            )
-
-        monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
-        monkeypatch.setattr(service, "restart_team", fail_restart)
-
-        result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "restart"])
-
-        assert result.exit_code == 1
-        assert "worker exit 1" in result.output
-        assert "missing SLACK_BOT_TOKEN" in result.output
-
-    def test_detached_worker_runs_stop_then_start(self, bobi_install, monkeypatch):
-        from bobi import service
-
-        calls = []
-        monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
-        monkeypatch.setattr(
-            service,
-            "stop_team",
-            lambda root, **kwargs: calls.append("stop")
-            or service.StopResult(pid=42, stopped=True),
-        )
-        monkeypatch.setattr(
-            service,
-            "spawn_team",
-            lambda root, **kwargs: calls.append(("start", kwargs["fresh"]))
-            or SimpleNamespace(
-                startup=SimpleNamespace(pid=43, log_file=Path("manager.log")),
-                validation=SimpleNamespace(ok=True, checks=[]),
-                image_rotated=False,
-            ),
-        )
-        monkeypatch.setattr(
-            service,
-            "restart_team",
-            lambda *args, **kwargs: pytest.fail("worker delegated recursively"),
-        )
-        monkeypatch.setattr("bobi.events.server.health", lambda url: None)
-        monkeypatch.setattr("bobi.cli._print_startup_info", lambda *args: None)
-
-        result = CliRunner().invoke(
-            main,
-            ["agent", TEST_AGENT_NAME, "restart", "--detached-worker", "--fresh"],
-        )
-
-        assert result.exit_code == 0, result.output
-        assert calls == ["stop", ("start", True)]
-        assert "Restart worker finished." in result.output
+    assert result.exit_code != 0
+    assert "cannot run from inside the target runtime" in result.output
+    assert expected_command in result.output

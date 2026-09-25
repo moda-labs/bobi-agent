@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -465,6 +466,20 @@ def _has_systemd_service() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _refuse_runtime_lifecycle(project_path: Path, command: list[str]) -> None:
+    from bobi.service import caller_is_manager_descendant
+
+    if not caller_is_manager_descendant(project_path):
+        return
+    rendered = shlex.join(
+        ["bobi", "agent", paths.agent_name_for_root(project_path), *command]
+    )
+    raise click.ClickException(
+        f"`{rendered}` cannot run from inside the target runtime.\n"
+        f"Run it from a shell outside the runtime:\n  {rendered}"
+    )
 
 
 def _systemctl(action: str) -> bool:
@@ -1108,6 +1123,10 @@ def stop(force):
         return
 
     project_path = _detect_project_root()
+    command = ["stop"]
+    if force:
+        command.append("--force")
+    _refuse_runtime_lifecycle(project_path, command)
     from bobi.service import stop_team
 
     result = stop_team(project_path, force=force)
@@ -1138,22 +1157,13 @@ def stop(force):
 
 @main.command()
 @click.option("--fresh", is_flag=True, help="Wipe manager session and start clean")
-@click.option("--detached-worker", is_flag=True, hidden=True)
-def restart(fresh, detached_worker):
+def restart(fresh):
     """Stop and restart the selected Bobi Agent.
 
     Usage:
         bobi agent eng restart
         bobi agent eng restart --fresh   # fresh manager session
     """
-    if detached_worker:
-        ctx = click.get_current_context()
-        click.echo(logs.stamped("INFO", f"Restart worker pid {os.getpid()} starting."))
-        ctx.invoke(stop)
-        ctx.invoke(start, fresh=fresh)
-        click.echo(logs.stamped("INFO", "Restart worker finished."))
-        return
-
     if _has_systemd_service():
         # Resolve before touching systemd so a missing installation fails
         # here, not after the service has already been restarted.
@@ -1178,16 +1188,15 @@ def restart(fresh, detached_worker):
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
 
-    from bobi.service import RestartFailed, restart_team
-
     project_path = _detect_project_root()
-    try:
-        result = restart_team(project_path, fresh=fresh)
-    except RestartFailed as exc:
-        click.echo(exc.report(), err=True)
-        raise SystemExit(1)
-    if result.output:
-        click.echo(result.output, nl=not result.output.endswith("\n"))
+    command = ["restart"]
+    if fresh:
+        command.append("--fresh")
+    _refuse_runtime_lifecycle(project_path, command)
+
+    ctx = click.get_current_context()
+    ctx.invoke(stop)
+    ctx.invoke(start, fresh=fresh)
 
 
 def _resolve_address(to: str | None) -> str | None:

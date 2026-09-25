@@ -8,6 +8,7 @@ the stub proves them deterministically in CI while the Claude leg still exercise
 a real manager locally. The same stub brain drives the private sidecar e2e.
 """
 
+import json
 import os
 import signal
 import subprocess
@@ -210,25 +211,15 @@ class TestManagerStartStop:
         _wait_for_exit_file(pid_file)
 
 
+@pytest.mark.parametrize("action", ["stop", "restart"])
 @pytest.mark.timeout(120)
-def test_restart_completes_when_caller_process_group_dies(
-    stub_bobi_env, stub_cli_run
+def test_lifecycle_from_manager_descendant_is_refused(
+    stub_bobi_env, stub_cli_run, action
 ):
     pid_file = stub_bobi_env.state_dir / "manager.pid"
-    restart_log = stub_bobi_env.state_dir / "restart.log"
-    caller = None
-    old_manager_paused = False
+    result_file = stub_bobi_env.state_dir / f"{action}-from-runtime.json"
+    manager = None
     try:
-        started = stub_cli_run("start", timeout=45)
-        assert started.returncode == 0, started.stderr
-        old_pid = _wait_for_pid(pid_file)
-
-        # Hold the old manager so the worker remains inside stop_team long
-        # enough for the test to inspect its process group deterministically.
-        os.kill(old_pid, signal.SIGSTOP)
-        old_manager_paused = True
-        restart_log.unlink(missing_ok=True)
-
         caller_env = {
             **os.environ,
             "BOBI_HOME": str(stub_bobi_env.home_dir),
@@ -236,14 +227,20 @@ def test_restart_completes_when_caller_process_group_dies(
             "BOBI_BRAIN": "stub",
             "BOBI_STUB_BRAIN": "1",
         }
-        caller = subprocess.Popen(
+        result_file.unlink(missing_ok=True)
+        manager = subprocess.Popen(
             [
+                sys.executable,
+                "-c",
+                _RUNTIME_CALLER_HARNESS,
+                str(pid_file),
+                str(result_file),
                 sys.executable,
                 "-m",
                 "bobi.cli",
                 "agent",
                 stub_bobi_env.agent_name,
-                "restart",
+                action,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -252,24 +249,20 @@ def test_restart_completes_when_caller_process_group_dies(
             env=caller_env,
             start_new_session=True,
         )
+        manager_pid = _wait_for_pid(pid_file)
+        result = _wait_for_json(result_file)
 
-        _kill_caller_group_after_worker_starts(caller, restart_log)
-        os.kill(old_pid, signal.SIGCONT)
-        old_manager_paused = False
-        new_pid = _wait_for_pid(pid_file, timeout=60, other_than=old_pid)
-        os.kill(new_pid, 0)
-
-        record = restart_log.read_text()
-        assert "Restart worker finished." in record
+        assert result["returncode"] != 0
+        assert "cannot run from inside the target runtime" in result["output"]
+        assert (
+            f"bobi agent {stub_bobi_env.agent_name} {action}" in result["output"]
+        )
+        assert int(pid_file.read_text().strip()) == manager_pid
+        os.kill(manager_pid, 0)
     finally:
-        if old_manager_paused:
-            try:
-                os.kill(old_pid, signal.SIGCONT)
-            except ProcessLookupError:
-                pass
-        if caller is not None and caller.poll() is None:
-            os.killpg(caller.pid, signal.SIGKILL)
-            caller.wait(timeout=10)
+        if manager is not None and manager.poll() is None:
+            os.killpg(manager.pid, signal.SIGKILL)
+            manager.wait(timeout=10)
         stub_cli_run("stop", timeout=30)
         _wait_for_exit_file(pid_file)
 
@@ -383,29 +376,43 @@ def _wait_for_pid(pid_file, timeout: float = 15, other_than: int = 0) -> int:
     raise TimeoutError(f"{pid_file} never held a live pid other than {other_than}")
 
 
-def _kill_caller_group_after_worker_starts(proc, restart_log,
-                                           timeout: float = 30) -> None:
+def _wait_for_json(path, timeout: float = 15) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            record = restart_log.read_text()
-        except OSError:
-            record = ""
-        marker = "Restart worker pid "
-        line = next((line for line in record.splitlines() if marker in line), "")
-        if line:
-            assert proc.poll() is None, "restart caller exited before group kill"
-            worker_pid = int(line.split(marker, 1)[1].split()[0])
-            assert os.getpgid(worker_pid) != os.getpgid(proc.pid), (
-                "restart worker stayed in caller process group"
-            )
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=10)
-            return
-        if proc.poll() is not None:
-            raise AssertionError("restart caller exited before worker started")
+            return json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
         time.sleep(0.05)
-    raise TimeoutError("detached restart worker never started")
+    raise TimeoutError(f"lifecycle caller did not record a result in {path}")
+
+
+_RUNTIME_CALLER_HARNESS = r"""
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+pid_file = Path(sys.argv[1])
+result_file = Path(sys.argv[2])
+command = sys.argv[3:]
+
+def terminate_runtime(_signum, _frame):
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+
+signal.signal(signal.SIGTERM, terminate_runtime)
+pid_file.write_text(str(os.getpid()))
+result = subprocess.run(command, capture_output=True, text=True)
+result_file.write_text(json.dumps({
+    "returncode": result.returncode,
+    "output": result.stdout + result.stderr,
+}))
+while True:
+    time.sleep(1)
+"""
 
 
 def _wait_for_exit(pid: int, timeout: float = 10):

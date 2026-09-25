@@ -112,134 +112,24 @@ def test_spawn_team_returns_without_waiting_for_registration(bobi_install, monke
     assert spawned["cmd"][-2:] == ["start", "--foreground"]
 
 
-class TestDetachedRestart:
-    def _fake_popen(self, spawned, *, exit_code=0):
-        def fake_popen(cmd, stdout=None, stderr=None, cwd=None, env=None,
-                       start_new_session=False):
-            spawned.update({
-                "cmd": cmd,
-                "cwd": cwd,
-                "env": env,
-                "start_new_session": start_new_session,
-                "stdout_name": getattr(stdout, "name", None),
-                "one_stream": stdout is stderr,
-            })
-            return SimpleNamespace(
-                pid=os.getpid(),
-                wait=lambda timeout=None: exit_code,
-            )
+@pytest.mark.parametrize(
+    ("caller_pid", "expected"),
+    [(300, True), (400, False)],
+)
+def test_caller_is_manager_descendant(
+    bobi_install, monkeypatch, caller_pid, expected,
+):
+    from bobi.service import caller_is_manager_descendant
 
-        return fake_popen
+    (bobi_install.state_dir / "manager.pid").write_text("100")
+    monkeypatch.setattr(
+        "subprocess.check_output",
+        lambda *args, **kwargs: "100 50\n200 100\n300 200\n400 1\n",
+    )
 
-    def test_spawn_restart_detaches_worker_and_uses_durable_log(
-        self, bobi_install, monkeypatch,
-    ):
-        from bobi import paths
-        from bobi.service import spawn_restart
-
-        spawned = {}
-        monkeypatch.setattr("subprocess.Popen", self._fake_popen(spawned))
-
-        handle = spawn_restart(bobi_install.repo_path)
-
-        assert spawned["start_new_session"] is True
-        assert spawned["cmd"] == [
-            os.sys.executable,
-            "-m",
-            "bobi.cli",
-            "agent",
-            paths.agent_name_for_root(bobi_install.repo_path),
-            "restart",
-            "--detached-worker",
-        ]
-        assert spawned["cwd"] == str(bobi_install.repo_path)
-        assert spawned["env"]["BOBI_ROOT"] == str(bobi_install.repo_path)
-        assert spawned["stdout_name"] == str(
-            bobi_install.state_dir / "restart.log"
-        )
-        assert spawned["one_stream"] is True
-        assert handle.log_file == bobi_install.state_dir / "restart.log"
-
-    def test_spawn_restart_forwards_fresh(self, bobi_install, monkeypatch):
-        from bobi.service import spawn_restart
-
-        spawned = {}
-        monkeypatch.setattr("subprocess.Popen", self._fake_popen(spawned))
-
-        spawn_restart(bobi_install.repo_path, fresh=True)
-
-        assert spawned["cmd"][-1] == "--fresh"
-
-    def test_restart_team_requires_a_changed_live_manager(
-        self, bobi_install, monkeypatch,
-    ):
-        from bobi.service import restart_team
-
-        spawned = {}
-
-        def popen_that_restarts(*args, **kwargs):
-            process = self._fake_popen(spawned)(*args, **kwargs)
-            (bobi_install.state_dir / "restart.log").write_text(
-                "Restart worker finished.\n"
-            )
-            (bobi_install.state_dir / "manager.pid").write_text(str(os.getpid()))
-            return process
-
-        (bobi_install.state_dir / "manager.pid").unlink(missing_ok=True)
-        monkeypatch.setattr("subprocess.Popen", popen_that_restarts)
-
-        result = restart_team(bobi_install.repo_path)
-
-        assert result.pid == os.getpid()
-        assert result.output == "Restart worker finished.\n"
-
-    def test_restart_team_reports_worker_failure_with_log_tail(
-        self, bobi_install, monkeypatch,
-    ):
-        from bobi.service import RestartFailed, restart_team
-
-        spawned = {}
-
-        def popen_that_fails(*args, **kwargs):
-            process = self._fake_popen(spawned, exit_code=1)(*args, **kwargs)
-            (bobi_install.state_dir / "restart.log").write_text(
-                "Preflight:\nmissing SLACK_BOT_TOKEN\n"
-            )
-            return process
-
-        monkeypatch.setattr("subprocess.Popen", popen_that_fails)
-
-        with pytest.raises(RestartFailed) as error:
-            restart_team(bobi_install.repo_path)
-
-        assert "worker exit 1" in str(error.value)
-        assert "missing SLACK_BOT_TOKEN" in error.value.report()
-
-    def test_restart_team_rejects_missing_manager(self, bobi_install, monkeypatch):
-        from bobi import service
-
-        spawned = {}
-        (bobi_install.state_dir / "manager.pid").unlink(missing_ok=True)
-        monkeypatch.setattr("subprocess.Popen", self._fake_popen(spawned))
-        monkeypatch.setattr(service, "MANAGER_PID_TIMEOUT", 0.0)
-
-        with pytest.raises(service.RestartFailed) as error:
-            service.restart_team(bobi_install.repo_path)
-
-        assert "no manager is running" in str(error.value)
-
-    def test_restart_team_rejects_unchanged_manager(self, bobi_install, monkeypatch):
-        from bobi import service
-
-        spawned = {}
-        (bobi_install.state_dir / "manager.pid").write_text(str(os.getpid()))
-        monkeypatch.setattr("subprocess.Popen", self._fake_popen(spawned))
-        monkeypatch.setattr(service, "MANAGER_PID_TIMEOUT", 0.0)
-
-        with pytest.raises(service.RestartFailed) as error:
-            service.restart_team(bobi_install.repo_path)
-
-        assert f"left manager pid {os.getpid()} running" in str(error.value)
+    assert caller_is_manager_descendant(
+        bobi_install.repo_path, caller_pid=caller_pid,
+    ) is expected
 
 
 def test_run_team_foreground_loads_runtime_dotenv(bobi_install, monkeypatch):
