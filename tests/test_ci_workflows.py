@@ -190,10 +190,10 @@ def test_macos_supervisor_load_reader_runs_on_real_darwin_ci():
     assert job["runs-on"] == "macos-latest"
     test_step = next(
         step for step in job["steps"]
-        if step.get("name") == "Exercise the Darwin load reader against real ps output"
+        if step.get("name") == "Smoke the real Darwin supervisor load-grace path"
     )
-    assert test_step["run"] == \
-        "pytest tests/test_supervisor_load.py --timeout=30 -q"
+    assert "tests/test_supervisor_load.py" in test_step["run"]
+    assert "tests/test_supervision_restart.py" in test_step["run"]
 
 
 def test_diy_install_lane_uses_one_wheel_across_supported_hosts():

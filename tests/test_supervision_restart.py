@@ -18,8 +18,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from bobi import manager_health, paths
 
 from bobi.supervisor.config import SupervisorConfig
@@ -217,25 +215,19 @@ def test_supervisor_forwards_sigterm_to_child_and_exits_clean(tmp_path):
                 pass
 
 
-def test_load_grace_defers_a_busy_wedge_then_reopens(tmp_path):
-    """Load grace end to end (#903): the supervisor's OWN load evidence - a real CPU-
-    burning descendant walked from the real /proc - defers a confirmed wedge
-    verdict on a pegged host, so the healthy-but-busy manager is NOT restarted
-    and nothing is charged. The moment the load evidence drops, the gate
-    reopens and the SAME wedge restarts exactly as before.
+def test_load_grace_smoke_defers_real_busy_wedge_then_reopens(tmp_path):
+    """Load grace smoke (#903/MOD-382): a real supervisor drives a real manager
+    stub and CPU-burning descendant through the platform-native evidence reader.
+    The busy wedge is not restarted; killing the burner drops the evidence and
+    reopens the same restart path.
 
     This is the #903 trap in miniature: full-suite runs on a 2-vCPU instance
     charged the restart budget three ways and killed a productive manager.
     """
-    if not Path("/proc").exists():
-        pytest.skip("/proc required for the real descendant CPU walk")
-
     root = tmp_path / "proj"
     (root / ".bobi" / "state").mkdir(parents=True)
     launch_log = tmp_path / "launches.log"
     busy_pid_file = tmp_path / "busy.pid"
-
-    host = {"load": (99.0, 2)}  # saturated: load1 99 over 2 cpus
 
     def spawn():
         return subprocess.Popen([
@@ -247,16 +239,13 @@ def test_load_grace_defers_a_busy_wedge_then_reopens(tmp_path):
             "--mode", "busy-wedge-then-recover",
         ])
 
-    def load_fn(manager_pid, previous):
-        from bobi.supervisor.load import load_evidence
-        # One burner consumes roughly one of the injected two CPUs. The
-        # production default is stricter (0.8) for attribution; this acceptance
-        # leg uses 0.25 so shared/slow CI still proves the real tick-delta path.
-        return load_evidence(manager_pid, previous, host_load=host["load"],
-                             tree_cpu_ratio=0.25)
-
-    sup = Supervisor([], _fast_config(), project_root=root,
-                     spawn_fn=spawn, load_fn=load_fn)
+    config = _fast_config()
+    # The smoke uses the real host load and process table. Lower only the two
+    # thresholds so shared CI can deterministically exercise the production
+    # gate without manufacturing whole-host saturation.
+    config.load_pegged_ratio = 0.0
+    config.load_tree_cpu_ratio = 0.02
+    sup = Supervisor([], config, project_root=root, spawn_fn=spawn)
     t = _run_supervisor_in_thread(sup)
     busy_pid = None
     try:
@@ -265,16 +254,22 @@ def test_load_grace_defers_a_busy_wedge_then_reopens(tmp_path):
             "busy descendant never spawned"
         busy_pid = int(busy_pid_file.read_text().strip())
 
-        # Under pegged load the confirmed wedge verdict defers, across several
-        # confirm windows: one launch only, no restart, nothing charged.
-        time.sleep(4.0)
+        # Wait for the actual supervisor gate, not just the absence of a
+        # restart. This proves the native reader observed the real burner.
+        assert _wait_until(lambda: bool(sup._load_grace), timeout=10), \
+            "real load evidence never activated the supervisor gate"
+        grace = sup._load_grace
+        assert grace is not None
+        assert grace["load1"] is not None
+        assert grace["busy_descendants"] >= 1
+        assert grace["tree_cpu_cores"] > 0
         assert _launch_count(launch_log) == 1, \
             "a busy wedge was restarted despite the load grace"
 
-        # The load clears: the evidence goes inactive and the same wedge now
-        # restarts - the gate reopens, the budget charges, the relaunch
-        # recovers to idle.
-        host["load"] = (0.1, 2)
+        # Stop the real CPU work. The tree delta falls to zero and the same
+        # wedge now restarts through the production decision path.
+        os.kill(busy_pid, signal.SIGKILL)
+        busy_pid = None
         assert _wait_until(lambda: _launch_count(launch_log) >= 2, timeout=20), \
             "supervisor never restarted the wedge after the load cleared"
     finally:

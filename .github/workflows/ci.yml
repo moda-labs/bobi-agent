@@ -106,8 +106,10 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Exercise the Darwin load reader against real ps output
-        run: pytest tests/test_supervisor_load.py --timeout=30 -q
+      - name: Smoke the real Darwin supervisor load-grace path
+        run: >-
+          pytest tests/test_supervisor_load.py tests/test_supervision_restart.py
+          --timeout=30 -q
 
   # The required check that stands in for the unit-test matrix.
   #

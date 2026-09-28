@@ -20,9 +20,10 @@ Modes:
 - ``busy-wedge-then-recover`` (#903): first launch registers a wedged
   director AND forks a CPU-burning descendant, writing the busy child's pid to
   ``--busy-pid-file`` - the load-grace shape: a sanctioned heavy worker on a
-  saturated host. Every relaunch registers a healthy idle director. The busy
-  child self-exits after 60s (and the test SIGKILLs it in cleanup), so a
-  failed assertion cannot leak a burn loop past the test.
+  saturated host. The platform-native process-table reader observes that real
+  child. Every relaunch registers a healthy idle director. The busy child
+  self-exits after 60s (and the test SIGKILLs it in cleanup), so a failed
+  assertion cannot leak a burn loop past the test.
 
 Each launch appends a line to ``--launch-log`` so the test can count restarts.
 """
@@ -56,7 +57,7 @@ def main() -> None:
     if a.mode == "busy-wedge-then-recover" and launch_index == 1:
         # A real descendant burning CPU: fork a tight loop that outlives this
         # manager (reparented to init when the supervisor kills us), so the
-        # supervisor's /proc walk sees a busy process in the manager's tree.
+        # supervisor's process-table walk sees it in the manager's tree.
         busy_child = os.fork()
         if busy_child == 0:
             deadline = time.time() + 60
