@@ -313,12 +313,13 @@ import sys
 import time
 
 session_dir, mode = sys.argv[1], sys.argv[2]
+extra = sys.argv[3:]
 if mode == "launcher":
-    subprocess.Popen([sys.executable, __file__, session_dir, "leader"],
+    subprocess.Popen([sys.executable, __file__, session_dir, "leader", *extra],
                      start_new_session=True)
     raise SystemExit(0)
 if mode == "leader":
-    subprocess.Popen([sys.executable, __file__, session_dir, "child"])
+    subprocess.Popen([sys.executable, __file__, session_dir, "child", *extra])
 probe = os.path.join(session_dir, "%s-%d.probe" % (mode, os.getpid()))
 while True:
     with open(probe, "w") as handle:
@@ -409,6 +410,84 @@ while True:
         # left our own group intact rather than merely failing to reach us.
         os.killpg(os.getpgid(0), 0)
 
+
+    def test_isolated_env_cleanup_reaps_both_daemons_on_skip(
+        self, tmp_path
+    ):
+        from types import SimpleNamespace
+
+        from .conftest import _cleanup_bobi_env
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        groups = {}
+        script = tmp_path / "stub_daemon.py"
+        script.write_text(self.STUB_AGENT)
+        try:
+            for component in ("manager", "event-server"):
+                session_dir = tmp_path / component
+                session_dir.mkdir()
+                identity = (
+                    ["-m", "bobi.cli", "agent", "test-repo", "start", "--foreground"]
+                    if component == "manager"
+                    else [str(tmp_path / "dist" / "local.js")]
+                )
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(script),
+                        str(session_dir),
+                        "launcher",
+                        *identity,
+                    ],
+                    check=True,
+                    timeout=30,
+                )
+                pid = self._await_writers(session_dir)["leader"]
+                groups[component] = pid
+                (state_dir / f"{component}.pid").write_text(str(pid))
+
+            with pytest.raises(pytest.skip.Exception):
+                try:
+                    pytest.skip("readiness failed before fixture yield")
+                finally:
+                    _cleanup_bobi_env(SimpleNamespace(
+                        state_dir=state_dir,
+                        agent_name="test-repo",
+                    ))
+        finally:
+            for pid in groups.values():
+                with contextlib.suppress(OSError):
+                    os.killpg(pid, signal.SIGKILL)
+
+        for pid in groups.values():
+            with pytest.raises(ProcessLookupError):
+                os.killpg(pid, 0)
+        assert not (state_dir / "manager.pid").exists()
+        assert not (state_dir / "event-server.pid").exists()
+
+    def test_isolated_env_cleanup_does_not_signal_a_reused_pid(self, tmp_path):
+        from types import SimpleNamespace
+
+        from .conftest import _cleanup_bobi_env
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        victim = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            start_new_session=True,
+        )
+        try:
+            (state_dir / "manager.pid").write_text(str(victim.pid))
+            _cleanup_bobi_env(SimpleNamespace(
+                state_dir=state_dir,
+                agent_name="test-repo",
+            ))
+            assert victim.poll() is None
+            assert not (state_dir / "manager.pid").exists()
+        finally:
+            with contextlib.suppress(OSError):
+                os.killpg(victim.pid, signal.SIGKILL)
 
 @pytest.mark.timeout(240)
 class TestWaitRunsThroughTheExecutor:
