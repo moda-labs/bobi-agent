@@ -184,6 +184,18 @@ def test_promote_dev_advances_only_on_fully_green_main_push():
     assert checkout["with"]["fetch-depth"] == 0
 
 
+def test_macos_supervisor_load_reader_runs_on_real_darwin_ci():
+    job = _ci_workflow()["jobs"]["macos-supervisor-load"]
+
+    assert job["runs-on"] == "macos-latest"
+    test_step = next(
+        step for step in job["steps"]
+        if step.get("name") == "Exercise the Darwin load reader against real ps output"
+    )
+    assert test_step["run"] == \
+        "pytest tests/test_supervisor_load.py --timeout=30 -q"
+
+
 def test_diy_install_lane_uses_one_wheel_across_supported_hosts():
     workflow = _ci_workflow()
     jobs = workflow["jobs"]

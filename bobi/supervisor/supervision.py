@@ -313,10 +313,13 @@ class Supervisor:
         return manager_health.health(f"http://127.0.0.1:{port}")
 
     def _default_load_fn(self, manager_pid, previous):
-        from .load import load_evidence
-        return load_evidence(manager_pid, previous,
-                             pegged_ratio=self.config.load_pegged_ratio,
-                             tree_cpu_ratio=self.config.load_tree_cpu_ratio)
+        from .load import default_load_evidence
+        return default_load_evidence(
+            manager_pid,
+            previous,
+            pegged_ratio=self.config.load_pegged_ratio,
+            tree_cpu_ratio=self.config.load_tree_cpu_ratio,
+        )
 
     # --- child lifecycle --------------------------------------------------
 

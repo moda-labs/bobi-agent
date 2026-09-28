@@ -9,14 +9,23 @@ test_supervision_restart.py.
 
 import os
 import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
+
+import pytest
 
 from bobi.supervisor.config import SupervisorConfig
 from bobi.supervisor.load import (
     _cpu_capacity,
+    _darwin_descendant_cpu,
     _descendant_cpu,
     _host_load,
+    _parse_ps_time,
     _parse_stat,
+    darwin_load_evidence,
+    default_load_evidence,
     load_evidence,
 )
 
@@ -65,6 +74,21 @@ class TestParseStat:
     def test_non_numeric_fields_rejected(self):
         line = _stat_line(100, 1, 5, 7).replace(" 5 7", " x 7")
         assert _parse_stat(line) is None
+
+
+class TestParsePsTime:
+
+    def test_parses_minutes_seconds_and_hundredths(self):
+        assert _parse_ps_time("12:34.56") == 75456
+
+    def test_parses_hours_minutes_seconds(self):
+        assert _parse_ps_time("1:02:03.45") == 372345
+
+    def test_parses_unbounded_accumulated_minutes(self):
+        assert _parse_ps_time("123:45.67") == 742567
+
+    def test_rejects_malformed_time(self):
+        assert _parse_ps_time("not-a-time") is None
 
 
 # --- the descendant cpu walk ----------------------------------------------
@@ -135,6 +159,32 @@ class TestDescendantCpu:
         assert tick_delta == 0
         assert sample == {}
 
+
+class TestDarwinDescendantCpu:
+
+    def test_counts_busy_descendants_from_ps_output(self):
+        first = "100 1 0:00.01\n101 100 0:00.05\n200 1 0:01.00\n"
+        second = "100 1 0:00.02\n101 100 0:00.25\n200 1 0:02.00\n"
+
+        _, _, sample = _darwin_descendant_cpu(
+            100, None, ps_run=lambda *_args, **_kwargs: first)
+        busy, tick_delta, sample2 = _darwin_descendant_cpu(
+            100, sample, ps_run=lambda *_args, **_kwargs: second)
+
+        assert busy == 1
+        assert tick_delta == 20
+        assert sample2 == {101: 25}
+
+    def test_ps_failure_fails_closed(self):
+        def fail(*_args, **_kwargs):
+            raise OSError("ps unavailable")
+
+        busy, tick_delta, sample = _darwin_descendant_cpu(
+            100, {101: 5}, ps_run=fail)
+
+        assert busy == 0
+        assert tick_delta == 0
+        assert sample == {}
 
 # --- host load ------------------------------------------------------------
 
@@ -243,6 +293,76 @@ class TestLoadEvidence:
                            clock_ticks=10, tree_cpu_ratio=0.25)
         assert ev["pegged"] is False
         assert ev["active"] is False
+
+
+class TestDarwinLoadEvidence:
+
+    def test_default_reader_selects_darwin(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            "bobi.supervisor.load.darwin_load_evidence",
+            lambda manager_pid, previous, **kwargs: {
+                "manager_pid": manager_pid,
+                "previous": previous,
+                "kwargs": kwargs,
+            },
+        )
+
+        assert default_load_evidence(42, "baseline", pegged_ratio=0.7) == {
+            "manager_pid": 42,
+            "previous": "baseline",
+            "kwargs": {"pegged_ratio": 0.7},
+        }
+
+    def test_unreadable_ps_fails_closed(self):
+        def fail(*_args, **_kwargs):
+            raise OSError("ps unavailable")
+
+        ev = darwin_load_evidence(
+            100, None, host_load=(8.0, 2), ps_run=fail)
+
+        assert ev["pegged"] is True
+        assert ev["busy_descendants"] == 0
+        assert ev["active"] is False
+
+    def test_unreadable_load_average_fails_closed(self, monkeypatch):
+        monkeypatch.setattr(os, "getloadavg", lambda: (_ for _ in ()).throw(
+            OSError("load unavailable")))
+        ps_output = "100 1 0:00.01\n101 100 0:00.05\n"
+
+        ev = darwin_load_evidence(
+            100, None, ps_run=lambda: ps_output)
+
+        assert ev["load1"] is None
+        assert ev["pegged"] is False
+        assert ev["active"] is False
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="requires Darwin ps")
+    def test_real_ps_tracks_busy_descendant(self):
+        child = subprocess.Popen([
+            sys.executable,
+            "-c",
+            (
+                "import time; end=time.monotonic()+5; value=0; "
+                "exec('while time.monotonic() < end:\\n value += 1')"
+            ),
+        ])
+        try:
+            time.sleep(0.05)
+            baseline = darwin_load_evidence(
+                os.getpid(), None, host_load=(1.0, 1))["sample"]
+            time.sleep(0.25)
+            ev = darwin_load_evidence(
+                os.getpid(), baseline, host_load=(1.0, 1),
+                tree_cpu_ratio=0.001)
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+        assert child.pid in ev["sample"].ticks
+        assert ev["busy_descendants"] >= 1
+        assert ev["tree_cpu_cores"] > 0
+        assert ev["active"] is True
 
     def test_not_active_when_no_busy_descendants(self, tmp_path):
         _write_proc(tmp_path, {100: (1, 1, 1), 101: (100, 5, 0)})
