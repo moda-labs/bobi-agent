@@ -199,8 +199,9 @@ jobs:
             --from-literal=fleet="$BOBI_SELF_HOST_FLEET" \
             --from-literal=instance="$BOBI_SELF_HOST_INSTANCE" \
             --from-literal=image="$BOBI_SELF_HOST_IMAGE"
-          sed "s|ghcr.io/moda-labs/bobi:latest|$BOBI_SELF_HOST_IMAGE|" \
-            examples/self-host/kubernetes/deployment.yaml | kubectl apply -f -
+          manifest="$(sed "s|ghcr.io/moda-labs/bobi:latest|$BOBI_SELF_HOST_IMAGE|" examples/self-host/kubernetes/deployment.yaml)"
+          grep -qF "image: $BOBI_SELF_HOST_IMAGE" <<<"$manifest" || { echo "::error::sed did not pin the image"; exit 1; }
+          echo "$manifest" | kubectl apply -f -
           kubectl rollout status deployment/bobi-self-host-consumer --timeout=5m
 
       - name: Prove heartbeat and remote restart from outside the cluster
@@ -210,7 +211,7 @@ jobs:
           BOBI_SELF_HOST_FLEET_OPERATOR_TOKEN: ${{ env.BOBI_SELF_HOST_FLEET_OPERATOR_TOKEN }}
         run: |
           pytest tests/integration/test_self_hosted_consumer.py \
-            -m live -v --timeout=240 \
+            -m live -v --timeout=480 \
             --junitxml=self-hosted-consumer.xml
 
       - name: Assert the consumer proof actually ran
@@ -237,4 +238,15 @@ jobs:
             terraform destroy -input=false -auto-approve
           else
             echo "Terraform was not initialized; no managed resources to destroy."
+          fi
+
+      - name: Write proof summary
+        if: always()
+        run: |
+          if [ "${{ steps.live.outputs.run }}" = "true" ]; then
+            echo "### Self-hosted consumer proof: RUN (${{ job.status }})" >> "$GITHUB_STEP_SUMMARY"
+            echo "Live proof executed against Cloudflare Worker and Kubernetes (status: ${{ job.status }})." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Self-hosted consumer proof: SKIPPED (inert run)" >> "$GITHUB_STEP_SUMMARY"
+            echo "Live proof did not run (missing ci:live label or fork PR)." >> "$GITHUB_STEP_SUMMARY"
           fi

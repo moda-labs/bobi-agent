@@ -64,6 +64,10 @@ migration-only version before deploying the serving version that binds the
 class. It also enables the public workers.dev route and keeps the compatibility
 date and `nodejs_compat` flag aligned with `event-server/worker/wrangler.jsonc`.
 
+> **Upgrades and re-apply**: This module is optimized for disposable consumer
+> validation (`apply` followed by `destroy`). It is not supported for in-place
+> upgrades; destroy and re-apply, or manage upgrades with `wrangler deploy`.
+
 Verify the deployed server before starting Kubernetes:
 
 ```bash

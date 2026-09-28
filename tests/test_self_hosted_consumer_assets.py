@@ -28,9 +28,14 @@ def test_terraform_matches_the_shipped_worker_contract():
 
     assert 'source  = "cloudflare/cloudflare"' in versions
     assert 'version = "5.25.0"' in versions
-    assert f'compatibility_date = "{shipped["compatibility_date"]}"' in main
-    for flag in shipped["compatibility_flags"]:
-        assert f'"{flag}"' in main
+    assert main.count(f'compatibility_date = "{shipped["compatibility_date"]}"') == 2
+    tf_flag_blocks = [
+        [x.strip(' "\n') for x in m.split(",") if x.strip(' "\n')]
+        for m in re.findall(r"compatibility_flags\s*=\s*\[(.*?)\]", main, re.DOTALL)
+    ]
+    assert len(tf_flag_blocks) == 2
+    for block in tf_flag_blocks:
+        assert sorted(block) == sorted(shipped["compatibility_flags"])
     migration = shipped["migrations"][0]
     assert f'new_tag            = "{migration["tag"]}"' in main
     for class_name in migration["new_sqlite_classes"]:
@@ -159,3 +164,6 @@ def test_workflow_uses_public_image_and_checks_both_external_proofs():
     assert "test_self_hosted_fleet_api_fails_closed_without_the_operator_token" in text
     assert "test_kubernetes_sidecar_heartbeats_and_restarts_from_outside_the_cluster" in text
     assert "terraform destroy" in text
+    assert "sed did not pin the image" in text
+    assert "Write proof summary" in text
+    assert "--timeout=480" in text
