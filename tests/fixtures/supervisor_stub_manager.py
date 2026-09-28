@@ -17,13 +17,12 @@ Modes:
 - ``dead-then-recover``: first launch registers a *dead* director
   (``status=error``) whose health server keeps answering - the exact #12
   stranding shape. Every relaunch registers a healthy idle director.
-- ``busy-wedge-then-recover`` (#903): first launch registers a wedged
-  director AND forks a CPU-burning descendant, writing the busy child's pid to
-  ``--busy-pid-file`` - the load-grace shape: a sanctioned heavy worker on a
-  saturated host. The platform-native process-table reader observes that real
-  child. Every relaunch registers a healthy idle director. The busy child
-  self-exits after 60s (and the test SIGKILLs it in cleanup), so a failed
-  assertion cannot leak a burn loop past the test.
+- ``busy-wedge-then-recover`` (#903): first launch forks a CPU-burning
+  descendant, then becomes wedged when ``--wedge-trigger-file`` appears. This
+  lets the platform-native reader establish a real two-sample CPU delta before
+  the ambiguous liveness verdict. Every relaunch registers a healthy idle
+  director. The busy child self-exits after 60s (and the test SIGKILLs it in
+  cleanup), so a failed assertion cannot leak a burn loop past the test.
 
 Each launch appends a line to ``--launch-log`` so the test can count restarts.
 """
@@ -40,10 +39,13 @@ def main() -> None:
     p.add_argument("--session", required=True)
     p.add_argument("--launch-log", required=True)
     p.add_argument("--busy-pid-file", default=None)
+    p.add_argument("--wedge-trigger-file", default=None)
     p.add_argument("--mode", required=True,
                    choices=["wedge-then-recover", "always-idle",
                             "dead-then-recover", "busy-wedge-then-recover"])
     a = p.parse_args()
+    if a.mode == "busy-wedge-then-recover" and not a.wedge_trigger_file:
+        p.error("--wedge-trigger-file is required for busy-wedge-then-recover")
 
     root = Path(a.project_root)
     log = Path(a.launch_log)
@@ -79,15 +81,22 @@ def main() -> None:
     from bobi import manager_health
     from bobi import paths
     if a.mode == "busy-wedge-then-recover":
+        wedge_trigger = Path(a.wedge_trigger_file)
+
+        def busy_manager_status():
+            wedged = launch_index == 1 and wedge_trigger.exists()
+            last_activity = frozen if wedged else time.time()
+            return {
+                "session": a.session,
+                "status": "running" if launch_index == 1 else "idle",
+                "last_activity": last_activity,
+                "idle_seconds": max(0.0, time.time() - last_activity),
+            }
+
         manager_health.start(
             paths.state_dir(root), root.name,
             session_status_fn=lambda: [],
-            manager_status_fn=lambda: {
-                "session": a.session,
-                "status": status,
-                "last_activity": frozen,
-                "idle_seconds": max(0.0, time.time() - frozen),
-            },
+            manager_status_fn=busy_manager_status,
         )
     else:
         from bobi.sdk import set_project_root, get_registry, SessionEntry

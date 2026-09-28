@@ -239,9 +239,10 @@ def test_load_grace_smoke_defers_real_busy_wedge_then_reopens(tmp_path):
     busy_pid_file = tmp_path / "busy.pid"
 
     state_file = tmp_path / "supervisor-state.json"
+    wedge_trigger = tmp_path / "wedge.trigger"
     proc = subprocess.Popen([
         sys.executable, str(LOAD_HARNESS), str(root), str(launch_log),
-        str(busy_pid_file), str(state_file),
+        str(busy_pid_file), str(state_file), str(wedge_trigger),
     ])
     busy_pid = None
     try:
@@ -250,13 +251,28 @@ def test_load_grace_smoke_defers_real_busy_wedge_then_reopens(tmp_path):
             "busy descendant never spawned"
         busy_pid = int(busy_pid_file.read_text().strip())
 
-        # Wait for the actual supervisor gate, not just the absence of a
-        # restart. This proves the native reader observed the real burner.
+        # Establish the native two-sample CPU delta before presenting an
+        # ambiguous liveness verdict. Starting already wedged races the restart
+        # confirmation against the first usable process-tree sample.
+        def observed():
+            return _read_json(state_file)
+
         assert _wait_until(
-            lambda: bool(_read_json(state_file).get("load_grace")), timeout=20
+            lambda: bool(
+                observed().get("load_evidence", {}).get("active")
+            ),
+            timeout=20,
+        ), f"real load evidence never observed the busy descendant: {observed()}"
+        assert _launch_count(launch_log) == 1
+
+        # Transition the same live manager to wedged only after the production
+        # reader has established that its real descendant is consuming CPU.
+        wedge_trigger.touch()
+        assert _wait_until(
+            lambda: bool(observed().get("load_grace")), timeout=20
         ), \
-            "real load evidence never activated the supervisor gate"
-        grace = _read_json(state_file)["load_grace"]
+            f"real load evidence never activated the supervisor gate: {observed()}"
+        grace = observed()["load_grace"]
         assert grace is not None
         assert grace["load1"] is not None
         assert grace["busy_descendants"] >= 1

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from bobi.fsutil import atomic_write_json
 from bobi.supervisor.config import SupervisorConfig
+from bobi.supervisor.load import default_load_evidence
 from bobi.supervisor.supervision import Supervisor, SupervisorObserver
 
 
@@ -14,7 +15,9 @@ SESSION = "moda-manager-proj"
 
 
 def main() -> int:
-    root, launch_log, busy_pid_file, state_file = map(Path, sys.argv[1:])
+    root, launch_log, busy_pid_file, state_file, wedge_trigger = map(
+        Path, sys.argv[1:]
+    )
 
     def spawn():
         return subprocess.Popen([
@@ -23,12 +26,9 @@ def main() -> int:
             "--session", SESSION,
             "--launch-log", str(launch_log),
             "--busy-pid-file", str(busy_pid_file),
+            "--wedge-trigger-file", str(wedge_trigger),
             "--mode", "busy-wedge-then-recover",
         ])
-
-    class Observer(SupervisorObserver):
-        def poll(self, state):
-            atomic_write_json(state_file, {"load_grace": state.load_grace})
 
     config = SupervisorConfig(
         poll_interval=0.25,
@@ -42,8 +42,28 @@ def main() -> int:
         load_pegged_ratio=0.0,
         load_tree_cpu_ratio=0.02,
     )
+    observed = {}
+
+    def load(manager_pid, previous):
+        evidence = default_load_evidence(
+            manager_pid,
+            previous,
+            pegged_ratio=config.load_pegged_ratio,
+            tree_cpu_ratio=config.load_tree_cpu_ratio,
+        )
+        observed["load_evidence"] = {
+            key: value for key, value in evidence.items() if key != "sample"
+        }
+        return evidence
+
+    class Observer(SupervisorObserver):
+        def poll(self, state):
+            observed["load_grace"] = state.load_grace
+            atomic_write_json(state_file, observed)
+
     return Supervisor(
-        [], config, project_root=root, spawn_fn=spawn, observer=Observer()
+        [], config, project_root=root, spawn_fn=spawn, load_fn=load,
+        observer=Observer(),
     ).run()
 
 
