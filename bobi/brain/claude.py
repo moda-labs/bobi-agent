@@ -30,6 +30,7 @@ from bobi.brain.base import (
     BrainCost,
     BrainMessage,
     BrainSession,
+    BrainUsage,
     DeferredTool,
     StreamDelta,
     TurnResult,
@@ -40,6 +41,7 @@ from bobi.brain.gateway import (
     gateway_base_url,
     with_gateway_env,
 )
+from bobi.metrics.providers import claude_usage
 
 log = logging.getLogger(__name__)
 
@@ -220,7 +222,11 @@ def _result_to_turn(
     assistant_error_message: str = "",
 ) -> TurnResult:
     """Normalize an SDK ``ResultMessage`` into a :class:`TurnResult`."""
-    costs = _model_usage_to_costs(getattr(msg, "model_usage", None))
+    usage = _model_usage_to_usage(
+        getattr(msg, "model_usage", None),
+        result_usage=getattr(msg, "usage", None),
+    )
+    costs = [item.legacy_cost() for item in usage]
 
     deferred = None
     dtu = getattr(msg, "deferred_tool_use", None)
@@ -259,6 +265,7 @@ def _result_to_turn(
         result_text=result_text,
         deferred_tool=deferred,
         costs=costs,
+        usage=usage,
     )
 
 
@@ -271,32 +278,93 @@ def _model_usage_to_costs(model_usage: Any) -> list[BrainCost]:
     recorded input volume is the full context input, while cache reads stay
     split for downstream renderers.
     """
-    if not model_usage:
-        return []
-
-    if isinstance(model_usage, dict):
-        return [
-            _one_model_usage_to_cost(model, usage)
-            for model, usage in model_usage.items()
-        ]
-
-    items = model_usage if isinstance(model_usage, list) else [model_usage]
-    return [_one_model_usage_to_cost("", usage) for usage in items]
+    return [usage.legacy_cost() for usage in _model_usage_to_usage(model_usage)]
 
 
 def _one_model_usage_to_cost(model: str, usage: Any) -> BrainCost:
-    raw_input = _usage_int(usage, "input_tokens", "inputTokens")
-    cache_read = _usage_int(
-        usage, "cache_read_input_tokens", "cacheReadInputTokens"
+    return _one_model_usage(model, usage).legacy_cost()
+
+
+def _model_usage_to_usage(
+    model_usage: Any, *, result_usage: Any = None
+) -> list[BrainUsage]:
+    """Preserve every supported Claude usage dimension without guessing."""
+    if not model_usage:
+        return []
+    if isinstance(model_usage, dict):
+        items = [
+            (str(model), _json_safe_usage(item))
+            for model, item in model_usage.items()
+        ]
+        detail = _json_safe_usage(result_usage) if result_usage else {}
+        detail_match = _matching_model_usage(items, detail) if detail else None
+        return [
+            _one_model_usage(
+                model,
+                _merge_result_usage(raw, detail) if model == detail_match else raw,
+            )
+            for model, raw in items
+        ]
+    items = model_usage if isinstance(model_usage, list) else [model_usage]
+    return [_one_model_usage("", usage) for usage in items]
+
+
+def _matching_model_usage(
+    items: list[tuple[str, dict[str, Any]]], detail: dict[str, Any]
+) -> str | None:
+    detailed = claude_usage(detail, model="")
+    fields = (
+        "uncached_input_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
     )
-    cache_creation = _usage_int(
-        usage, "cache_creation_input_tokens", "cacheCreationInputTokens"
-    )
-    return BrainCost(
+    candidates = []
+    for model, raw in items:
+        summary = claude_usage(raw, model=model)
+        if all(
+            getattr(detailed, field) is None
+            or getattr(detailed, field) == getattr(summary, field)
+            for field in fields
+        ):
+            candidates.append(model)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _merge_result_usage(
+    summary: dict[str, Any], detail: dict[str, Any]
+) -> dict[str, Any]:
+    merged = dict(summary)
+    merged.update(detail)
+    merged["model_usage"] = summary
+    merged["turn_usage"] = detail
+    return merged
+
+
+def _one_model_usage(model: str, usage: Any) -> BrainUsage:
+    raw_usage = _json_safe_usage(usage)
+    normalized = claude_usage(
+        raw_usage,
         model=model or _usage_str(usage, "canonicalModel", "model"),
-        input_tokens=raw_input + cache_read + cache_creation,
-        cached_input_tokens=cache_read,
-        output_tokens=_usage_int(usage, "output_tokens", "outputTokens"),
+        scope="turn",
+    )
+    return BrainUsage(
+        model=normalized.model,
+        provider_event_id=normalized.provider_event_id,
+        input_tokens=normalized.input_tokens,
+        uncached_input_tokens=normalized.uncached_input_tokens,
+        cache_read_input_tokens=normalized.cache_read_input_tokens,
+        cache_write_input_tokens=normalized.cache_write_input_tokens,
+        cache_write_5m_input_tokens=normalized.cache_write_5m_input_tokens,
+        cache_write_1h_input_tokens=normalized.cache_write_1h_input_tokens,
+        cache_write_unknown_ttl_input_tokens=(
+            normalized.cache_write_unknown_ttl_input_tokens
+        ),
+        cache_write_breakdown_complete=normalized.cache_write_breakdown_complete,
+        output_tokens=normalized.output_tokens,
+        reasoning_output_tokens=normalized.reasoning_output_tokens,
+        raw_usage=normalized.raw_usage,
+        token_semantics_version=normalized.token_semantics_version,
     )
 
 
@@ -318,15 +386,20 @@ def _usage_value(usage: Any, *keys: str) -> Any:
     return None
 
 
-def _usage_int(usage: Any, *keys: str) -> int:
-    value = _usage_value(usage, *keys)
-    # bool is an int subclass; a stray True must not read as 1 token.
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
 def _usage_str(usage: Any, *keys: str) -> str:
     value = _usage_value(usage, *keys)
     return value if isinstance(value, str) else ""
+
+
+def _json_safe_usage(usage: Any) -> dict[str, Any]:
+    if isinstance(usage, dict):
+        source = usage
+    else:
+        source = getattr(usage, "__dict__", {})
+    try:
+        return json.loads(json.dumps(source, default=str))
+    except (TypeError, ValueError):
+        return {}
 
 
 def _terminal_error(msg: Any) -> tuple[str, str, int | None, int | None]:

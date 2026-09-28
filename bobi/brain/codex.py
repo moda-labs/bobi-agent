@@ -36,10 +36,12 @@ from bobi.brain.base import (
     BrainCost,
     BrainMessage,
     BrainSession,
+    BrainUsage,
     TurnResult,
     classify_brain_unavailability,
 )
 from bobi.brain.gateway import GatewayAwareEngine, gateway_base_url
+from bobi.metrics.providers import codex_usage
 
 # Headless, non-interactive, fully autonomous: the box is the sandbox, so we
 # bypass Codex's approval/sandbox prompts (the analog of Claude's
@@ -77,10 +79,34 @@ def _costs(u: dict, model: str) -> list[BrainCost]:
     # (its non_cached_input() is input - cached), so record both as-is;
     # summing them double-counts every cache read. reasoning_output_tokens
     # is likewise a subset of output_tokens - never add it. #760
-    return [BrainCost(model=model or "codex",
-                      input_tokens=u.get("input_tokens", 0) or 0,
-                      cached_input_tokens=u.get("cached_input_tokens", 0) or 0,
-                      output_tokens=u.get("output_tokens", 0) or 0)]
+    return [_usage(u, model).legacy_cost()]
+
+
+def _usage(raw: dict, model: str, provider_event_id: str = "") -> BrainUsage:
+    """Normalize Codex totals while retaining cache-write and reasoning facts."""
+    normalized = codex_usage(
+        raw if isinstance(raw, dict) else {},
+        model=model,
+        provider_event_id=provider_event_id,
+    )
+    return BrainUsage(
+        model=normalized.model,
+        provider_event_id=normalized.provider_event_id,
+        input_tokens=normalized.input_tokens,
+        uncached_input_tokens=normalized.uncached_input_tokens,
+        cache_read_input_tokens=normalized.cache_read_input_tokens,
+        cache_write_input_tokens=normalized.cache_write_input_tokens,
+        cache_write_5m_input_tokens=normalized.cache_write_5m_input_tokens,
+        cache_write_1h_input_tokens=normalized.cache_write_1h_input_tokens,
+        cache_write_unknown_ttl_input_tokens=(
+            normalized.cache_write_unknown_ttl_input_tokens
+        ),
+        cache_write_breakdown_complete=normalized.cache_write_breakdown_complete,
+        output_tokens=normalized.output_tokens,
+        reasoning_output_tokens=normalized.reasoning_output_tokens,
+        raw_usage=normalized.raw_usage,
+        token_semantics_version=normalized.token_semantics_version,
+    )
 
 
 async def _write_stdin(writer: asyncio.StreamWriter, text: str) -> None:
@@ -297,9 +323,15 @@ class _CodexSession:
                 # (auto-compaction), so the manager keeps one stable thread. Cost
                 # attribution still uses the usage. (#485 follow-up: a turn-count
                 # rotation if unbounded rollout growth ever becomes an issue.)
+                normalized_usage = _usage(
+                    usage,
+                    self._model,
+                    str(ev.get("turn_id") or ev.get("id") or ""),
+                )
                 yield TurnResult(
                     session_id=self._thread_id or "",
-                    costs=_costs(usage, self._model),
+                    costs=[normalized_usage.legacy_cost()],
+                    usage=[normalized_usage],
                 )
                 return
             elif etype in ("turn.failed", "error"):

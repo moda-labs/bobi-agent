@@ -1,9 +1,10 @@
 # Fine-grained metrics and token tracking
 
-> **Status:** Phase 0.0 complete; ready for Phase 0 implementation
+> **Status:** Phase 0 complete; ready for Phase 1 implementation
 > **Created:** 2026-09-24
 > **Phase 0.0 amendment:** 2026-09-25
-> **Audited snapshot:** `origin/main` at `de81de3c4060363acdf8936c8ca24d66a006ba55` in worktree `worktrees/fine-grained-metrics-phase-0`
+> **Phase 0 completed:** 2026-09-28
+> **Audited snapshot:** `origin/main` at `de81de3c4060363acdf8936c8ca24d66a006ba55` in worktree `worktrees/fine-grained-metrics`
 > **Scope:** ingestion, schema, local storage, Admin API, MCP tools, and JEV-router experimentation; no Web UI
 
 ## Executive decision
@@ -234,7 +235,7 @@ flowchart LR
 Add a provider-neutral telemetry envelope with:
 
 - `event_id`: UUIDv7 or deterministic hash for replayed provider events.
-- `schema_version`, `event_type`, `emitted_at_ns`, `producer_id`, and monotonic per-producer `sequence`.
+- `schema_version`, `event_type`, `emitted_at_us`, `producer_id`, and monotonic per-producer `sequence`.
 - Correlation IDs: `session_id`, `turn_id`, `workflow_step_id`, `llm_invocation_id`, `tool_execution_id`, `router_decision_id`.
 - Metadata-only payload. Text bodies are excluded by default; sizes, hashes, template IDs, model identifiers, and provider usage are allowed.
 
@@ -251,7 +252,7 @@ payload[payload_length] = canonical UTF-8 JSON
 terminator[1] = "\n"
 ```
 
-The writer emits the complete frame with one append call. The collector rejects a wrong magic/version, impossible length, checksum mismatch, or missing terminator. A crash may leave one incomplete final frame; the collector imports every prior valid frame and leaves the cursor at the start of the incomplete frame. Per-process files prevent cross-process append interleaving and require no lock per event.
+The writer completes the frame before accepting the next event, including retrying short OS writes. If an append fails after a partial write, that writer rejects every later append so no valid frame can be stranded behind an incomplete tail. The collector rejects a wrong magic/version, impossible length, checksum mismatch, or missing terminator. A crash may leave one incomplete final frame; the collector imports every prior valid frame and leaves the cursor at the start of the incomplete frame. Per-process files prevent cross-process append interleaving and require no lock per event.
 
 Suggested paths:
 
@@ -993,7 +994,9 @@ pytest tests/metrics/test_provider_contracts.py \
        tests/metrics/test_projection.py -q --timeout=30
 .venv/bin/python scripts/benchmark_metrics.py producer --events 1000000 --processes 1,8,32,64
 .venv/bin/python scripts/benchmark_metrics.py collector --burst-multiple 10 --assert-drain-seconds 60
-.venv/bin/python scripts/live_metrics_smoke.py provider-probe --provider claude --db "$BOBI_SMOKE_ROOT/phase0-claude/metrics.db"
+.venv/bin/python scripts/benchmark_metrics.py rebuild --turns 1000
+.venv/bin/python scripts/benchmark_metrics.py contention --processes 32 --writes-per-process 100
+.venv/bin/python scripts/live_metrics_smoke.py provider-probe --provider claude --model opus --db "$BOBI_SMOKE_ROOT/phase0-claude/metrics.db"
 .venv/bin/python scripts/live_metrics_smoke.py provider-probe --provider codex --db "$BOBI_SMOKE_ROOT/phase0-codex/metrics.db"
 ```
 
@@ -1135,6 +1138,7 @@ Phase 0 runs the production adapters directly and writes the result through the 
 ```bash
 .venv/bin/python scripts/live_metrics_smoke.py provider-probe \
   --provider claude \
+  --model opus \
   --prompt "Reply with exactly METRICS_SMOKE_OK." \
   --db "$BOBI_SMOKE_ROOT/phase0-claude/metrics.db"
 

@@ -43,6 +43,7 @@ uses ``fcntl.flock``.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -180,5 +181,33 @@ def file_lock(path: Path | str) -> Iterator[None]:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
             yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def try_file_lock(path: Path | str) -> Iterator[bool]:
+    """Try to hold the companion lock for *path* without waiting.
+
+    The lock file and inode rules match :func:`file_lock`. Contention is a
+    normal standby outcome for metrics collectors, so only ``EACCES`` and
+    ``EAGAIN`` become ``False``; setup and filesystem failures still surface to
+    the caller's fail-safe boundary.
+    """
+    import fcntl
+
+    path = Path(path)
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                yield False
+                return
+            raise
+        try:
+            yield True
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

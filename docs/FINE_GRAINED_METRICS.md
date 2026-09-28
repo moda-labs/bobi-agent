@@ -4,12 +4,11 @@ This document is the implementation and operations guide for Bobi's
 fine-grained token, latency, cost, and model-routing telemetry.
 
 > [!IMPORTANT]
-> **Implementation status:** the architecture contract is complete, but the
-> runtime feature is not implemented yet. Paths under `bobi/metrics/`, the
-> `bobi admin metrics_*` aliases, and the `bobi agent <name> metrics ...`
-> commands described here are target Phase 0-4 interfaces. The existing
-> `usage` Admin command and `bobi_usage_summary` MCP tool are already present.
-> Do not interpret a planned command as available until its phase lands.
+> **Implementation status:** the Phase 0 provider, spool, storage, projection,
+> and benchmark prototypes exist. Runtime ingestion and the Phase 2-4 Admin,
+> local-maintenance, MCP, and experiment interfaces are not implemented yet.
+> The existing `usage` Admin command and `bobi_usage_summary` MCP tool remain
+> the only shipped query interfaces until those phases land.
 
 The executable architecture and phase gates live in
 [`plans/2026-09-24-fine-grained-metrics-token-tracking.md`](../plans/2026-09-24-fine-grained-metrics-token-tracking.md).
@@ -302,9 +301,11 @@ payload[payload_length] # canonical UTF-8 JSON
 terminator[1] = "\n"
 ```
 
-The writer appends a complete frame in one operation. A crash may leave one
-incomplete final frame; the collector imports every prior valid frame and
-leaves the cursor at the incomplete frame's start.
+The writer completes a frame before accepting the next event and retries short
+OS writes. If an append fails after a partial write, that writer rejects later
+appends so no valid frame can be stranded behind an incomplete tail. A crash
+may leave one incomplete final frame; the collector imports every prior valid
+frame and leaves the cursor at the incomplete frame's start.
 
 Default layout for agent `<name>`:
 
@@ -406,8 +407,9 @@ deadline. They never migrate, checkpoint, or write.
 ## 3. Codebase and Module Map
 
 > [!NOTE]
-> The modules in the first table are planned. Add them incrementally by phase;
-> do not create empty placeholders merely to match this document.
+> Phase 0 modules are implemented as executable prototypes. Phase 1 hardens and
+> wires them into runtime lifecycle; Phase 2-3 modules remain planned and must
+> not be created as empty placeholders.
 
 ### New `bobi/metrics/` modules
 
@@ -415,10 +417,13 @@ deadline. They never migrate, checkpoint, or write.
 |---|---:|---|---|
 | `bobi/metrics/__init__.py` | 0 | Stable package exports and feature capability/version constants | Start threads or open storage on import |
 | `bobi/metrics/events.py` | 0 | Versioned envelopes, event types, ID generation, canonical JSON, validation | Perform I/O or provider parsing |
+| `bobi/metrics/providers.py` | 0 | Exact Claude/Codex usage normalization and transcript/rollout parsing | Read prompt or tool bodies into metrics |
 | `bobi/metrics/producer.py` | 0-1 | Bounded queue, `put_nowait`, drop counters, background writer lifecycle | Block, open SQLite, or propagate failures into a turn |
 | `bobi/metrics/spool.py` | 0-1 | `BMT1` encoding/decoding, segment rotation, checksum validation, cursor-safe tailing, archive compression | Project relational rows |
 | `bobi/metrics/collector.py` | 0-2 | Collector election, spool discovery, staging batches, projection scheduling, reconciliation scheduling, health | Run on the producer thread |
-| `bobi/metrics/store.py` | 0-2 | SQLite connection profiles, migrations, raw staging, idempotent projection transactions, backup/rebuild/prune | Expose writable connections to Admin readers |
+| `bobi/metrics/schema.py` | 0 | Executable v1 DDL and canonical `best_usage` view | Open connections or perform migrations |
+| `bobi/metrics/store.py` | 0-2 | SQLite connection profiles, migrations, raw staging, snapshots, backup/rebuild/prune | Expose writable connections to Admin readers |
+| `bobi/metrics/projection.py` | 0-2 | Dependency-ordered deferred projection, retry, and per-event quarantine | Reject raw ingestion because a normalized parent is late |
 | `bobi/metrics/reconcile.py` | 2 | Claude transcript and version-gated Codex rollout adapters; provider deduplication | Blindly sum repeated transcript rows |
 | `bobi/metrics/estimate.py` | 2 | Collector-owned estimator registry, model qualification, calibrated fallback rows | Run token counting synchronously in a model turn |
 | `bobi/metrics/query.py` | 3 | Summary/session/turn/hotspot/experiment read models, cursor binding, coverage, response caps | Return prompt/tool bodies or combine incompatible granularities |
@@ -443,7 +448,7 @@ their ownership becomes ambiguous.
 | `bobi/supervisor/__main__.py` | Own the primary collector lifecycle independently of manager health |
 | `bobi/supervisor/snapshot.py` | Add collector/query health to heartbeat capability data |
 | `bobi/supervisor/admin.py` | Add isolated metrics query admission and `usage_*` dispatch without blocking the ordered lifecycle worker |
-| `bobi/cli.py` | Add local metrics operations and `bobi admin metrics_*` aliases in their assigned phases |
+| `bobi/cli.py` | Add local metrics operations and Admin metrics aliases in their assigned phases |
 
 CodeGraph currently shows two turn-drain families that must converge on one
 observer:
@@ -854,10 +859,10 @@ GROUP BY projection_state;
 > Use Admin summary queries for production totals, or explicitly choose one
 > scope after checking coverage.
 
-### Query through Bobi Admin
+### Planned Bobi Admin query contract
 
-These Phase 3 CLI aliases use the existing operator-authenticated Worker
-command route. They do not open the remote instance's SQLite file directly.
+Phase 3 will add CLI aliases over the existing operator-authenticated Worker
+command route. They will not open the remote instance's SQLite file directly.
 
 ```bash
 export BOBI_ADMIN_URL='https://events.example.com'
@@ -866,38 +871,14 @@ export BOBI_INSTANCE='my-agent'
 export FLEET_OPERATOR_TOKEN='<operator token from your secret store>'
 ```
 
-Summary (`metrics_summary` maps to wire command `usage`):
+| Planned alias | Wire command | Example arguments |
+|---|---|---|
+| `metrics_summary` | `usage` | `{"window_seconds":86400,"group_by":["model"]}` |
+| `metrics_turn` | `usage_turn` | `{"turn_id":"<turn-id>"}` |
+| `metrics_hotspots` | `usage_hotspots` | `{"scope":"tool","metric":"latency","top_n":20}` |
 
-```bash
-bobi admin metrics_summary \
-  --url "$BOBI_ADMIN_URL" \
-  --fleet "$BOBI_FLEET" \
-  --instance "$BOBI_INSTANCE" \
-  --args '{"window_seconds":86400,"group_by":["model"]}' \
-  --wait --json
-```
-
-Turn detail:
-
-```bash
-bobi admin metrics_turn \
-  --url "$BOBI_ADMIN_URL" \
-  --fleet "$BOBI_FLEET" \
-  --instance "$BOBI_INSTANCE" \
-  --args "{\"turn_id\":\"$TURN_ID\"}" \
-  --wait --json
-```
-
-Top tool-latency hotspots:
-
-```bash
-bobi admin metrics_hotspots \
-  --url "$BOBI_ADMIN_URL" \
-  --fleet "$BOBI_FLEET" \
-  --instance "$BOBI_INSTANCE" \
-  --args '{"scope":"tool","metric":"latency","top_n":20}' \
-  --wait --json
-```
+The Phase 3 implementation must add copy-pasteable CLI examples only after the
+aliases exist and the public-command contract test recognizes them.
 
 Expected command envelope:
 
@@ -1064,6 +1045,7 @@ Phase 0 provider probes:
 ```bash
 .venv/bin/python scripts/live_metrics_smoke.py provider-probe \
   --provider claude \
+  --model opus \
   --prompt 'Reply with exactly METRICS_SMOKE_OK.' \
   --db "$BOBI_SMOKE_ROOT/phase0-claude/metrics.db"
 
@@ -1202,15 +1184,10 @@ on the consuming invocation.
 
 ### S3: Admin and MCP
 
-```bash
-bobi admin metrics_turn \
-  --url "$BOBI_ADMIN_URL" \
-  --fleet "$BOBI_FLEET" \
-  --instance "$BOBI_INSTANCE" \
-  --args "{\"turn_id\":\"$TOOL_TURN_ID\"}" \
-  --wait --json \
-  | tee "$BOBI_SMOKE_ROOT/admin-turn.json"
+Phase 3 must invoke the delivered `metrics_turn` alias, write its JSON response
+to `$BOBI_SMOKE_ROOT/admin-turn.json`, and run this assertion:
 
+```bash
 jq -e --arg turn "$TOOL_TURN_ID" '
   .status == "done"
   and .result.usage_turn.turn.turn_id == $turn
@@ -1287,8 +1264,8 @@ kill -KILL "$MANAGER_PID"
 wait "$MESSAGE_CLIENT_PID" || true
 
 bobi agent "$SMOKE_AGENT" start
-bobi agent "$SMOKE_AGENT" metrics reconcile \
-  --turn-id "$KILLED_TURN_ID" --wait --json
+
+# Phase 2: invoke the delivered reconcile operation for $KILLED_TURN_ID here.
 
 .venv/bin/python scripts/live_metrics_smoke.py verify-token-parity \
   --agent "$SMOKE_AGENT" \
@@ -1312,6 +1289,11 @@ PASS turn_id=<id> process_exit=SIGKILL source=<claude_transcript|codex_rollout> 
 
 .venv/bin/python scripts/benchmark_metrics.py collector \
   --burst-multiple 10 --assert-drain-seconds 60
+
+.venv/bin/python scripts/benchmark_metrics.py rebuild --turns 1000
+
+.venv/bin/python scripts/benchmark_metrics.py contention \
+  --processes 32 --writes-per-process 100
 
 .venv/bin/python scripts/benchmark_metrics.py turn-replay \
   --compare telemetry-off,shadow,full
@@ -1360,11 +1342,8 @@ What may remain unknown:
 - tool start/end timing not persisted anywhere else;
 - router or attribution metadata lost before spooling.
 
-Check collector health and coverage before trusting an aggregate:
-
-```bash
-bobi agent "$BOBI_AGENT_NAME" metrics status --json
-```
+After Phase 2 lands, use its local `metrics status --json` operation to check
+collector health and coverage before trusting an aggregate.
 
 Expected health fields include queue drops, spool bytes, import lag, last
 successful commit, rejected/quarantined events, reconciliation lag, query queue
@@ -1399,10 +1378,8 @@ Operator response:
 
 ### How do I reconcile one turn manually?
 
-```bash
-bobi agent "$BOBI_AGENT_NAME" metrics reconcile \
-  --turn-id "$TURN_ID" --wait --json
-```
+Invoke the Phase 2 `metrics reconcile` operation with `turn_id=$TURN_ID` and
+wait for its JSON result.
 
 Reconciliation is idempotent. It stages deterministic provider events and may
 add an exact row that supersedes an estimate.
@@ -1413,10 +1390,7 @@ The Phase 2 operator command rebuilds a new read model from retained framed
 segments/raw events, validates it, then atomically activates it. It must not
 modify the forensic copy of a corrupt database.
 
-```bash
-bobi agent "$BOBI_AGENT_NAME" metrics rebuild \
-  --wait --json
-```
+Invoke the Phase 2 `metrics rebuild` operation and wait for its JSON result.
 
 Expected result shape:
 
@@ -1433,7 +1407,6 @@ Expected result shape:
 After rebuild:
 
 ```bash
-bobi agent "$BOBI_AGENT_NAME" metrics status --json
 sqlite3 -readonly "$METRICS_DB" 'PRAGMA integrity_check;'
 ```
 
@@ -1441,17 +1414,9 @@ Expected SQLite output is `ok`.
 
 ### How do I prune retention safely?
 
-Preview the configured retention and adaptive disk-budget action:
-
-```bash
-bobi agent "$BOBI_AGENT_NAME" metrics prune --dry-run --json
-```
-
-Apply exactly that policy:
-
-```bash
-bobi agent "$BOBI_AGENT_NAME" metrics prune --apply --json
-```
+Use the Phase 2 `metrics prune --dry-run --json` operation to preview the
+configured retention and adaptive disk-budget action. Apply exactly that plan
+with the corresponding `--apply --json` operation.
 
 The pruner must never delete:
 

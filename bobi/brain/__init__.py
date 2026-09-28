@@ -25,6 +25,7 @@ from bobi.brain.base import (
     AssistantText,
     BrainCapabilities,
     BrainCost,
+    BrainUsage,
     BrainFactory,
     BrainMessage,
     BrainSession,
