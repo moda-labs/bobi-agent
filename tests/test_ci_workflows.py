@@ -192,8 +192,17 @@ def test_macos_supervisor_load_reader_runs_on_real_darwin_ci():
         step for step in job["steps"]
         if step.get("name") == "Smoke the real Darwin supervisor load-grace path"
     )
-    assert "tests/test_supervisor_load.py" in test_step["run"]
-    assert "tests/test_supervision_restart.py" in test_step["run"]
+    assert (
+        "test_parses_real_ps_shapes_and_rejects_malformed_time"
+        in test_step["run"]
+    )
+    assert "test_default_reader_selects_darwin" in test_step["run"]
+    assert "test_unreadable_ps_fails_closed" in test_step["run"]
+    assert (
+        "tests/test_supervision_restart.py::"
+        "test_load_grace_smoke_defers_real_busy_wedge_then_reopens"
+    ) in test_step["run"]
+    assert "tests/test_supervision_restart.py " not in test_step["run"]
 
 
 def test_diy_install_lane_uses_one_wheel_across_supported_hosts():

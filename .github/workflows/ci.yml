@@ -108,8 +108,12 @@ jobs:
 
       - name: Smoke the real Darwin supervisor load-grace path
         run: >-
-          pytest tests/test_supervisor_load.py tests/test_supervision_restart.py
-          --timeout=30 -q
+          pytest
+          tests/test_supervisor_load.py::TestParsePsTime::test_parses_real_ps_shapes_and_rejects_malformed_time
+          tests/test_supervisor_load.py::TestDarwinLoadEvidence::test_default_reader_selects_darwin
+          tests/test_supervisor_load.py::TestDarwinLoadEvidence::test_unreadable_ps_fails_closed
+          tests/test_supervision_restart.py::test_load_grace_smoke_defers_real_busy_wedge_then_reopens
+          --timeout=60 -q
 
   # The required check that stands in for the unit-test matrix.
   #

@@ -253,6 +253,9 @@ def test_load_grace_smoke_defers_real_busy_wedge_then_reopens(tmp_path):
         assert _wait_until(lambda: busy_pid_file.exists(), timeout=10), \
             "busy descendant never spawned"
         busy_pid = int(busy_pid_file.read_text().strip())
+        assert _wait_until(
+            lambda: sup._child_healthy_since is not None, timeout=20
+        ), "manager health endpoint never became visible to the supervisor"
 
         # Wait for the actual supervisor gate, not just the absence of a
         # restart. This proves the native reader observed the real burner.

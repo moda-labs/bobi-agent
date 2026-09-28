@@ -66,9 +66,6 @@ def main() -> None:
             os._exit(0)
         Path(a.busy_pid_file).write_text(str(busy_child))
 
-    from bobi.sdk import set_project_root, get_registry, SessionEntry
-    set_project_root(root)
-
     frozen = time.time() - 100_000  # far past any test threshold
     if a.mode == "always-idle":
         status = "idle"
@@ -79,15 +76,28 @@ def main() -> None:
     else:  # wedge-then-recover
         status = "running" if launch_index == 1 else "idle"
 
-    get_registry().register(SessionEntry(
-        name=a.session, role="manager", status=status,
-        pid=os.getpid(), last_activity=frozen,
-    ))
-
     from bobi import manager_health
     from bobi import paths
-    manager_health.start(paths.state_dir(root), root.name,
-                         manager_session=a.session)
+    if a.mode == "busy-wedge-then-recover":
+        manager_health.start(
+            paths.state_dir(root), root.name,
+            session_status_fn=lambda: [],
+            manager_status_fn=lambda: {
+                "session": a.session,
+                "status": status,
+                "last_activity": frozen,
+                "idle_seconds": max(0.0, time.time() - frozen),
+            },
+        )
+    else:
+        from bobi.sdk import set_project_root, get_registry, SessionEntry
+        set_project_root(root)
+        get_registry().register(SessionEntry(
+            name=a.session, role="manager", status=status,
+            pid=os.getpid(), last_activity=frozen,
+        ))
+        manager_health.start(paths.state_dir(root), root.name,
+                             manager_session=a.session)
 
     # Behave like a live-but-quiet manager: stay up until the supervisor kills us.
     while True:
