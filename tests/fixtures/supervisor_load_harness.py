@@ -59,6 +59,9 @@ def main() -> int:
     class Observer(SupervisorObserver):
         def poll(self, state):
             observed["load_grace"] = state.load_grace
+            observed["health"] = state.health
+            observed["ever_healthy"] = state.ever_healthy
+            observed["health_fail_count"] = state.health_fail_count
             atomic_write_json(state_file, observed)
 
     return Supervisor(

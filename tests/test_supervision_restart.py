@@ -246,23 +246,27 @@ def test_load_grace_smoke_defers_real_busy_wedge_then_reopens(tmp_path):
     ])
     busy_pid = None
     try:
-        # The stub forks its busy descendant and records its pid.
+        # The stub spawns its busy descendant and records its pid.
         assert _wait_until(lambda: busy_pid_file.exists(), timeout=10), \
             "busy descendant never spawned"
         busy_pid = int(busy_pid_file.read_text().strip())
 
-        # Establish the native two-sample CPU delta before presenting an
-        # ambiguous liveness verdict. Starting already wedged races the restart
-        # confirmation against the first usable process-tree sample.
+        # Establish both inputs to the real decision before presenting an
+        # ambiguous verdict: the supervisor has observed the healthy manager
+        # over HTTP, and the native reader has a two-sample CPU delta.
         def observed():
             return _read_json(state_file)
 
         assert _wait_until(
             lambda: bool(
                 observed().get("load_evidence", {}).get("active")
+                and observed().get("ever_healthy")
+                and observed().get("health", {}).get("manager", {}).get(
+                    "status"
+                ) == "running"
             ),
             timeout=20,
-        ), f"real load evidence never observed the busy descendant: {observed()}"
+        ), f"real health/load evidence never became ready: {observed()}"
         assert _launch_count(launch_log) == 1
 
         # Transition the same live manager to wedged only after the production

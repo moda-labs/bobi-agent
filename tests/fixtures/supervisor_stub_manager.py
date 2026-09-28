@@ -17,7 +17,7 @@ Modes:
 - ``dead-then-recover``: first launch registers a *dead* director
   (``status=error``) whose health server keeps answering - the exact #12
   stranding shape. Every relaunch registers a healthy idle director.
-- ``busy-wedge-then-recover`` (#903): first launch forks a CPU-burning
+- ``busy-wedge-then-recover`` (#903): first launch spawns a CPU-burning
   descendant, then becomes wedged when ``--wedge-trigger-file`` appears. This
   lets the platform-native reader establish a real two-sample CPU delta before
   the ambiguous liveness verdict. Every relaunch registers a healthy idle
@@ -29,6 +29,8 @@ Each launch appends a line to ``--launch-log`` so the test can count restarts.
 
 import argparse
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -54,19 +56,6 @@ def main() -> None:
     launch_index = (len(log.read_text().splitlines()) if log.exists() else 0) + 1
     with open(log, "a") as fh:
         fh.write(f"launch {launch_index} pid={os.getpid()}\n")
-
-    busy_child = None
-    if a.mode == "busy-wedge-then-recover" and launch_index == 1:
-        # A real descendant burning CPU: fork a tight loop that outlives this
-        # manager (reparented to init when the supervisor kills us), so the
-        # supervisor's process-table walk sees it in the manager's tree.
-        busy_child = os.fork()
-        if busy_child == 0:
-            deadline = time.time() + 60
-            while time.time() < deadline:
-                pass
-            os._exit(0)
-        Path(a.busy_pid_file).write_text(str(busy_child))
 
     frozen = time.time() - 100_000  # far past any test threshold
     if a.mode == "always-idle":
@@ -98,6 +87,17 @@ def main() -> None:
             session_status_fn=lambda: [],
             manager_status_fn=busy_manager_status,
         )
+        if launch_index == 1:
+            # Production starts manager health before sessions can launch
+            # heavy descendants. Preserve that ordering so CPU evidence never
+            # races ahead of the liveness signal the supervisor must judge.
+            busy_child = subprocess.Popen([
+                sys.executable,
+                "-c",
+                "import time; end=time.time()+60\n"
+                "while time.time()<end: pass",
+            ])
+            Path(a.busy_pid_file).write_text(str(busy_child.pid))
     else:
         from bobi.sdk import set_project_root, get_registry, SessionEntry
         set_project_root(root)
