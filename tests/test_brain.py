@@ -12,7 +12,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 
 from bobi.brain import (
     AssistantText,
@@ -882,6 +889,160 @@ async def test_receive_response_converts_assistant_and_result():
     assert out[0].usage == {"input_tokens": 5, "cache_read_input_tokens": 100}
     assert isinstance(out[1], TurnResult)
     assert out[1].total_cost_usd == 0.1
+
+
+@pytest.mark.asyncio
+async def test_receive_response_captures_invocation_and_tool_metadata():
+    first = AssistantMessage(
+        content=[ToolUseBlock(id="tool-1", name="view_file", input={"path": "x"})],
+        model="claude-opus-4-8",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    tool_result = UserMessage(
+        content=[ToolResultBlock(tool_use_id="tool-1", content="ok")]
+    )
+    second = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="claude-opus-4-8",
+        usage={"input_tokens": 6, "output_tokens": 3},
+        message_id="message-2",
+    )
+    result = _result(
+        model_usage={
+            "claude-opus-4-8": {"input_tokens": 11, "output_tokens": 5}
+        }
+    )
+
+    out = [
+        message
+        async for message in _claude_session_over(
+            [first, tool_result, second, result]
+        ).receive_response()
+    ]
+    turn = out[-1]
+
+    assert [item.provider_event_id for item in turn.invocations] == [
+        "message-1",
+        "message-2",
+    ]
+    assert turn.invocations[0].usage.input_tokens == 5
+    assert len(turn.tool_executions) == 1
+    tool = turn.tool_executions[0]
+    assert tool.provider_tool_call_id == "tool-1"
+    assert tool.tool_name == "view_file"
+    assert tool.tool_kind == "file_read"
+    assert tool.triggering_provider_event_id == "message-1"
+    assert tool.consuming_provider_event_id == "message-2"
+    assert tool.ended_at_us >= tool.started_at_us
+
+
+@pytest.mark.asyncio
+async def test_receive_response_deltas_persistent_session_usage_and_cost():
+    session = _claude_session_over([
+        AssistantMessage(
+            content=[TextBlock(text="first")],
+            model="claude-opus-5",
+            usage={"input_tokens": 2, "output_tokens": 4},
+            message_id="message-1",
+        ),
+        _result(
+            total_cost_usd=0.31,
+            usage={
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 30,
+                "cache_creation": {"ephemeral_1h_input_tokens": 30},
+                "cache_read_input_tokens": 8,
+                "output_tokens": 4,
+            },
+            model_usage={
+                "claude-opus-5": {
+                    "inputTokens": 2,
+                    "cacheCreationInputTokens": 30,
+                    "cacheReadInputTokens": 8,
+                    "outputTokens": 4,
+                },
+                "claude-haiku-4-5": {
+                    "inputTokens": 10,
+                    "outputTokens": 1,
+                },
+            },
+        ),
+    ])
+    first = [message async for message in session.receive_response()][-1]
+
+    session._client = _FakeSDKClient([
+        AssistantMessage(
+            content=[TextBlock(text="second")],
+            model="claude-opus-5",
+            usage={"input_tokens": 2, "output_tokens": 15},
+            message_id="message-2",
+        ),
+        _result(
+            total_cost_usd=0.35,
+            usage={
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 2,
+                "cache_creation": {"ephemeral_1h_input_tokens": 2},
+                "cache_read_input_tokens": 38,
+                "output_tokens": 15,
+            },
+            model_usage={
+                "claude-opus-5": {
+                    "inputTokens": 4,
+                    "cacheCreationInputTokens": 32,
+                    "cacheReadInputTokens": 46,
+                    "outputTokens": 19,
+                },
+                "claude-haiku-4-5": {
+                    "inputTokens": 10,
+                    "outputTokens": 1,
+                },
+            },
+        ),
+    ])
+    second = [message async for message in session.receive_response()][-1]
+
+    assert {usage.model for usage in first.usage} == {
+        "claude-opus-5",
+        "claude-haiku-4-5",
+    }
+    assert [usage.model for usage in second.usage] == ["claude-opus-5"]
+    usage = second.usage[0]
+    assert usage.uncached_input_tokens == 2
+    assert usage.cache_read_input_tokens == 38
+    assert usage.cache_write_input_tokens == 2
+    assert usage.cache_write_1h_input_tokens == 2
+    assert usage.output_tokens == 15
+    assert second.total_cost_usd == pytest.approx(0.04)
+    assert second.costs == [usage.legacy_cost()]
+
+
+@pytest.mark.asyncio
+async def test_resumed_session_omits_ambiguous_first_cumulative_total():
+    session = _claude_session_over([_result(
+        total_cost_usd=0.35,
+        model_usage={
+            "claude-opus-5": {"inputTokens": 100, "outputTokens": 10}
+        },
+    )])
+    session._cumulative_usage_ready = False
+    first = [message async for message in session.receive_response()][-1]
+
+    session._client = _FakeSDKClient([_result(
+        total_cost_usd=0.40,
+        model_usage={
+            "claude-opus-5": {"inputTokens": 120, "outputTokens": 14}
+        },
+    )])
+    second = [message async for message in session.receive_response()][-1]
+
+    assert first.usage == []
+    assert first.costs == []
+    assert first.total_cost_usd == 0
+    assert second.usage[0].uncached_input_tokens == 20
+    assert second.usage[0].output_tokens == 4
+    assert second.total_cost_usd == pytest.approx(0.05)
 
 
 @pytest.mark.asyncio

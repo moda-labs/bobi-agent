@@ -1,17 +1,61 @@
 import os
 
 import pytest
+import yaml
 
-from bobi.metrics.providers import claude_usage
+from bobi.metrics.providers import claude_usage, codex_usage
 from bobi.metrics.store import connect
 from scripts.live_metrics_smoke import (
     _assert_common_parity,
     _brain_options,
     _codex_sessions_root,
+    _codex_parity_expected,
+    _configure_installed_smoke_package,
     _find_claude_transcript,
     _isolated_brain_defaults,
     _write_database,
 )
+
+
+def test_codex_parity_allows_only_unresolved_stream_model():
+    rollout = codex_usage(
+        {"input_tokens": 10, "output_tokens": 2}, model="cx/gpt-live"
+    )
+    unresolved = codex_usage(
+        {"input_tokens": 10, "output_tokens": 2}, model="codex"
+    )
+
+    assert _codex_parity_expected(unresolved, rollout).model == "codex"
+
+    resolved = codex_usage(
+        {"input_tokens": 10, "output_tokens": 2}, model="gpt-other"
+    )
+    with pytest.raises(RuntimeError, match="model mismatch"):
+        _codex_parity_expected(resolved, rollout)
+
+
+def test_provision_pins_disposable_claude_to_known_live_model(tmp_path):
+    package = tmp_path / "agent.yaml"
+    package.write_text("agent: smoke\n")
+
+    _configure_installed_smoke_package(package, "claude")
+
+    assert yaml.safe_load(package.read_text())["brain"] == {
+        "kind": "claude",
+        "model": "opus",
+    }
+
+
+def test_provision_preserves_codex_model_if_fixture_declares_one(tmp_path):
+    package = tmp_path / "agent.yaml"
+    package.write_text("agent: smoke\nbrain:\n  model: gpt-live\n")
+
+    _configure_installed_smoke_package(package, "codex")
+
+    assert yaml.safe_load(package.read_text())["brain"] == {
+        "kind": "codex",
+        "model": "gpt-live",
+    }
 
 
 def test_live_probe_forwards_only_explicit_model():

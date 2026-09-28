@@ -20,6 +20,7 @@ import logging
 import os
 import platform
 import shutil
+import time
 from collections import deque
 from contextlib import suppress
 from typing import Any, AsyncIterator
@@ -28,8 +29,10 @@ from bobi.brain.base import (
     ERROR_KIND_MAX_TURNS,
     AssistantText,
     BrainCost,
+    BrainInvocation,
     BrainMessage,
     BrainSession,
+    BrainToolExecution,
     BrainUsage,
     DeferredTool,
     StreamDelta,
@@ -41,9 +44,33 @@ from bobi.brain.gateway import (
     gateway_base_url,
     with_gateway_env,
 )
+
+
+def _tool_kind(name: str, *, server: bool = False) -> str:
+    normalized = name.strip().lower().replace("-", "_")
+    if normalized in {"read", "view", "view_file", "read_file"}:
+        return "file_read"
+    if normalized in {"edit", "write", "edit_file", "write_file", "apply_patch"}:
+        return "file_edit"
+    if normalized in {"bash", "shell", "command", "command_execution"}:
+        return "shell"
+    if normalized in {"websearch", "web_search", "webfetch", "web_fetch"}:
+        return "web_search"
+    return "server" if server else "client"
 from bobi.metrics.providers import claude_usage
 
 log = logging.getLogger(__name__)
+
+_UNSET = object()
+_CUMULATIVE_USAGE_FIELDS = (
+    ("input_tokens", "inputTokens"),
+    ("output_tokens", "outputTokens"),
+    ("cache_read_input_tokens", "cacheReadInputTokens"),
+    ("cache_creation_input_tokens", "cacheCreationInputTokens"),
+    ("thinking_tokens", "thinkingTokens"),
+    ("web_search_requests", "webSearchRequests"),
+    ("cost_usd", "costUSD"),
+)
 
 DEFAULT_INITIALIZE_TIMEOUT_MS = 180_000
 DEFAULT_CONNECT_ATTEMPTS = 3
@@ -110,6 +137,9 @@ class _ClaudeSession:
         # "gateway", not real Anthropic spend).
         self.provider = provider
         self._client = self._new_client()
+        self._model_usage_baseline: dict[str, dict[str, Any]] = {}
+        self._total_cost_baseline = 0.0
+        self._cumulative_usage_ready = not bool(getattr(options, "resume", None))
 
     def _new_client(self) -> Any:
         from claude_agent_sdk import ClaudeSDKClient
@@ -188,12 +218,57 @@ class _ClaudeSession:
 
     async def receive_response(self) -> AsyncIterator[BrainMessage]:
         """Translate one turn's SDK messages into normalized brain messages."""
-        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ResultMessage,
+            ServerToolResultBlock,
+            ServerToolUseBlock,
+            TextBlock,
+            ToolResultBlock,
+            ToolUseBlock,
+            UserMessage,
+        )
+        tool_use_types = tuple(
+            item for item in (ToolUseBlock, ServerToolUseBlock)
+            if isinstance(item, type)
+        )
+        tool_result_types = tuple(
+            item for item in (ToolResultBlock, ServerToolResultBlock)
+            if isinstance(item, type)
+        )
+        user_message_type = UserMessage if isinstance(UserMessage, type) else ()
 
         assistant_error_kind = ""
         assistant_error_message = ""
+        turn_started_us = time.time_ns() // 1000
+        last_event_us = turn_started_us
+        invocations: list[BrainInvocation] = []
+        tool_states: dict[str, dict[str, Any]] = {}
+        completed_tool_ids: list[str] = []
+
+        def finish_tool(block: Any, observed_at_us: int) -> None:
+            tool_id = str(getattr(block, "tool_use_id", "") or "")
+            if not tool_id:
+                return
+            state = tool_states.setdefault(
+                tool_id,
+                {
+                    "provider_tool_call_id": tool_id,
+                    "tool_name": "unknown",
+                    "tool_kind": "provider",
+                    "triggering_provider_event_id": "",
+                    "started_at_us": observed_at_us,
+                },
+            )
+            state["ended_at_us"] = observed_at_us
+            state["status"] = "failed" if getattr(block, "is_error", False) else "completed"
+            state["is_error"] = bool(getattr(block, "is_error", False))
+            if tool_id not in completed_tool_ids:
+                completed_tool_ids.append(tool_id)
+
         async for msg in self._client.receive_response():
             if isinstance(msg, AssistantMessage):
+                observed_at_us = time.time_ns() // 1000
                 text_parts = [
                     b.text for b in msg.content if isinstance(b, TextBlock)
                 ]
@@ -202,16 +277,100 @@ class _ClaudeSession:
                 if error_kind:
                     assistant_error_kind = error_kind
                     assistant_error_message = text
+                provider_event_id = str(
+                    getattr(msg, "message_id", None)
+                    or getattr(msg, "uuid", None)
+                    or f"claude-invocation-{len(invocations) + 1}"
+                )
+                invocation_usage = None
+                if getattr(msg, "usage", None):
+                    invocation_usage = _one_model_usage(
+                        str(getattr(msg, "model", "") or ""),
+                        msg.usage,
+                        provider_event_id=provider_event_id,
+                    )
+                invocations.append(
+                    BrainInvocation(
+                        provider_event_id=provider_event_id,
+                        model=str(getattr(msg, "model", "") or ""),
+                        started_at_us=last_event_us,
+                        ended_at_us=observed_at_us,
+                        stop_reason=str(getattr(msg, "stop_reason", "") or ""),
+                        status="failed" if error_kind else "completed",
+                        usage=invocation_usage,
+                    )
+                )
+                for tool_id in completed_tool_ids:
+                    if not tool_states[tool_id].get("consuming_provider_event_id"):
+                        tool_states[tool_id]["consuming_provider_event_id"] = provider_event_id
+                completed_tool_ids.clear()
+                for block in msg.content:
+                    if isinstance(block, tool_use_types):
+                        tool_id = str(getattr(block, "id", "") or "")
+                        if tool_id:
+                            tool_name = str(getattr(block, "name", "") or "unknown")
+                            is_server = (
+                                isinstance(ServerToolUseBlock, type)
+                                and isinstance(block, ServerToolUseBlock)
+                            )
+                            tool_states[tool_id] = {
+                                "provider_tool_call_id": tool_id,
+                                "tool_name": tool_name,
+                                "tool_kind": _tool_kind(tool_name, server=is_server),
+                                "triggering_provider_event_id": provider_event_id,
+                                "started_at_us": observed_at_us,
+                                "status": "running",
+                                "is_error": False,
+                            }
+                    elif isinstance(block, tool_result_types):
+                        finish_tool(block, observed_at_us)
+                last_event_us = observed_at_us
                 yield AssistantText(
                     text=text,
                     usage=getattr(msg, "usage", None),
                 )
+            elif isinstance(msg, user_message_type):
+                observed_at_us = time.time_ns() // 1000
+                content = getattr(msg, "content", None)
+                blocks = content if isinstance(content, list) else []
+                for block in blocks:
+                    if isinstance(block, tool_result_types):
+                        finish_tool(block, observed_at_us)
+                last_event_us = observed_at_us
             elif isinstance(msg, ResultMessage):
-                yield _result_to_turn(
+                observed_at_us = time.time_ns() // 1000
+                cumulative_usage = getattr(msg, "model_usage", None)
+                cumulative_cost = getattr(msg, "total_cost_usd", 0.0) or 0.0
+                usage_snapshot = _model_usage_snapshot(cumulative_usage)
+                if usage_snapshot:
+                    if getattr(self, "_cumulative_usage_ready", True):
+                        usage_baseline = getattr(self, "_model_usage_baseline", {})
+                        turn_usage = _model_usage_delta(cumulative_usage, usage_baseline)
+                        cost_baseline = getattr(self, "_total_cost_baseline", 0.0)
+                        turn_cost = _counter_delta(cumulative_cost, cost_baseline)
+                    else:
+                        turn_usage = {}
+                        turn_cost = 0.0
+                else:
+                    turn_usage = cumulative_usage
+                    turn_cost = cumulative_cost
+                result = _result_to_turn(
                     msg,
                     assistant_error_kind=assistant_error_kind,
                     assistant_error_message=assistant_error_message,
+                    model_usage_override=turn_usage,
+                    total_cost_usd_override=turn_cost,
                 )
+                if usage_snapshot:
+                    self._model_usage_baseline = usage_snapshot
+                    self._total_cost_baseline = float(cumulative_cost)
+                    self._cumulative_usage_ready = True
+                result.invocations = invocations
+                result.tool_executions = [
+                    BrainToolExecution(**state)
+                    for state in tool_states.values()
+                ]
+                yield result
             # Other SDK message types carry no signal the call sites consume.
 
 
@@ -220,10 +379,17 @@ def _result_to_turn(
     *,
     assistant_error_kind: str = "",
     assistant_error_message: str = "",
+    model_usage_override: Any = _UNSET,
+    total_cost_usd_override: Any = _UNSET,
 ) -> TurnResult:
     """Normalize an SDK ``ResultMessage`` into a :class:`TurnResult`."""
+    model_usage = (
+        getattr(msg, "model_usage", None)
+        if model_usage_override is _UNSET
+        else model_usage_override
+    )
     usage = _model_usage_to_usage(
-        getattr(msg, "model_usage", None),
+        model_usage,
         result_usage=getattr(msg, "usage", None),
     )
     costs = [item.legacy_cost() for item in usage]
@@ -259,14 +425,64 @@ def _result_to_turn(
         max_turns=max_turns,
         turn_count=turn_count,
         api_error_status=getattr(msg, "api_error_status", None),
-        total_cost_usd=getattr(msg, "total_cost_usd", 0.0) or 0.0,
+        total_cost_usd=(
+            getattr(msg, "total_cost_usd", 0.0) or 0.0
+            if total_cost_usd_override is _UNSET
+            else total_cost_usd_override
+        ),
         duration_ms=getattr(msg, "duration_ms", 0) or 0,
+        api_duration_ms=getattr(msg, "duration_api_ms", 0) or 0,
         num_turns=getattr(msg, "num_turns", 0) or 0,
+        provider_turn_id=str(getattr(msg, "uuid", "") or ""),
         result_text=result_text,
         deferred_tool=deferred,
         costs=costs,
         usage=usage,
     )
+
+
+def _counter_delta(current: Any, previous: Any) -> int | float:
+    current_value = current if isinstance(current, (int, float)) else 0
+    previous_value = previous if isinstance(previous, (int, float)) else 0
+    return current_value - previous_value if current_value >= previous_value else current_value
+
+
+def _model_usage_snapshot(model_usage: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(model_usage, dict):
+        return {}
+    return {
+        str(model): _json_safe_usage(usage)
+        for model, usage in model_usage.items()
+    }
+
+
+def _model_usage_delta(
+    model_usage: Any,
+    previous: dict[str, dict[str, Any]],
+) -> Any:
+    """Convert Claude's session-cumulative modelUsage into per-turn usage."""
+    current = _model_usage_snapshot(model_usage)
+    if not current:
+        return model_usage
+    result: dict[str, dict[str, Any]] = {}
+    for model, usage in current.items():
+        prior = previous.get(model, {})
+        delta = dict(usage)
+        changed = not prior
+        for keys in _CUMULATIVE_USAGE_FIELDS:
+            value = _usage_value(usage, *keys)
+            if value is None:
+                continue
+            prior_value = _usage_value(prior, *keys)
+            difference = _counter_delta(value, prior_value)
+            selected_key = next((key for key in keys if key in usage), keys[0])
+            for key in keys:
+                delta.pop(key, None)
+            delta[selected_key] = difference
+            changed = changed or difference != 0
+        if changed:
+            result[model] = delta
+    return result
 
 
 def _model_usage_to_costs(model_usage: Any) -> list[BrainCost]:
@@ -341,11 +557,14 @@ def _merge_result_usage(
     return merged
 
 
-def _one_model_usage(model: str, usage: Any) -> BrainUsage:
+def _one_model_usage(
+    model: str, usage: Any, *, provider_event_id: str = ""
+) -> BrainUsage:
     raw_usage = _json_safe_usage(usage)
     normalized = claude_usage(
         raw_usage,
         model=model or _usage_str(usage, "canonicalModel", "model"),
+        provider_event_id=provider_event_id,
         scope="turn",
     )
     return BrainUsage(

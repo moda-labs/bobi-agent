@@ -137,6 +137,7 @@ def build_heartbeat(*, identity: dict, state: SupervisorState,
                     derived_status: str, healthy: bool,
                     manager_pid: int | None, now: float,
                     project_root: Path | None,
+                    metrics: dict | None = None,
                     supervisor_version: str = SUPERVISOR_VERSION) -> dict:
     """Assemble the tier-1 heartbeat snapshot."""
     health = state.health or {}
@@ -171,6 +172,11 @@ def build_heartbeat(*, identity: dict, state: SupervisorState,
         # block is reported null. Populated when the sidecar gains its own WS
         # subscription (Phase B) or /health surfaces the manager's client.
         "event_client": None,
+        "metrics": metrics or {
+            "mode": "disabled",
+            "status": "disabled",
+            "db_ready": False,
+        },
         "resources": _resources(project_root),
         "versions": _versions(project_root),
         "expectations": _expectations(project_root),

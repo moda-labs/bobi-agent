@@ -74,6 +74,34 @@ class BrainUsage:
         )
 
 
+@dataclass(frozen=True)
+class BrainInvocation:
+    """Metadata-only facts for one provider model invocation."""
+
+    provider_event_id: str = ""
+    model: str = ""
+    started_at_us: int | None = None
+    ended_at_us: int | None = None
+    stop_reason: str = ""
+    status: str = "completed"
+    usage: BrainUsage | None = None
+
+
+@dataclass(frozen=True)
+class BrainToolExecution:
+    """Metadata-only facts for one tool execution observed by a brain."""
+
+    provider_tool_call_id: str = ""
+    tool_name: str = ""
+    tool_kind: str = "provider"
+    triggering_provider_event_id: str = ""
+    consuming_provider_event_id: str = ""
+    started_at_us: int | None = None
+    ended_at_us: int | None = None
+    status: str = "completed"
+    is_error: bool = False
+
+
 @dataclass
 class DeferredTool:
     """A tool call the brain suspended for out-of-band resolution.
@@ -116,11 +144,15 @@ class TurnResult:
     api_error_status: int | None = None
     total_cost_usd: float = 0.0
     duration_ms: int = 0
+    api_duration_ms: int = 0
     num_turns: int = 0
+    provider_turn_id: str = ""
     result_text: str = ""
     deferred_tool: DeferredTool | None = None
     costs: list[BrainCost] = field(default_factory=list)
     usage: list[BrainUsage] = field(default_factory=list)
+    invocations: list[BrainInvocation] = field(default_factory=list)
+    tool_executions: list[BrainToolExecution] = field(default_factory=list)
 
     def error_text(self) -> str:
         """The honest error string for this turn, or "" when it succeeded."""

@@ -1,6 +1,6 @@
 from argparse import Namespace
 
-from scripts.benchmark_metrics import benchmark_rebuild
+from scripts.benchmark_metrics import benchmark_rebuild, benchmark_turn_replay
 
 
 def test_rebuild_benchmark_proves_replay_and_snapshot_parity():
@@ -15,3 +15,19 @@ def test_rebuild_benchmark_proves_replay_and_snapshot_parity():
     assert report["snapshot"]["counts"]["sessions"] == 3
     assert report["snapshot"]["counts"]["turns"] == 3
     assert report["snapshot"]["counts"]["usage_measurements"] == 3
+
+
+def test_turn_replay_benchmark_compares_all_runtime_modes():
+    report = benchmark_turn_replay(Namespace(
+        compare="telemetry-off,shadow,full",
+        turns=3,
+        turn_work_ms=1.0,
+        rounds=1,
+        assert_regression_percent=10_000,
+    ))
+
+    assert [run["mode"] for run in report["runs"]] == [
+        "telemetry-off", "shadow", "full"
+    ]
+    assert report["runs"][2]["projected_turns"] == 3
+    assert report["runs"][2]["collector_health"]["uncommitted_spool_bytes"] == 0

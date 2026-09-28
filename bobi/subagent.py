@@ -476,10 +476,26 @@ async def _run_agent_supervised(
                 await client.connect()
             # The task is turn 1, explicitly — connect() is never a turn
             # (#1016). Fresh and resumed sessions now take one identical path.
+            from bobi.metrics.runtime import observe_turn
+
+            turn_observation = observe_turn(
+                name,
+                provider=getattr(client, "provider", "anthropic"),
+                role=role,
+                run_key=run_key,
+                trigger_kind="supervised",
+                trigger_id=phase,
+                model_requested=model,
+            )
             await client.query(prompt)
 
             while True:
-                outcome = await drain_turn(client, name, model=model)
+                outcome = await drain_turn(
+                    client,
+                    name,
+                    model=model,
+                    observation=turn_observation,
+                )
                 if outcome.final_text:
                     result.final_text = outcome.final_text
                 result_msg = outcome.result
@@ -510,6 +526,15 @@ async def _run_agent_supervised(
                     loop = asyncio.get_running_loop()
                     answer = await loop.run_in_executor(
                         None, on_input_needed, deferred.name, deferred.input,
+                    )
+                    turn_observation = observe_turn(
+                        name,
+                        provider=getattr(client, "provider", "anthropic"),
+                        role=role,
+                        run_key=run_key,
+                        trigger_kind="deferred_tool_answer",
+                        trigger_id=phase,
+                        model_requested=model,
                     )
                     await client.query(answer)
                     continue

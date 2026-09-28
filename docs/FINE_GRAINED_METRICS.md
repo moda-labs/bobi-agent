@@ -4,11 +4,13 @@ This document is the implementation and operations guide for Bobi's
 fine-grained token, latency, cost, and model-routing telemetry.
 
 > [!IMPORTANT]
-> **Implementation status:** the Phase 0 provider, spool, storage, projection,
-> and benchmark prototypes exist. Runtime ingestion and the Phase 2-4 Admin,
-> local-maintenance, MCP, and experiment interfaces are not implemented yet.
-> The existing `usage` Admin command and `bobi_usage_summary` MCP tool remain
-> the only shipped query interfaces until those phases land.
+> **Implementation status:** Phase 0 storage/provider contracts and Phase 1
+> runtime ingestion are implemented on the feature branch. Metrics remain
+> disabled by default; set `BOBI_METRICS_MODE=shadow` or `full` to exercise the
+> pipeline. Phase 2-4 reconciliation, Admin drill-down, local-maintenance, MCP,
+> and experiment interfaces are not implemented yet. The existing `usage`
+> Admin command and `bobi_usage_summary` MCP tool remain the only query
+> interfaces until those phases land.
 
 The executable architecture and phase gates live in
 [`plans/2026-09-24-fine-grained-metrics-token-tracking.md`](../plans/2026-09-24-fine-grained-metrics-token-tracking.md).
@@ -226,13 +228,20 @@ Claude and Codex already expose exact usage; token estimation is a fallback.
 
 | Provider | Live exact source | Retained exact source | Important caveat |
 |---|---|---|---|
-| Claude | SDK `AssistantMessage.usage`, `ResultMessage.usage`, `model_usage` | `~/.claude/projects/**/<session>.jsonl` | Repeated rows require message/request ID deduplication |
-| Codex | `turn.completed.usage` from `codex exec --json` | `$CODEX_HOME/sessions/**/rollout-*.jsonl` | Repeated `token_count` events must not be blindly summed |
+| Claude | SDK `AssistantMessage.usage`, `ResultMessage.usage`, `model_usage` | `~/.claude/projects/**/<session>.jsonl` | Persistent-session terminal summaries are cumulative and must be differenced |
+| Codex | `turn.completed.usage` from `codex exec --json` | `$CODEX_HOME/sessions/**/rollout-*.jsonl` | Resumed-thread stdout counters are cumulative; repeated rollout counters must not be summed |
 
-Codex turn totals are a supported contract. Invocation-level reconstruction
-from internal rollout events is version-gated: an unknown CLI version keeps the
-exact turn total, retains raw events, and reports invocation detail as
-unsupported rather than inventing a split.
+The live adapters retain the previous terminal counters and emit a monotonic
+per-turn delta. Claude invocation rows still use exact `AssistantMessage.usage`.
+Codex `0.157.1` stdout does not expose the provider turn ID or selected default
+model; Phase 1 verifies the exact delta against rollout `turn_token_usage`, and
+Phase 2 adds version-gated rollout enrichment. An unknown rollout version keeps
+the exact online turn total and never invents an invocation split.
+
+After a process restart, the first resumed terminal summary has no in-memory
+baseline. Phase 1 omits that ambiguous aggregate instead of mislabeling
+session-cumulative counters as one turn. Invocation/tool timing still records;
+Phase 2 transcript/rollout reconciliation recovers the missing exact usage.
 
 ### Why direct SQLite writes are forbidden on the hot path
 
@@ -407,9 +416,8 @@ deadline. They never migrate, checkpoint, or write.
 ## 3. Codebase and Module Map
 
 > [!NOTE]
-> Phase 0 modules are implemented as executable prototypes. Phase 1 hardens and
-> wires them into runtime lifecycle; Phase 2-3 modules remain planned and must
-> not be created as empty placeholders.
+> Phase 0 modules and Phase 1 runtime wiring are implemented. Phase 2-3 modules
+> remain planned and must not be created as empty placeholders.
 
 ### New `bobi/metrics/` modules
 
@@ -424,6 +432,7 @@ deadline. They never migrate, checkpoint, or write.
 | `bobi/metrics/schema.py` | 0 | Executable v1 DDL and canonical `best_usage` view | Open connections or perform migrations |
 | `bobi/metrics/store.py` | 0-2 | SQLite connection profiles, migrations, raw staging, snapshots, backup/rebuild/prune | Expose writable connections to Admin readers |
 | `bobi/metrics/projection.py` | 0-2 | Dependency-ordered deferred projection, retry, and per-event quarantine | Reject raw ingestion because a normalized parent is late |
+| `bobi/metrics/runtime.py` | 1 | Process-local session/turn/step observer, provider metadata normalization, and fail-safe event emission | Write SQLite, wait on locks, or retain prompt/tool bodies |
 | `bobi/metrics/reconcile.py` | 2 | Claude transcript and version-gated Codex rollout adapters; provider deduplication | Blindly sum repeated transcript rows |
 | `bobi/metrics/estimate.py` | 2 | Collector-owned estimator registry, model qualification, calibrated fallback rows | Run token counting synchronously in a model turn |
 | `bobi/metrics/query.py` | 3 | Summary/session/turn/hotspot/experiment read models, cursor binding, coverage, response caps | Return prompt/tool bodies or combine incompatible granularities |
@@ -437,8 +446,8 @@ their ownership becomes ambiguous.
 | File | Required change |
 |---|---|
 | `bobi/brain/base.py` | Replace or extend lossy `BrainCost` with a provider-neutral usage type that preserves cache write, reasoning output, raw usage, and provenance |
-| `bobi/brain/claude.py` | Emit exact usage/model/invocation facts from SDK events; preserve cache-creation detail and provider IDs |
-| `bobi/brain/codex.py` | Preserve `turn.completed.usage`, cache-write, reasoning-output, and provider turn/thread IDs from JSONL |
+| `bobi/brain/claude.py` | Emit exact usage/model/invocation facts from SDK events; preserve cache-creation detail and difference persistent-session terminal totals |
+| `bobi/brain/codex.py` | Difference resumed-thread `turn.completed.usage`; preserve cache-write/reasoning output and live tool timing; retain unknown provider turn/model fields for Phase 2 enrichment |
 | `bobi/brain/turns.py` | Attach the shared telemetry observer to workflow and supervised/detached turn drains |
 | `bobi/session.py` | Attach the same observer to persistent `Session._drain_turn()` without duplicating semantics |
 | `bobi/chat_history.py` | Keep transcript discovery/ordered tool information compatible with reconciliation |
@@ -1175,12 +1184,14 @@ export TOOL_TURN_ID="$(.venv/bin/python scripts/live_metrics_smoke.py wait-lates
 Expected:
 
 ```text
-PASS turn_id=<id> tools=view_file,edit_file,view_file timings=complete attribution=complete
+PASS turn_id=<id> tools=<provider sequence> timings=complete token_contribution=unavailable_not_fabricated
 ```
 
-A shell-command substitution for the required file tools fails this smoke.
-Tool-result tokens are local diagnostic estimates; provider-billed input stays
-on the consuming invocation.
+The exact provider tool sequence may contain additional shell or verification
+steps. The gate requires real read/edit/read behavior with complete timings.
+Phase 1 deliberately stores per-tool token contribution as `NULL` because the
+providers bill at invocation/turn scope; the verifier prints
+`token_contribution=unavailable_not_fabricated`.
 
 ### S3: Admin and MCP
 

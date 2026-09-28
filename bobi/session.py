@@ -27,6 +27,7 @@ from bobi.brain.base import (
 )
 from bobi.brain_availability import observe_brain_turn
 from bobi.inbox import Inbox, Message
+from bobi.metrics.runtime import observe_turn
 from bobi.sdk import (
     save_session_id,
     load_session_id,
@@ -384,6 +385,7 @@ class Session:
         self._total_cost_usd = 0.0
         self._total_duration_ms = 0
         self._total_turns = 0
+        self._metrics_observation = None
 
         # Context rotation state (Steps 1-4, #273). Rotation now cycles the
         # client directly (no decision-log flush — #456 removed it); the only
@@ -895,6 +897,16 @@ class Session:
         # and fires a perpetual false "rotation pending". One call's usage is
         # the actual window fill.
         last_assistant_usage: dict | None = None
+        observation = self._metrics_observation
+        owns_observation = observation is None
+        if observation is None:
+            observation = observe_turn(
+                self.name,
+                provider=getattr(self._client, "provider", "anthropic"),
+                role=self.role,
+                trigger_kind="direct",
+                model_requested=self._session_model(),
+            )
 
         # Heartbeat last_activity for the duration of the turn so a director
         # blocked on a live child (e.g. a Task subagent) is not mistaken for a
@@ -904,6 +916,8 @@ class Session:
         try:
             async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantText):
+                    if msg.text:
+                        observation.mark_first_output()
                     if msg.usage is not None:
                         last_assistant_usage = msg.usage
                     if msg.text:
@@ -919,6 +933,7 @@ class Session:
                             except Exception:
                                 pass
                 elif isinstance(msg, TurnResult):
+                    observation.record_result(msg)
                     turn_completed = True
                     save_session_id(self.name, msg.session_id,
                                     model=self._session_model())
@@ -1085,6 +1100,21 @@ class Session:
                 log.debug(
                     "keepalive: teardown for '%s' raised", self.name, exc_info=True
                 )
+
+        if owns_observation:
+            latest = observation.results[-1] if observation.results else None
+            observation.finish(
+                status=(
+                    "completed"
+                    if turn_completed and latest is not None and not latest.is_error
+                    else "failed"
+                ),
+                error_kind=(
+                    latest.error_kind
+                    if latest is not None
+                    else ("drain_error" if not turn_completed else "")
+                ),
+            )
 
         # Turn complete — clear any "is thinking…" indicators the drain loop
         # started for this turn. The gateway clears the indicator when a
@@ -1256,6 +1286,16 @@ class Session:
             return
 
         try:
+            observation = observe_turn(
+                self.name,
+                provider=getattr(self._client, "provider", "anthropic"),
+                role=self.role,
+                trigger_kind="startup" if msg.sender == "launch" else "inbox",
+                trigger_id=msg.id,
+                is_user_initiated=msg.sender != "launch",
+                model_requested=self._session_model(),
+            )
+            self._metrics_observation = observation
             log_activity(
                 "inbox",
                 {"sender": msg.sender, "text": msg.text[:200]},
@@ -1336,6 +1376,23 @@ class Session:
             if msg.wait:
                 self.inbox.respond(msg, f"error: {e}")
             self._set_state("error")
+        finally:
+            observation = self._metrics_observation
+            self._metrics_observation = None
+            if observation is not None:
+                latest = observation.results[-1] if observation.results else None
+                observation.finish(
+                    status=(
+                        "completed"
+                        if latest is not None and not latest.is_error
+                        else "failed"
+                    ),
+                    error_kind=(
+                        latest.error_kind
+                        if latest is not None
+                        else "drain_error"
+                    ),
+                )
 
     def _start_pending_rotation(self) -> None:
         """Start one coalesced background candidate preparation."""

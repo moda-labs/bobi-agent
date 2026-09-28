@@ -630,6 +630,7 @@ async def _run_workflow_async(
         get_process_brain_model, resolve_effort, resolve_max_turns,
         resolve_model,
     )
+    from bobi.metrics.runtime import observe_workflow_step
 
     _brain = get_brain()
     # A fresh launch ignores the saved transcript but keeps the name: the
@@ -680,6 +681,20 @@ async def _run_workflow_async(
     def _is_prompt_step(step: StepDef) -> bool:
         return not (
             step.condition or step.action or step.notify or step.await_event
+        )
+
+    def _observe_step(step: StepDef, step_type: str, index: int):
+        return observe_workflow_step(
+            session_name,
+            workflow_name=workflow.name,
+            step_name=step.name,
+            step_index=index,
+            attempt=visit_counts[step.name],
+            step_type=step_type,
+            run_key=run_key,
+            provider=getattr(_brain, "provider", "unknown"),
+            brain=getattr(_brain, "name", "unknown"),
+            role=role or current_agent,
         )
 
     def _first_prompt_step() -> StepDef | None:
@@ -950,18 +965,25 @@ async def _run_workflow_async(
             visit_counts[step.name] = int(visit_counts.get(step.name, 0)) + 1
 
             if step.max_iterations and visit_counts[step.name] > step.max_iterations:
+                step_observation = _observe_step(step, "exhausted", step_idx)
                 exhausted_jump, error = _exhaust_step(step)
                 if exhausted_jump >= 0:
+                    step_observation.finish(status="completed")
                     step_idx = exhausted_jump
                     continue
+                step_observation.finish(
+                    status="failed", error_kind="max_iterations"
+                )
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
                 return OUTCOME_FAILED
 
             # Route step — deterministic, no LLM
             if step.condition:
+                step_observation = _observe_step(step, "route", step_idx)
                 taken = ctx.evaluate_condition(step.condition)
                 target = step.goto if taken else step.else_goto
+                step_observation.finish(status="completed")
                 log.info(f"Route {step.name}: {step.condition} → {target}")
                 if target:
                     jump = workflow.step_index(target)
@@ -987,8 +1009,16 @@ async def _run_workflow_async(
 
             # Native action step — deterministic, no LLM
             if step.action:
+                step_observation = _observe_step(step, "action", step_idx)
                 log.info(f"Native action step {step.name}: {step.action}")
-                result = _execute_native_action(step, ctx, cwd)
+                try:
+                    result = _execute_native_action(step, ctx, cwd)
+                except Exception as exc:
+                    step_observation.finish(
+                        status="failed", error_kind=type(exc).__name__
+                    )
+                    raise
+                step_observation.finish(status="completed")
                 ctx.set_scope(step.name, result)
                 for k, v in result.items():
                     ctx.set_flat(k, v)
@@ -1005,6 +1035,7 @@ async def _run_workflow_async(
 
             # Notify step — deterministic, no LLM
             if step.notify:
+                step_observation = _observe_step(step, "notify", step_idx)
                 outcome = _execute_notify_step(
                     step, ctx, run_key, workflow.name,
                 )
@@ -1022,9 +1053,13 @@ async def _run_workflow_async(
                         f"{outcome.error}; refusing to arm await step "
                         f"{next_step.name}"
                     )
+                    step_observation.finish(
+                        status="failed", error_kind="notify_undeliverable"
+                    )
                     run_failed, failure_error = True, error
                     _emit_step_failed(run_key, workflow.name, step.name, error)
                     return OUTCOME_FAILED
+                step_observation.finish(status="completed")
                 _checkpoint(step_idx + 1)
                 step_idx += 1
                 continue
@@ -1033,6 +1068,7 @@ async def _run_workflow_async(
             # the ledger entry opened at launch (#1048), flipped to waiting
             # here - suspension is a state of THIS run, not a new record.
             if step.await_event:
+                step_observation = _observe_step(step, "await", step_idx)
                 log.info(f"Await step {step.name}: suspending, waiting for '{step.await_event}'")
                 # Ledger BEFORE registry, mirroring the terminal path's
                 # ordering: admission's liveness check reads "registry
@@ -1055,6 +1091,7 @@ async def _run_workflow_async(
                     "run_id": run.run_id,
                     "text": f"Workflow suspended at {step.name}, waiting for '{step.await_event}'",
                 })
+                step_observation.finish(status="waiting")
 
                 suspended = True
                 if collect is not None:
@@ -1197,6 +1234,16 @@ async def _run_workflow_async(
                 "text": f"Step {step.name} started",
             })
 
+            step_observation = _observe_step(step, "prompt", step_idx)
+            telemetry_context = {
+                "role": role or current_agent,
+                "run_key": run_key,
+                "workflow_name": workflow.name,
+                "workflow_step_id": step_observation.workflow_step_id,
+                "trigger_kind": "workflow_step",
+                "trigger_id": step.name,
+            }
+
             prompt = _build_step_prompt(step, ctx, session_name, step.name)
             prompt = _step_header(step) + prompt
             if context_pending:
@@ -1206,7 +1253,10 @@ async def _run_workflow_async(
 
             await client.query(prompt)
             drain = await _drain_response(
-                client, session_name, model=current_model,
+                client,
+                session_name,
+                model=current_model,
+                telemetry_context=telemetry_context,
             )
 
             # A turn-cap kill is recoverable, not terminal (#845): the harness
@@ -1271,10 +1321,16 @@ async def _run_workflow_async(
                     )
                     break
                 drain = await _drain_response(
-                    client, session_name, model=current_model,
+                    client,
+                    session_name,
+                    model=current_model,
+                    telemetry_context=telemetry_context,
                 )
 
             if drain.final_text is None:
+                step_observation.finish(
+                    status="failed", error_kind=drain.error_kind
+                )
                 run_failed, failure_error = True, drain.error
                 _emit_step_failed(run_key, workflow.name, step.name,
                                   drain.error)
@@ -1299,13 +1355,20 @@ async def _run_workflow_async(
                     f"Please update your handoff file with these fields and confirm."
                 )
                 await client.query(fix_prompt)
-                await _drain_response(client, session_name,
-                                      model=current_model)
+                await _drain_response(
+                    client,
+                    session_name,
+                    model=current_model,
+                    telemetry_context=telemetry_context,
+                )
                 handoff = _read_handoff(session_name, step.name)
                 missing = _validate_handoff(step, handoff)
 
             if missing:
                 error = f"Handoff missing required fields after retries: {missing}"
+                step_observation.finish(
+                    status="failed", error_kind="handoff_missing"
+                )
                 run_failed, failure_error = True, error
                 _emit_step_failed(run_key, workflow.name, step.name, error)
                 return OUTCOME_FAILED
@@ -1319,6 +1382,7 @@ async def _run_workflow_async(
                 ctx.set_flat(k, v)
 
             duration = time.time() - step_start
+            step_observation.finish(status="completed")
             _emit_lifecycle_event("agent/step.completed", {
                 "run_key": run_key,
                 "workflow": workflow.name,
@@ -1438,7 +1502,11 @@ async def _run_workflow_async(
 
 
 async def _drain_response(
-    client, session_name: str, *, model: str,
+    client,
+    session_name: str,
+    *,
+    model: str,
+    telemetry_context: dict | None = None,
 ) -> DrainResult:
     """Adapt one drained turn into the step loop's flat shape.
 
@@ -1452,7 +1520,12 @@ async def _drain_response(
     ``bobi.brain.turns.drain_turn``; this adapter only folds the brain's own
     turn verdict into that flat shape.
     """
-    outcome = await drain_turn(client, session_name, model=model)
+    outcome = await drain_turn(
+        client,
+        session_name,
+        model=model,
+        telemetry_context=telemetry_context,
+    )
     msg = outcome.result
     if msg is None:
         return DrainResult(None, outcome.failure, outcome.failure_kind)

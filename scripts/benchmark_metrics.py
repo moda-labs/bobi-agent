@@ -10,6 +10,7 @@ import multiprocessing
 import os
 import platform
 import sqlite3
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bobi.metrics.collector import MetricsCollector, rebuild_database
+from bobi.metrics.collector import MetricsCollectorService
+from bobi.metrics.runtime import MetricsRuntime
+from bobi.brain.base import BrainInvocation, BrainUsage, TurnResult
 from bobi.metrics.events import MetricsEvent
 from bobi.metrics.producer import MetricsProducer
 from bobi.metrics.spool import SpoolWriter
@@ -336,6 +340,147 @@ def benchmark_contention(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def _turn_replay_mode(
+    root: Path,
+    *,
+    mode: str,
+    turns: int,
+    turn_work_ms: float,
+) -> dict[str, object]:
+    runtime_mode = "disabled" if mode == "telemetry-off" else mode
+    collector = MetricsCollectorService(root, poll_interval=0.005) if mode == "full" else None
+    if collector is not None:
+        collector.start()
+    runtime = MetricsRuntime(root, mode=runtime_mode, capacity=max(8192, turns * 8))
+    samples_ns: list[int] = []
+    try:
+        for index in range(turns):
+            started_ns = time.perf_counter_ns()
+            observation = runtime.begin_turn(
+                "benchmark-session",
+                provider="benchmark",
+                brain="benchmark",
+                trigger_kind="benchmark",
+                trigger_id=str(index),
+                model_requested="benchmark-model",
+            )
+            if turn_work_ms:
+                time.sleep(turn_work_ms / 1000)
+            usage = BrainUsage(
+                model="benchmark-model",
+                provider_event_id=f"provider-{index}",
+                input_tokens=100,
+                uncached_input_tokens=100,
+                output_tokens=20,
+                raw_usage={"input_tokens": 100, "output_tokens": 20},
+            )
+            observation.record_result(TurnResult(
+                session_id="benchmark-provider-session",
+                provider_turn_id=f"provider-{index}",
+                usage=[usage],
+                invocations=[BrainInvocation(
+                    provider_event_id=f"provider-{index}",
+                    model="benchmark-model",
+                    usage=usage,
+                )],
+            ))
+            observation.finish(status="completed")
+            samples_ns.append(time.perf_counter_ns() - started_ns)
+    finally:
+        closed = runtime.close(timeout=30)
+        if collector is not None:
+            stopped = collector.stop(timeout=30)
+        else:
+            stopped = True
+    if not closed or not stopped:
+        raise RuntimeError(f"{mode} replay did not stop cleanly")
+    health = runtime.health()
+    if health.get("telemetry_events_dropped") or health.get("writer_errors"):
+        raise RuntimeError(f"{mode} replay lost telemetry: {health}")
+    result: dict[str, object] = {
+        "mode": mode,
+        "turns": turns,
+        "turn_work_ms": turn_work_ms,
+        "mean_ms": sum(samples_ns) / len(samples_ns) / 1_000_000,
+        "latency_ms": {
+            "p50": percentile(samples_ns, 0.50) / 1000,
+            "p95": percentile(samples_ns, 0.95) / 1000,
+            "p99": percentile(samples_ns, 0.99) / 1000,
+        },
+        "producer_health": health,
+    }
+    if collector is not None:
+        conn = connect(collector.db_path, readonly=True)
+        try:
+            result["projected_turns"] = int(
+                conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+            )
+        finally:
+            conn.close()
+        result["collector_health"] = collector.health()
+        if result["projected_turns"] != turns:
+            raise RuntimeError(
+                f"full replay projected {result['projected_turns']} of {turns} turns"
+            )
+    return result
+
+
+def benchmark_turn_replay(args: argparse.Namespace) -> dict[str, object]:
+    modes = [value.strip() for value in args.compare.split(",") if value.strip()]
+    allowed = {"telemetry-off", "shadow", "full"}
+    if not modes or any(mode not in allowed for mode in modes):
+        raise SystemExit(f"--compare must use: {','.join(sorted(allowed))}")
+    if "telemetry-off" not in modes:
+        raise SystemExit("--compare must include telemetry-off as the baseline")
+    trials: dict[str, list[dict[str, object]]] = {mode: [] for mode in modes}
+    with tempfile.TemporaryDirectory(prefix="bobi-metrics-turn-replay-") as root:
+        for round_index in range(args.rounds):
+            rotated = modes[round_index % len(modes):] + modes[:round_index % len(modes)]
+            for mode in rotated:
+                trial = _turn_replay_mode(
+                    Path(root) / f"{round_index}-{mode}",
+                    mode=mode,
+                    turns=args.turns,
+                    turn_work_ms=args.turn_work_ms,
+                )
+                trial["round"] = round_index + 1
+                trials[mode].append(trial)
+    runs = []
+    for mode in modes:
+        mode_trials = trials[mode]
+        representative = dict(mode_trials[-1])
+        representative["mean_ms"] = statistics.median(
+            float(trial["mean_ms"]) for trial in mode_trials
+        )
+        representative["trials"] = [
+            {
+                "round": trial["round"],
+                "mean_ms": trial["mean_ms"],
+                "latency_ms": trial["latency_ms"],
+            }
+            for trial in mode_trials
+        ]
+        runs.append(representative)
+    baseline_ms = float(next(
+        run["mean_ms"] for run in runs if run["mode"] == "telemetry-off"
+    ))
+    for run in runs:
+        regression = max(0.0, (float(run["mean_ms"]) - baseline_ms) / baseline_ms * 100)
+        run["regression_percent"] = regression
+        if run["mode"] != "telemetry-off" and regression >= args.assert_regression_percent:
+            raise SystemExit(
+                f"{run['mode']} replay regression {regression:.3f}% exceeds "
+                f"{args.assert_regression_percent:.3f}%"
+            )
+    return {
+        "benchmark": "turn_replay",
+        "metadata": metadata(),
+        "assert_regression_percent": args.assert_regression_percent,
+        "rounds": args.rounds,
+        "runs": runs,
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     root.add_argument("--json-out", type=Path)
@@ -353,6 +498,12 @@ def parser() -> argparse.ArgumentParser:
     contention = commands.add_parser("contention")
     contention.add_argument("--processes", type=int, default=32)
     contention.add_argument("--writes-per-process", type=int, default=100)
+    replay = commands.add_parser("turn-replay")
+    replay.add_argument("--compare", default="telemetry-off,shadow,full")
+    replay.add_argument("--turns", type=int, default=200)
+    replay.add_argument("--turn-work-ms", type=float, default=20.0)
+    replay.add_argument("--rounds", type=int, default=3)
+    replay.add_argument("--assert-regression-percent", type=float, default=1.0)
     return root
 
 
@@ -364,6 +515,8 @@ def main() -> None:
         report = benchmark_collector(args)
     elif args.command == "rebuild":
         report = benchmark_rebuild(args)
+    elif args.command == "turn-replay":
+        report = benchmark_turn_replay(args)
     else:
         report = benchmark_contention(args)
     rendered = json.dumps(report, indent=2, sort_keys=True)

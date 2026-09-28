@@ -57,7 +57,8 @@ class Telemetry(SupervisorObserver):
                  supervisor_version: str = SUPERVISOR_VERSION,
                  now_fn=time.time,
                  publish_fn=_default_publish,
-                 ensure_bubble_fn=None):
+                 ensure_bubble_fn=None,
+                 metrics_health_fn=None):
         self.project_root = project_root
         self.config = config
         self.identity = identity or resolve_deployment_identity(project_root)
@@ -65,6 +66,7 @@ class Telemetry(SupervisorObserver):
         self._now = now_fn
         self._publish_fn = publish_fn
         self._ensure_bubble_fn = ensure_bubble_fn
+        self._metrics_health_fn = metrics_health_fn
         # Derived-verdict state carried across polls. ``_last_status`` is the
         # last CONFIRMED verdict, reported through an unconfirmed transient
         # health miss so a single dropped /health probe doesn't flap the fleet
@@ -168,6 +170,7 @@ class Telemetry(SupervisorObserver):
             identity=self.identity, state=state, derived_status=derived,
             healthy=healthy, manager_pid=manager_pid, now=now,
             project_root=self.project_root,
+            metrics=self._metrics_health(),
             supervisor_version=self.supervisor_version,
         )
         self.last_snapshot = snapshot
@@ -191,6 +194,17 @@ class Telemetry(SupervisorObserver):
             # known-starved, so a wedged read there is not a failing episode
             # (nor is the working poll that ends the deferral a recovery).
             self._update_probe_episode(derived, now)
+
+    def _metrics_health(self) -> dict:
+        if self._metrics_health_fn is None:
+            return {"mode": "disabled", "status": "disabled", "db_ready": False}
+        try:
+            value = self._metrics_health_fn()
+            return value if isinstance(value, dict) else {
+                "mode": "unknown", "status": "degraded", "db_ready": False
+            }
+        except Exception:
+            return {"mode": "unknown", "status": "degraded", "db_ready": False}
 
     def _update_probe_episode(self, derived: str, now: float) -> None:
         bad = derived in _BAD_STATES

@@ -185,7 +185,35 @@ class TestTelemetryHeartbeat:
         assert set(data["resources"]) == {"disk_free_mb", "mem_free_mb",
                                           "mem_pct"}
         assert set(data["expectations"]) == {"subscriptions", "monitors"}
+        assert data["metrics"] == {
+            "mode": "disabled", "status": "disabled", "db_ready": False
+        }
         assert "generated_at" in data
+
+    def test_poll_includes_fail_safe_collector_health(self, monkeypatch):
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(
+            tele.probe, "status_file_age", lambda root, session, now: 1.0
+        )
+        published = []
+        health = {
+            "mode": "shadow",
+            "status": "running",
+            "db_ready": True,
+            "telemetry_events_dropped": 0,
+        }
+        observer = _telemetry(
+            published, metrics_health_fn=lambda: health
+        )
+
+        observer.poll(_state(status="idle"))
+
+        heartbeat = next(
+            data for topic, _source, data in published
+            if topic == "fleet/heartbeat"
+        )
+        assert heartbeat["metrics"] == health
 
     def test_wedge_emits_probe_failing_then_recovered(self, monkeypatch):
         import bobi.supervisor.telemetry as tele

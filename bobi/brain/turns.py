@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 from bobi.brain.base import AssistantText, TurnResult
 from bobi.brain_availability import observe_brain_turn
+from bobi.metrics.runtime import TurnObservation, observe_turn
 # Safe only while bobi.sdk keeps its own bobi.brain imports function-local
 # (sdk.py does, deliberately) - hoisting those would close an import cycle
 # through this module.
@@ -67,7 +68,15 @@ class TurnOutcome:
     failure_kind: str = ""
 
 
-async def drain_turn(client, session_name: str, *, model: str) -> TurnOutcome:
+async def drain_turn(
+    client,
+    session_name: str,
+    *,
+    model: str,
+    observation: TurnObservation | None = None,
+    telemetry_context: dict | None = None,
+    finish_observation: bool = True,
+) -> TurnOutcome:
     """Drain one turn from *client*, owning the per-turn bookkeeping.
 
     On every non-empty assistant message: capture it as the turn's final
@@ -85,15 +94,25 @@ async def drain_turn(client, session_name: str, *, model: str) -> TurnOutcome:
     wall-clock enforcement (D067) still lands in the caller's handler.
     """
     final_text = ""
+    if observation is None:
+        context = dict(telemetry_context or {})
+        observation = observe_turn(
+            session_name,
+            provider=getattr(client, "provider", "anthropic"),
+            model_requested=model,
+            **context,
+        )
     stream = client.receive_response()
     try:
         async for msg in stream:
             if isinstance(msg, AssistantText):
                 if msg.text:
+                    observation.mark_first_output()
                     final_text = msg.text
                     log_activity("response", {"text": msg.text[:500]},
                                  session=session_name)
             elif isinstance(msg, TurnResult):
+                observation.record_result(msg)
                 save_session_id(session_name, msg.session_id, model=model)
                 observe_brain_turn(
                     msg,
@@ -109,14 +128,27 @@ async def drain_turn(client, session_name: str, *, model: str) -> TurnOutcome:
                     "num_turns": msg.num_turns,
                     "duration_ms": msg.duration_ms,
                 }, session=session_name)
+                if finish_observation:
+                    observation.finish(
+                        status="failed" if msg.is_error else "completed",
+                        error_kind=msg.error_kind,
+                    )
                 return TurnOutcome(msg, final_text)
+    except asyncio.CancelledError:
+        if finish_observation:
+            observation.finish(status="cancelled", error_kind="cancelled")
+        raise
     except asyncio.TimeoutError:
         error = timeout_error()
         log.error("Drain timeout for '%s': %s", session_name, error)
+        if finish_observation:
+            observation.finish(status="failed", error_kind="timeout")
         return TurnOutcome(None, final_text, error, "timeout")
     except Exception as e:
         error = tool_crash_error(e)
         log.error("Drain error for '%s': %s", session_name, error)
+        if finish_observation:
+            observation.finish(status="failed", error_kind="tool_crash")
         return TurnOutcome(None, final_text, error, "tool_crash")
     finally:
         # Returning at the terminal result leaves an async generator suspended
@@ -132,4 +164,6 @@ async def drain_turn(client, session_name: str, *, model: str) -> TurnOutcome:
     error = network_drop_error()
     log.error("Drain for '%s' ended without a terminal result: %s",
               session_name, error)
+    if finish_observation:
+        observation.finish(status="failed", error_kind="network_drop")
     return TurnOutcome(None, final_text, error, "network_drop")

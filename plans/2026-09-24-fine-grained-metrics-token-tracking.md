@@ -1,9 +1,10 @@
 # Fine-grained metrics and token tracking
 
-> **Status:** Phase 0 complete; ready for Phase 1 implementation
+> **Status:** Phase 1 completed; Phase 2 is next
 > **Created:** 2026-09-24
 > **Phase 0.0 amendment:** 2026-09-25
 > **Phase 0 completed:** 2026-09-28
+> **Phase 1 implemented:** 2026-09-28
 > **Audited snapshot:** `origin/main` at `de81de3c4060363acdf8936c8ca24d66a006ba55` in worktree `worktrees/fine-grained-metrics`
 > **Scope:** ingestion, schema, local storage, Admin API, MCP tools, and JEV-router experimentation; no Web UI
 
@@ -32,7 +33,7 @@
 
 ### Audit method and limitations
 
-The audit used direct source reads, CodeGraph call-path queries, installed CLI help, retained local Claude and Codex JSONL files, and existing tests. No paid model request was made.
+The audit used direct source reads, CodeGraph call-path queries, installed CLI help, retained local Claude and Codex JSONL files, and existing tests. The initial audit made no paid model request; Phase 0 and Phase 1 later ran the live provider gates defined by this plan.
 
 The meeting recording at `/Users/zodinet17/dev/recap.json` was used only to identify hypotheses. Its relevant claims were that Bobi currently has deployment-level metrics, SQLite might be appropriate, CLI use might leave only plaintext transcripts, fallback estimation might be acceptable, and JEV could act as a model classifier for A/B tests. None of those statements was treated as implementation truth.
 
@@ -91,7 +92,7 @@ Conclusion: Claude token collection can be exact online. Transcript parsing is a
 - `bobi/brain/codex.py:44-57` configures `codex exec --json`; `bobi/brain/codex.py:100-145` parses its stdout as NDJSON.
 - `bobi/brain/codex.py:252-264` starts a new or resumed non-interactive execution for each Bobi query.
 - `bobi/brain/codex.py:280-304` consumes `thread.started`, assistant `item.completed`, and `turn.completed.usage`.
-- The installed Codex CLI version was `0.156.1`. `codex exec --help` documents `--json` as JSONL event output and supports session resume.
+- The Phase 1 verified Codex CLI version is `0.157.1`. `codex exec --help` documents `--json` as JSONL event output and supports session resume.
 - Official Codex non-interactive-mode documentation also describes JSONL event output: <https://learn.chatgpt.com/docs/non-interactive-mode.md>.
 - Retained rollouts live at `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<timestamp>-<thread-id>.jsonl`, matching `bobi/chat_history.py:302-321`.
 - The audited machine had 510 retained Codex rollout files. A large inspected rollout contained `task_started`, `task_complete`, `token_count`, and 7,863 function/custom-tool calls. Its usage event shape, with values removed, was:
@@ -126,9 +127,12 @@ Conclusion: Claude token collection can be exact online. Transcript parsing is a
 ```
 
 - `last_token_usage` may repeat in adjacent events; the inspected file had 9,375 populated token events, 6,562 unique `last_token_usage` objects, and monotonically non-decreasing `total_token_usage`. A parser must use event/turn boundaries and provider identifiers, not blindly sum every row.
-- The persisted rollout format is richer than Bobi's current live adapter. `turn.completed.usage` gives an exact turn aggregate, while the rollout's `token_count`, task, and tool-call events can support finer reconstruction. Because this richer internal rollout shape is less stable than the documented stdout contract, it must be version-gated and retained as raw JSON for reprocessing.
+- Live Phase 1 verification found that `turn.completed.usage` is thread-cumulative after `codex exec resume`, not per-turn. The adapter must subtract the prior terminal counters within a live Bobi session. The rollout's `turn_token_usage` independently proves the resulting per-turn delta.
+- Codex `0.157.1` stdout does not expose the provider turn ID or selected default model on `turn.completed`. Phase 1 records exact usage with an unresolved `codex` model label when no model was explicitly configured; the live verifier correlates by provider session and time window and records the rollout model separately. Phase 2 owns version-gated rollout enrichment.
+- A process restart loses the live cumulative baseline. Phase 1 therefore omits the first resumed terminal aggregate instead of attributing session/thread totals to one turn. Phase 2 transcript/rollout reconciliation recovers that explicit coverage gap.
+- The persisted rollout format is richer than Bobi's current live adapter. Its `token_usage_record`, task, and tool-call events can support finer reconstruction. Because this richer internal rollout shape is less stable than the documented stdout contract, it must be version-gated and retained as raw JSON for reprocessing.
 
-Conclusion: Codex usage is also available without estimation. Exact turn totals are available on the current supported stream; finer invocation reconstruction should use guarded rollout reconciliation until the live stream contract is proven stable by fixtures.
+Conclusion: Codex usage is also available without estimation. Exact turn totals require a monotonic delta over resumed-thread stdout counters and are verified against rollout `turn_token_usage`; provider turn/model enrichment and finer invocation reconstruction use guarded rollout reconciliation.
 
 #### Precision currently lost by Bobi
 
@@ -1020,14 +1024,26 @@ Verification tooling:
 pytest tests/metrics/test_producer.py \
        tests/metrics/test_collector.py \
        tests/metrics/test_execution_paths.py \
-       tests/test_session.py tests/test_workflow.py -q --timeout=30
-.venv/bin/python scripts/benchmark_metrics.py turn-replay --compare telemetry-off,shadow,full
+       tests/test_session.py tests/test_orchestrator.py -q --timeout=30
+.venv/bin/python scripts/benchmark_metrics.py turn-replay \
+  --compare telemetry-off,shadow,full --rounds 7
 .venv/bin/python scripts/live_metrics_smoke.py installed-matrix --checks single-turn,tool-loop
 ```
 
 Transition gates: enqueue p99 remains at or below 200 microseconds; deterministic turn replay latency regression is below 1%; no producer performs SQLite I/O or waits on a lock; zero agent-turn failures across injected queue/spool/database errors; no telemetry drops at measured production peak; and every enumerated production turn path emits one conversation turn plus its invocation/tool children. Live S1 and S2 pass for Claude and Codex.
 
 Definition of done: shadow-mode ingestion is wired to every production drain path; legacy writes remain enabled; collector health is visible; fault-injection and execution-path coverage pass; and live artifacts contain turn IDs, exact token rows, tool timings, attribution labels, and collector health.
+
+Phase 1 evidence on 2026-09-28:
+
+- Exact installed-agent parity passed for Claude and Codex with `is_estimated=0`; Claude preserved 1-hour cache-write detail and Codex preserved cached and reasoning counters.
+- Real tool loops produced five timed `tool_executions` rows per provider. Per-tool billing-token contribution remains `NULL` because neither provider exposes that attribution.
+- Collector health reported zero dropped events, writer errors, rejected/quarantined events, and uncommitted spool bytes for both providers.
+- Producer enqueue p99 was at most `1.209 us` across 1, 8, 32, and 64 processes against the `200 us` SLO.
+- Seven-round turn replay measured `0.833%` shadow regression and `0%` full regression; all 200 turns projected in full mode.
+- Focused metrics tests passed (`61`), and the corrected brain/session/workflow adjacent suite passed (`479`).
+- The full non-integration repository suite passed with `5471 passed, 11 skipped`.
+- The final same-code-state installed-agent rerun passed exact token parity, tool timing, and zero-backlog collector health for Claude and Codex.
 
 ### Phase 2 - reconciliation and estimation
 
@@ -1267,7 +1283,7 @@ tool_name  tool_kind  duration_ms  result_token_contribution  attribution_method
 view_file  file_read  >=0          >=0                        <not-empty>          completed
 edit_file  file_edit  >=0          >=0                        <not-empty>          completed
 view_file  file_read  >=0          >=0                        <not-empty>          completed
-PASS turn_id=<id> tools=view_file,edit_file,view_file timings=complete attribution=complete
+PASS turn_id=<id> tools=<provider sequence> timings=complete token_contribution=unavailable_not_fabricated
 ```
 
 `result_token_contribution` is a local estimate of the tool result consumed by the next invocation, not provider-billed per-tool usage. The exact provider input belongs to the consuming invocation. The smoke fails if the API labels the per-tool estimate as exact, if timestamps are inverted, or if a completed tool cannot be linked to its triggering invocation.

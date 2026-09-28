@@ -130,6 +130,52 @@ def test_run_team_foreground_loads_runtime_dotenv(bobi_install, monkeypatch):
     assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "from-runtime-dotenv"
 
 
+def test_manager_owns_a_fail_safe_metrics_collector_in_shadow_mode(
+    bobi_install, monkeypatch, tmp_path
+):
+    import signal
+
+    from bobi.config import Config
+    from bobi.service import run_manager_from_config
+
+    calls = []
+
+    class Collector:
+        def __init__(self, root):
+            calls.append(("init", root))
+
+        def start(self):
+            calls.append(("start",))
+
+        def stop(self, *, timeout):
+            calls.append(("stop", timeout))
+            return True
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".codex").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("BOBI_METRICS_MODE", "shadow")
+    monkeypatch.setattr("bobi.metrics.collector.MetricsCollectorService", Collector)
+    monkeypatch.setattr("bobi.manager_health.start", lambda *args, **kwargs: 1)
+    monkeypatch.setattr("bobi.subagent.run_persistent_agent", lambda **kwargs: None)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    try:
+        run_manager_from_config(
+            bobi_install.repo_path, Config.load(bobi_install.repo_path)
+        )
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+
+    assert calls == [
+        ("init", bobi_install.repo_path),
+        ("start",),
+        ("stop", 2),
+    ]
+
+
 def test_startup_info_warns_when_inbound_events_use_local_ingress(bobi_install):
     from bobi.service import build_startup_info
 
