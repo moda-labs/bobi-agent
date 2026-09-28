@@ -132,6 +132,7 @@ class MetricsCollectorService:
         root: Path | str,
         *,
         poll_interval: float = 0.1,
+        reconcile_interval: float = 60.0,
     ) -> None:
         self.root = Path(root).resolve()
         self.metrics_root = self.root / "state" / "metrics"
@@ -140,6 +141,8 @@ class MetricsCollectorService:
         self.health_path = self.metrics_root / "collector.state.json"
         self.collector = MetricsCollector(self.db_path)
         self.poll_interval = poll_interval
+        self.reconcile_interval = reconcile_interval
+        self._last_reconcile = time.monotonic()
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
@@ -163,6 +166,11 @@ class MetricsCollectorService:
             "telemetry_events_dropped": 0,
             "producer_writer_errors": 0,
             "producer_count": 0,
+            "maintenance_queue_depth": 0,
+            "last_maintenance": None,
+            "last_reconciliation_at_us": None,
+            "reconciliation_errors": 0,
+            "uncovered_turns": 0,
         }
 
     def start(self) -> None:
@@ -195,6 +203,7 @@ class MetricsCollectorService:
             "projected": 0,
             "deferred": 0,
             "quarantined": 0,
+            "corrupt_segments": 0,
         }
 
     def _collect_once_locked(self) -> dict[str, int | str]:
@@ -204,10 +213,22 @@ class MetricsCollectorService:
             "projected": 0,
             "deferred": 0,
             "quarantined": 0,
+            "corrupt_segments": 0,
         }
         self.collector.prepare_locked()
         for segment in sorted(self.spool_root.glob("*/*.telemetry")):
-            result = self.collector.collect_segment_locked(segment)
+            try:
+                result = self.collector.collect_segment_locked(segment)
+            except SpoolCorruptionError:
+                log.debug(
+                    "metrics: corrupt spool segment isolated: %s",
+                    segment,
+                    exc_info=True,
+                )
+                totals["corrupt_segments"] = (
+                    int(totals["corrupt_segments"]) + 1
+                )
+                continue
             for key in ("staged", "projected", "deferred", "quarantined"):
                 totals[key] = int(totals[key]) + int(result[key])
         return totals
@@ -231,6 +252,14 @@ class MetricsCollectorService:
     def _cycle_locked(self) -> None:
         try:
             result = self._collect_once_locked()
+            from bobi.metrics.maintenance import process_pending_requests
+
+            maintenance = process_pending_requests(self.root)
+            if maintenance:
+                result = self._collect_once_locked()
+                self._set_health(last_maintenance=maintenance[-1])
+            if time.monotonic() - self._last_reconcile >= self.reconcile_interval:
+                result = self._reconcile_locked(result)
             self._refresh_health(result)
         except Exception as exc:
             log.debug("metrics: collector cycle failed", exc_info=True)
@@ -240,6 +269,45 @@ class MetricsCollectorService:
                 rejected_events=int(self.health()["rejected_events"]) + 1,
             )
             self._publish_health()
+
+    def _reconcile_locked(
+        self, result: dict[str, int | str]
+    ) -> dict[str, int | str]:
+        from bobi.metrics.estimate import estimate_missing
+        from bobi.metrics.reconcile import reconcile_missing
+
+        errors = int(self.health()["reconciliation_errors"])
+        try:
+            reconciliation = reconcile_missing(self.root, collect=False)
+            errors += int(reconciliation["errors"])
+        except Exception:
+            log.debug("metrics: scheduled reconciliation failed", exc_info=True)
+            errors += 1
+        result = self._collect_once_locked()
+        try:
+            estimate_missing(self.root, collect=False)
+        except Exception:
+            log.debug("metrics: scheduled estimation failed", exc_info=True)
+            errors += 1
+        result = self._collect_once_locked()
+        uncovered = 0
+        if self.db_path.exists():
+            conn = connect(self.db_path, readonly=True)
+            try:
+                uncovered = int(conn.execute(
+                    "SELECT COUNT(*) FROM turns AS t WHERE NOT EXISTS ("
+                    "SELECT 1 FROM usage_measurements AS u WHERE u.turn_id=t.turn_id "
+                    "AND u.scope='turn')"
+                ).fetchone()[0])
+            finally:
+                conn.close()
+        self._last_reconcile = time.monotonic()
+        self._set_health(
+            last_reconciliation_at_us=time.time_ns() // 1000,
+            reconciliation_errors=errors,
+            uncovered_turns=uncovered,
+        )
+        return result
 
     def _refresh_health(self, result: dict[str, int | str]) -> None:
         now_us = time.time_ns() // 1000
@@ -300,8 +368,13 @@ class MetricsCollectorService:
                     quarantined = 0
             finally:
                 conn.close()
+        corrupt_segments = int(result.get("corrupt_segments", 0))
         self._set_health(
-            status="running" if result["role"] == "active" else "standby",
+            status=(
+                "degraded"
+                if corrupt_segments
+                else "running" if result["role"] == "active" else "standby"
+            ),
             role=result["role"],
             db_ready=self.db_path.exists(),
             spool_bytes=spool_bytes,
@@ -311,11 +384,15 @@ class MetricsCollectorService:
                 if oldest_uncommitted_ns is not None else 0.0
             ),
             last_success_at_us=now_us,
-            last_error=None,
+            last_error="SpoolCorruptionError" if corrupt_segments else None,
+            rejected_events=corrupt_segments,
             quarantined_events=quarantined,
             telemetry_events_dropped=drops,
             producer_writer_errors=writer_errors,
             producer_count=producers,
+            maintenance_queue_depth=len(list(
+                (self.metrics_root / "maintenance").glob("*.request.json")
+            )),
         )
         self._publish_health()
 

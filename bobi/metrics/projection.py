@@ -98,11 +98,19 @@ def _project_row(
     values = {key: value for key, value in payload.items() if key in allowed}
     names = list(values)
     placeholders = ",".join("?" for _ in names)
-    updates = ",".join(
-        f"{name}=excluded.{name}" for name in names if name != target.primary_key
-    )
+    updates = []
+    for name in names:
+        if name == target.primary_key:
+            continue
+        if target.table == "sessions" and name == "provider_session_id":
+            updates.append(
+                "provider_session_id=COALESCE("
+                "excluded.provider_session_id,sessions.provider_session_id)"
+            )
+        else:
+            updates.append(f"{name}=excluded.{name}")
     conflict = (
-        f"DO UPDATE SET {updates}"
+        f"DO UPDATE SET {','.join(updates)}"
         if updates
         else "DO NOTHING"
     )
@@ -150,6 +158,7 @@ def project_pending(
                WHEN 'router_decision.recorded' THEN 20
                WHEN 'invocation.recorded' THEN 30
                ELSE 40 END,
+               emitted_at_us, producer_id, producer_sequence,
                received_at_us, event_id
            LIMIT ?""",
         (now_us, limit),

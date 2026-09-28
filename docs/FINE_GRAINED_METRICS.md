@@ -4,13 +4,30 @@ This document is the implementation and operations guide for Bobi's
 fine-grained token, latency, cost, and model-routing telemetry.
 
 > [!IMPORTANT]
-> **Implementation status:** Phase 0 storage/provider contracts and Phase 1
-> runtime ingestion are implemented on the feature branch. Metrics remain
-> disabled by default; set `BOBI_METRICS_MODE=shadow` or `full` to exercise the
-> pipeline. Phase 2-4 reconciliation, Admin drill-down, local-maintenance, MCP,
-> and experiment interfaces are not implemented yet. The existing `usage`
-> Admin command and `bobi_usage_summary` MCP tool remain the only query
-> interfaces until those phases land.
+> **Implementation status:** Phase 0 storage/provider contracts, Phase 1 runtime
+> ingestion, and Phase 2 reconciliation, estimation, rebuild, and retention are
+> implemented and accepted on the feature branch. Current-code Claude and
+> Codex S1/S2/S4, the 60-minute concurrent kill/recovery soak, and all local
+> regression gates pass. Metrics remain disabled by default; set
+> `BOBI_METRICS_MODE=shadow` or `full` to exercise the pipeline. Phase 3-4
+> Admin drill-down, MCP, and experiment interfaces are not implemented. The
+> existing `usage` Admin command and `bobi_usage_summary` MCP tool remain the
+> only query interfaces until those phases land.
+
+The 60-minute Phase 2 implementation gate uses eight producer processes at `0.1`
+turns/second/worker, rotates a `SIGKILL` every five minutes, and performs a
+terminal read-model replay. This rate preserves concurrency and recovery
+coverage while bounding primary-plus-replay disk usage on the test host.
+
+The accepted run produced 5,675 events over a 3,593.158-second event span,
+survived 11 scheduled process kill/restart cycles, drained every projection,
+matched spool/database fingerprints and exact token totals, and rebuilt to an
+equal logical snapshot. Its observed peak allocated runtime storage was
+25,894,912 bytes, including the replay database.
+
+The original 72-hour soak is a non-blocking release/GA canary. Run it in
+scheduled CI or dedicated infrastructure; it must not block Phase 3
+development.
 
 The executable architecture and phase gates live in
 [`plans/2026-09-24-fine-grained-metrics-token-tracking.md`](../plans/2026-09-24-fine-grained-metrics-token-tracking.md).
@@ -321,7 +338,7 @@ Default layout for agent `<name>`:
 ```text
 $BOBI_HOME/agents/<name>/run/state/metrics/
   spool/<producer-boot-id>/<segment>.telemetry
-  archive/<date>/<segment>.telemetry.zst
+  archive/<date>/<producer>/<segment>.telemetry.gz
   collector.state.json
   metrics.db
 ```
@@ -416,8 +433,8 @@ deadline. They never migrate, checkpoint, or write.
 ## 3. Codebase and Module Map
 
 > [!NOTE]
-> Phase 0 modules and Phase 1 runtime wiring are implemented. Phase 2-3 modules
-> remain planned and must not be created as empty placeholders.
+> Phase 0-2 modules and runtime wiring are implemented. Phase 3 modules remain
+> planned and must not be created as empty placeholders.
 
 ### New `bobi/metrics/` modules
 
@@ -499,7 +516,7 @@ Do not create `metrics_summary` as a wire verb. The canonical mapping is:
 |---|---|
 | `scripts/live_metrics_smoke.py` | Provision disposable agents, synchronize without arbitrary sleeps, independently verify provider parity, inspect tools, inject disposable faults |
 | `scripts/benchmark_metrics.py` | Producer, collector, query, and router benchmarks with machine metadata and percentile JSON |
-| `scripts/metrics_soak.py` | 72-hour replay/reconciliation/failure soak |
+| `scripts/metrics_soak.py` | Bounded implementation soak and scheduled 72-hour release/GA canary |
 | `scripts/check_srm.py` | Deterministic sample-ratio mismatch test |
 | `tests/fixtures/metrics/` | Redacted provider streams/transcripts, schema snapshots, representative DB, JEV golden vectors |
 

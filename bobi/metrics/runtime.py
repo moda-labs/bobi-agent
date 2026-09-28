@@ -67,9 +67,26 @@ class MetricsRuntime:
         self._sequence = itertools.count()
         self._turn_indexes: dict[str, int] = {}
         self._session_starts: dict[str, int] = {}
+        self._emitted_sessions: set[str] = set()
+        self._provider_sessions: dict[str, str] = {}
+        self._fault_injection_enabled = False
         self._producer: MetricsProducer | None = None
         self._init_error = ""
         self.events_emitted = 0
+
+        try:
+            from bobi.metrics.faults import (
+                fault_injection_enabled,
+                validate_fault_injection,
+            )
+
+            validate_fault_injection(self.root)
+            self._fault_injection_enabled = fault_injection_enabled(self.root)
+        except Exception as exc:
+            self.mode = DISABLED
+            self._init_error = type(exc).__name__
+            log.warning("metrics: fault injection refused: %s", exc)
+            return
 
         if self.mode not in ENABLED_MODES:
             self.mode = DISABLED
@@ -126,6 +143,7 @@ class MetricsRuntime:
                 session_id=session_id,
                 turn_id=turn_id,
                 invocation_id=invocation_id,
+                _validate_payload=False,
             )
             accepted = producer.try_emit(event)
             if accepted:
@@ -174,6 +192,7 @@ class MetricsRuntime:
         trigger_id: str = "",
         is_user_initiated: bool = False,
         model_requested: str = "",
+        prompt_bytes: int | None = None,
         started_at_us: int | None = None,
     ) -> "TurnObservation":
         started = started_at_us or time.time_ns() // 1000
@@ -181,7 +200,7 @@ class MetricsRuntime:
         self._session_starts.setdefault(session_id, started)
         turn_index = self._turn_indexes.get(session_id, 0) + 1
         self._turn_indexes[session_id] = turn_index
-        return TurnObservation(
+        observation = TurnObservation(
             runtime=self,
             session_id=session_id,
             session_name=session_name,
@@ -198,8 +217,11 @@ class MetricsRuntime:
             trigger_id=trigger_id,
             is_user_initiated=is_user_initiated,
             model_requested=model_requested,
+            prompt_bytes=prompt_bytes,
             started_at_us=started,
         )
+        observation.start()
+        return observation
 
     def begin_workflow_step(
         self,
@@ -256,10 +278,19 @@ class TurnObservation:
     trigger_id: str
     is_user_initiated: bool
     model_requested: str
+    prompt_bytes: int | None
     started_at_us: int
     first_output_at_us: int | None = None
     results: list["TurnResult"] = field(default_factory=list)
     _finished: bool = False
+
+    def start(self) -> None:
+        if self.session_id not in self.runtime._emitted_sessions:
+            _emit_session(
+                self,
+                self.runtime._provider_sessions.get(self.session_id, ""),
+            )
+        _emit_turn_row(self, status="running", ended_at_us=None, error_kind="")
 
     def mark_first_output(self) -> None:
         if self.first_output_at_us is None:
@@ -348,9 +379,11 @@ class WorkflowStepObservation:
         )
 
 
-def _sum_optional(items: list[int | None]) -> int | None:
-    known = [item for item in items if item is not None]
-    return sum(known) if known else None
+def _sum_reported(items: list[int | None]) -> int | None:
+    """Sum a dimension only when every contributing invocation reports it."""
+    if not items or any(item is None for item in items):
+        return None
+    return sum(items)
 
 
 def _aggregate_usage(items: list["BrainUsage"]) -> dict[str, object]:
@@ -361,14 +394,18 @@ def _aggregate_usage(items: list["BrainUsage"]) -> dict[str, object]:
         "cache_write_input_tokens",
         "cache_write_5m_input_tokens",
         "cache_write_1h_input_tokens",
-        "cache_write_unknown_ttl_input_tokens",
         "output_tokens",
         "reasoning_output_tokens",
     )
-    payload = {name: _sum_optional([getattr(item, name) for item in items]) for name in fields}
-    payload["cache_write_breakdown_complete"] = int(
-        bool(items) and all(item.cache_write_breakdown_complete for item in items)
-    )
+    payload = {
+        name: _sum_reported([getattr(item, name) for item in items])
+        for name in fields
+    }
+    incomplete = [item for item in items if not item.cache_write_breakdown_complete]
+    payload["cache_write_unknown_ttl_input_tokens"] = _sum_reported([
+        item.cache_write_unknown_ttl_input_tokens for item in incomplete
+    ])
+    payload["cache_write_breakdown_complete"] = int(bool(items) and not incomplete)
     payload["token_semantics_version"] = max(
         (item.token_semantics_version for item in items), default=1
     )
@@ -417,7 +454,7 @@ def _usage_payload(
 
 def _emit_session(observation: TurnObservation, provider_session_id: str) -> None:
     runtime = observation.runtime
-    runtime.emit(
+    accepted = runtime.emit(
         "session.recorded",
         {
             "session_id": observation.session_id,
@@ -437,6 +474,59 @@ def _emit_session(observation: TurnObservation, provider_session_id: str) -> Non
             "metadata_json": "{}",
         },
         session_id=observation.session_id,
+    )
+    if not accepted:
+        return
+    runtime._emitted_sessions.add(observation.session_id)
+    if provider_session_id:
+        runtime._provider_sessions[observation.session_id] = provider_session_id
+
+
+def _emit_turn_row(
+    observation: TurnObservation,
+    *,
+    status: str,
+    ended_at_us: int | None,
+    error_kind: str,
+) -> None:
+    duration_ms = sum(result.duration_ms for result in observation.results) or None
+    api_duration_ms = sum(result.api_duration_ms for result in observation.results) or None
+    provider_turn_id = next(
+        (
+            result.provider_turn_id
+            for result in reversed(observation.results)
+            if result.provider_turn_id
+        ),
+        "",
+    )
+    observation.runtime.emit(
+        "turn.recorded",
+        {
+            "turn_id": observation.turn_id,
+            "session_id": observation.session_id,
+            "turn_index": observation.turn_index,
+            "trigger_kind": observation.trigger_kind,
+            "trigger_id": observation.trigger_id or None,
+            "is_user_initiated": int(observation.is_user_initiated),
+            "prompt_template_id": None,
+            "prompt_template_version": None,
+            "prompt_sha256": None,
+            "prompt_bytes": observation.prompt_bytes,
+            "started_at_us": observation.started_at_us,
+            "first_output_at_us": observation.first_output_at_us,
+            "ended_at_us": ended_at_us,
+            "wall_duration_ms": (
+                (ended_at_us - observation.started_at_us) / 1000
+                if ended_at_us is not None else None
+            ),
+            "provider_duration_ms": duration_ms,
+            "provider_api_duration_ms": api_duration_ms,
+            "status": status,
+            "error_kind": error_kind or None,
+            "provider_turn_id": provider_turn_id or None,
+        },
+        session_id=observation.session_id,
+        turn_id=observation.turn_id,
     )
 
 
@@ -479,9 +569,30 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
         (result.session_id for result in reversed(observation.results) if result.session_id),
         "",
     )
-    _emit_session(observation, provider_session_id)
-    duration_ms = sum(result.duration_ms for result in observation.results) or None
-    api_duration_ms = sum(result.api_duration_ms for result in observation.results) or None
+    fault_action = None
+    if runtime._fault_injection_enabled:
+        try:
+            from bobi.metrics.faults import consume_drop_online_usage
+
+            fault_action = consume_drop_online_usage(
+                runtime.root, observation.turn_id
+            )
+        except Exception:
+            log.debug("metrics: fault injection check failed", exc_info=True)
+    if (
+        provider_session_id
+        and runtime._provider_sessions.get(observation.session_id)
+        != provider_session_id
+    ):
+        _emit_session(observation, provider_session_id)
+    if fault_action is None:
+        _emit_turn_row(
+            observation,
+            status=status,
+            ended_at_us=ended_at_us,
+            error_kind=error_kind,
+        )
+
     provider_turn_id = next(
         (
             result.provider_turn_id
@@ -489,32 +600,6 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             if result.provider_turn_id
         ),
         "",
-    )
-    runtime.emit(
-        "turn.recorded",
-        {
-            "turn_id": observation.turn_id,
-            "session_id": observation.session_id,
-            "turn_index": observation.turn_index,
-            "trigger_kind": observation.trigger_kind,
-            "trigger_id": observation.trigger_id or None,
-            "is_user_initiated": int(observation.is_user_initiated),
-            "prompt_template_id": None,
-            "prompt_template_version": None,
-            "prompt_sha256": None,
-            "prompt_bytes": None,
-            "started_at_us": observation.started_at_us,
-            "first_output_at_us": observation.first_output_at_us,
-            "ended_at_us": ended_at_us,
-            "wall_duration_ms": (ended_at_us - observation.started_at_us) / 1000,
-            "provider_duration_ms": duration_ms,
-            "provider_api_duration_ms": api_duration_ms,
-            "status": status,
-            "error_kind": error_kind or None,
-            "provider_turn_id": provider_turn_id or None,
-        },
-        session_id=observation.session_id,
-        turn_id=observation.turn_id,
     )
 
     invocation_rows, provider_ids = _invocation_rows(observation, ended_at_us)
@@ -549,7 +634,7 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             turn_id=observation.turn_id,
             invocation_id=invocation_id,
         )
-        if invocation.usage is not None:
+        if invocation.usage is not None and fault_action is None:
             usage = invocation.usage
             measurement_id = _stable_id(
                 "use", observation.turn_id, invocation_id, usage.provider_event_id
@@ -586,6 +671,8 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
         for usage in result.usage:
             usage_by_model.setdefault(usage.model or "unknown", []).append(usage)
     for model, usage_items in usage_by_model.items():
+        if fault_action is not None:
+            continue
         aggregate = _aggregate_usage(usage_items)
         measurement_id = _stable_id("use", observation.turn_id, "turn", model)
         runtime.emit(
@@ -633,6 +720,14 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             },
             session_id=observation.session_id,
             turn_id=observation.turn_id,
+        )
+    if fault_action is not None:
+        time.sleep(fault_action.hold_seconds)
+        _emit_turn_row(
+            observation,
+            status=status,
+            ended_at_us=time.time_ns() // 1000,
+            error_kind=error_kind,
         )
 
 
@@ -705,15 +800,15 @@ def get_runtime(root: Path | str | None = None) -> MetricsRuntime:
         except Exception:
             root = None
     resolved = Path(root).resolve() if root is not None else None
+    if resolved is None:
+        # An unbound process cannot safely select or reuse an agent-local store.
+        return MetricsRuntime(Path.cwd(), mode=DISABLED)
     if (
         _runtime is not None
         and _runtime.pid == pid
-        and (_runtime.root if resolved is not None else None) == resolved
+        and _runtime.root == resolved
     ):
         return _runtime
-    if resolved is None:
-        # An unbound process cannot safely select an agent-local metrics store.
-        return MetricsRuntime(Path.cwd(), mode=DISABLED)
     previous = _runtime
     if previous is not None:
         try:

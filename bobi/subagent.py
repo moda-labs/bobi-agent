@@ -486,6 +486,7 @@ async def _run_agent_supervised(
                 trigger_kind="supervised",
                 trigger_id=phase,
                 model_requested=model,
+                prompt_bytes=len(prompt.encode("utf-8")),
             )
             await client.query(prompt)
 
@@ -535,6 +536,7 @@ async def _run_agent_supervised(
                         trigger_kind="deferred_tool_answer",
                         trigger_id=phase,
                         model_requested=model,
+                        prompt_bytes=len(answer.encode("utf-8")),
                     )
                     await client.query(answer)
                     continue

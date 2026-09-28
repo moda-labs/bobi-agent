@@ -1249,6 +1249,7 @@ async def _run_workflow_async(
             if context_pending:
                 prompt = _context_prefix() + prompt
                 context_pending = False
+            telemetry_context["prompt_bytes"] = len(prompt.encode("utf-8"))
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             await client.query(prompt)
@@ -1305,9 +1306,11 @@ async def _run_workflow_async(
                 )
                 try:
                     await client.connect()
-                    await client.query(
-                        _turn_budget_resume_prompt(step, final_try)
+                    resume_prompt = _turn_budget_resume_prompt(step, final_try)
+                    telemetry_context["prompt_bytes"] = len(
+                        resume_prompt.encode("utf-8")
                     )
+                    await client.query(resume_prompt)
                 except Exception as e:
                     log.error(
                         "Step %s could not be resumed after the turn cap: %s",
@@ -1353,6 +1356,9 @@ async def _run_workflow_async(
                 fix_prompt = (
                     f"Your handoff is missing required fields: {', '.join(missing)}. "
                     f"Please update your handoff file with these fields and confirm."
+                )
+                telemetry_context["prompt_bytes"] = len(
+                    fix_prompt.encode("utf-8")
                 )
                 await client.query(fix_prompt)
                 await _drain_response(

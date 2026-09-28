@@ -1294,6 +1294,7 @@ class Session:
                 trigger_id=msg.id,
                 is_user_initiated=msg.sender != "launch",
                 model_requested=self._session_model(),
+                prompt_bytes=len(msg.text.encode("utf-8")),
             )
             self._metrics_observation = observation
             log_activity(

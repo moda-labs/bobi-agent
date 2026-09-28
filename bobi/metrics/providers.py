@@ -5,12 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
 
 class ProviderContractError(ValueError):
     """The provider event does not match a supported exact-usage contract."""
+
+
+SUPPORTED_CODEX_ROLLOUT_PREFIXES = ("0.156.", "0.157.")
 
 
 def _token(value: Any) -> int | None:
@@ -112,6 +116,29 @@ class ProviderUsage:
                 "reasoning_output_tokens",
             )
         }
+
+
+@dataclass(frozen=True)
+class ProviderUsageRecord:
+    """One exact provider usage fact with source correlation metadata."""
+
+    usage: ProviderUsage
+    observed_at_us: int
+    provider_session_id: str = ""
+    provider_turn_id: str = ""
+    ordinal: int = -1
+
+
+def _timestamp_us(value: Any) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return int(
+            datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            * 1_000_000
+        )
+    except ValueError:
+        return None
 
 
 def claude_usage(
@@ -224,9 +251,11 @@ def codex_usage(
     )
 
 
-def parse_claude_transcript(path: Path | str) -> list[ProviderUsage]:
-    """Parse exact invocation usage, deduplicated by provider request/message ID."""
-    found: dict[str, ProviderUsage] = {}
+def parse_claude_transcript_records(
+    path: Path | str,
+) -> list[ProviderUsageRecord]:
+    """Parse exact Claude usage with timestamps and message-ID deduplication."""
+    found: dict[str, ProviderUsageRecord] = {}
     with Path(path).open(encoding="utf-8", errors="replace") as stream:
         for line in stream:
             try:
@@ -250,8 +279,24 @@ def parse_claude_transcript(path: Path | str) -> list[ProviderUsage]:
                 provider_event_id=event_id,
                 source="claude_transcript",
             )
-            found[parsed.provider_event_id] = parsed
-    return list(found.values())
+            observed_at_us = _timestamp_us(event.get("timestamp"))
+            if observed_at_us is None:
+                continue
+            found[parsed.provider_event_id] = ProviderUsageRecord(
+                usage=parsed,
+                observed_at_us=observed_at_us,
+                provider_session_id=str(event.get("sessionId") or ""),
+                provider_turn_id=str(event.get("requestId") or ""),
+            )
+    return sorted(
+        found.values(),
+        key=lambda item: (item.observed_at_us, item.usage.provider_event_id),
+    )
+
+
+def parse_claude_transcript(path: Path | str) -> list[ProviderUsage]:
+    """Parse exact invocation usage, deduplicated by provider request/message ID."""
+    return [record.usage for record in parse_claude_transcript_records(path)]
 
 
 def parse_codex_stdout(events: Iterable[dict[str, Any]], model: str) -> ProviderUsage:
@@ -267,16 +312,26 @@ def parse_codex_stdout(events: Iterable[dict[str, Any]], model: str) -> Provider
     return codex_usage(usage, model=model, provider_event_id=event_id)
 
 
-def parse_codex_rollout(path: Path | str, model: str = "codex") -> list[ProviderUsage]:
-    """Select the last exact token_usage_record for each persisted Codex turn."""
-    latest: dict[str, tuple[int, ProviderUsage]] = {}
+def parse_codex_rollout_records(
+    path: Path | str,
+    model: str = "codex",
+) -> list[ProviderUsageRecord]:
+    """Select the final exact usage row per turn from a supported rollout."""
+    latest: dict[str, ProviderUsageRecord] = {}
     turn_models: dict[str, str] = {}
+    provider_session_id = ""
+    cli_version = ""
     with Path(path).open(encoding="utf-8", errors="replace") as stream:
         for line in stream:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 break
+            if event.get("type") == "session_meta":
+                payload = event.get("payload") or {}
+                provider_session_id = str(payload.get("id") or provider_session_id)
+                cli_version = str(payload.get("cli_version") or cli_version)
+                continue
             if event.get("type") == "turn_context":
                 payload = event.get("payload") or {}
                 turn_id = str(payload.get("turn_id") or "")
@@ -300,7 +355,28 @@ def parse_codex_rollout(path: Path | str, model: str = "codex") -> list[Provider
             )
             ordinal = event.get("ordinal")
             ordinal = ordinal if isinstance(ordinal, int) else -1
+            observed_at_us = _timestamp_us(event.get("timestamp"))
+            if observed_at_us is None:
+                continue
+            record = ProviderUsageRecord(
+                usage=parsed,
+                observed_at_us=observed_at_us,
+                provider_session_id=str(
+                    payload.get("session_id") or provider_session_id
+                ),
+                provider_turn_id=turn_id,
+                ordinal=ordinal,
+            )
             previous = latest.get(turn_id)
-            if previous is None or ordinal >= previous[0]:
-                latest[turn_id] = (ordinal, parsed)
-    return [value[1] for _, value in sorted(latest.items())]
+            if previous is None or ordinal >= previous.ordinal:
+                latest[turn_id] = record
+    if cli_version and not cli_version.startswith(SUPPORTED_CODEX_ROLLOUT_PREFIXES):
+        raise ProviderContractError(
+            f"unsupported codex rollout version: {cli_version}"
+        )
+    return [latest[key] for key in sorted(latest)]
+
+
+def parse_codex_rollout(path: Path | str, model: str = "codex") -> list[ProviderUsage]:
+    """Select the last exact token_usage_record for each persisted Codex turn."""
+    return [record.usage for record in parse_codex_rollout_records(path, model)]

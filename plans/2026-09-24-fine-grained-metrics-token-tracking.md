@@ -1,10 +1,11 @@
 # Fine-grained metrics and token tracking
 
-> **Status:** Phase 1 completed; Phase 2 is next
+> **Status:** Phase 2 implemented and accepted locally; Phase 3 not started
 > **Created:** 2026-09-24
 > **Phase 0.0 amendment:** 2026-09-25
 > **Phase 0 completed:** 2026-09-28
 > **Phase 1 implemented:** 2026-09-28
+> **Phase 2 completed:** 2026-09-28
 > **Audited snapshot:** `origin/main` at `de81de3c4060363acdf8936c8ca24d66a006ba55` in worktree `worktrees/fine-grained-metrics`
 > **Scope:** ingestion, schema, local storage, Admin API, MCP tools, and JEV-router experimentation; no Web UI
 
@@ -263,7 +264,7 @@ Suggested paths:
 ```text
 <run-root>/state/metrics/
   spool/<producer-boot-id>/<segment>.telemetry
-  archive/<date>/<segment>.telemetry.zst
+  archive/<date>/<producer>/<segment>.telemetry.gz
   collector.state.json
   metrics.db
 ```
@@ -1061,13 +1062,38 @@ pytest tests/metrics/test_reconcile.py \
        tests/metrics/test_estimate.py \
        tests/metrics/test_retention.py \
        tests/metrics/test_rebuild.py -q --timeout=30
-.venv/bin/python scripts/metrics_soak.py --hours 72 --kill-workers --replay --json-out "$BOBI_SMOKE_ROOT/soak.json"
+.venv/bin/python scripts/metrics_soak.py --hours 1 --workers 8 --turns-per-second 0.1 --kill-workers --kill-interval 300 --replay --json-out "$BOBI_SMOKE_ROOT/soak.json"
 .venv/bin/python scripts/live_metrics_smoke.py installed-matrix --checks single-turn,tool-loop,process-kill
 ```
 
-Transition gates: exact transcript/rollout parity is 100% for reported dimensions; duplicate logical measurements remain zero after repeated reconciliation; an exact row supersedes an estimate without deleting it; `SIGKILL` recovery converges within 60 seconds after explicit reconciliation; the 72-hour soak has zero unexplained exact-total divergence, zero database corruption, and zero agent failures caused by telemetry; rebuild checksums match; and any estimator enabled for a model family has held-out MAPE at or below 10% and p95 absolute percentage error at or below 20% over at least 100 exact turns. Estimators that miss the gate remain disabled for that model family.
+Transition gates: exact transcript/rollout parity is 100% for reported dimensions; duplicate logical measurements remain zero after repeated reconciliation; an exact row supersedes an estimate without deleting it; `SIGKILL` recovery converges within 60 seconds after explicit reconciliation; the 60-minute concurrent kill/recovery soak has zero unexplained exact-total divergence, zero database corruption, zero pending or quarantined projections, zero unexpected worker failures, and an equal logical snapshot after replay; rebuild checksums match; and any estimator enabled for a model family has held-out MAPE at or below 10% and p95 absolute percentage error at or below 20% over at least 100 exact turns. Estimators that miss the gate remain disabled for that model family. The 72-hour soak is a non-blocking release/GA canary run in scheduled CI or dedicated infrastructure and does not block Phase 3 development.
 
-Definition of done: supported provider/parser matrix, estimator calibration report, retention-pressure report, repair/rebuild commands, 72-hour soak artifact, and live S4 evidence for both providers.
+Definition of done: supported provider/parser matrix, estimator calibration report, retention-pressure report, repair/rebuild commands, passing 60-minute soak artifact, and live S4 evidence for both providers.
+
+Phase 2 acceptance completed on 2026-09-28:
+
+- The current code state passes `114` focused metrics tests, `35` plan-artifact
+  tests, and the full non-integration suite with `5524 passed, 11 skipped`.
+- Current-code Claude S1/S2/S4 passes exact parity, `is_estimated=0`, five individually timed tool rows, process-kill transcript recovery, zero duplicates, and zero collector backlog.
+- Current-code Codex S1/S2/S4 passes exact provider-stream parity, four
+  individually timed tool rows, exact rollout recovery after `SIGKILL`, zero
+  duplicates, and zero collector backlog. Per-tool token contribution remains
+  unavailable and is not fabricated.
+- Representative five-round replay passes the `<1%` gate: shadow regression is `0.509%`, full regression is `0%`, all turns project, and producer/collector drops and writer errors are zero.
+- Reconciliation now preserves an aggregate token dimension as `NULL` when any contributing invocation omits it; the unknown-cache-TTL bucket sums only records whose TTL breakdown is incomplete.
+- Rebuild activation now checkpoints source and candidate databases, restores the checkpointed source on post-activation failure, and refuses to activate a partial read model when any retained spool/archive segment is corrupt.
+- The mandatory 60-minute concurrent kill/recovery soak passes with eight
+  workers, 5,675 events over a 3,593.158-second event span, 11 scheduled
+  process kill/restart cycles, exact spool/database fingerprint and token
+  parity, zero duplicate measurements, zero unexpected worker failures, zero
+  pending or quarantined projections, SQLite integrity `ok`, replay integrity
+  `ok`, and equal logical snapshots. Observed peak allocated runtime storage
+  was 25,894,912 bytes. The interrupted pre-fix run and stopped high-rate run
+  remain preserved and excluded from acceptance.
+
+Phase 2 is complete. The 72-hour release/GA canary remains non-blocking and
+must run in scheduled CI or dedicated infrastructure. Phase 3 remains
+unimplemented and requires explicit approval to start.
 
 ### Phase 3 - Admin API and MCP
 

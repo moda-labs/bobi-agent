@@ -33,6 +33,17 @@ def test_frame_round_trip_and_offsets(tmp_path):
     assert uuid.UUID(records[0].event.event_id.removeprefix("evt_")).version == 7
 
 
+def test_event_validation_remains_enabled_by_default():
+    with pytest.raises(TypeError):
+        MetricsEvent(
+            event_type="session.recorded",
+            producer_id="producer",
+            producer_sequence=1,
+            source="test",
+            payload={"not_json": object()},
+        )
+
+
 def test_incomplete_tail_preserves_prior_frames(tmp_path):
     path = tmp_path / "segment.telemetry"
     complete = encode_frame(event(1))

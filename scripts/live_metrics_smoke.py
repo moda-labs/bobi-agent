@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import shutil
 import sqlite3
 import subprocess
@@ -32,12 +33,16 @@ from bobi.chat_history import claude_projects_dirs
 from bobi.fsutil import atomic_write_text
 from bobi.metrics.collector import MetricsCollector
 from bobi.metrics.events import MetricsEvent
+from bobi.metrics.faults import arm_fault as arm_metrics_fault
+from bobi.metrics.faults import read_fault
 from bobi.metrics.providers import (
     ProviderUsage,
     claude_usage,
     codex_usage,
     parse_claude_transcript,
+    parse_claude_transcript_records,
     parse_codex_rollout,
+    parse_codex_rollout_records,
     parse_codex_stdout,
 )
 from bobi.metrics.spool import SpoolWriter
@@ -509,6 +514,26 @@ def _codex_parity_expected(
     )
 
 
+def _wait_claude_invocation_usage(
+    transcript: Path,
+    invocation_ids: set[str],
+    *,
+    timeout: float = 10.0,
+) -> list[ProviderUsage]:
+    """Wait for Claude to durably append usage after the online result arrives."""
+    deadline = time.monotonic() + timeout
+    while True:
+        exact = [
+            item for item in parse_claude_transcript(transcript)
+            if item.provider_event_id in invocation_ids
+        ]
+        if exact:
+            return exact
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Claude transcript has no matching invocation usage")
+        time.sleep(0.05)
+
+
 def verify_token_parity(args: argparse.Namespace) -> dict[str, object]:
     conn = connect(args.db, readonly=True)
     try:
@@ -520,6 +545,11 @@ def verify_token_parity(args: argparse.Namespace) -> dict[str, object]:
         if turn is None:
             raise RuntimeError(f"turn {args.turn_id} was not found")
         database = _database_turn_usage(conn, args.turn_id)
+        usage_observed_at_us = conn.execute(
+            "SELECT MAX(observed_at_us) FROM usage_measurements "
+            "WHERE turn_id=? AND is_estimated=0",
+            (args.turn_id,),
+        ).fetchone()[0]
         invocation_ids = {
             str(row[0])
             for row in conn.execute(
@@ -530,20 +560,24 @@ def verify_token_parity(args: argparse.Namespace) -> dict[str, object]:
         }
     finally:
         conn.close()
-    if not database or any(item.measurement_source != "provider_stream" for item in database):
-        raise RuntimeError("turn has no exact provider_stream usage")
+    expected_source = (
+        "claude_transcript" if args.provider == "claude" else "codex_rollout"
+    ) if getattr(args, "require_reconciled", False) else "provider_stream"
+    if not database or any(
+        item.measurement_source != expected_source for item in database
+    ):
+        raise RuntimeError(f"turn has no exact {expected_source} usage")
 
     provider_session_id = str(turn["provider_session_id"] or "")
     if args.provider == "claude":
         transcript = _find_claude_transcript(
             provider_session_id, int(turn["started_at_us"]) * 1000
         )
-        exact = [
-            item for item in parse_claude_transcript(transcript)
-            if item.provider_event_id in invocation_ids
-        ]
-        if not exact:
-            raise RuntimeError("Claude transcript has no matching invocation usage")
+        exact = _wait_claude_invocation_usage(
+            transcript,
+            invocation_ids,
+            timeout=float(getattr(args, "transcript_timeout", 10.0)),
+        )
         expected = _aggregate(exact, source="claude_transcript")
         _assert_common_parity(database, expected, allow_left_extras=True)
         source = transcript
@@ -551,10 +585,19 @@ def verify_token_parity(args: argparse.Namespace) -> dict[str, object]:
         rollout = _find_named_jsonl(
             _codex_sessions_root(), provider_session_id, int(turn["started_at_us"]) * 1000
         )
+        # A process-killed turn intentionally remains lifecycle-incomplete, so
+        # reconciliation can recover exact usage while ``ended_at_us`` stays
+        # NULL. Bound independent rollout verification by the recovered
+        # provider observation instead of inventing a turn completion time.
+        ended_at_us = turn["ended_at_us"]
+        if ended_at_us is None:
+            ended_at_us = usage_observed_at_us
+        if ended_at_us is None:
+            raise RuntimeError("Codex turn has no end or exact usage observation")
         rollout_usage = _codex_turn_usage(
             rollout,
             started_at_us=int(turn["started_at_us"]),
-            ended_at_us=int(turn["ended_at_us"]),
+            ended_at_us=int(ended_at_us),
             model=database[0].model,
         )
         expected = [_codex_parity_expected(database[0], rollout_usage)]
@@ -569,6 +612,21 @@ def verify_token_parity(args: argparse.Namespace) -> dict[str, object]:
         "provider_source": str(source),
         "usage": {item.model: item.comparable_tokens() for item in database},
     }
+    conn = connect(args.db, readonly=True)
+    try:
+        duplicates = int(conn.execute(
+            "SELECT COUNT(*) FROM ("
+            "SELECT scope,COALESCE(invocation_id,''),provider,model,"
+            "measurement_source,COUNT(*) AS count FROM usage_measurements "
+            "WHERE turn_id=? AND is_estimated=0 GROUP BY 1,2,3,4,5 "
+            "HAVING count>1)",
+            (args.turn_id,),
+        ).fetchone()[0])
+    finally:
+        conn.close()
+    if duplicates:
+        raise RuntimeError(f"turn has {duplicates} duplicate exact measurements")
+    artifact["duplicates"] = duplicates
     if args.provider == "codex":
         artifact["provider_model"] = rollout_usage.model
     if getattr(args, "json_out", None):
@@ -576,7 +634,7 @@ def verify_token_parity(args: argparse.Namespace) -> dict[str, object]:
         args.json_out.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
     print(
         f"PASS provider={args.provider} turn_id={args.turn_id} "
-        "is_estimated=0 parity=exact"
+        f"source={expected_source} is_estimated=0 parity=exact duplicates=0"
     )
     return artifact
 
@@ -651,6 +709,7 @@ def _smoke_env(home: Path) -> dict[str, str]:
         env.pop(name, None)
     env["BOBI_HOME"] = str(home)
     env["BOBI_METRICS_MODE"] = "shadow"
+    env["BOBI_METRICS_FAULT_INJECTION"] = "1"
     env.setdefault("BOBI_EVENT_SERVER", "http://localhost:8080")
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = str(REPO_ROOT) + (os.pathsep + existing if existing else "")
@@ -694,6 +753,260 @@ def _wait_agent_ready(run_root: Path, timeout: float = 120) -> dict[str, object]
                 )
         time.sleep(0.1)
     raise RuntimeError(f"manager did not become idle within {timeout:.1f}s")
+
+
+def _wait_manager_restarted(
+    run_root: Path,
+    previous_pid: int,
+    *,
+    timeout: float = 120,
+) -> dict[str, object]:
+    from bobi import manager_health
+    from bobi.sdk import pid_alive
+
+    deadline = time.monotonic() + timeout
+    last_error = "manager pid did not change"
+    pid_path = run_root / "state" / "manager.pid"
+    port_path = run_root / "state" / "manager-health.port"
+    while time.monotonic() < deadline:
+        try:
+            manager_pid = int(pid_path.read_text().strip())
+            if manager_pid == previous_pid:
+                time.sleep(0.1)
+                continue
+            if not pid_alive(manager_pid):
+                last_error = f"replacement manager pid {manager_pid} is not alive"
+                time.sleep(0.1)
+                continue
+            port = int(port_path.read_text().strip())
+            health = manager_health.health(
+                f"http://127.0.0.1:{port}", timeout=0.5
+            )
+            if not health or int(health.get("pid") or 0) != manager_pid:
+                last_error = "replacement manager health did not match its pid"
+                time.sleep(0.1)
+                continue
+            manager = health.get("manager") or {}
+            if manager.get("status") not in {"running", "idle"}:
+                last_error = (
+                    "replacement manager is not ready: "
+                    f"{manager.get('status', 'unknown')}"
+                )
+                time.sleep(0.1)
+                continue
+            return health
+        except (OSError, TypeError, ValueError) as exc:
+            last_error = str(exc)
+            time.sleep(0.1)
+    raise RuntimeError(
+        f"manager did not restart within {timeout:.1f}s: {last_error}"
+    )
+
+
+def arm_fault(args: argparse.Namespace) -> None:
+    home = args.bobi_home.resolve()
+    if not (home / SMOKE_MARKER).exists():
+        raise SystemExit(f"run provision first; missing {home / SMOKE_MARKER}")
+    root = home / "agents" / args.agent / "run"
+    state = arm_metrics_fault(root, args.fault, hold_seconds=args.hold_seconds)
+    print(f"ARMED fault={state['fault']} count={state['count']}")
+
+
+def _provider_records_for_running_turn(
+    provider: str,
+    provider_session_id: str,
+    started_at_us: int,
+):
+    if provider == "claude":
+        source = _find_claude_transcript(
+            provider_session_id, started_at_us * 1000
+        )
+        records = parse_claude_transcript_records(source)
+    else:
+        source = _find_named_jsonl(
+            _codex_sessions_root(), provider_session_id, started_at_us * 1000
+        )
+        records = parse_codex_rollout_records(source)
+    return source, [
+        record for record in records
+        if record.observed_at_us >= started_at_us - 2_000_000
+    ]
+
+
+def wait_crash_window(args: argparse.Namespace) -> str:
+    home = args.bobi_home.resolve()
+    root = home / "agents" / args.agent / "run"
+    deadline = time.monotonic() + args.timeout
+    last_error = "turn not started"
+    while time.monotonic() < deadline:
+        state = read_fault(root)
+        turn_id = str((state or {}).get("turn_id") or "")
+        if (state or {}).get("status") != "consumed" or not turn_id:
+            time.sleep(0.1)
+            continue
+        try:
+            conn = connect(args.db, readonly=True)
+            try:
+                turn = conn.execute(
+                    "SELECT t.*,s.provider_session_id,s.session_name FROM turns AS t "
+                    "JOIN sessions AS s USING(session_id) WHERE t.turn_id=?",
+                    (turn_id,),
+                ).fetchone()
+                usage_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM usage_measurements WHERE turn_id=?",
+                    (turn_id,),
+                ).fetchone()[0])
+                tool_count = int(conn.execute(
+                    "SELECT COUNT(*) FROM tool_executions WHERE turn_id=?",
+                    (turn_id,),
+                ).fetchone()[0])
+            finally:
+                conn.close()
+            if turn is None or turn["status"] != "running":
+                last_error = "turn is not durably running"
+                time.sleep(0.1)
+                continue
+            if args.require_online_measurement_absent and usage_count:
+                raise RuntimeError("online usage measurement is present")
+            if tool_count < 1:
+                last_error = "tool execution not projected"
+                time.sleep(0.1)
+                continue
+            provider_session_id = str(turn["provider_session_id"] or "")
+            if not provider_session_id:
+                from bobi.sdk import load_session_id
+
+                provider_session_id = load_session_id(
+                    str(turn["session_name"]), root=root
+                )
+            source, records = _provider_records_for_running_turn(
+                args.provider,
+                provider_session_id,
+                int(turn["started_at_us"]),
+            )
+            if args.require_transcript_usage and not records:
+                last_error = f"no provider usage in {source}"
+                time.sleep(0.1)
+                continue
+            manager_pid = int((root / "state" / "manager.pid").read_text().strip())
+            os.kill(manager_pid, 0)
+            print(turn_id)
+            return turn_id
+        except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
+            last_error = str(exc)
+            time.sleep(0.1)
+    raise SystemExit(
+        f"crash window did not become ready within {args.timeout:.1f}s: {last_error}"
+    )
+
+
+def wait_reconciliation(args: argparse.Namespace) -> None:
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        conn = connect(args.db, readonly=True)
+        try:
+            row = conn.execute(
+                "SELECT measurement_source,is_estimated FROM best_usage "
+                "WHERE turn_id=? AND scope='turn' AND is_estimated=0 LIMIT 1",
+                (args.turn_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is not None and row["measurement_source"] in {
+            "claude_transcript", "codex_rollout"
+        }:
+            print(
+                f"PASS turn_id={args.turn_id} "
+                f"source={row['measurement_source']} is_estimated=0"
+            )
+            return
+        time.sleep(0.1)
+    raise SystemExit(
+        f"turn {args.turn_id} did not reconcile within {args.timeout:.1f}s"
+    )
+
+
+def _process_kill_smoke(
+    *,
+    env: dict[str, str],
+    home: Path,
+    agent: str,
+    provider: str,
+    db: Path,
+    artifacts: Path,
+) -> None:
+    root = home / "agents" / agent / "run"
+    smoke_file = root / "workspace" / "LIVE_SMOKE.txt"
+    smoke_file.parent.mkdir(parents=True, exist_ok=True)
+    smoke_file.write_text("state=kill-smoke\n")
+    arm_metrics_fault(root, "drop-next-online-usage", hold_seconds=60)
+    executable = Path(sys.executable).with_name("bobi")
+    client = subprocess.Popen(
+        [
+            str(executable), "agent", agent, "message",
+            "Inspect LIVE_SMOKE.txt with a file-reading tool, then reply "
+            "with exactly KILL_SMOKE_DONE.",
+            "--wait", "--timeout", "300",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    turn_id = wait_crash_window(argparse.Namespace(
+        bobi_home=home,
+        agent=agent,
+        provider=provider,
+        db=db,
+        require_transcript_usage=True,
+        require_online_measurement_absent=True,
+        timeout=120.0,
+    ))
+    manager_pid = int((root / "state" / "manager.pid").read_text().strip())
+    os.kill(manager_pid, signal.SIGKILL)
+    try:
+        client.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        client.kill()
+        client.communicate()
+    from bobi.sdk import pid_alive
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and pid_alive(manager_pid):
+        time.sleep(0.1)
+    if pid_alive(manager_pid):
+        raise RuntimeError(f"manager pid {manager_pid} survived SIGKILL")
+    restart_output = _bobi(env, "agent", agent, "start", timeout=120)
+    if "already running" in restart_output.lower():
+        raise RuntimeError(f"manager did not restart: {restart_output}")
+    restart_health = _wait_manager_restarted(
+        root, manager_pid, timeout=120
+    )
+    (artifacts / f"{provider}-process-kill-restart.json").write_text(
+        json.dumps(restart_health, indent=2, sort_keys=True) + "\n"
+    )
+    output = _bobi(
+        env,
+        "agent", agent, "metrics", "reconcile",
+        "--turn-id", turn_id, "--wait", "--json",
+        timeout=120,
+    )
+    reconciliation = json.loads(output)
+    if reconciliation.get("errors") or not reconciliation.get("turns_repaired"):
+        raise RuntimeError(f"reconciliation failed: {reconciliation}")
+    (artifacts / f"{provider}-process-kill-reconcile.json").write_text(
+        json.dumps(reconciliation, indent=2, sort_keys=True) + "\n"
+    )
+    wait_reconciliation(argparse.Namespace(db=db, turn_id=turn_id, timeout=60.0))
+    verify_token_parity(argparse.Namespace(
+        agent=agent,
+        provider=provider,
+        turn_id=turn_id,
+        db=db,
+        json_out=artifacts / f"{provider}-process-kill.json",
+        require_reconciled=True,
+    ))
 
 
 def _configure_installed_smoke_package(package: Path, provider: str) -> None:
@@ -751,10 +1064,10 @@ def _wait_for_collector_health(path: Path, timeout: float = 30) -> dict[str, obj
 
 def installed_matrix(args: argparse.Namespace) -> None:
     checks = {value for value in args.checks.split(",") if value}
-    unsupported = checks - {"single-turn", "tool-loop"}
+    unsupported = checks - {"single-turn", "tool-loop", "process-kill"}
     if unsupported:
         raise SystemExit(
-            "Phase 1 installed-matrix supports single-turn and tool-loop only; "
+            "installed-matrix supports single-turn, tool-loop, and process-kill; "
             f"unsupported: {','.join(sorted(unsupported))}"
         )
     home = args.bobi_home.resolve()
@@ -849,6 +1162,15 @@ def installed_matrix(args: argparse.Namespace) -> None:
                     minimum_tool_count=3,
                     json_out=artifacts / f"{provider}-tool-loop.json",
                 ))
+            if "process-kill" in checks:
+                _process_kill_smoke(
+                    env=env,
+                    home=home,
+                    agent=agent,
+                    provider=provider,
+                    db=db,
+                    artifacts=artifacts,
+                )
             health = _wait_for_collector_health(
                 run_root / "state" / "metrics" / "collector.state.json"
             )
@@ -954,6 +1276,7 @@ def parser() -> argparse.ArgumentParser:
     parity.add_argument("--turn-id", required=True)
     parity.add_argument("--db", type=Path, required=True)
     parity.add_argument("--json-out", type=Path)
+    parity.add_argument("--require-reconciled", action="store_true")
     tools = commands.add_parser("verify-tools")
     tools.add_argument("--db", type=Path, required=True)
     tools.add_argument("--turn-id", required=True)
@@ -961,6 +1284,28 @@ def parser() -> argparse.ArgumentParser:
     tools.add_argument("--required-kinds", default="")
     tools.add_argument("--minimum-tool-count", type=int, default=1)
     tools.add_argument("--json-out", type=Path)
+    fault = commands.add_parser("arm-fault")
+    fault.add_argument("--bobi-home", type=Path, required=True)
+    fault.add_argument("--agent", required=True)
+    fault.add_argument(
+        "--fault", choices=("drop-next-online-usage",),
+        default="drop-next-online-usage",
+    )
+    fault.add_argument("--hold-seconds", type=float, default=60.0)
+    crash = commands.add_parser("wait-crash-window")
+    crash.add_argument("--bobi-home", type=Path, required=True)
+    crash.add_argument("--agent", required=True)
+    crash.add_argument("--provider", choices=("claude", "codex"), required=True)
+    crash.add_argument("--db", type=Path, required=True)
+    crash.add_argument("--require-transcript-usage", action="store_true")
+    crash.add_argument(
+        "--require-online-measurement-absent", action="store_true"
+    )
+    crash.add_argument("--timeout", type=float, default=120.0)
+    reconciliation = commands.add_parser("wait-reconciliation")
+    reconciliation.add_argument("--db", type=Path, required=True)
+    reconciliation.add_argument("--turn-id", required=True)
+    reconciliation.add_argument("--timeout", type=float, default=60.0)
     provision_cmd = commands.add_parser("provision")
     provision_cmd.add_argument(
         "--bobi-home", type=Path,
@@ -993,18 +1338,18 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
-    if args.command == "provider-probe":
-        provider_probe(args)
-    elif args.command == "wait-latest-turn":
-        wait_latest_turn(args)
-    elif args.command == "verify-token-parity":
-        verify_token_parity(args)
-    elif args.command == "verify-tools":
-        verify_tools(args)
-    elif args.command == "provision":
-        provision(args)
-    else:
-        installed_matrix(args)
+    handlers = {
+        "provider-probe": provider_probe,
+        "wait-latest-turn": wait_latest_turn,
+        "verify-token-parity": verify_token_parity,
+        "verify-tools": verify_tools,
+        "arm-fault": arm_fault,
+        "wait-crash-window": wait_crash_window,
+        "wait-reconciliation": wait_reconciliation,
+        "provision": provision,
+        "installed-matrix": installed_matrix,
+    }
+    handlers[args.command](args)
 
 
 if __name__ == "__main__":

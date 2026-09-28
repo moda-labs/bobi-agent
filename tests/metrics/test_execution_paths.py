@@ -15,7 +15,7 @@ from bobi.brain.base import (
 from bobi.brain.turns import drain_turn
 from bobi.inbox import Message
 from bobi.metrics.collector import MetricsCollectorService
-from bobi.metrics.runtime import MetricsRuntime
+from bobi.metrics.runtime import MetricsRuntime, _aggregate_usage
 from bobi.metrics import runtime as metrics_runtime
 from bobi.metrics.store import connect
 from bobi.sdk import SessionEntry, get_registry
@@ -181,6 +181,34 @@ def test_runtime_projects_turn_invocation_tool_usage_and_cost(tmp_path):
         conn.close()
 
 
+def test_online_turn_aggregate_preserves_unreported_dimensions_as_null():
+    complete = BrainUsage(
+        model="claude-test",
+        input_tokens=10,
+        cache_write_input_tokens=3,
+        cache_write_5m_input_tokens=3,
+        cache_write_1h_input_tokens=0,
+        cache_write_breakdown_complete=True,
+        output_tokens=4,
+    )
+    partial = BrainUsage(
+        model="claude-test",
+        input_tokens=20,
+        cache_write_input_tokens=5,
+        cache_write_unknown_ttl_input_tokens=5,
+        cache_write_breakdown_complete=False,
+        output_tokens=None,
+    )
+
+    aggregate = _aggregate_usage([complete, partial])
+
+    assert aggregate["input_tokens"] == 30
+    assert aggregate["output_tokens"] is None
+    assert aggregate["cache_write_5m_input_tokens"] is None
+    assert aggregate["cache_write_unknown_ttl_input_tokens"] == 5
+    assert aggregate["cache_write_breakdown_complete"] == 0
+
+
 def test_runtime_startup_failure_never_reaches_the_turn(tmp_path):
     def fail(*args, **kwargs):
         raise OSError("disk unavailable")
@@ -202,6 +230,76 @@ def test_turn_indexes_are_scoped_to_each_process_local_session(tmp_path):
     assert runtime.begin_turn("two", provider="test").turn_index == 1
 
 
+def test_turn_start_is_durable_before_terminal_result(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    observation = runtime.begin_turn(
+        "agent",
+        provider="anthropic",
+        brain="claude",
+        trigger_kind="inbox",
+        prompt_bytes=12,
+    )
+    assert runtime.close(timeout=2)
+
+    service = MetricsCollectorService(tmp_path)
+    service.collect_once()
+    conn = connect(service.db_path, readonly=True)
+    try:
+        turn = conn.execute(
+            "SELECT * FROM turns WHERE turn_id=?", (observation.turn_id,)
+        ).fetchone()
+        assert turn["status"] == "running"
+        assert turn["ended_at_us"] is None
+        assert turn["prompt_bytes"] == 12
+    finally:
+        conn.close()
+
+
+def test_session_row_emits_once_then_only_when_provider_correlation_changes(
+    tmp_path,
+):
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    first = runtime.begin_turn("agent", provider="anthropic", brain="claude")
+    first.record_result(TurnResult(session_id="provider-session"))
+    first.finish(status="completed")
+    second = runtime.begin_turn("agent", provider="anthropic", brain="claude")
+    second.record_result(TurnResult(session_id="provider-session"))
+    second.finish(status="completed")
+    assert runtime.close(timeout=2)
+
+    segment = next((tmp_path / "state" / "metrics" / "spool").rglob("*.telemetry"))
+    from bobi.metrics.spool import iter_frames
+
+    session_events = [
+        frame.event
+        for frame in iter_frames(segment)
+        if frame.event.event_type == "session.recorded"
+    ]
+    assert len(session_events) == 2
+    assert session_events[0].payload["provider_session_id"] is None
+    assert session_events[1].payload["provider_session_id"] == "provider-session"
+
+
+def test_rejected_session_event_is_retried_on_the_next_turn(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    real_emit = runtime.emit
+    rejected = False
+
+    def reject_once(event_type, payload, **ids):
+        nonlocal rejected
+        if event_type == "session.recorded" and not rejected:
+            rejected = True
+            return False
+        return real_emit(event_type, payload, **ids)
+
+    runtime.emit = reject_once
+    first = runtime.begin_turn("agent", provider="anthropic", brain="claude")
+    assert first.session_id not in runtime._emitted_sessions
+    runtime.begin_turn("agent", provider="anthropic", brain="claude")
+    assert first.session_id in runtime._emitted_sessions
+    assert runtime.close(timeout=2)
+
+
 def test_runtime_replaces_same_process_root_and_forked_singletons(
     monkeypatch, tmp_path
 ):
@@ -217,6 +315,19 @@ def test_runtime_replaces_same_process_root_and_forked_singletons(
     forked = metrics_runtime.get_runtime(tmp_path / "two")
     assert forked is not second
     assert forked.pid == first.pid + 1
+    metrics_runtime.reset_runtime_for_tests()
+
+
+def test_unbound_runtime_never_reuses_an_agent_runtime(monkeypatch, tmp_path):
+    metrics_runtime.reset_runtime_for_tests()
+    monkeypatch.setenv("BOBI_METRICS_MODE", "disabled")
+    active = metrics_runtime.get_runtime(tmp_path / "agent")
+    monkeypatch.setattr("bobi.paths.bound_root", lambda: None)
+
+    unbound = metrics_runtime.get_runtime()
+
+    assert unbound is not active
+    assert unbound.mode == "disabled"
     metrics_runtime.reset_runtime_for_tests()
 
 

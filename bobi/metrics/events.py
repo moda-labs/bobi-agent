@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import secrets
+import random
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import Any
 
 SCHEMA_VERSION = 1
@@ -16,7 +16,10 @@ SCHEMA_VERSION = 1
 def uuid7() -> uuid.UUID:
     """Generate an RFC 9562 UUIDv7 on Python versions without ``uuid.uuid7``."""
     timestamp_ms = time.time_ns() // 1_000_000
-    random_bits = secrets.randbits(74)
+    # UUID uniqueness does not require cryptographic randomness. Python seeds
+    # the process-global PRNG from OS entropy and reseeds it after fork; using
+    # it here avoids an entropy syscall for every telemetry envelope.
+    random_bits = random.getrandbits(74)
     random_a = random_bits >> 62
     random_b = random_bits & ((1 << 62) - 1)
     value = (
@@ -58,8 +61,9 @@ class MetricsEvent:
     session_id: str | None = None
     turn_id: str | None = None
     invocation_id: str | None = None
+    _validate_payload: InitVar[bool] = True
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _validate_payload: bool) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError(f"unsupported metrics schema version: {self.schema_version}")
         if not self.event_type or not self.producer_id or not self.source:
@@ -68,7 +72,8 @@ class MetricsEvent:
             raise ValueError("producer_sequence must be non-negative")
         if not isinstance(self.payload, dict):
             raise ValueError("metrics event payload must be an object")
-        canonical_json(self.payload)
+        if _validate_payload:
+            canonical_json(self.payload)
 
     def to_dict(self) -> dict[str, Any]:
         return {
