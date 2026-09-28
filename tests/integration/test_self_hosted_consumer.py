@@ -25,6 +25,21 @@ INSTANCE_ENV = "BOBI_SELF_HOST_INSTANCE"
 VERSION_ENV = "BOBI_SELF_HOST_VERSION"
 USER_AGENT = "bobi-self-host-proof/1"
 
+REQUEST_TIMEOUT = 15
+DETAIL_TIMEOUT = 180
+DETAIL_POLL = 2
+COMMAND_TIMEOUT = 60
+COMMAND_POLL = 0.5
+# A poll loop can overrun its deadline by one in-flight request plus one sleep.
+# The sidecar test runs two detail waits, one command wait, and one POST; the
+# workflow's pytest --timeout must exceed this, or pytest-timeout fires before
+# the deadlines and their diagnostics can (tests/test_self_hosted_consumer_assets.py).
+WORST_CASE_SECONDS = (
+    2 * (DETAIL_TIMEOUT + REQUEST_TIMEOUT + DETAIL_POLL)
+    + (COMMAND_TIMEOUT + REQUEST_TIMEOUT + COMMAND_POLL)
+    + REQUEST_TIMEOUT
+)
+
 requires_consumer = pytest.mark.skipif(
     not os.environ.get(URL_ENV),
     reason=f"self-host proof needs {URL_ENV} (set by self-hosted-consumer.yml)",
@@ -42,7 +57,7 @@ def _request(path: str, *, token: str | None = None, payload: dict | None = None
         data = json.dumps(payload).encode()
     request = urllib.request.Request(base + path, data=data, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as exc:
         body = exc.read()
@@ -56,7 +71,7 @@ def _detail_path() -> str:
     return f"/fleet/instances/{fleet}/{instance}"
 
 
-def _await_detail(predicate, timeout: float = 180) -> dict:
+def _await_detail(predicate, timeout: float = DETAIL_TIMEOUT) -> dict:
     token = os.environ[TOKEN_ENV]
     deadline = time.monotonic() + timeout
     last_status = None
@@ -65,14 +80,14 @@ def _await_detail(predicate, timeout: float = 180) -> dict:
         last_status, last_body = _request(_detail_path(), token=token)
         if last_status == 200 and predicate(last_body):
             return last_body
-        time.sleep(2)
+        time.sleep(DETAIL_POLL)
     raise AssertionError(
         f"instance detail did not reach the expected state within {timeout:g}s; "
         f"last response was HTTP {last_status}: {last_body!r}"
     )
 
 
-def _await_command(status_path: str, timeout: float = 60) -> dict:
+def _await_command(status_path: str, timeout: float = COMMAND_TIMEOUT) -> dict:
     token = os.environ[TOKEN_ENV]
     deadline = time.monotonic() + timeout
     last_status = None
@@ -81,7 +96,7 @@ def _await_command(status_path: str, timeout: float = 60) -> dict:
         last_status, last_body = _request(status_path, token=token)
         if last_status == 200 and last_body.get("status") in {"done", "error"}:
             return last_body
-        time.sleep(0.5)
+        time.sleep(COMMAND_POLL)
     raise AssertionError(
         f"restart command did not resolve within {timeout:g}s; "
         f"last response was HTTP {last_status}: {last_body!r}"

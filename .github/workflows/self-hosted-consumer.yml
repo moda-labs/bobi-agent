@@ -200,7 +200,11 @@ jobs:
             --from-literal=instance="$BOBI_SELF_HOST_INSTANCE" \
             --from-literal=image="$BOBI_SELF_HOST_IMAGE"
           manifest="$(sed "s|ghcr.io/moda-labs/bobi:latest|$BOBI_SELF_HOST_IMAGE|" examples/self-host/kubernetes/deployment.yaml)"
+          [ -n "$BOBI_SELF_HOST_IMAGE" ] || { echo "::error::BOBI_SELF_HOST_IMAGE is empty"; exit 1; }
           grep -qF "image: $BOBI_SELF_HOST_IMAGE" <<<"$manifest" || { echo "::error::sed did not pin the image"; exit 1; }
+          if grep -oE 'image: *ghcr\.io/moda-labs/bobi:[^[:space:]"]*' <<<"$manifest" | sed 's/^image: *//' | grep -vqxF "$BOBI_SELF_HOST_IMAGE"; then
+            echo "::error::manifest still has an unpinned bobi image"; exit 1
+          fi
           echo "$manifest" | kubectl apply -f -
           kubectl rollout status deployment/bobi-self-host-consumer --timeout=5m
 
@@ -211,7 +215,7 @@ jobs:
           BOBI_SELF_HOST_FLEET_OPERATOR_TOKEN: ${{ env.BOBI_SELF_HOST_FLEET_OPERATOR_TOKEN }}
         run: |
           pytest tests/integration/test_self_hosted_consumer.py \
-            -m live -v --timeout=480 \
+            -m live -v --timeout=540 \
             --junitxml=self-hosted-consumer.xml
 
       - name: Assert the consumer proof actually ran
@@ -246,6 +250,9 @@ jobs:
           if [ "${{ steps.live.outputs.run }}" = "true" ]; then
             echo "### Self-hosted consumer proof: RUN (${{ job.status }})" >> "$GITHUB_STEP_SUMMARY"
             echo "Live proof executed against Cloudflare Worker and Kubernetes (status: ${{ job.status }})." >> "$GITHUB_STEP_SUMMARY"
+          elif [ -z "${{ steps.live.outputs.run }}" ]; then
+            echo "### Self-hosted consumer proof: FAILED before the run decision (${{ job.status }})" >> "$GITHUB_STEP_SUMMARY"
+            echo "The live/inert decision step never ran; check the checkout and setup steps." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### Self-hosted consumer proof: SKIPPED (inert run)" >> "$GITHUB_STEP_SUMMARY"
             echo "Live proof did not run (missing ci:live label or fork PR)." >> "$GITHUB_STEP_SUMMARY"

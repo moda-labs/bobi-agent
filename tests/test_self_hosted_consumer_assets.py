@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from scripts.render_worker_ci_config import load_jsonc
+from tests.integration.test_self_hosted_consumer import WORST_CASE_SECONDS
 from tests.workflow_utils import load_workflow, workflow_on
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -165,5 +166,13 @@ def test_workflow_uses_public_image_and_checks_both_external_proofs():
     assert "test_kubernetes_sidecar_heartbeats_and_restarts_from_outside_the_cluster" in text
     assert "terraform destroy" in text
     assert "sed did not pin the image" in text
+    assert "manifest still has an unpinned bobi image" in text
+    assert "BOBI_SELF_HOST_IMAGE is empty" in text
     assert "Write proof summary" in text
-    assert "--timeout=480" in text
+    assert "FAILED before the run decision" in text
+    timeouts = re.findall(
+        r"pytest tests/integration/test_self_hosted_consumer\.py[^\n]*\n[^\n]*--timeout=(\d+)",
+        text,
+    )
+    assert len(timeouts) == 1
+    assert int(timeouts[0]) > WORST_CASE_SECONDS
