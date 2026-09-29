@@ -722,6 +722,57 @@ def _smoke_env(home: Path) -> dict[str, str]:
     return env
 
 
+def _reset_disposable_transport_state(home: Path, run_root: Path) -> list[Path]:
+    """Drop broker-bound identity before connecting a smoke agent elsewhere.
+
+    A provisioned smoke home normally starts against its local event server.
+    ``bubble.json``, deployment credentials, and cursors are scoped to that
+    server and must not be reused when a later S3 run targets a disposable
+    Worker.  Metrics, transcripts, spools, and provider sessions are preserved.
+
+    This destructive operation is intentionally unavailable outside a home
+    provisioned by this script and refuses a run root that escapes that home.
+    """
+    home = home.resolve()
+    marker = home / SMOKE_MARKER
+    try:
+        marker_data = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError):
+        marker_data = {}
+    if marker_data.get("created_by") != "live_metrics_smoke.py":
+        raise RuntimeError(
+            f"refusing transport reset outside a provisioned smoke home: {home}"
+        )
+
+    resolved_run_root = run_root.resolve()
+    try:
+        resolved_run_root.relative_to(home)
+    except ValueError:
+        raise RuntimeError(
+            f"refusing transport reset outside disposable home: {resolved_run_root}"
+        ) from None
+
+    state = resolved_run_root / "state"
+    candidates = [
+        state / "bubble.json",
+        state / "bubble.lock",
+        state / "admin-cursor.json",
+    ]
+    for directory in (state / "deployments", state / "cursors"):
+        if directory.is_dir() and not directory.is_symlink():
+            candidates.extend(
+                path for path in directory.iterdir()
+                if path.is_file() and not path.is_symlink()
+            )
+
+    removed = []
+    for path in candidates:
+        if path.is_file() and not path.is_symlink():
+            path.unlink()
+            removed.append(path)
+    return removed
+
+
 def _bobi(env: dict[str, str], *argv: str, timeout: int = 300) -> str:
     executable = Path(sys.executable).with_name("bobi")
     try:
@@ -1474,6 +1525,11 @@ def installed_matrix(args: argparse.Namespace) -> None:
         db = run_root / "state" / "metrics" / "metrics.db"
         tool_turn_id = None
         try:
+            if transport_checks:
+                removed = _reset_disposable_transport_state(home, run_root)
+                print(
+                    f"RESET provider={provider} transport_identity_files={len(removed)}"
+                )
             _bobi(provider_env, "agent", agent, "start", "--fresh", timeout=120)
             _wait_agent_ready(run_root)
             if "single-turn" in checks:

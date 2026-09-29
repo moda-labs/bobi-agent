@@ -18,6 +18,7 @@ from scripts.live_metrics_smoke import (
     _configure_installed_smoke_package,
     _find_claude_transcript,
     _isolated_brain_defaults,
+    _reset_disposable_transport_state,
     _smoke_env,
     _wait_claude_invocation_usage,
     _wait_manager_restarted,
@@ -204,6 +205,77 @@ def test_arm_fault_requires_provisioned_disposable_home(tmp_path):
             fault="drop-next-online-usage",
             hold_seconds=0,
         ))
+
+
+def test_transport_reset_removes_only_broker_bound_disposable_state(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / SMOKE_MARKER).write_text(
+        json.dumps({"created_by": "live_metrics_smoke.py"}) + "\n"
+    )
+    run_root = home / "agents" / "smoke" / "run"
+    state = run_root / "state"
+    (state / "deployments").mkdir(parents=True)
+    (state / "cursors").mkdir()
+    stale = [
+        state / "bubble.json",
+        state / "bubble.lock",
+        state / "admin-cursor.json",
+        state / "deployments" / "manager.json",
+        state / "cursors" / "manager.json",
+    ]
+    for path in stale:
+        path.write_text("stale\n")
+    preserved = [
+        state / "metrics" / "metrics.db",
+        state / "events-retained.jsonl",
+        run_root / "workspace" / "LIVE_SMOKE.txt",
+    ]
+    for path in preserved:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("preserved\n")
+
+    removed = _reset_disposable_transport_state(home, run_root)
+
+    assert set(removed) == set(stale)
+    assert all(not path.exists() for path in stale)
+    assert all(path.read_text() == "preserved\n" for path in preserved)
+
+
+@pytest.mark.parametrize("marker", [None, {}, {"created_by": "someone-else"}])
+def test_transport_reset_refuses_unmarked_home(tmp_path, marker):
+    home = tmp_path / "home"
+    home.mkdir()
+    if marker is not None:
+        (home / SMOKE_MARKER).write_text(json.dumps(marker) + "\n")
+    run_root = home / "agents" / "smoke" / "run"
+    state = run_root / "state"
+    state.mkdir(parents=True)
+    bubble = state / "bubble.json"
+    bubble.write_text("must survive\n")
+
+    with pytest.raises(RuntimeError, match="provisioned smoke home"):
+        _reset_disposable_transport_state(home, run_root)
+
+    assert bubble.read_text() == "must survive\n"
+
+
+def test_transport_reset_refuses_run_root_outside_home(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / SMOKE_MARKER).write_text(
+        json.dumps({"created_by": "live_metrics_smoke.py"}) + "\n"
+    )
+    outside = tmp_path / "outside" / "run"
+    state = outside / "state"
+    state.mkdir(parents=True)
+    bubble = state / "bubble.json"
+    bubble.write_text("must survive\n")
+
+    with pytest.raises(RuntimeError, match="outside disposable home"):
+        _reset_disposable_transport_state(home, outside)
+
+    assert bubble.read_text() == "must survive\n"
 
 
 def test_wait_crash_window_requires_running_turn_tool_and_provider_usage(
