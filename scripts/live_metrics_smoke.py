@@ -1251,16 +1251,34 @@ def _admin_metrics_call(
     query_args: dict[str, object],
     timeout: float,
 ) -> dict[str, object]:
-    raw = _bobi(
-        env,
-        "admin", alias,
-        "--url", base_url,
-        "--fleet", fleet,
-        "--instance", instance,
-        "--args", json.dumps(query_args, separators=(",", ":")),
-        "--wait", "--timeout", str(timeout), "--json",
-        timeout=max(30, int(timeout) + 15),
+    deadline = time.monotonic() + timeout
+    transient = (
+        "admin command rejected (503): "
+        '{"error":"no live supervisor admin subscription; command not delivered"}'
     )
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"bobi admin {alias}: supervisor admin subscription did not "
+                f"become ready within {timeout:.1f}s"
+            )
+        try:
+            raw = _bobi(
+                env,
+                "admin", alias,
+                "--url", base_url,
+                "--fleet", fleet,
+                "--instance", instance,
+                "--args", json.dumps(query_args, separators=(",", ":")),
+                "--wait", "--timeout", str(remaining), "--json",
+                timeout=max(30, int(remaining) + 15),
+            )
+            break
+        except RuntimeError as exc:
+            if transient not in str(exc):
+                raise
+            time.sleep(min(0.2, max(0, deadline - time.monotonic())))
     result = _json_object(raw, f"bobi admin {alias}")
     if result.get("status") not in {"done", "error"}:
         raise RuntimeError(

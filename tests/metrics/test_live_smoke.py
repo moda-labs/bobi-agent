@@ -609,6 +609,61 @@ def test_admin_transport_keeps_operator_token_off_argv(monkeypatch):
     assert captured["env"]["FLEET_OPERATOR_TOKEN"] == "operator-secret"
 
 
+def test_admin_transport_retries_only_subscription_startup_race(monkeypatch):
+    calls = []
+
+    def fake_bobi(env, *argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise RuntimeError(
+                "bobi admin metrics_summary: admin command rejected (503): "
+                '{"error":"no live supervisor admin subscription; command not delivered"}'
+            )
+        return json.dumps({"status": "done", "result": {"usage": {}}})
+
+    monkeypatch.setattr(live_smoke, "_bobi", fake_bobi)
+    monkeypatch.setattr(live_smoke.time, "sleep", lambda _: None)
+
+    result = live_smoke._admin_metrics_call(
+        {"FLEET_OPERATOR_TOKEN": "operator-secret"},
+        base_url="https://events.example.com",
+        fleet="fleet",
+        instance="agent",
+        alias="metrics_summary",
+        query_args={},
+        timeout=1,
+    )
+
+    assert result["status"] == "done"
+    assert len(calls) == 2
+
+
+def test_admin_transport_does_not_retry_other_503(monkeypatch):
+    calls = []
+
+    def fake_bobi(env, *argv, **kwargs):
+        calls.append(argv)
+        raise RuntimeError(
+            "bobi admin metrics_summary: admin command rejected (503): "
+            '{"error":"operator unavailable"}'
+        )
+
+    monkeypatch.setattr(live_smoke, "_bobi", fake_bobi)
+
+    with pytest.raises(RuntimeError, match="operator unavailable"):
+        live_smoke._admin_metrics_call(
+            {"FLEET_OPERATOR_TOKEN": "operator-secret"},
+            base_url="https://events.example.com",
+            fleet="fleet",
+            instance="agent",
+            alias="metrics_summary",
+            query_args={},
+            timeout=1,
+        )
+
+    assert len(calls) == 1
+
+
 def test_mcp_transport_decodes_matching_sse_json_rpc(monkeypatch):
     payload = {"status": "done", "result": {"usage_turn": {"turn": {}}}}
     response = {
