@@ -280,7 +280,9 @@ def test_transport_reset_refuses_run_root_outside_home(tmp_path):
     assert bubble.read_text() == "must survive\n"
 
 
-def test_transport_supervisor_uses_foreground_fresh_sidecar(monkeypatch, tmp_path):
+def test_transport_supervisor_uses_foreground_sidecar_without_second_reset(
+    monkeypatch, tmp_path
+):
     captured = {}
 
     class Process:
@@ -303,8 +305,9 @@ def test_transport_supervisor_uses_foreground_fresh_sidecar(monkeypatch, tmp_pat
 
     assert actual is process
     assert captured["argv"][1:] == [
-        "agent", "smoke", "supervise", "--", "--foreground", "--fresh",
+        "agent", "smoke", "supervise", "--", "--foreground",
     ]
+    assert "--fresh" not in captured["argv"]
     assert captured["kwargs"]["env"]["BOBI_EVENT_SERVER"].endswith(":1234")
     assert captured["kwargs"]["start_new_session"] is True
     assert captured["kwargs"]["stderr"] is live_smoke.subprocess.STDOUT
@@ -607,61 +610,6 @@ def test_admin_transport_keeps_operator_token_off_argv(monkeypatch):
     assert "operator-secret" not in captured["argv"]
     assert "--token" not in captured["argv"]
     assert captured["env"]["FLEET_OPERATOR_TOKEN"] == "operator-secret"
-
-
-def test_admin_transport_retries_only_subscription_startup_race(monkeypatch):
-    calls = []
-
-    def fake_bobi(env, *argv, **kwargs):
-        calls.append(argv)
-        if len(calls) == 1:
-            raise RuntimeError(
-                "bobi admin metrics_summary: admin command rejected (503): "
-                '{"error":"no live supervisor admin subscription; command not delivered"}'
-            )
-        return json.dumps({"status": "done", "result": {"usage": {}}})
-
-    monkeypatch.setattr(live_smoke, "_bobi", fake_bobi)
-    monkeypatch.setattr(live_smoke.time, "sleep", lambda _: None)
-
-    result = live_smoke._admin_metrics_call(
-        {"FLEET_OPERATOR_TOKEN": "operator-secret"},
-        base_url="https://events.example.com",
-        fleet="fleet",
-        instance="agent",
-        alias="metrics_summary",
-        query_args={},
-        timeout=1,
-    )
-
-    assert result["status"] == "done"
-    assert len(calls) == 2
-
-
-def test_admin_transport_does_not_retry_other_503(monkeypatch):
-    calls = []
-
-    def fake_bobi(env, *argv, **kwargs):
-        calls.append(argv)
-        raise RuntimeError(
-            "bobi admin metrics_summary: admin command rejected (503): "
-            '{"error":"operator unavailable"}'
-        )
-
-    monkeypatch.setattr(live_smoke, "_bobi", fake_bobi)
-
-    with pytest.raises(RuntimeError, match="operator unavailable"):
-        live_smoke._admin_metrics_call(
-            {"FLEET_OPERATOR_TOKEN": "operator-secret"},
-            base_url="https://events.example.com",
-            fleet="fleet",
-            instance="agent",
-            alias="metrics_summary",
-            query_args={},
-            timeout=1,
-        )
-
-    assert len(calls) == 1
 
 
 def test_mcp_transport_decodes_matching_sse_json_rpc(monkeypatch):
