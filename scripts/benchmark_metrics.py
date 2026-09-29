@@ -14,6 +14,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from bobi.metrics.events import MetricsEvent
 from bobi.metrics.producer import MetricsProducer
 from bobi.metrics.spool import SpoolWriter
 from bobi.metrics.store import connect, integrity_check, logical_snapshot
+from bobi.metrics.query import MetricsQueries
 
 
 def percentile(values: list[int], quantile: float) -> float:
@@ -480,6 +482,192 @@ def benchmark_turn_replay(args: argparse.Namespace) -> dict[str, object]:
         "runs": runs,
     }
 
+def _query_percentiles(samples_ns: list[int]) -> dict[str, float]:
+    return {
+        "p50": percentile(samples_ns, 0.50) / 1000,
+        "p95": percentile(samples_ns, 0.95) / 1000,
+        "p99": percentile(samples_ns, 0.99) / 1000,
+    }
+
+def build_query_dataset(path: Path, *, turns: int = 10_000) -> None:
+    """Build a deterministic retained dataset without prompt or response bodies."""
+    conn = connect(path)
+    from bobi.metrics.store import migrate
+
+    migrate(conn)
+    session_count = max(1, turns // 100)
+    conn.execute("BEGIN")
+    try:
+        for session_index in range(session_count):
+            conn.execute(
+                "INSERT INTO sessions(session_id,session_name,brain,provider,run_key,"
+                "started_at_us,status) VALUES(?,?,?,?,?,?,?)",
+                (f"s{session_index}", f"session-{session_index}", "claude", "anthropic",
+                 f"run-{session_index}", 1_000_000 + session_index, "completed"),
+            )
+        for index in range(turns):
+            session_id = f"s{index % session_count}"
+            turn_id, invocation_id = f"t{index}", f"i{index}"
+            started = 2_000_000 + index * 10_000
+            model = "sonnet" if index % 2 == 0 else "haiku"
+            conn.execute(
+                "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
+                "prompt_template_id,prompt_sha256,prompt_bytes,started_at_us,ended_at_us,"
+                "wall_duration_ms,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (turn_id, session_id, index, "user", 1, f"template-{index % 10}",
+                 f"hash-{index}", 100 + index % 50, started, started + 8_000,
+                 8.0 + index % 20, "completed"),
+            )
+            conn.execute(
+                "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
+                "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (invocation_id, turn_id, 0, "anthropic", model, started + 100,
+                 started + 7_000, 6.9, "completed"),
+            )
+            conn.execute(
+                "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,"
+                "provider,model,measurement_source,is_estimated,token_semantics_version,"
+                "input_tokens,cache_read_input_tokens,output_tokens,observed_at_us) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"u{index}", "invocation", turn_id, invocation_id, "anthropic", model,
+                 "provider_stream", 0, 1, 100 + index % 20, index % 5, 20 + index % 10,
+                 started + 8_000),
+            )
+            conn.execute(
+                "INSERT INTO tool_executions(tool_execution_id,turn_id,triggering_invocation_id,"
+                "tool_name,tool_kind,output_bytes,started_at_us,ended_at_us,status,"
+                "attribution_method) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (f"x{index}", turn_id, invocation_id, "view_file", "file_read",
+                 1000 + index % 100, started + 1_000, started + 2_000, "completed",
+                 "local_tokenizer"),
+            )
+            conn.execute(
+                "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,"
+                "invocation_id,provider,model,amount_usd,measurement_source,is_estimated,"
+                "observed_at_us) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (f"c{index}", "invocation", session_id, turn_id, invocation_id,
+                 "anthropic", model, 0.001 + (index % 10) / 100_000,
+                 "provider_stream", 0, started + 8_000),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def _benchmark_query_isolation(root: Path) -> dict[str, object]:
+    from bobi.supervisor.admin import AdminListener, METRICS_QUERY_CAPACITY
+
+    published: list[dict] = []
+    blocker = threading.Event()
+
+    class Supervisor:
+        def request_manager_restart(self):
+            pass
+        def request_manager_stop(self):
+            pass
+        def request_manager_start(self):
+            pass
+
+    class Telemetry:
+        identity = {"fleet": "benchmark", "instance": "query"}
+        last_snapshot = {"status": "ready"}
+
+    listener = AdminListener(
+        supervisor=Supervisor(), telemetry=Telemetry(), project_root=root,
+        publish_fn=lambda _topic, _source, data, _root: published.append(data) or True,
+    )
+    listener._execute_metrics_query = lambda _command, _args: blocker.wait(5) or {}
+    try:
+        for index in range(METRICS_QUERY_CAPACITY):
+            listener._dispatch({"payload": {"command_id": f"q{index}", "command": "usage_turn", "args": {"turn_id": "t0"}}})
+        started = time.perf_counter_ns()
+        listener._dispatch({"payload": {"command_id": "busy", "command": "usage_turn", "args": {"turn_id": "t0"}}})
+        busy_ms = (time.perf_counter_ns() - started) / 1_000_000
+        status_samples = []
+        for index in range(100):
+            before = time.perf_counter_ns()
+            listener._dispatch({"payload": {"command_id": f"status-{index}", "command": "status"}})
+            status_samples.append(time.perf_counter_ns() - before)
+        busy = next(item for item in published if item["command_id"] == "busy")
+        if busy.get("result", {}).get("code") != "metrics_busy":
+            raise SystemExit("saturated metrics executor did not return metrics_busy")
+        status_latency = _query_percentiles(status_samples)
+        if busy_ms > 50:
+            raise SystemExit(f"metrics_busy took {busy_ms:.3f} ms, above 50 ms")
+        if status_latency["p99"] > 100:
+            raise SystemExit(f"status p99 {status_latency['p99']:.3f} ms, above 100 ms")
+        return {"metrics_busy_ms": busy_ms, "status_latency_ms": status_latency}
+    finally:
+        blocker.set()
+        # Let admitted callbacks publish and release their permits before the
+        # executor is shut down; cancellation is not part of this benchmark.
+        deadline = time.monotonic() + 1
+        while len(published) < METRICS_QUERY_CAPACITY + 101 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        listener.stop()
+
+def benchmark_queries(args: argparse.Namespace) -> dict[str, object]:
+    dataset = args.dataset.resolve()
+    if not dataset.exists():
+        build_query_dataset(dataset, turns=args.turns)
+    else:
+        # Production collector startup always executes additive schema DDL.
+        # Do the same before measuring an older retained benchmark database.
+        from bobi.metrics.store import migrate
+
+        writable = connect(dataset)
+        try:
+            migrate(writable)
+        finally:
+            writable.close()
+    root = dataset.parent / ".query-benchmark-root"
+    db_target = root / "state" / "metrics"
+    db_target.mkdir(parents=True, exist_ok=True)
+    linked = db_target / "metrics.db"
+    if linked.exists() or linked.is_symlink():
+        linked.unlink()
+    linked.symlink_to(dataset)
+    queries = MetricsQueries(root)
+    conn = connect(dataset, readonly=True)
+    try:
+        turns = int(conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0])
+        events = int(conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0])
+    finally:
+        conn.close()
+    if turns == 0:
+        raise SystemExit("query benchmark dataset has no turns")
+    end_at = (2_000_000 + turns * 10_000 + 20_000) / 1_000_000
+    cases = {
+        "turn_detail": (lambda index: queries.turn({"turn_id": f"t{index % turns}"}), 100.0),
+        "summary": (lambda _index: queries.summary({"window_seconds": min(31 * 86400, end_at), "end_at": end_at, "group_by": ["model"]}), 250.0),
+        "hotspots": (lambda _index: queries.hotspots({"window_seconds": min(31 * 86400, end_at), "end_at": end_at, "scope": "tool", "metric": "latency", "top_n": 20}), 500.0),
+    }
+    results: dict[str, object] = {}
+    for name, (query, slo_ms) in cases.items():
+        samples: list[int] = []
+        for index in range(args.iterations):
+            started = time.perf_counter_ns()
+            query(index)
+            samples.append(time.perf_counter_ns() - started)
+        latency = _query_percentiles(samples)
+        if latency["p95"] > slo_ms:
+            raise SystemExit(f"{name} p95 {latency['p95']:.3f} ms exceeds {slo_ms:.3f} ms")
+        if max(samples) / 1_000_000 > 1000:
+            raise SystemExit(f"{name} exceeded the one-second query deadline")
+        results[name] = {"latency_ms": latency, "slo_p95_ms": slo_ms}
+    isolation = _benchmark_query_isolation(root) if args.saturate else None
+    return {
+        "benchmark": "queries",
+        "metadata": metadata(),
+        "dataset": {"path": str(dataset), "bytes": dataset.stat().st_size, "turns": turns, "events": events},
+        "iterations": args.iterations,
+        "queries": results,
+        "saturation": isolation,
+    }
+
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
@@ -504,6 +692,12 @@ def parser() -> argparse.ArgumentParser:
     replay.add_argument("--turn-work-ms", type=float, default=20.0)
     replay.add_argument("--rounds", type=int, default=3)
     replay.add_argument("--assert-regression-percent", type=float, default=1.0)
+    queries = commands.add_parser("queries")
+    queries.add_argument("--dataset", type=Path, required=True)
+    queries.add_argument("--turns", type=int, default=10_000,
+                         help="Rows to generate when --dataset does not exist.")
+    queries.add_argument("--iterations", type=int, default=200)
+    queries.add_argument("--saturate", action="store_true")
     return root
 
 
@@ -517,6 +711,8 @@ def main() -> None:
         report = benchmark_rebuild(args)
     elif args.command == "turn-replay":
         report = benchmark_turn_replay(args)
+    elif args.command == "queries":
+        report = benchmark_queries(args)
     else:
         report = benchmark_contention(args)
     rendered = json.dumps(report, indent=2, sort_keys=True)

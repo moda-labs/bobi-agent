@@ -4,15 +4,15 @@ This document is the implementation and operations guide for Bobi's
 fine-grained token, latency, cost, and model-routing telemetry.
 
 > [!IMPORTANT]
-> **Implementation status:** Phase 0 storage/provider contracts, Phase 1 runtime
-> ingestion, and Phase 2 reconciliation, estimation, rebuild, and retention are
-> implemented and accepted on the feature branch. Current-code Claude and
-> Codex S1/S2/S4, the 60-minute concurrent kill/recovery soak, and all local
-> regression gates pass. Metrics remain disabled by default; set
-> `BOBI_METRICS_MODE=shadow` or `full` to exercise the pipeline. Phase 3-4
-> Admin drill-down, MCP, and experiment interfaces are not implemented. The
-> existing `usage` Admin command and `bobi_usage_summary` MCP tool remain the
-> only query interfaces until those phases land.
+> **Implementation status:** Phase 0-2 are accepted. Phase 3 Admin/MCP code,
+> query isolation, pagination/caps, the operator client, and local performance
+> gates are implemented. Current-source real Worker/Admin/MCP transport passes
+> for summary, session, turn, hotspot, and experiment queries. Earlier
+> development Claude/Codex S1/S2/S4 evidence is source-stale after later
+> corrections. Phase 3 acceptance requires the full live matrix to be rerun
+> from the accepted commit. Phase 4 routing is not started.
+> Metrics remain disabled by default; set
+> `BOBI_METRICS_MODE=shadow` or `full` to exercise the pipeline.
 
 The 60-minute Phase 2 implementation gate uses eight producer processes at `0.1`
 turns/second/worker, rotates a `SIGKILL` every five minutes, and performs a
@@ -433,8 +433,8 @@ deadline. They never migrate, checkpoint, or write.
 ## 3. Codebase and Module Map
 
 > [!NOTE]
-> Phase 0-2 modules and runtime wiring are implemented. Phase 3 modules remain
-> planned and must not be created as empty placeholders.
+> Phase 0-3 modules and runtime/Admin/MCP wiring are implemented. Phase 3 is
+> not accepted until its live gates pass.
 
 ### New `bobi/metrics/` modules
 
@@ -754,10 +754,19 @@ FROM ranked
 WHERE usage_rank = 1;
 ```
 
-Aggregation adds one more rule: use invocation rows only when every invocation
-in the turn has a selected measurement; otherwise use the exact turn row. Never
-sum both levels. Every response reports which granularity was selected and its
-exact/estimated/unknown coverage.
+Aggregation adds one more rule: choose one granularity per turn in this order:
+complete exact invocation coverage, an exact turn aggregate, complete effective
+invocation coverage (exact rows plus estimates for otherwise unmeasured
+siblings), then an estimated turn fallback. Exactness outranks granularity, so
+a complete estimated child partition never replaces an exact provider turn
+total. Never sum both levels. When exact rows exist for a logical target,
+estimates for that target remain available in drill-down provenance but are
+excluded from totals and rankings. A multi-model exact invocation keeps all
+exact model partitions. Aggregates preserve an unknown dimension as `NULL`
+when any selected component did not report it. Coverage reports
+`usage_granularity` (`invocation`, `turn`, `mixed`, or `none`) and the number of
+turns selected at invocation and turn granularity in addition to
+exact/estimated/unknown invocation evidence.
 
 ## 5. Developer and Operator Guide
 
@@ -885,10 +894,10 @@ GROUP BY projection_state;
 > Use Admin summary queries for production totals, or explicitly choose one
 > scope after checking coverage.
 
-### Planned Bobi Admin query contract
+### Bobi Admin query contract
 
-Phase 3 will add CLI aliases over the existing operator-authenticated Worker
-command route. They will not open the remote instance's SQLite file directly.
+The CLI aliases use the existing operator-authenticated Worker command route.
+They never open the remote instance's SQLite file directly.
 
 ```bash
 export BOBI_ADMIN_URL='https://events.example.com'
@@ -897,14 +906,50 @@ export BOBI_INSTANCE='my-agent'
 export FLEET_OPERATOR_TOKEN='<operator token from your secret store>'
 ```
 
-| Planned alias | Wire command | Example arguments |
+| Alias | Wire command | Example arguments |
 |---|---|---|
 | `metrics_summary` | `usage` | `{"window_seconds":86400,"group_by":["model"]}` |
+| `metrics_session` | `usage_session` | `{"session_id":"<session-id>"}` |
 | `metrics_turn` | `usage_turn` | `{"turn_id":"<turn-id>"}` |
 | `metrics_hotspots` | `usage_hotspots` | `{"scope":"tool","metric":"latency","top_n":20}` |
+| `metrics_experiment` | `usage_experiment` | `{"experiment_id":"<experiment-id>"}` |
 
-The Phase 3 implementation must add copy-pasteable CLI examples only after the
-aliases exist and the public-command contract test recognizes them.
+`metrics_session`, `metrics_turn`, `metrics_hotspots`, and
+`metrics_experiment` first read the instance heartbeat and require supervisor
+`0.4.0` or newer. A known-old, absent, or malformed version is rejected before
+the Worker records a command. `metrics_summary` maps to the legacy `usage`
+command and deliberately skips this preflight so older supervisors remain
+queryable. When summary arguments omit a range, `usage` defaults to the last
+24 hours; explicit non-positive or malformed `window_seconds` values remain
+errors.
+
+Hotspot scopes are `session`, `turn`, `invocation`, `tool`, and
+`prompt_template`. Token, cost, and latency rankings use the scopes that own
+those facts; tools support latency and result-byte rankings. Unknown token,
+duration, or size dimensions are omitted from rankings rather than treated as
+zero. Session turns and hotspots use opaque, filter-bound keyset cursors, so
+new rows ahead of a page boundary do not duplicate or skip the next retained
+row. Turn detail and experiment aggregation reject a combined result above 200
+rows instead of returning a partial atomic view. Every serialized result is
+also capped at 512 KiB.
+
+Experiment filters (`from`/`to`, cohort, outcome definition, evaluator
+name/version) are applied by the read model. Each variant reports sample size,
+completion/error/fallback rates, router and turn latency, token dimensions,
+separate reported/estimated cost, and exact/estimated/unknown invocation
+coverage. Numeric outcomes remain separated by definition, source, evaluator,
+evaluator version, and estimate status.
+
+Example:
+
+```bash
+bobi admin metrics_turn \
+  --url "$BOBI_ADMIN_URL" \
+  --fleet "$BOBI_FLEET" \
+  --instance "$BOBI_INSTANCE" \
+  --args '{"turn_id":"<turn-id>"}' \
+  --wait --json
+```
 
 Expected command envelope:
 
@@ -930,6 +975,13 @@ Expected command envelope:
 `status=pending` means the asynchronous command has not resolved. Poll its
 `command_id`. `status=error` with `result.code=metrics_busy` means the metrics
 query executor is saturated; it does not mean SQLite is corrupted.
+For the CLI, `--timeout` is one total polling deadline. Each HTTP poll and
+sleep is capped to the remaining budget; expiry returns the last pending
+envelope so the caller can continue with its `command_id`.
+
+The supervisor admits at most four running metrics queries plus eight queued
+queries. A thirteenth concurrent request receives `metrics_busy` immediately;
+lifecycle and status commands remain on the separate ordered worker.
 
 ### Query through MCP
 
@@ -940,11 +992,11 @@ Available/current and planned tools:
 
 | MCP tool | Status | Purpose |
 |---|---|---|
-| `bobi_usage_summary` | Existing; widened in Phase 3 | Fleet/instance summary |
-| `bobi_usage_session` | Phase 3 | One session plus paginated turns |
-| `bobi_usage_turn` | Phase 3 | Turn, invocations, tools, provenance, coverage |
-| `bobi_usage_hotspots` | Phase 3 | Ranked cost/token/latency hotspots |
-| `bobi_usage_experiment` | Phase 4 | Per-variant JEV outcomes and coverage |
+| `bobi_usage_summary` | Implemented | Fleet/instance summary |
+| `bobi_usage_session` | Implemented | One session plus paginated turns |
+| `bobi_usage_turn` | Implemented | Turn, invocations, tools, provenance, coverage |
+| `bobi_usage_hotspots` | Implemented | Ranked cost/token/latency hotspots |
+| `bobi_usage_experiment` | Implemented query surface; Phase 4 supplies router data | Per-variant JEV outcomes and coverage |
 
 Claude Code:
 
@@ -1014,8 +1066,10 @@ Target metrics unit/regression suites as phases land:
 .venv/bin/python -m pytest \
   tests/test_session.py \
   tests/test_brain_turns.py \
-  tests/test_supervisor_admin.py \
+  tests/test_admin_listener.py \
+  tests/test_admin_client.py \
   tests/test_admin_command_parity.py \
+  tests/metrics/test_query.py \
   -q --timeout=30
 ```
 
@@ -1033,7 +1087,7 @@ Worker Admin/MCP tests:
 ```bash
 cd event-server
 npm ci
-npm test -- --run worker/src/mcp.test.ts worker/src/fleet.test.ts
+npm test --workspace worker -- --run test/mcp.spec.ts test/fleet.spec.ts
 ```
 
 ### Disposable live-smoke setup
@@ -1060,6 +1114,30 @@ Expected:
 READY agent=metrics-smoke-claude provider=claude
 READY agent=metrics-smoke-codex provider=codex
 ```
+
+For the Phase 3 S3 transport gate, point the same disposable providers at a
+real Worker and provide its operator credential through the environment:
+
+```bash
+export BOBI_ADMIN_URL="$DISPOSABLE_WORKER_URL"
+export FLEET_OPERATOR_TOKEN="$DISPOSABLE_OPERATOR_TOKEN"
+
+.venv/bin/python scripts/live_metrics_smoke.py installed-matrix \
+  --bobi-home "$BOBI_HOME" \
+  --claude-agent "$BOBI_CLAUDE_AGENT" \
+  --codex-agent "$BOBI_CODEX_AGENT" \
+  --checks single-turn,tool-loop,process-kill,admin,mcp \
+  --artifacts "$BOBI_SMOKE_ROOT/phase-3"
+```
+
+`admin` and `mcp` require `tool-loop` in the same invocation. The harness uses
+a unique fleet identity for each provider, waits for supervisor `0.4.0` or
+newer, then invokes all five metrics surfaces: summary, session, turn,
+hotspots, and experiment. Every response must be terminal. When both transport
+checks are selected, the Admin and MCP logical payloads must match exactly.
+Missing Worker URL or operator credentials is a failed preflight, not a skip.
+The operator token remains environment-only and is not written to argv or
+evidence artifacts.
 
 Fault injection must refuse to arm outside a harness-provisioned disposable
 home.
@@ -1377,6 +1455,27 @@ Expected health fields include queue drops, spool bytes, import lag, last
 successful commit, rejected/quarantined events, reconciliation lag, query queue
 depth, and query latency percentiles.
 
+Query-executor health is nested under the heartbeat's `metrics.query_executor`
+block:
+
+```json
+{
+  "accepting": true,
+  "active_workers": 1,
+  "queue_depth": 2,
+  "rejected_queries": 0,
+  "deadline_cancellations": 0,
+  "completed_queries": 41,
+  "query_latency_ms": {"p50": 4.221, "p95": 91.704, "p99": 109.337}
+}
+```
+
+Latency percentiles use the most recent 1,024 completed queries and remain
+`null` until a query completes. During shutdown `accepting` flips to `false`
+before queued reads are cancelled. The listener then waits for running reads
+for at most two seconds; an unfinished read does not keep `AdminListener.stop()`
+blocked beyond that grace period.
+
 ### What does `metrics_busy` mean?
 
 `metrics_busy` is admission control for the dedicated read-only query executor:
@@ -1515,12 +1614,20 @@ Raw tables retain superseded estimates and may hold both turn and invocation
 measurements. Summary queries use `best_usage` and one compatible granularity.
 Counting every raw row intentionally overcounts.
 
+Exact cost also suppresses an estimate for the same logical target. Estimates
+remain eligible only for sibling invocations without exact cost. Multi-model
+provider partitions are additive but count as one logical invocation, and
+model-filtered tool totals include only tools triggered by an invocation that
+selected that model.
+
 ### Security checklist
 
 - Keep prompts, responses, tool inputs/results, environment values, secrets,
   and full paths out of metrics by default.
-- Store hashes, stable template IDs, byte sizes, normalized tool kinds, and
-  provider usage instead.
+- Store hashes only for internal deduplication/correlation. Never return
+  prompt/tool content hashes or assignment-key hashes through Admin or MCP.
+- Public metrics may return stable telemetry IDs, template IDs, byte sizes,
+  normalized tool kinds, and normalized provider usage.
 - Hash JEV assignment keys with a deployment-only secret; never persist the
   source key.
 - Use read-only/query-only SQLite connections for Admin work.

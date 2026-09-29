@@ -215,6 +215,46 @@ class TestTelemetryHeartbeat:
         )
         assert heartbeat["metrics"] == health
 
+    def test_poll_adds_query_executor_health_without_replacing_collector_health(
+            self, monkeypatch):
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(
+            tele.probe, "status_file_age", lambda root, session, now: 1.0
+        )
+        published = []
+        observer = _telemetry(
+            published,
+            metrics_health_fn=lambda: {
+                "mode": "shadow", "status": "running", "db_ready": True,
+            },
+        )
+        observer.set_metrics_query_health_fn(lambda: {
+            "accepting": True,
+            "active_workers": 1,
+            "queue_depth": 2,
+            "rejected_queries": 3,
+            "deadline_cancellations": 4,
+            "query_latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0},
+        })
+
+        observer.poll(_state(status="idle"))
+
+        heartbeat = next(
+            data for topic, _source, data in published
+            if topic == "fleet/heartbeat"
+        )
+        assert heartbeat["metrics"]["mode"] == "shadow"
+        assert heartbeat["metrics"]["db_ready"] is True
+        assert heartbeat["metrics"]["query_executor"] == {
+            "accepting": True,
+            "active_workers": 1,
+            "queue_depth": 2,
+            "rejected_queries": 3,
+            "deadline_cancellations": 4,
+            "query_latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0},
+        }
+
     def test_wedge_emits_probe_failing_then_recovered(self, monkeypatch):
         import bobi.supervisor.telemetry as tele
         monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)

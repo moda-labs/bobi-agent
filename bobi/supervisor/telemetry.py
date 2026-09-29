@@ -67,6 +67,7 @@ class Telemetry(SupervisorObserver):
         self._publish_fn = publish_fn
         self._ensure_bubble_fn = ensure_bubble_fn
         self._metrics_health_fn = metrics_health_fn
+        self._metrics_query_health_fn = None
         # Derived-verdict state carried across polls. ``_last_status`` is the
         # last CONFIRMED verdict, reported through an unconfirmed transient
         # health miss so a single dropped /health probe doesn't flap the fleet
@@ -83,6 +84,10 @@ class Telemetry(SupervisorObserver):
         # The most recent heartbeat snapshot, exposed for the admin `status`
         # command (#9) so a status reply reuses the tier-1 body verbatim.
         self.last_snapshot: dict | None = None
+
+    def set_metrics_query_health_fn(self, health_fn) -> None:
+        """Add query-executor health after the Admin listener is constructed."""
+        self._metrics_query_health_fn = health_fn
 
     # --- startup ----------------------------------------------------------
 
@@ -197,14 +202,24 @@ class Telemetry(SupervisorObserver):
 
     def _metrics_health(self) -> dict:
         if self._metrics_health_fn is None:
-            return {"mode": "disabled", "status": "disabled", "db_ready": False}
-        try:
-            value = self._metrics_health_fn()
-            return value if isinstance(value, dict) else {
-                "mode": "unknown", "status": "degraded", "db_ready": False
-            }
-        except Exception:
-            return {"mode": "unknown", "status": "degraded", "db_ready": False}
+            value = {"mode": "disabled", "status": "disabled", "db_ready": False}
+        else:
+            try:
+                candidate = self._metrics_health_fn()
+                value = candidate if isinstance(candidate, dict) else {
+                    "mode": "unknown", "status": "degraded", "db_ready": False
+                }
+            except Exception:
+                value = {"mode": "unknown", "status": "degraded", "db_ready": False}
+        if self._metrics_query_health_fn is not None:
+            try:
+                query_health = self._metrics_query_health_fn()
+                if isinstance(query_health, dict):
+                    value = {**value, "query_executor": query_health}
+            except Exception:
+                # Collector health remains useful when query health is unreadable.
+                pass
+        return value
 
     def _update_probe_episode(self, derived: str, now: float) -> None:
         bad = derived in _BAD_STATES

@@ -122,6 +122,13 @@ def test_schema_has_wal_foreign_keys_and_best_usage(tmp_path):
     }
     assert "raw_events" in names
     assert "best_usage" in names
+    indexes = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        )
+    }
+    assert "idx_cost_invocation" in indexes
     conn.close()
 
 

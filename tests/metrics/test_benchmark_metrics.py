@@ -1,6 +1,10 @@
 from argparse import Namespace
 
-from scripts.benchmark_metrics import benchmark_rebuild, benchmark_turn_replay
+from scripts.benchmark_metrics import (
+    benchmark_queries,
+    benchmark_rebuild,
+    benchmark_turn_replay,
+)
 
 
 def test_rebuild_benchmark_proves_replay_and_snapshot_parity():
@@ -31,3 +35,18 @@ def test_turn_replay_benchmark_compares_all_runtime_modes():
     ]
     assert report["runs"][2]["projected_turns"] == 3
     assert report["runs"][2]["collector_health"]["uncommitted_spool_bytes"] == 0
+
+def test_query_benchmark_enforces_latency_and_saturation_gates(tmp_path):
+    report = benchmark_queries(Namespace(
+        dataset=tmp_path / "representative.db",
+        turns=100,
+        iterations=3,
+        saturate=True,
+    ))
+
+    assert report["dataset"]["turns"] == 100
+    assert report["queries"]["turn_detail"]["latency_ms"]["p95"] <= 100
+    assert report["queries"]["summary"]["latency_ms"]["p95"] <= 250
+    assert report["queries"]["hotspots"]["latency_ms"]["p95"] <= 500
+    assert report["saturation"]["metrics_busy_ms"] <= 50
+    assert report["saturation"]["status_latency_ms"]["p99"] <= 100

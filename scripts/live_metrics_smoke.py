@@ -20,6 +20,9 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import yaml
 
@@ -705,7 +708,10 @@ def verify_tools(args: argparse.Namespace) -> dict[str, object]:
 
 def _smoke_env(home: Path) -> dict[str, str]:
     env = dict(os.environ)
-    for name in ("BOBI_BRAIN", "BOBI_BRAIN_MODEL", "BOBI_BRAIN_EFFORT"):
+    for name in (
+        "BOBI_BRAIN", "BOBI_BRAIN_MODEL", "BOBI_BRAIN_EFFORT",
+        "FLEET_OPERATOR_TOKEN",
+    ):
         env.pop(name, None)
     env["BOBI_HOME"] = str(home)
     env["BOBI_METRICS_MODE"] = "shadow"
@@ -1062,13 +1068,377 @@ def _wait_for_collector_health(path: Path, timeout: float = 30) -> dict[str, obj
     raise RuntimeError(f"collector health did not become active: {path}")
 
 
+def _json_object(raw: str, label: str) -> dict[str, object]:
+    """Decode one JSON object without ever echoing credentials."""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} returned invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} returned a non-object JSON value")
+    return value
+
+
+def _http_json(
+    url: str,
+    *,
+    token: str,
+    payload: dict[str, object] | None = None,
+    accept: str = "application/json",
+    timeout: float = 30,
+) -> tuple[int, str]:
+    headers = {"Authorization": f"Bearer {token}", "Accept": accept}
+    data = None
+    if payload is not None:
+        data = json.dumps(payload, separators=(",", ":")).encode()
+        headers["Content-Type"] = "application/json"
+    request = Request(url, data=data, headers=headers)
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode()
+    except HTTPError as exc:
+        return exc.code, exc.read().decode(errors="replace")
+    except URLError as exc:
+        raise RuntimeError(f"transport request failed: {exc.reason}") from None
+
+
+def _wait_admin_target(
+    base_url: str,
+    *,
+    token: str,
+    fleet: str,
+    instance: str,
+    timeout: float = 60,
+) -> None:
+    target = (
+        f"{base_url.rstrip('/')}/fleet/instances/"
+        f"{quote(fleet, safe='')}/{quote(instance, safe='')}"
+    )
+    deadline = time.monotonic() + timeout
+    last_status = 0
+    while time.monotonic() < deadline:
+        try:
+            status, raw = _http_json(target, token=token, timeout=min(5, timeout))
+            last_status = status
+            if status == 200:
+                detail = _json_object(raw, "Admin instance detail")
+                supervisor = detail.get("supervisor")
+                version = str(
+                    supervisor.get("version") or ""
+                ) if isinstance(supervisor, dict) else ""
+                parts = version.split(".")
+                compatible = (
+                    1 <= len(parts) <= 3
+                    and all(part.isdigit() for part in parts)
+                    and tuple((list(map(int, parts)) + [0, 0, 0])[:3])
+                    >= (0, 4, 0)
+                )
+                if (
+                    isinstance(supervisor, dict)
+                    and compatible
+                ):
+                    return
+        except RuntimeError:
+            pass
+        time.sleep(0.2)
+    raise RuntimeError(
+        "smoke supervisor did not appear in the Worker read model "
+        f"within {timeout:.1f}s (last HTTP status {last_status})"
+    )
+
+
+def _admin_metrics_call(
+    env: dict[str, str],
+    *,
+    base_url: str,
+    fleet: str,
+    instance: str,
+    alias: str,
+    query_args: dict[str, object],
+    timeout: float,
+) -> dict[str, object]:
+    raw = _bobi(
+        env,
+        "admin", alias,
+        "--url", base_url,
+        "--fleet", fleet,
+        "--instance", instance,
+        "--args", json.dumps(query_args, separators=(",", ":")),
+        "--wait", "--timeout", str(timeout), "--json",
+        timeout=max(30, int(timeout) + 15),
+    )
+    result = _json_object(raw, f"bobi admin {alias}")
+    if result.get("status") not in {"done", "error"}:
+        raise RuntimeError(
+            f"bobi admin {alias} did not return a terminal result"
+        )
+    return result
+
+
+def _mcp_metrics_call(
+    *,
+    base_url: str,
+    token: str,
+    request_id: int,
+    tool: str,
+    arguments: dict[str, object],
+    timeout: float,
+) -> dict[str, object]:
+    status, raw = _http_json(
+        f"{base_url.rstrip('/')}/mcp",
+        token=token,
+        payload={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        },
+        accept="application/json, text/event-stream",
+        timeout=timeout,
+    )
+    if status != 200:
+        raise RuntimeError(f"MCP {tool} returned HTTP {status}")
+    message = None
+    for line in raw.splitlines():
+        if line.startswith("data:"):
+            message = _json_object(line[len("data:"):].strip(), f"MCP {tool}")
+            break
+    if message is None and raw.strip():
+        message = _json_object(raw, f"MCP {tool}")
+    if message is None or message.get("jsonrpc") != "2.0" or message.get("id") != request_id:
+        raise RuntimeError(f"MCP {tool} returned no matching JSON-RPC response")
+    if "error" in message:
+        raise RuntimeError(f"MCP {tool} returned a JSON-RPC error")
+    result = message.get("result")
+    if not isinstance(result, dict) or result.get("isError"):
+        raise RuntimeError(f"MCP {tool} returned a tool error")
+    content = result.get("content")
+    if not isinstance(content, list):
+        raise RuntimeError(f"MCP {tool} returned no content")
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str):
+                return _json_object(text, f"MCP {tool} payload")
+    raise RuntimeError(f"MCP {tool} returned no JSON text payload")
+
+
+def _turn_session_id(db: Path, turn_id: str) -> str:
+    conn = connect(db, readonly=True)
+    try:
+        row = conn.execute(
+            "SELECT session_id FROM turns WHERE turn_id=?", (turn_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise RuntimeError(f"turn {turn_id} is absent from metrics.db")
+    return str(row[0])
+
+
+def _write_sanitized_json(path: Path, value: dict[str, object]) -> None:
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def _run_s3_transport(
+    *,
+    env: dict[str, str],
+    base_url: str,
+    token: str,
+    fleet: str,
+    instance: str,
+    db: Path,
+    turn_id: str,
+    artifacts: Path,
+    run_admin: bool,
+    run_mcp: bool,
+    timeout: float,
+) -> None:
+    """Exercise all five metrics reads through real Admin and MCP transports."""
+    session_id = _turn_session_id(db, turn_id)
+    queries: dict[str, tuple[str, dict[str, object]]] = {
+        "summary": ("metrics_summary", {"session_id": session_id}),
+        "session": ("metrics_session", {"session_id": session_id, "limit": 10}),
+        "turn": ("metrics_turn", {"turn_id": turn_id}),
+        "hotspots": (
+            "metrics_hotspots",
+            {
+                "scope": "tool",
+                "metric": "latency",
+                "session": session_id,
+                "top_n": 10,
+            },
+        ),
+        "experiment": (
+            "metrics_experiment",
+            {"experiment_id": "metrics-smoke-unassigned"},
+        ),
+    }
+    admin_results: dict[str, dict[str, object]] = {}
+    mcp_results: dict[str, dict[str, object]] = {}
+    if run_admin or run_mcp:
+        _wait_admin_target(
+            base_url,
+            token=token,
+            fleet=fleet,
+            instance=instance,
+            timeout=max(60, timeout),
+        )
+    if run_admin:
+        admin_env = {**env, "FLEET_OPERATOR_TOKEN": token}
+        for name, (alias, query_args) in queries.items():
+            result = _admin_metrics_call(
+                admin_env,
+                base_url=base_url,
+                fleet=fleet,
+                instance=instance,
+                alias=alias,
+                query_args=query_args,
+                timeout=timeout,
+            )
+            admin_results[name] = result
+            _write_sanitized_json(artifacts / f"{instance}-admin-{name}.json", result)
+
+        summary = admin_results["summary"]["result"]["usage"]
+        if (
+            summary["totals"]["turns"] < 1
+            or summary["coverage"]["exact_invocations"] < 1
+        ):
+            raise RuntimeError("Admin summary has no exact live-provider coverage")
+        turn = admin_results["turn"]["result"]["usage_turn"]
+        if turn["turn"]["turn_id"] != turn_id or len(turn["tool_executions"]) < 3:
+            raise RuntimeError("Admin turn result does not contain the live tool-loop turn")
+        session = admin_results["session"]["result"]["usage_session"]
+        if session["session"]["session_id"] != session_id or not session["turns"]:
+            raise RuntimeError("Admin session result does not contain the live session")
+        hotspots = admin_results["hotspots"]["result"]["usage_hotspots"]
+        if not hotspots["hotspots"] or hotspots["hotspots"][0]["scope"] != "tool":
+            raise RuntimeError("Admin hotspot result does not contain a tool hotspot")
+        experiment = admin_results["experiment"]
+        if experiment["status"] == "error":
+            if experiment.get("result", {}).get("code") != "unknown_experiment":
+                raise RuntimeError("Admin experiment query failed unexpectedly")
+        elif experiment["status"] != "done":
+            raise RuntimeError("Admin experiment query did not terminate")
+
+    if run_mcp:
+        mcp_tools = {
+            "summary": (
+                "bobi_usage_summary",
+                {"days": 1, "fleet": fleet, "session_id": session_id},
+            ),
+            "session": (
+                "bobi_usage_session",
+                {"fleet": fleet, "instance": instance, **queries["session"][1]},
+            ),
+            "turn": (
+                "bobi_usage_turn",
+                {"fleet": fleet, "instance": instance, **queries["turn"][1]},
+            ),
+            "hotspots": (
+                "bobi_usage_hotspots",
+                {"fleet": fleet, "instance": instance, **queries["hotspots"][1]},
+            ),
+            "experiment": (
+                "bobi_usage_experiment",
+                {"fleet": fleet, "instance": instance, **queries["experiment"][1]},
+            ),
+        }
+        for request_id, (name, (tool, arguments)) in enumerate(mcp_tools.items(), 1):
+            result = _mcp_metrics_call(
+                base_url=base_url,
+                token=token,
+                request_id=request_id,
+                tool=tool,
+                arguments=arguments,
+                timeout=timeout,
+            )
+            mcp_results[name] = result
+            _write_sanitized_json(artifacts / f"{instance}-mcp-{name}.json", result)
+
+        summary = mcp_results["summary"]
+        fleets = summary.get("fleets")
+        if summary.get("complete") is not True or not isinstance(fleets, list):
+            raise RuntimeError("MCP summary is incomplete")
+        instances = [
+            item
+            for fleet_row in fleets
+            if isinstance(fleet_row, dict) and fleet_row.get("fleet") == fleet
+            for item in fleet_row.get("instances", [])
+            if isinstance(item, dict) and item.get("instance") == instance
+        ]
+        if len(instances) != 1:
+            raise RuntimeError("MCP summary did not return exactly one smoke instance")
+        for name in ("session", "turn", "hotspots"):
+            if mcp_results[name].get("status") != "done":
+                raise RuntimeError(f"MCP {name} query did not complete")
+        experiment = mcp_results["experiment"]
+        if experiment.get("status") == "error":
+            if experiment.get("result", {}).get("code") != "unknown_experiment":
+                raise RuntimeError("MCP experiment query failed unexpectedly")
+        elif experiment.get("status") != "done":
+            raise RuntimeError("MCP experiment query did not terminate")
+        turn = mcp_results["turn"]
+        turn_payload = turn["result"]["usage_turn"]
+        if turn_payload["turn"]["turn_id"] != turn_id or len(turn_payload["tool_executions"]) < 3:
+            raise RuntimeError("MCP turn result does not contain the live tool-loop turn")
+
+    parity: dict[str, bool] = {}
+    if run_admin and run_mcp:
+        admin_usage = admin_results["summary"]["result"]["usage"]
+        mcp_instance = next(
+            item
+            for fleet_row in mcp_results["summary"]["fleets"]
+            if fleet_row["fleet"] == fleet
+            for item in fleet_row["instances"]
+            if item["instance"] == instance
+        )
+        parity["summary"] = (
+            mcp_instance.get("fine_grained", {}).get("totals") == admin_usage["totals"]
+            and mcp_instance.get("fine_grained", {}).get("coverage") == admin_usage["coverage"]
+        )
+        for name in ("session", "turn", "hotspots"):
+            wire = f"usage_{name}"
+            parity[name] = (
+                mcp_results[name].get("status") == "done"
+                and mcp_results[name]["result"][wire]
+                == admin_results[name]["result"][wire]
+            )
+        parity["experiment"] = (
+            mcp_results["experiment"].get("status")
+            == admin_results["experiment"].get("status")
+            and mcp_results["experiment"].get("result")
+            == admin_results["experiment"].get("result")
+        )
+        if not all(parity.values()):
+            raise RuntimeError(f"Admin/MCP logical parity failed: {parity}")
+        _write_sanitized_json(
+            artifacts / f"{instance}-admin-mcp-parity.json",
+            {"status": "passed", "checks": parity},
+        )
+    print(
+        f"PASS provider_transport={instance} admin={str(run_admin).lower()} "
+        f"mcp={str(run_mcp).lower()} terminal=true"
+        + (" parity=exact" if parity else "")
+    )
+
+
 def installed_matrix(args: argparse.Namespace) -> None:
     checks = {value for value in args.checks.split(",") if value}
-    unsupported = checks - {"single-turn", "tool-loop", "process-kill"}
+    unsupported = checks - {"single-turn", "tool-loop", "process-kill", "admin", "mcp"}
     if unsupported:
         raise SystemExit(
-            "installed-matrix supports single-turn, tool-loop, and process-kill; "
+            "installed-matrix supports single-turn, tool-loop, process-kill, admin, and mcp; "
             f"unsupported: {','.join(sorted(unsupported))}"
+        )
+    transport_checks = bool(checks & {"admin", "mcp"})
+    if transport_checks and "tool-loop" not in checks:
+        raise SystemExit("admin and mcp checks require tool-loop in the same run")
+    if transport_checks and not args.admin_url:
+        raise SystemExit("admin and mcp checks require --admin-url or BOBI_ADMIN_URL")
+    if transport_checks and not args.operator_token:
+        raise SystemExit(
+            "admin and mcp checks require FLEET_OPERATOR_TOKEN"
         )
     home = args.bobi_home.resolve()
     if not (home / SMOKE_MARKER).exists():
@@ -1090,17 +1460,26 @@ def installed_matrix(args: argparse.Namespace) -> None:
         )
         if item[0] in providers
     )
+    smoke_run_id = uuid.uuid4().hex[:8]
     for provider, agent in matrix:
         _preflight(provider)
+        provider_env = dict(env)
+        provider_fleet = f"{args.fleet}-{provider}-{smoke_run_id}"
+        if transport_checks:
+            provider_env["BOBI_EVENT_SERVER"] = args.admin_url
+            provider_env["BOBI_FLEET"] = provider_fleet
+            provider_env["BOBI_INSTANCE"] = agent
+            provider_env.pop("FLEET_OPERATOR_TOKEN", None)
         run_root = home / "agents" / agent / "run"
         db = run_root / "state" / "metrics" / "metrics.db"
+        tool_turn_id = None
         try:
-            _bobi(env, "agent", agent, "start", "--fresh", timeout=120)
+            _bobi(provider_env, "agent", agent, "start", "--fresh", timeout=120)
             _wait_agent_ready(run_root)
             if "single-turn" in checks:
                 after_us = time.time_ns() // 1000
                 response = _bobi(
-                    env,
+                    provider_env,
                     "agent", agent, "message",
                     "Reply with exactly METRICS_SMOKE_OK.",
                     "--wait", "--timeout", "300",
@@ -1138,7 +1517,7 @@ def installed_matrix(args: argparse.Namespace) -> None:
                     "exactly TOOL_SMOKE_OK."
                 )
                 response = _bobi(
-                    env,
+                    provider_env,
                     "agent", agent, "message", prompt,
                     "--wait", "--timeout", "300",
                     timeout=330,
@@ -1162,9 +1541,25 @@ def installed_matrix(args: argparse.Namespace) -> None:
                     minimum_tool_count=3,
                     json_out=artifacts / f"{provider}-tool-loop.json",
                 ))
+                tool_turn_id = turn_id
+            if transport_checks:
+                assert tool_turn_id is not None
+                _run_s3_transport(
+                    env=provider_env,
+                    base_url=args.admin_url,
+                    token=args.operator_token,
+                    fleet=provider_fleet,
+                    instance=agent,
+                    db=db,
+                    turn_id=tool_turn_id,
+                    artifacts=artifacts,
+                    run_admin="admin" in checks,
+                    run_mcp="mcp" in checks,
+                    timeout=args.transport_timeout,
+                )
             if "process-kill" in checks:
                 _process_kill_smoke(
-                    env=env,
+                    env=provider_env,
                     home=home,
                     agent=agent,
                     provider=provider,
@@ -1187,7 +1582,7 @@ def installed_matrix(args: argparse.Namespace) -> None:
             subprocess.run(
                 [str(Path(sys.executable).with_name("bobi")), "agent", agent, "stop"],
                 cwd=REPO_ROOT,
-                env=env,
+                env=provider_env,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -1333,6 +1728,15 @@ def parser() -> argparse.ArgumentParser:
     matrix.add_argument("--checks", default="single-turn,tool-loop")
     matrix.add_argument("--providers", default="claude,codex")
     matrix.add_argument("--artifacts", type=Path)
+    matrix.add_argument(
+        "--admin-url", default=os.environ.get("BOBI_ADMIN_URL", "")
+    )
+    matrix.add_argument(
+        "--fleet", default=os.environ.get("BOBI_FLEET", "metrics-smoke")
+    )
+    # Secrets are environment-only so they never appear in process listings.
+    matrix.set_defaults(operator_token=os.environ.get("FLEET_OPERATOR_TOKEN", ""))
+    matrix.add_argument("--transport-timeout", type=float, default=30.0)
     return root
 
 

@@ -17,7 +17,7 @@ the reference implementation if you are writing your own operator surface —
 including the parts a first attempt gets wrong, like which poll failures are
 transient and which are not.
 
-- **Version:** `SUPERVISOR_VERSION = "0.3.0"` (`bobi/supervisor/snapshot.py`),
+- **Version:** `SUPERVISOR_VERSION = "0.4.0"` (`bobi/supervisor/snapshot.py`),
   reported on every heartbeat at `supervisor.version`.
 - **Transport:** the bobi event bus. See `docs/EVENT_SERVER.md` for the server,
   `docs/SELF_HOSTED_EVENT_SERVER.md` for running your own.
@@ -122,7 +122,7 @@ A command is published to the deployment's admin topic:
 
 `command_id` is caller-supplied and opaque to the supervisor; it is echoed on
 the result so a caller can correlate. A command whose `command` is not one of
-the sixteen below, or which carries no `command_id`, is **dropped without a
+the twenty below, or which carries no `command_id`, is **dropped without a
 reply** (the supervisor logs it locally). An unrecognized command has no
 command to acknowledge, so a consumer must not wait on a result for one — it
 never executes and never answers.
@@ -210,7 +210,11 @@ an incident.
 | `transcript` | `{"session": "<name>", "detail": bool}` (both optional) | `{"messages": [...]}`, plus `{"session", "entries": [...], "usage": {...}}` when `detail` is set |
 | `roster` | — | `{"subagents": [...]}` |
 | `spend` | — | `{"spend": {...}}` |
-| `usage` | `{"window_seconds": number, "end_at": epoch?}` | `{"usage": {"window", "jobs", "tokens", "cost_usd", "estimated_cost_usd"}}` |
+| `usage` | `{"window_seconds"?: number, "end_at"?: epoch}`; window defaults to 24 hours | `{"usage": {"window", "jobs", "tokens", "cost_usd", "estimated_cost_usd"}}` |
+| `usage_session` | `{"session_id": string, "cursor"?, "limit"?, "include_turns"?}` | `{"usage_session": {"session", "turns", "next_cursor", "coverage"}}` |
+| `usage_turn` | `{"turn_id": string}` | `{"usage_turn": {"turn", "workflow_steps", "invocations", "tool_executions", "usage_measurements", "cost_measurements", "router_decisions", "coverage"}}` |
+| `usage_hotspots` | time range, `scope`, `metric`, optional `session`, `cursor`, `top_n` | `{"usage_hotspots": {"hotspots", "next_cursor", "coverage"}}` |
+| `usage_experiment` | `{"experiment_id": string}` plus optional filters | `{"usage_experiment": {"experiment_id", "variants", "outcomes", "coverage"}}` |
 | `session_log` | — | `{"sessions": [...], "counts": {...}, "truncated": bool}` |
 | `runs` | `{"status", "query", "offset", "limit"}` (all optional) | `{"runs": [...], "counts": {...}, "total", "offset", "limit", "query", "truncated"}` |
 | `overview` | — | `{"overview": {...}}` |
@@ -237,7 +241,50 @@ the full set, not the capped rows.
 non-positive or unparseable `limit` falls back to the builder default rather
 than failing the command.
 
-`usage` folds the same de-duplicated rows as `runs`. It includes terminal jobs
+`usage` preserves the legacy fold and additively includes
+`metrics_schema_version`, fine-grained `totals`, optional `groups`, and
+`coverage` when `metrics.db` is available. Unknown token dimensions are `null`,
+not zero. It accepts the legacy `window_seconds`/`end_at` pair or an explicit
+`from`/`to` range, but never both.
+
+Fine-grained token totals choose one granularity per turn in this order:
+complete exact invocation coverage, exact turn aggregate, complete effective
+invocation coverage, then estimated turn fallback. Exactness therefore outranks
+granularity. `coverage.usage_granularity` is `invocation`, `turn`, `mixed`, or
+`none`; `coverage.invocation_granularity_turns` and
+`coverage.turn_granularity_turns` report the selected-turn counts.
+
+The four `usage_*` drill-downs require supervisor `0.4.0`. They run on a
+dedicated four-worker read-only executor with eight queued requests, for 12
+total admitted requests. Saturation returns
+`result.code=metrics_busy` without waiting behind SQLite work. Each accepted
+query has a one-second SQLite progress deadline; list responses are capped at
+200 rows and every result is capped at 512 KiB. No prompt, response, tool input,
+tool output, content-derived prompt/tool hash, assignment-key hash, raw provider
+usage, project/local path, or free-form metadata body is returned.
+The heartbeat's existing `metrics` block additively carries a
+`query_executor` object with `accepting`, `active_workers`, `queue_depth`,
+`rejected_queries`, `deadline_cancellations`, `completed_queries`, and
+`query_latency_ms.{p50,p95,p99}`. Percentiles cover the most recent 1,024
+completed queries and are `null` before the first completion. On shutdown the
+listener first closes admission, cancels queued reads, and waits no more than
+two seconds for running reads before allowing supervisor shutdown to continue.
+Operator clients and MCP preflight the heartbeat's `supervisor.version` before
+issuing a drill-down and reject old, missing, or malformed versions without
+recording a command. The legacy `usage` summary remains available to older
+supervisors and does not require this preflight.
+
+Session turns and hotspots use opaque, filter-bound keyset cursors. A cursor is
+valid only with the same filters and page size, and inserts ahead of its last
+row do not duplicate or skip the next retained row. Turn detail and experiment
+aggregation are bounded atomic views rather than paged fragments: if their
+combined rows exceed 200, they fail with `query_too_large`. Experiment variants
+include sample size, completion/error/fallback rates, router and turn latency,
+token dimensions, separate reported/estimated cost, and per-variant
+exact/estimated/unknown invocation coverage; quality outcomes remain grouped by
+their definition, source, evaluator, version, and estimation status.
+
+The legacy part of `usage` folds the same de-duplicated rows as `runs`. It includes terminal jobs
 whose completion time falls in `[end_at - window_seconds, end_at]`; running and
 waiting work is excluded. Usage is recorded per session, not as a token-level
 time series, so a matching job contributes its whole recorded usage. Recorded
@@ -508,12 +555,16 @@ state read from KV. Browser clients are not supported and CORS is off.
 | `bobi_fleet_status` | none | Every instance: reachability, manager state, sessions, versions |
 | `bobi_instance_detail` | `fleet`, `instance` | One instance's full heartbeat plus its lifecycle trail |
 | `bobi_usage_summary` | `days`, `fleet?` | Rolling job/token/cost totals per fleet with per-instance detail and explicit partial failures |
+| `bobi_usage_session` | `fleet`, `instance`, `session_id`, optional cursor/limit | One session and a bounded page of turns |
+| `bobi_usage_turn` | `fleet`, `instance`, `turn_id` | Turn, invocation, tool, usage/cost provenance, and coverage |
+| `bobi_usage_hotspots` | `fleet`, `instance`, range/scope/metric filters, optional cursor | Bounded ranked hotspots |
+| `bobi_usage_experiment` | `fleet`, `instance`, `experiment_id`, optional filters | Per-variant routing outcomes and coverage |
 | `bobi_command_result` | `fleet`, `instance`, `command_id` | One command's folded view (`pending` / `done` / `error`) |
 | `bobi_read_transcript` | `fleet`, `instance`, `session?` | One session's recent messages, framed as untrusted content |
 | `bobi_send_message` | `fleet`, `instance`, `message`, `session?` | A `command_id`. **Never the reply** |
 | `bobi_lifecycle` | `fleet`, `instance`, `action`, `reason` | The `restart`/`stop`/`start` command's view |
 
-Seven tools over sixteen admin commands, because the vocabulary is deliberately
+Eleven tools over twenty admin commands, because the vocabulary is deliberately
 **not** one tool per command: `bobi_lifecycle` folds `restart`/`stop`/`start`
 behind an `action` enum, and `status` is already covered by the heartbeat that
 `bobi_instance_detail` returns.

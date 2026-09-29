@@ -152,6 +152,7 @@ def run(root: Path, argv: list[str]) -> int:
     # start, the supervisor still supervises.
     admin = AdminListener(supervisor=supervisor, telemetry=telemetry,
                           project_root=root)
+    telemetry.set_metrics_query_health_fn(admin.metrics_query_health)
     admin.start()
     try:
         return supervisor.run()

@@ -188,8 +188,12 @@ def test_live_probe_can_append_repeated_runs_to_one_database(tmp_path):
 
 def test_smoke_env_forces_fault_injection_on(monkeypatch, tmp_path):
     monkeypatch.setenv("BOBI_METRICS_FAULT_INJECTION", "0")
+    monkeypatch.setenv("FLEET_OPERATOR_TOKEN", "must-not-reach-provider")
 
-    assert _smoke_env(tmp_path)["BOBI_METRICS_FAULT_INJECTION"] == "1"
+    env = _smoke_env(tmp_path)
+
+    assert env["BOBI_METRICS_FAULT_INJECTION"] == "1"
+    assert "FLEET_OPERATOR_TOKEN" not in env
 
 
 def test_arm_fault_requires_provisioned_disposable_home(tmp_path):
@@ -397,3 +401,383 @@ def test_parser_and_dispatch_expose_phase2_recovery_commands(monkeypatch, tmp_pa
     live_smoke.main()
 
     assert called == ["turn-2"]
+
+
+def test_phase3_transport_checks_fail_closed_without_inputs(monkeypatch, tmp_path):
+    monkeypatch.delenv("BOBI_ADMIN_URL", raising=False)
+    monkeypatch.delenv("FLEET_OPERATOR_TOKEN", raising=False)
+    with pytest.raises(SystemExit, match="require tool-loop"):
+        live_smoke.installed_matrix(parser().parse_args([
+            "installed-matrix", "--bobi-home", str(tmp_path),
+            "--checks", "admin,mcp", "--providers", "claude",
+        ]))
+
+    with pytest.raises(SystemExit, match="require --admin-url"):
+        live_smoke.installed_matrix(parser().parse_args([
+            "installed-matrix", "--bobi-home", str(tmp_path),
+            "--checks", "tool-loop,admin", "--providers", "claude",
+        ]))
+
+    with pytest.raises(SystemExit, match="require FLEET_OPERATOR_TOKEN"):
+        live_smoke.installed_matrix(parser().parse_args([
+            "installed-matrix", "--bobi-home", str(tmp_path),
+            "--checks", "tool-loop,admin", "--providers", "claude",
+            "--admin-url", "https://events.example.com",
+        ]))
+
+    monkeypatch.setenv("FLEET_OPERATOR_TOKEN", "operator-secret")
+    parsed = parser().parse_args([
+        "installed-matrix", "--bobi-home", str(tmp_path),
+        "--checks", "tool-loop,admin", "--providers", "claude",
+        "--admin-url", "https://events.example.com",
+    ])
+    assert parsed.operator_token == "operator-secret"
+    assert "--operator-token" not in parser().format_help()
+
+
+def test_wait_admin_target_accepts_future_compatible_supervisor(monkeypatch):
+    monkeypatch.setattr(
+        live_smoke,
+        "_http_json",
+        lambda *args, **kwargs: (
+            200,
+            json.dumps({"supervisor": {"version": "1.2.3"}}),
+        ),
+    )
+
+    live_smoke._wait_admin_target(
+        "https://events.example.com",
+        token="operator-token",
+        fleet="fleet",
+        instance="agent",
+        timeout=0.1,
+    )
+
+
+def test_admin_transport_keeps_operator_token_off_argv(monkeypatch):
+    captured = {}
+
+    def fake_bobi(env, *argv, **kwargs):
+        captured["env"] = env
+        captured["argv"] = argv
+        return json.dumps({"status": "done", "result": {"usage_turn": {}}})
+
+    monkeypatch.setattr(live_smoke, "_bobi", fake_bobi)
+    result = live_smoke._admin_metrics_call(
+        {"FLEET_OPERATOR_TOKEN": "operator-secret"},
+        base_url="https://events.example.com",
+        fleet="fleet",
+        instance="agent",
+        alias="metrics_turn",
+        query_args={"turn_id": "turn-1"},
+        timeout=30,
+    )
+
+    assert result["status"] == "done"
+    assert "operator-secret" not in captured["argv"]
+    assert "--token" not in captured["argv"]
+    assert captured["env"]["FLEET_OPERATOR_TOKEN"] == "operator-secret"
+
+
+def test_mcp_transport_decodes_matching_sse_json_rpc(monkeypatch):
+    payload = {"status": "done", "result": {"usage_turn": {"turn": {}}}}
+    response = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "result": {
+            "content": [{"type": "text", "text": json.dumps(payload)}],
+        },
+    }
+    captured = {}
+
+    def fake_http(url, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return 200, f"event: message\ndata: {json.dumps(response)}\n\n"
+
+    monkeypatch.setattr(live_smoke, "_http_json", fake_http)
+
+    assert live_smoke._mcp_metrics_call(
+        base_url="https://events.example.com/",
+        token="operator-secret",
+        request_id=7,
+        tool="bobi_usage_turn",
+        arguments={"fleet": "fleet", "instance": "agent", "turn_id": "turn-1"},
+        timeout=30,
+    ) == payload
+    assert captured["url"] == "https://events.example.com/mcp"
+    assert captured["token"] == "operator-secret"
+    assert captured["payload"]["id"] == 7
+
+
+def test_phase3_transport_runs_all_admin_and_mcp_queries_with_parity(
+        monkeypatch, tmp_path):
+    db = tmp_path / "metrics.db"
+    conn = connect(db)
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO sessions(session_id,session_name,brain,provider,"
+        "started_at_us,status) VALUES(?,?,?,?,?,?)",
+        ("session-1", "manager", "claude", "anthropic", 1, "running"),
+    )
+    conn.execute(
+        "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,"
+        "is_user_initiated,started_at_us,status) VALUES(?,?,?,?,?,?,?)",
+        ("turn-1", "session-1", 1, "message", 1, 2, "completed"),
+    )
+    conn.commit()
+    conn.close()
+
+    totals = {"turns": 1, "input_tokens": 10}
+    coverage = {"exact_invocations": 1}
+    payloads = {
+        "summary": {"totals": totals, "coverage": coverage},
+        "session": {
+            "session": {"session_id": "session-1"},
+            "turns": [{"turn_id": "turn-1"}],
+        },
+        "turn": {
+            "turn": {"turn_id": "turn-1"},
+            "tool_executions": [{"scope": "tool"}] * 3,
+        },
+        "hotspots": {"hotspots": [{"scope": "tool", "id": "tool-1"}]},
+        "experiment": {
+            "experiment_id": "metrics-smoke-unassigned",
+            "variants": [],
+            "outcomes": [],
+        },
+    }
+    alias_to_name = {
+        "metrics_summary": "summary",
+        "metrics_session": "session",
+        "metrics_turn": "turn",
+        "metrics_hotspots": "hotspots",
+        "metrics_experiment": "experiment",
+    }
+    tool_to_name = {
+        "bobi_usage_summary": "summary",
+        "bobi_usage_session": "session",
+        "bobi_usage_turn": "turn",
+        "bobi_usage_hotspots": "hotspots",
+        "bobi_usage_experiment": "experiment",
+    }
+    admin_calls = []
+    mcp_calls = []
+    admin_envs = []
+    monkeypatch.setattr(live_smoke, "_wait_admin_target", lambda *a, **k: None)
+
+    def admin_call(_env, **kwargs):
+        admin_envs.append(_env)
+        name = alias_to_name[kwargs["alias"]]
+        admin_calls.append((name, kwargs["query_args"]))
+        wire = "usage" if name == "summary" else f"usage_{name}"
+        return {"status": "done", "result": {wire: payloads[name]}}
+
+    def mcp_call(**kwargs):
+        name = tool_to_name[kwargs["tool"]]
+        mcp_calls.append((name, kwargs["arguments"]))
+        if name == "summary":
+            return {
+                "complete": True,
+                "fleets": [{
+                    "fleet": "fleet",
+                    "instances": [{
+                        "instance": "agent",
+                        "fine_grained": {
+                            "totals": totals,
+                            "coverage": coverage,
+                        },
+                    }],
+                }],
+            }
+        return {
+            "status": "done",
+            "result": {f"usage_{name}": payloads[name]},
+        }
+
+    monkeypatch.setattr(live_smoke, "_admin_metrics_call", admin_call)
+    monkeypatch.setattr(live_smoke, "_mcp_metrics_call", mcp_call)
+
+    live_smoke._run_s3_transport(
+        env={"BOBI_HOME": str(tmp_path)},
+        base_url="https://events.example.com",
+        token="operator-token",
+        fleet="fleet",
+        instance="agent",
+        db=db,
+        turn_id="turn-1",
+        artifacts=tmp_path,
+        run_admin=True,
+        run_mcp=True,
+        timeout=30,
+    )
+
+    assert [name for name, _args in admin_calls] == [
+        "summary", "session", "turn", "hotspots", "experiment",
+    ]
+    assert [name for name, _args in mcp_calls] == [
+        "summary", "session", "turn", "hotspots", "experiment",
+    ]
+    assert mcp_calls[0][1]["session_id"] == "session-1"
+    assert all(env["FLEET_OPERATOR_TOKEN"] == "operator-token" for env in admin_envs)
+    assert json.loads(
+        (tmp_path / "agent-admin-mcp-parity.json").read_text()
+    ) == {
+        "status": "passed",
+        "checks": {
+            "summary": True,
+            "session": True,
+            "turn": True,
+            "hotspots": True,
+            "experiment": True,
+        },
+    }
+
+
+def _run_phase3_experiment_transport(
+    monkeypatch,
+    tmp_path,
+    *,
+    admin_experiment,
+    mcp_experiment,
+):
+    db = tmp_path / "metrics.db"
+    conn = connect(db)
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO sessions(session_id,session_name,brain,provider,"
+        "started_at_us,status) VALUES(?,?,?,?,?,?)",
+        ("session-1", "manager", "claude", "anthropic", 1, "running"),
+    )
+    conn.execute(
+        "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,"
+        "is_user_initiated,started_at_us,status) VALUES(?,?,?,?,?,?,?)",
+        ("turn-1", "session-1", 1, "message", 1, 2, "completed"),
+    )
+    conn.commit()
+    conn.close()
+
+    totals = {"turns": 1, "input_tokens": 10}
+    coverage = {"exact_invocations": 1}
+    payloads = {
+        "summary": {"totals": totals, "coverage": coverage},
+        "session": {
+            "session": {"session_id": "session-1"},
+            "turns": [{"turn_id": "turn-1"}],
+        },
+        "turn": {
+            "turn": {"turn_id": "turn-1"},
+            "tool_executions": [{"scope": "tool"}] * 3,
+        },
+        "hotspots": {"hotspots": [{"scope": "tool", "id": "tool-1"}]},
+    }
+    alias_to_name = {
+        "metrics_summary": "summary",
+        "metrics_session": "session",
+        "metrics_turn": "turn",
+        "metrics_hotspots": "hotspots",
+        "metrics_experiment": "experiment",
+    }
+    tool_to_name = {
+        "bobi_usage_summary": "summary",
+        "bobi_usage_session": "session",
+        "bobi_usage_turn": "turn",
+        "bobi_usage_hotspots": "hotspots",
+        "bobi_usage_experiment": "experiment",
+    }
+    monkeypatch.setattr(live_smoke, "_wait_admin_target", lambda *a, **k: None)
+
+    def admin_call(_env, **kwargs):
+        name = alias_to_name[kwargs["alias"]]
+        if name == "experiment":
+            return admin_experiment
+        wire = "usage" if name == "summary" else f"usage_{name}"
+        return {"status": "done", "result": {wire: payloads[name]}}
+
+    def mcp_call(**kwargs):
+        name = tool_to_name[kwargs["tool"]]
+        if name == "experiment":
+            return mcp_experiment
+        if name == "summary":
+            return {
+                "complete": True,
+                "fleets": [{
+                    "fleet": "fleet",
+                    "instances": [{
+                        "instance": "agent",
+                        "fine_grained": {
+                            "totals": totals,
+                            "coverage": coverage,
+                        },
+                    }],
+                }],
+            }
+        return {
+            "status": "done",
+            "result": {f"usage_{name}": payloads[name]},
+        }
+
+    monkeypatch.setattr(live_smoke, "_admin_metrics_call", admin_call)
+    monkeypatch.setattr(live_smoke, "_mcp_metrics_call", mcp_call)
+    live_smoke._run_s3_transport(
+        env={"BOBI_HOME": str(tmp_path)},
+        base_url="https://events.example.com",
+        token="operator-token",
+        fleet="fleet",
+        instance="agent",
+        db=db,
+        turn_id="turn-1",
+        artifacts=tmp_path,
+        run_admin=True,
+        run_mcp=True,
+        timeout=30,
+    )
+
+
+def test_phase3_transport_accepts_matching_unknown_experiment(monkeypatch, tmp_path):
+    terminal = {
+        "status": "error",
+        "result": {
+            "code": "unknown_experiment",
+            "experiment_id": "metrics-smoke-unassigned",
+        },
+    }
+
+    _run_phase3_experiment_transport(
+        monkeypatch,
+        tmp_path,
+        admin_experiment=terminal,
+        mcp_experiment=terminal,
+    )
+
+    assert json.loads(
+        (tmp_path / "agent-admin-mcp-parity.json").read_text()
+    )["checks"]["experiment"] is True
+
+
+@pytest.mark.parametrize("failing_transport", ["admin", "mcp"])
+def test_phase3_transport_rejects_other_experiment_errors(
+    monkeypatch, tmp_path, failing_transport
+):
+    unknown = {
+        "status": "error",
+        "result": {
+            "code": "unknown_experiment",
+            "experiment_id": "metrics-smoke-unassigned",
+        },
+    }
+    unexpected = {
+        "status": "error",
+        "result": {"code": "metrics_busy"},
+    }
+
+    with pytest.raises(RuntimeError, match="experiment query failed unexpectedly"):
+        _run_phase3_experiment_transport(
+            monkeypatch,
+            tmp_path,
+            admin_experiment=(
+                unexpected if failing_transport == "admin" else unknown
+            ),
+            mcp_experiment=(
+                unexpected if failing_transport == "mcp" else unknown
+            ),
+        )

@@ -57,12 +57,13 @@ export interface McpEnv {
 // version is the MCP surface's own contract version, deliberately not the
 // Worker release: a client caches tool schemas against it, so it moves when the
 // tool surface changes, not when the Worker deploys.
+// 1.3.0: fine-grained session/turn/hotspot/experiment usage drill-downs.
 // 1.2.0: MOD-375 adds the rolling fleet usage summary.
 // 1.1.0: Lane B added three tools and changed none of Lane A's three, so a
 // client holding cached 1.0.0 schemas stays correct - additive minor is the
 // honest signal. It tracks the TOOL SURFACE, not the Worker release.
 export const MCP_SERVER_NAME = "bobi-fleet";
-export const MCP_SERVER_VERSION = "1.2.0";
+export const MCP_SERVER_VERSION = "1.3.0";
 
 // The route the handler owns. Exported so index.ts routes on the same literal
 // the handler is configured with, rather than two copies that can drift.
@@ -178,6 +179,52 @@ const usageFleetArg = z
 	.optional()
 	.describe("Optional fleet name. Omit to summarize every fleet in the read model.");
 
+const metricsTargetSchema = {
+	fleet: fleetArg,
+	instance: instanceArg,
+};
+
+const metricsLimitArg = z.number().int().min(1).max(200).optional();
+const metricsTimeArgs = {
+	from: z.string().datetime({ offset: true }).optional(),
+	to: z.string().datetime({ offset: true }).optional(),
+};
+
+const METRICS_DRILLDOWN_MIN_SUPERVISOR = [0, 4, 0] as const;
+
+function versionParts(value: unknown): number[] | null {
+	if (typeof value !== "string" || !/^\d+(\.\d+){0,2}$/.test(value)) return null;
+	return value.split(".").map(Number);
+}
+
+function versionAtLeast(value: unknown, minimum: readonly number[]): boolean {
+	const parts = versionParts(value);
+	if (!parts) return false;
+	for (let index = 0; index < minimum.length; index += 1) {
+		const actual = parts[index] ?? 0;
+		if (actual !== minimum[index]) return actual > minimum[index];
+	}
+	return true;
+}
+
+async function metricsDrilldownUnsupported(
+	store: FleetStorage,
+	fleet: string,
+	instance: string,
+): Promise<string | null> {
+	const record = await store.getInstance(fleet, instance);
+	if (!record) return null;
+	const supervisor = record.snapshot.supervisor;
+	const version = supervisor && typeof supervisor === "object"
+		? (supervisor as Record<string, unknown>).version
+		: undefined;
+	if (versionAtLeast(version, METRICS_DRILLDOWN_MIN_SUPERVISOR)) return null;
+	return (
+		`Fine-grained metrics are unavailable on ${fleet}/${instance}: supervisor ` +
+		`version ${typeof version === "string" ? version : "unknown"}; version 0.4.0 or newer is required.`
+	);
+}
+
 // Why a command could not be issued, said as a recovery instruction rather than
 // a status code. The agent is the reader, so each names what to do next.
 const ISSUE_FAILURE_TEXT: Record<IssueFailure, string> = {
@@ -209,7 +256,17 @@ async function runCommand(
 	params: {
 		fleet: string;
 		instance: string;
-		command: "transcript" | "chat" | "restart" | "stop" | "start" | "usage";
+		command:
+			| "transcript"
+			| "chat"
+			| "restart"
+			| "stop"
+			| "start"
+			| "usage"
+			| "usage_session"
+			| "usage_turn"
+			| "usage_hotspots"
+			| "usage_experiment";
 		args?: Record<string, unknown>;
 		wait?: boolean;
 	},
@@ -263,6 +320,13 @@ interface UsageTotals {
 	estimated_cost_usd: number;
 }
 
+interface FineGrainedUsage {
+	metrics_schema_version: number;
+	totals: Record<string, unknown>;
+	groups: unknown[];
+	coverage: Record<string, unknown>;
+}
+
 function emptyUsage(): UsageTotals {
 	return {
 		jobs: { total: 0, completed: 0, failed: 0, closed: 0 },
@@ -276,7 +340,7 @@ function finiteNumber(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function usageFromView(view: Record<string, unknown>): UsageTotals | null {
+function usageFromView(view: Record<string, unknown>): (UsageTotals & { fine_grained?: FineGrainedUsage }) | null {
 	if (view.status !== "done") return null;
 	const result = view.result;
 	if (!result || typeof result !== "object" || Array.isArray(result)) return null;
@@ -287,6 +351,18 @@ function usageFromView(view: Record<string, unknown>): UsageTotals | null {
 	if (!record.tokens || typeof record.tokens !== "object" || Array.isArray(record.tokens)) return null;
 	const jobs = record.jobs as Record<string, unknown>;
 	const tokens = record.tokens as Record<string, unknown>;
+	const fine =
+		typeof record.metrics_schema_version === "number" &&
+		record.totals && typeof record.totals === "object" && !Array.isArray(record.totals) &&
+		Array.isArray(record.groups) &&
+		record.coverage && typeof record.coverage === "object" && !Array.isArray(record.coverage)
+			? {
+				metrics_schema_version: record.metrics_schema_version,
+				totals: record.totals as Record<string, unknown>,
+				groups: record.groups,
+				coverage: record.coverage as Record<string, unknown>,
+			}
+			: undefined;
 	return {
 		jobs: {
 			total: finiteNumber(jobs.total),
@@ -302,6 +378,7 @@ function usageFromView(view: Record<string, unknown>): UsageTotals | null {
 		},
 		cost_usd: finiteNumber(record.cost_usd),
 		estimated_cost_usd: finiteNumber(record.estimated_cost_usd),
+		...(fine ? { fine_grained: fine } : {}),
 	};
 }
 
@@ -390,10 +467,22 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 				"instance does not fail the whole result; `complete` is false and `unavailable` " +
 				"names the missing legs. This observational read issues an audited admin read " +
 				"command to each matching instance.",
-			inputSchema: z.object({ days: usageDaysArg, fleet: usageFleetArg }),
-			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+			inputSchema: z.object({
+				days: usageDaysArg,
+				fleet: usageFleetArg,
+				session_id: z.string().min(1).optional(),
+				run_key: z.string().min(1).optional(),
+				model: z.string().min(1).optional(),
+				experiment_id: z.string().min(1).optional(),
+				variant_id: z.string().min(1).optional(),
+				group_by: z
+					.array(z.enum(["provider", "model", "session_id", "prompt_template_id", "experiment_id", "variant_id"]))
+					.max(3)
+					.optional(),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 		},
-		async ({ days, fleet: fleetFilter }) => {
+		async ({ days, fleet: fleetFilter, session_id, run_key, model, experiment_id, variant_id, group_by }) => {
 			const endAtMs = Date.now();
 			const windowSeconds = days * 24 * 60 * 60;
 			const status = await buildFleetStatus(store, endAtMs, windows());
@@ -427,7 +516,16 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 						fleet,
 						instance,
 						command: "usage",
-						args: { window_seconds: windowSeconds, end_at: endAtMs / 1000 },
+						args: {
+							window_seconds: windowSeconds,
+							end_at: endAtMs / 1000,
+							...(session_id ? { session_id } : {}),
+							...(run_key ? { run_key } : {}),
+							...(model ? { model } : {}),
+							...(experiment_id ? { experiment_id } : {}),
+							...(variant_id ? { variant_id } : {}),
+							...(group_by ? { group_by } : {}),
+						},
 					});
 					if (!outcome.ok) {
 						return {
@@ -453,7 +551,13 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 									: String(outcome.view.error ?? "supervisor returned no usable usage payload"),
 						};
 					}
-					return { ok: true as const, fleet, instance, usage: roundedUsage(usage) };
+					return {
+						ok: true as const,
+						fleet,
+						instance,
+						usage: roundedUsage(usage),
+						fine_grained: usage.fine_grained,
+					};
 				}),
 			);
 
@@ -476,7 +580,11 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 					fleetMap.set(leg.fleet, fleetUsage);
 				}
 				addUsage(fleetUsage, leg.usage);
-				fleetUsage.instances.push({ instance: leg.instance, ...leg.usage });
+				fleetUsage.instances.push({
+					instance: leg.instance,
+					...leg.usage,
+					...(leg.fine_grained ? { fine_grained: leg.fine_grained } : {}),
+				});
 			}
 
 			const fleets = [...fleetMap.entries()]
@@ -501,6 +609,101 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 				unavailable,
 			});
 		},
+	);
+
+	const registerMetricsQuery = (
+		name: string,
+		title: string,
+		description: string,
+		command: "usage_session" | "usage_turn" | "usage_hotspots" | "usage_experiment",
+		inputSchema: z.ZodObject<z.ZodRawShape>,
+		mapArgs: (args: Record<string, unknown>) => Record<string, unknown>,
+	) => {
+		server.registerTool(
+			name,
+			{
+				title,
+				description,
+				inputSchema,
+				annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+			},
+			async (args) => {
+				const values = args as Record<string, unknown>;
+				const unsupported = await metricsDrilldownUnsupported(
+					store,
+					String(values.fleet),
+					String(values.instance),
+				);
+				if (unsupported) return errorResult(unsupported);
+				const outcome = await runCommand(store, publish, env, {
+					fleet: String(values.fleet),
+					instance: String(values.instance),
+					command,
+					args: mapArgs(values),
+				});
+				if (!outcome.ok) return errorResult(outcome.error);
+				return jsonResult(outcome.view);
+			},
+		);
+	};
+
+	registerMetricsQuery(
+		"bobi_usage_session",
+		"Session usage",
+		"Read one metrics session and a bounded, cursor-paginated turn list. Returns stable identifiers and sizes, never content hashes or transcript bodies.",
+		"usage_session",
+		z.object({
+			...metricsTargetSchema,
+			session_id: z.string().min(1),
+			cursor: z.string().min(1).optional(),
+			limit: metricsLimitArg,
+			include_turns: z.boolean().optional(),
+		}),
+		({ fleet: _fleet, instance: _instance, ...args }) => args,
+	);
+
+	registerMetricsQuery(
+		"bobi_usage_turn",
+		"Turn usage",
+		"Read one conversational turn with its LLM invocations, tool timings, exact or estimated token provenance, costs, and coverage.",
+		"usage_turn",
+		z.object({ ...metricsTargetSchema, turn_id: z.string().min(1) }),
+		({ fleet: _fleet, instance: _instance, ...args }) => args,
+	);
+
+	registerMetricsQuery(
+		"bobi_usage_hotspots",
+		"Usage hotspots",
+		"Rank bounded token, cost, latency, or tool-result-size hotspots. Tool token attribution remains explicitly estimated.",
+		"usage_hotspots",
+		z.object({
+			...metricsTargetSchema,
+			...metricsTimeArgs,
+			scope: z.enum(["session", "turn", "invocation", "tool", "prompt_template"]),
+			metric: z.enum(["reported_cost", "estimated_cost", "input_tokens", "output_tokens", "latency", "tool_result_bytes"]),
+			session: z.string().min(1).optional(),
+			top_n: z.number().int().min(1).max(200).optional(),
+			cursor: z.string().min(1).optional(),
+		}),
+		({ fleet: _fleet, instance: _instance, ...args }) => args,
+	);
+
+	registerMetricsQuery(
+		"bobi_usage_experiment",
+		"Experiment usage",
+		"Read per-variant JEV routing outcomes and coverage without asserting statistical significance.",
+		"usage_experiment",
+		z.object({
+			...metricsTargetSchema,
+			...metricsTimeArgs,
+			experiment_id: z.string().min(1),
+			cohort: z.string().min(1).optional(),
+			outcome: z.string().min(1).optional(),
+			outcome_definition_version: z.string().min(1).optional(),
+			evaluator_name: z.string().min(1).optional(),
+			evaluator_version: z.string().min(1).optional(),
+		}),
+		({ fleet: _fleet, instance: _instance, ...args }) => args,
 	);
 
 	server.registerTool(

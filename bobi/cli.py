@@ -451,6 +451,54 @@ def agent(ctx, name):
     root = _bind_agent_runtime(name)
     ctx.obj = {"agent": name, "root": root}
 
+@main.command("admin")
+@click.argument("metrics_command", type=click.Choice([
+    "metrics_summary", "metrics_session", "metrics_turn",
+    "metrics_hotspots", "metrics_experiment",
+]))
+@click.option("--url", envvar="BOBI_ADMIN_URL", required=True,
+              help="Worker base URL.")
+@click.option("--fleet", envvar="BOBI_FLEET", required=True)
+@click.option("--instance", envvar="BOBI_INSTANCE", required=True)
+@click.option("--token", envvar="FLEET_OPERATOR_TOKEN", required=True,
+              help="Operator token; prefer the environment variable.")
+@click.option("--args", "raw_args", default="{}", show_default=True,
+              help="JSON object passed to the Admin command.")
+@click.option("--wait/--no-wait", default=False,
+              help="Poll until the command resolves or the timeout expires.")
+@click.option("--timeout", type=click.FloatRange(min=0.1), default=10.0,
+              show_default=True)
+@click.option("--json", "json_output", is_flag=True,
+              help="Print the complete JSON envelope.")
+def admin_command(metrics_command, url, fleet, instance, token, raw_args,
+                  wait, timeout, json_output):
+    """Query one deployed instance through the authenticated Admin API."""
+    from bobi.admin_client import AdminClientError, run_admin_command
+
+    try:
+        args = json.loads(raw_args)
+    except json.JSONDecodeError as exc:
+        raise click.UsageError(f"--args must be valid JSON: {exc.msg}") from None
+    if not isinstance(args, dict):
+        raise click.UsageError("--args must decode to a JSON object")
+    try:
+        result = run_admin_command(
+            base_url=url,
+            token=token,
+            fleet=fleet,
+            instance=instance,
+            alias=metrics_command,
+            args=args,
+            wait=wait,
+            timeout=timeout,
+        )
+    except AdminClientError as exc:
+        raise click.ClickException(str(exc)) from None
+    if json_output:
+        click.echo(json.dumps(result, sort_keys=True))
+    else:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+
 
 def _has_systemd_service() -> bool:
     """Check if bobi is managed by a systemd user service."""

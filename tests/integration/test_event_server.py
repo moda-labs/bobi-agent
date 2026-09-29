@@ -2069,7 +2069,8 @@ def test_mcp_tool_call_against_real_workerd(event_server):
     assert names == [
         "bobi_command_result", "bobi_fleet_status", "bobi_instance_detail",
         "bobi_lifecycle", "bobi_read_transcript", "bobi_send_message",
-        "bobi_usage_summary",
+        "bobi_usage_experiment", "bobi_usage_hotspots", "bobi_usage_session",
+        "bobi_usage_summary", "bobi_usage_turn",
     ], names
 
     status, called = _mcp_rpc(base_url, {
@@ -2086,6 +2087,268 @@ def test_mcp_tool_call_against_real_workerd(event_server):
     assert not result.get("isError"), result
     payload = json.loads(result["content"][0]["text"])
     assert isinstance(payload["instances"], list), payload
+
+
+def test_metrics_summary_default_round_trip_against_real_workerd(
+        event_server, tmp_path):
+    """The shipped Admin and MCP paths serve the same one-day metrics view.
+
+    This is deliberately a real transport test: a production ``AdminListener``
+    subscribes over WebSocket, the operator CLI issues through the Worker's
+    authenticated REST route, and all five metrics MCP tools issue independent
+    commands through the Worker's MCP route. The disposable database contains
+    metadata only; provider accuracy remains the live-provider smoke's job.
+    """
+    base_url = _require_worker_backend(event_server)
+
+    from click.testing import CliRunner
+
+    from bobi.cli import main
+    from bobi.events import publish
+    from bobi.metrics.store import connect, migrate
+    from bobi.supervisor.admin import AdminListener
+
+    root = tmp_path / "metrics-admin-runtime"
+    package = root / "package"
+    package.mkdir(parents=True)
+    (package / "agent.yaml").write_text(yaml.safe_dump({
+        "version": "1.0.0",
+        "agent": "metrics-smoke",
+        "entry_point": "manager",
+        "event_server": {"url": base_url},
+    }))
+
+    now_us = time.time_ns() // 1000
+    db = root / "state" / "metrics" / "metrics.db"
+    conn = connect(db)
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO sessions(session_id,session_name,brain,provider,project,"
+        "started_at_us,ended_at_us,status) VALUES(?,?,?,?,?,?,?,?)",
+        ("s-live", "manager", "claude", "anthropic", "/private/not-public",
+         now_us - 120_000_000, now_us - 40_000_000, "completed"),
+    )
+    conn.execute(
+        "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,"
+        "is_user_initiated,started_at_us,ended_at_us,wall_duration_ms,status) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        ("t-live", "s-live", 0, "user", 1, now_us - 90_000_000,
+         now_us - 60_000_000, 30_000, "completed"),
+    )
+    conn.execute(
+        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,"
+        "router_decision_id,provider,model_selected,started_at_us,ended_at_us,"
+        "wall_duration_ms,status) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        ("i-live", "t-live", 0, "r-live", "anthropic", "sonnet",
+         now_us - 89_000_000, now_us - 61_000_000, 28_000, "completed"),
+    )
+    conn.execute(
+        "INSERT INTO router_decisions(router_decision_id,turn_id,experiment_id,"
+        "variant_id,assignment_key_hash,assignment_status,router_name,router_version,"
+        "candidate_models_json,model_selected,router_reason,router_latency_ms,"
+        "decided_at_us,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("r-live", "t-live", "exp-live", "control", "not-public-assignment",
+         "assigned", "jev", "1", '["sonnet"]', "sonnet", "not-public-reason",
+         4.0, now_us - 89_500_000, '{"private":"not-public"}'),
+    )
+    conn.execute(
+        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,"
+        "invocation_id,provider,model,measurement_source,is_estimated,"
+        "token_semantics_version,input_tokens,cache_read_input_tokens,"
+        "output_tokens,observed_at_us,raw_usage_json) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("u-live", "invocation", "t-live", "i-live", "anthropic", "sonnet",
+         "provider_stream", 0, 1, 101, 23, 17, now_us - 60_000_000,
+         '{"private":"not-public"}'),
+    )
+    conn.execute(
+        "INSERT INTO tool_executions(tool_execution_id,turn_id,"
+        "triggering_invocation_id,tool_name,tool_kind,input_sha256,input_bytes,"
+        "output_sha256,output_bytes,started_at_us,ended_at_us,status,"
+        "attribution_method,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("x-live", "t-live", "i-live", "view_file", "file_read",
+         "not-public-input-hash", 12, "not-public-output-hash", 48,
+         now_us - 80_000_000, now_us - 79_000_000, "completed",
+         "local_tokenizer", '{"private":"not-public"}'),
+    )
+    conn.execute(
+        "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,"
+        "turn_id,invocation_id,provider,model,amount_usd,measurement_source,"
+        "is_estimated,observed_at_us,raw_cost_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("c-live", "invocation", "s-live", "t-live", "i-live", "anthropic",
+         "sonnet", 0.01, "provider_stream", 0, now_us - 60_000_000,
+         '{"private":"not-public"}'),
+    )
+    conn.execute(
+        "INSERT INTO experiment_outcomes(outcome_id,router_decision_id,outcome_name,"
+        "outcome_value,outcome_text,outcome_definition_version,outcome_source,"
+        "evaluator_name,evaluator_version,is_estimated,observed_at_us,metadata_json) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("o-live", "r-live", "success", 1.0, "not-public-outcome", "v1",
+         "runtime", "runtime", "1", 0, now_us - 59_000_000,
+         '{"private":"not-public"}'),
+    )
+    conn.commit()
+    conn.close()
+
+    fleet = f"metrics-smoke-{time.time_ns()}"
+    instance = f"default-summary-{time.time_ns()}"
+    identity = {"fleet": fleet, "instance": instance}
+    telemetry = type("Telemetry", (), {
+        "identity": identity,
+        "last_snapshot": None,
+    })()
+    supervisor = type("Supervisor", (), {})()
+    listener = AdminListener(
+        supervisor=supervisor,
+        telemetry=telemetry,
+        project_root=root,
+        event_server_url=base_url,
+    )
+
+    try:
+        listener.start()
+        assert listener._client is not None
+        assert listener._client.wait_connected(5), "admin listener did not connect"
+
+        heartbeat = {
+            "deployment": identity,
+            "supervisor": {"version": "0.4.0"},
+            "manager": {"status": "idle", "healthy": True},
+            "sessions": [],
+        }
+        assert publish._post_topic("fleet/heartbeat", "fleet", heartbeat, root)
+
+        detail_url = f"{base_url}/fleet/instances/{fleet}/{instance}"
+        deadline = time.monotonic() + 5
+        while True:
+            request = urllib.request.Request(
+                detail_url,
+                headers={"Authorization": f"Bearer {TEST_FLEET_OPERATOR_TOKEN}"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    if response.status == 200:
+                        break
+            except urllib.error.HTTPError as exc:
+                if exc.code != 404 or time.monotonic() >= deadline:
+                    raise
+            if time.monotonic() >= deadline:
+                pytest.fail("heartbeat did not reach the Worker read model")
+            time.sleep(0.05)
+
+        admin_call = CliRunner().invoke(main, [
+            "admin", "metrics_summary",
+            "--url", base_url,
+            "--fleet", fleet,
+            "--instance", instance,
+            "--token", TEST_FLEET_OPERATOR_TOKEN,
+            "--wait", "--timeout", "10", "--json",
+        ])
+        assert admin_call.exit_code == 0, admin_call.output
+        # The production listener is a separate process. In this in-process
+        # harness its INFO logs share CliRunner's capture stream, so the CLI's
+        # one-line JSON envelope is the final non-empty line.
+        admin_view = json.loads([line for line in admin_call.output.splitlines()
+                                 if line.strip()][-1])
+        assert admin_view["status"] == "done"
+        admin_usage = admin_view["result"]["usage"]
+        assert admin_usage["window"]["seconds"] == 24 * 60 * 60
+        assert admin_usage["totals"]["input_tokens"] == 101
+        assert admin_usage["totals"]["cache_read_input_tokens"] == 23
+        assert admin_usage["totals"]["output_tokens"] == 17
+        assert admin_usage["coverage"]["exact_invocations"] == 1
+
+        status, called = _mcp_rpc(base_url, {
+            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": {
+                "name": "bobi_usage_summary",
+                "arguments": {"days": 1, "fleet": fleet},
+            },
+        })
+        assert status == 200
+        assert "error" not in called, called
+        assert not called["result"].get("isError"), called
+        mcp_usage = json.loads(called["result"]["content"][0]["text"])
+        assert mcp_usage["complete"] is True, mcp_usage
+        assert mcp_usage["window"]["seconds"] == 24 * 60 * 60
+        assert len(mcp_usage["fleets"]) == 1
+        instance_usage = mcp_usage["fleets"][0]["instances"][0]
+        assert instance_usage["fine_grained"]["totals"] == admin_usage["totals"]
+        assert instance_usage["fine_grained"]["coverage"] == admin_usage["coverage"]
+
+        range_start = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600),
+        )
+        range_end = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600),
+        )
+        cases = [
+            ("metrics_session", "bobi_usage_session", {"session_id": "s-live"}),
+            ("metrics_turn", "bobi_usage_turn", {"turn_id": "t-live"}),
+            ("metrics_hotspots", "bobi_usage_hotspots", {
+                "from": range_start, "to": range_end, "scope": "tool",
+                "metric": "latency", "session": "s-live", "top_n": 10,
+            }),
+            ("metrics_experiment", "bobi_usage_experiment", {
+                "experiment_id": "exp-live",
+            }),
+        ]
+        drilldowns = {}
+        for request_id, (alias, tool, args) in enumerate(cases, 10):
+            admin_call = CliRunner().invoke(main, [
+                "admin", alias,
+                "--url", base_url,
+                "--fleet", fleet,
+                "--instance", instance,
+                "--token", TEST_FLEET_OPERATOR_TOKEN,
+                "--args", json.dumps(args),
+                "--wait", "--timeout", "10", "--json",
+            ])
+            assert admin_call.exit_code == 0, admin_call.output
+            admin_result = json.loads([
+                line for line in admin_call.output.splitlines() if line.strip()
+            ][-1])
+            assert admin_result["status"] == "done", admin_result
+
+            status, called = _mcp_rpc(base_url, {
+                "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                "params": {
+                    "name": tool,
+                    "arguments": {"fleet": fleet, "instance": instance, **args},
+                },
+            })
+            assert status == 200
+            assert "error" not in called, called
+            assert not called["result"].get("isError"), called
+            mcp_result = json.loads(called["result"]["content"][0]["text"])
+            assert mcp_result["status"] == "done", mcp_result
+
+            wire_command = alias.replace("metrics_", "usage_")
+            assert mcp_result["result"][wire_command] == \
+                admin_result["result"][wire_command]
+            drilldowns[alias] = admin_result
+
+        turn = drilldowns["metrics_turn"]["result"]["usage_turn"]
+        assert turn["turn"]["turn_id"] == "t-live"
+        assert turn["tool_executions"][0]["tool_name"] == "view_file"
+        hotspot = drilldowns["metrics_hotspots"]["result"]["usage_hotspots"]
+        assert hotspot["hotspots"][0]["id"] == "x-live"
+        experiment = drilldowns["metrics_experiment"]["result"]["usage_experiment"]
+        variant = experiment["variants"][0]
+        assert variant["tokens"]["input_tokens"] == 101
+        assert variant["reported_cost_usd"] == 0.01
+        assert variant["coverage"]["exact_invocations"] == 1
+        assert experiment["outcomes"][0]["outcome_name"] == "success"
+
+        public = json.dumps({
+            "admin": admin_view, "mcp": mcp_usage, "drilldowns": drilldowns,
+        })
+        assert "not-public" not in public
+        assert "/private/" not in public
+    finally:
+        listener.stop()
+        publish._es_url_cache.pop(str(root), None)
 
 
 def test_mcp_write_tools_run_under_real_workerd(event_server):

@@ -1,11 +1,12 @@
 # Fine-grained metrics and token tracking
 
-> **Status:** Phase 2 implemented and accepted locally; Phase 3 not started
+> **Status:** Phase 3 implemented locally; current-source offline and complete Admin/MCP transport gates pass, acceptance pending commit-bound S1/S2/S3/S4 rerun
 > **Created:** 2026-09-24
 > **Phase 0.0 amendment:** 2026-09-25
 > **Phase 0 completed:** 2026-09-28
 > **Phase 1 implemented:** 2026-09-28
 > **Phase 2 completed:** 2026-09-28
+> **Phase 3 implementation started:** 2026-09-28
 > **Audited snapshot:** `origin/main` at `de81de3c4060363acdf8936c8ca24d66a006ba55` in worktree `worktrees/fine-grained-metrics`
 > **Scope:** ingestion, schema, local storage, Admin API, MCP tools, and JEV-router experimentation; no Web UI
 
@@ -36,7 +37,7 @@
 
 The audit used direct source reads, CodeGraph call-path queries, installed CLI help, retained local Claude and Codex JSONL files, and existing tests. The initial audit made no paid model request; Phase 0 and Phase 1 later ran the live provider gates defined by this plan.
 
-The meeting recording at `/Users/zodinet17/dev/recap.json` was used only to identify hypotheses. Its relevant claims were that Bobi currently has deployment-level metrics, SQLite might be appropriate, CLI use might leave only plaintext transcripts, fallback estimation might be acceptable, and JEV could act as a model classifier for A/B tests. None of those statements was treated as implementation truth.
+The supplied recap artifact was used only to identify hypotheses. Its relevant claims were that Bobi currently has deployment-level metrics, SQLite might be appropriate, CLI use might leave only plaintext transcripts, fallback estimation might be acceptable, and JEV could act as a model classifier for A/B tests. None of those statements was treated as implementation truth.
 
 The initial audit checkout was stale. Phase 0.0 refreshed the contract on `origin/main` at `de81de3`, which already includes the `usage` Admin command and `bobi_usage_summary` MCP tool. Implementation must rebase before each phase and rerun source and provider-contract checks if the base changes.
 
@@ -337,6 +338,7 @@ PRAGMA temp_store = MEMORY;
 - Completion publishing occurs on the metrics worker. Lifecycle, status, and existing small reads continue on the ordered worker.
 - Shutdown stops accepting work, cancels queued futures, and waits at most 2 seconds for running reads. A stuck query cannot block supervisor shutdown.
 - Health reports active workers, queue depth, rejected queries, deadline cancellations, and p50/p95/p99 query latency.
+- Query health is published additively at `heartbeat.metrics.query_executor`; latency percentiles use a bounded rolling window of the most recent 1,024 completed queries and are `null` before the first completion.
 
 ### Failure isolation and performance contract
 
@@ -667,6 +669,7 @@ CREATE INDEX idx_tools_name_time ON tool_executions(tool_name, started_at_us);
 CREATE INDEX idx_usage_turn ON usage_measurements(turn_id, scope, is_estimated, observed_at_us);
 CREATE INDEX idx_usage_invocation ON usage_measurements(invocation_id, is_estimated, observed_at_us);
 CREATE INDEX idx_cost_turn ON cost_measurements(turn_id, scope, is_estimated);
+CREATE INDEX idx_cost_invocation ON cost_measurements(invocation_id, is_estimated);
 CREATE INDEX idx_router_experiment ON router_decisions(experiment_id, variant_id, decided_at_us);
 CREATE INDEX idx_raw_projection ON raw_events(projection_state, projection_not_before_us, received_at_us);
 
@@ -754,8 +757,10 @@ WHERE usage_rank = 1;
 - `input_tokens` is normalized total model input. `uncached_input_tokens`, cache read, and cache write are non-overlapping where provider semantics permit. `raw_usage_json` preserves the provider's original counters when semantics differ.
 - Anthropic cache creation preserves `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` separately. Codex or older records with cache writes but no TTL put the count in `cache_write_unknown_ttl_input_tokens`; the implementation never guesses a TTL. Cost estimation remains unknown when TTL-specific pricing is required but TTL is unknown.
 - `reasoning_output_tokens` is a subset of `output_tokens` for current Codex data and must not be added again.
-- Aggregates choose exactly one granularity: invocation rows when every invocation in the turn has a selected measurement, otherwise the exact turn row. They never sum a turn aggregate with its child invocation rows. Coverage states which granularity was used.
-- `reported_cost_usd` and `estimated_cost_usd` are separate response fields. Cost queries choose one compatible scope and never sum a session/turn aggregate with its child invocation rows. A provider-reported turn total must not be distributed across invocations or models unless the provider gives that split.
+- Aggregates choose exactly one granularity per turn with this precedence: complete exact invocation coverage, exact turn aggregate, complete effective invocation coverage (exact rows plus estimates for otherwise unmeasured siblings), then estimated turn fallback. Exactness outranks granularity, so a complete estimated child partition never replaces an exact provider turn total. Aggregates never sum a turn row with its child invocation rows. Coverage reports `usage_granularity` (`invocation`, `turn`, `mixed`, or `none`) plus the number of turns selected at each granularity.
+- Exact rows suppress estimates for the same logical scope target in aggregates and hotspot rankings, while detail queries retain both provenance rows. Legitimate multi-model exact partitions remain additive and still count as one logical invocation. An aggregate token dimension is `NULL` when any selected component leaves that dimension unknown.
+- `reported_cost_usd` and `estimated_cost_usd` are separate response fields. Exact cost suppresses an estimate for the same logical target; estimates may still fill genuinely unmeasured sibling invocations. Cost queries choose one compatible scope and never sum a session/turn aggregate with its child invocation rows. A provider-reported turn total must not be distributed across invocations or models unless the provider gives that split.
+- A model-filtered tool count includes only tools whose triggering invocation selected that model. Bobi does not infer tool ownership from turn membership alone.
 - Coverage is always returned with aggregates: exact invocation count, estimated invocation count, unknown invocation count, dropped events, and reconciled events.
 
 ### JEV experiment contract
@@ -810,7 +815,14 @@ The Phase 3 operator client exposes friendly aliases without adding wire verbs:
 | `bobi admin metrics_hotspots` | `usage_hotspots` |
 | `bobi admin metrics_experiment` | `usage_experiment` |
 
-All list commands are cursor-paginated and response-capped because one reply is carried in one bus message and one KV command result. Recommended defaults: `limit=50`, maximum `200`, maximum time range `31d` unless a session/turn ID narrows the query.
+Unbounded lists are cursor-paginated and every response is capped because one
+reply is carried in one bus message and one KV command result. Session turns
+and hotspot rankings use filter-bound keyset cursors, so inserts ahead of a
+page boundary do not duplicate or skip the next retained row. Recommended
+defaults are `limit=50`, maximum `200`, and maximum time range `31d` unless a
+session/turn ID narrows the query. Turn detail and experiment aggregation are
+single bounded snapshots: they return `query_too_large` when their combined
+child/aggregate rows exceed 200 instead of returning a silently partial view.
 
 ### Command contracts
 
@@ -831,7 +843,12 @@ Request:
 }
 ```
 
-`window_seconds` plus optional `end_at` remains the legacy form. `from`/`to` is the additive explicit-range form; a request must use one form, not both. The existing MCP `days` argument continues mapping to `window_seconds`. New MCP filters are optional, so older clients remain valid.
+`window_seconds` plus optional `end_at` remains the legacy form. Omitting both
+range forms defaults to the last 24 hours, so `bobi admin metrics_summary`
+works with its default empty `--args`. `from`/`to` is the additive
+explicit-range form; a request must use one form, not both. The existing MCP
+`days` argument continues mapping to `window_seconds`. New MCP filters are
+optional, so older clients remain valid.
 
 Response separates reported and estimated cost and includes coverage:
 
@@ -881,7 +898,7 @@ Arguments: `session_id` required; optional `cursor`, `limit`, `include_turns=tru
 
 #### `usage_turn`
 
-Arguments: `turn_id` required. Returns `{"usage_turn": {"turn": ..., "invocations": ..., "tool_executions": ..., "usage_measurements": ..., "cost_measurements": ..., "workflow_step": ..., "router_decision": ..., "coverage": ...}}`. Tool arguments/results remain hashes and sizes unless the caller separately uses the existing transcript-detail command.
+Arguments: `turn_id` required. Returns `{"usage_turn": {"turn": ..., "invocations": ..., "tool_executions": ..., "usage_measurements": ..., "cost_measurements": ..., "workflow_step": ..., "router_decision": ..., "coverage": ...}}`. Tool arguments/results and every content-derived hash remain internal. The metrics response exposes sizes and stable telemetry IDs only; callers use the separately authorized transcript-detail command for content debugging.
 
 #### `usage_hotspots`
 
@@ -902,7 +919,16 @@ The response is `{"usage_hotspots": {"hotspots": [...], "next_cursor": ..., "cov
 
 #### `usage_experiment`
 
-Arguments: `experiment_id` required; optional time range, cohort, outcome, `outcome_definition_version`, and evaluator filters. Returns `{"usage_experiment": {"experiment_id": ..., "variants": ..., "coverage": ...}}` with per-variant sample size, completion/error rates, latency, reported/estimated cost, tokens, fallback rate, and quality outcome. It must not claim statistical significance unless the implementation actually computes and labels the method.
+Arguments: `experiment_id` required; optional time range, cohort, outcome,
+`outcome_definition_version`, and evaluator filters. Returns
+`{"usage_experiment": {"experiment_id": ..., "variants": ..., "outcomes":
+..., "coverage": ...}}`. Each variant carries sample size, completion/error
+and fallback rates, router/turn latency, token dimensions, separate
+reported/estimated cost, and exact/estimated/unknown invocation coverage.
+Quality outcomes remain separate by definition/source/evaluator version. The
+command returns `query_too_large` if variants plus outcome aggregates exceed
+200 rows. It must not claim statistical significance unless the implementation
+actually computes and labels the method.
 
 ### Errors
 
@@ -925,12 +951,13 @@ Register logically read-only query tools in `event-server/worker/src/mcp.ts`, al
 - `bobi_usage_hotspots` -> `usage_hotspots`.
 - `bobi_usage_experiment` -> `usage_experiment`.
 
-Each tool validates arguments with Zod and returns a pending `command_id` when the supervisor does not answer within the short MCP wait budget. Follow the existing transcript-tool convention: set `readOnlyHint: false` because issuing the admin command writes an audit/command record even though the deployment query itself does not mutate metrics; set `destructiveHint: false` and `idempotentHint: true`. `bobi_command_result` remains the generic poll mechanism.
+Each tool validates arguments with Zod and returns a pending `command_id` when the supervisor does not answer within the short MCP wait budget. Set `readOnlyHint: true`, `destructiveHint: false`, and `idempotentHint: true`: these tools do not mutate agent or metrics state, and transport/audit records are incidental operational bookkeeping. `bobi_command_result` remains the generic poll mechanism.
 
 Security and privacy:
 
 - Reuse the operator-token and bubble-scoped admin boundary documented in `docs/ADMIN_PROTOCOL.md`.
 - Do not put full prompts, model outputs, tool inputs, secrets, paths, or environment variables into metrics.
+- Content-derived prompt/tool hashes and assignment-key hashes are storage-only fields and must not be returned by Admin or MCP queries.
 - Hash assignment keys with a deployment-specific salt.
 - Apply local retention to raw segments and normalized rows; return retention/coverage boundaries to callers.
 
@@ -1092,8 +1119,12 @@ Phase 2 acceptance completed on 2026-09-28:
   remain preserved and excluded from acceptance.
 
 Phase 2 is complete. The 72-hour release/GA canary remains non-blocking and
-must run in scheduled CI or dedicated infrastructure. Phase 3 remains
-unimplemented and requires explicit approval to start.
+must run in scheduled CI or dedicated infrastructure. Phase 3 implementation
+is present locally. Current-source offline gates and the complete real
+Worker/Admin/MCP summary, session, turn, hotspot, and experiment transport
+matrix pass; earlier provider development evidence is source-stale after later
+corrections. Acceptance remains blocked on rerunning S1-S4 from the accepted
+Phase 3 commit.
 
 ### Phase 3 - Admin API and MCP
 
@@ -1106,11 +1137,23 @@ unimplemented and requires explicit approval to start.
 Verification tooling:
 
 ```bash
-pytest tests/test_supervisor_admin.py tests/test_admin_command_parity.py tests/metrics/test_query.py -q --timeout=30
-cd event-server && npm test -- --run worker/src/mcp.test.ts worker/src/fleet.test.ts
-.venv/bin/python scripts/benchmark_metrics.py queries --dataset tests/fixtures/metrics/representative.db --saturate
-.venv/bin/python scripts/live_metrics_smoke.py installed-matrix --checks single-turn,tool-loop,process-kill,admin,mcp
+.venv/bin/python -m pytest tests/test_admin_listener.py tests/test_admin_client.py tests/test_admin_command_parity.py tests/metrics/test_query.py -q --timeout=30
+cd event-server && npm test --workspace worker -- --run test/mcp.spec.ts test/fleet.spec.ts test/index.spec.ts
+.venv/bin/python scripts/benchmark_metrics.py queries --dataset .tmp/private/task-runs/fine-grained-metrics/evidence/phase-3/representative.db --saturate
+BOBI_ADMIN_URL="$DISPOSABLE_WORKER_URL" \
+FLEET_OPERATOR_TOKEN="$DISPOSABLE_OPERATOR_TOKEN" \
+  .venv/bin/python scripts/live_metrics_smoke.py installed-matrix \
+  --bobi-home "$BOBI_HOME" \
+  --checks single-turn,tool-loop,process-kill,admin,mcp
 ```
+
+The transport checks fail closed when the Worker URL or operator token is
+missing. `admin` and `mcp` require `tool-loop` in the same run, target a unique
+per-provider fleet identity, and exercise summary, session, turn, hotspots, and
+experiment through both transports. Every response must be terminal; when both
+checks are selected, all five logical payloads must match. The operator token is
+read from the environment and is never placed on the child Admin CLI argv or in
+the sanitized artifacts.
 
 Transition gates: turn detail p95 is at or below 100 milliseconds, summary p95 at or below 250 milliseconds, and hotspot p95 at or below 500 milliseconds on the representative retained dataset; an accepted query completes or hits its one-second deadline; saturation returns `metrics_busy` within 50 milliseconds; lifecycle/status commands remain below 100 milliseconds p99 while the metrics executor is saturated; responses never exceed 512 KiB or 200 rows; and Python/TypeScript allowlists have exact parity.
 

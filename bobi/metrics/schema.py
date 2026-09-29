@@ -288,7 +288,9 @@ CREATE INDEX IF NOT EXISTS idx_tools_turn ON tool_executions(turn_id, started_at
 CREATE INDEX IF NOT EXISTS idx_tools_name_time ON tool_executions(tool_name, started_at_us);
 CREATE INDEX IF NOT EXISTS idx_usage_turn ON usage_measurements(turn_id, scope, is_estimated, observed_at_us);
 CREATE INDEX IF NOT EXISTS idx_usage_invocation ON usage_measurements(invocation_id, is_estimated, observed_at_us);
+CREATE INDEX IF NOT EXISTS idx_usage_supersedes ON usage_measurements(supersedes_measurement_id);
 CREATE INDEX IF NOT EXISTS idx_cost_turn ON cost_measurements(turn_id, scope, is_estimated);
+CREATE INDEX IF NOT EXISTS idx_cost_invocation ON cost_measurements(invocation_id, is_estimated);
 CREATE INDEX IF NOT EXISTS idx_router_experiment ON router_decisions(experiment_id, variant_id, decided_at_us);
 CREATE INDEX IF NOT EXISTS idx_raw_projection ON raw_events(projection_state, projection_not_before_us, received_at_us);
 
