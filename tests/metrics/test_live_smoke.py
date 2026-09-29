@@ -12,6 +12,7 @@ import scripts.live_metrics_smoke as live_smoke
 from scripts.live_metrics_smoke import (
     SMOKE_MARKER,
     _assert_common_parity,
+    _assert_exact_live_usage,
     _brain_options,
     _codex_sessions_root,
     _codex_parity_expected,
@@ -642,6 +643,44 @@ def test_mcp_transport_decodes_matching_sse_json_rpc(monkeypatch):
     assert captured["payload"]["id"] == 7
 
 
+@pytest.mark.parametrize(
+    ("granularity", "scope"),
+    [("invocation", "invocation"), ("turn", "turn"), ("mixed", "turn")],
+)
+def test_exact_live_usage_accepts_supported_exact_granularity(granularity, scope):
+    _assert_exact_live_usage(
+        {
+            "totals": {"turns": 1, "input_tokens": 10, "output_tokens": 2},
+            "coverage": {"usage_granularity": granularity},
+        },
+        {"usage_measurements": [{"scope": scope, "is_estimated": 0}]},
+    )
+
+
+@pytest.mark.parametrize(
+    ("summary", "turn"),
+    [
+        (
+            {
+                "totals": {"turns": 1, "input_tokens": 10, "output_tokens": 2},
+                "coverage": {"usage_granularity": "turn"},
+            },
+            {"usage_measurements": [{"scope": "turn", "is_estimated": 1}]},
+        ),
+        (
+            {
+                "totals": {"turns": 1, "input_tokens": 0, "output_tokens": 0},
+                "coverage": {"usage_granularity": "turn"},
+            },
+            {"usage_measurements": [{"scope": "turn", "is_estimated": 0}]},
+        ),
+    ],
+)
+def test_exact_live_usage_rejects_estimated_or_empty_usage(summary, turn):
+    with pytest.raises(RuntimeError, match="no exact live-provider usage"):
+        _assert_exact_live_usage(summary, turn)
+
+
 def test_phase3_transport_runs_all_admin_and_mcp_queries_with_parity(
         monkeypatch, tmp_path):
     db = tmp_path / "metrics.db"
@@ -661,7 +700,11 @@ def test_phase3_transport_runs_all_admin_and_mcp_queries_with_parity(
     conn.close()
 
     totals = {"turns": 1, "input_tokens": 10}
-    coverage = {"exact_invocations": 1}
+    coverage = {
+        "exact_invocations": 1,
+        "estimated_invocations": 0,
+        "usage_granularity": "invocation",
+    }
     payloads = {
         "summary": {"totals": totals, "coverage": coverage},
         "session": {
@@ -671,6 +714,7 @@ def test_phase3_transport_runs_all_admin_and_mcp_queries_with_parity(
         "turn": {
             "turn": {"turn_id": "turn-1"},
             "tool_executions": [{"scope": "tool"}] * 3,
+            "usage_measurements": [{"scope": "invocation", "is_estimated": 0}],
         },
         "hotspots": {"hotspots": [{"scope": "tool", "id": "tool-1"}]},
         "experiment": {
@@ -790,7 +834,11 @@ def _run_phase3_experiment_transport(
     conn.close()
 
     totals = {"turns": 1, "input_tokens": 10}
-    coverage = {"exact_invocations": 1}
+    coverage = {
+        "exact_invocations": 1,
+        "estimated_invocations": 0,
+        "usage_granularity": "invocation",
+    }
     payloads = {
         "summary": {"totals": totals, "coverage": coverage},
         "session": {
@@ -800,6 +848,7 @@ def _run_phase3_experiment_transport(
         "turn": {
             "turn": {"turn_id": "turn-1"},
             "tool_executions": [{"scope": "tool"}] * 3,
+            "usage_measurements": [{"scope": "invocation", "is_estimated": 0}],
         },
         "hotspots": {"hotspots": [{"scope": "tool", "id": "tool-1"}]},
     }

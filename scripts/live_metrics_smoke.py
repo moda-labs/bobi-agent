@@ -1334,6 +1334,37 @@ def _write_sanitized_json(path: Path, value: dict[str, object]) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def _assert_exact_live_usage(
+    summary: dict[str, object], turn: dict[str, object]
+) -> None:
+    """Accept exact provider usage at invocation or turn granularity."""
+    totals = summary.get("totals")
+    coverage = summary.get("coverage")
+    measurements = turn.get("usage_measurements")
+    if not isinstance(totals, dict) or not isinstance(coverage, dict):
+        raise RuntimeError("Admin summary is missing usage totals or coverage")
+    if not isinstance(measurements, list):
+        raise RuntimeError("Admin turn is missing usage measurements")
+    token_total = sum(
+        int(totals.get(name) or 0)
+        for name in ("input_tokens", "output_tokens")
+    )
+    exact = [
+        item for item in measurements
+        if isinstance(item, dict)
+        and item.get("is_estimated") == 0
+        and item.get("scope") in {"invocation", "turn"}
+    ]
+    granularity = coverage.get("usage_granularity")
+    if (
+        int(totals.get("turns") or 0) < 1
+        or token_total < 1
+        or granularity not in {"invocation", "turn", "mixed"}
+        or not exact
+    ):
+        raise RuntimeError("Admin response has no exact live-provider usage")
+
+
 def _run_s3_transport(
     *,
     env: dict[str, str],
@@ -1394,14 +1425,10 @@ def _run_s3_transport(
             _write_sanitized_json(artifacts / f"{instance}-admin-{name}.json", result)
 
         summary = admin_results["summary"]["result"]["usage"]
-        if (
-            summary["totals"]["turns"] < 1
-            or summary["coverage"]["exact_invocations"] < 1
-        ):
-            raise RuntimeError("Admin summary has no exact live-provider coverage")
         turn = admin_results["turn"]["result"]["usage_turn"]
         if turn["turn"]["turn_id"] != turn_id or len(turn["tool_executions"]) < 3:
             raise RuntimeError("Admin turn result does not contain the live tool-loop turn")
+        _assert_exact_live_usage(summary, turn)
         session = admin_results["session"]["result"]["usage_session"]
         if session["session"]["session_id"] != session_id or not session["turns"]:
             raise RuntimeError("Admin session result does not contain the live session")
