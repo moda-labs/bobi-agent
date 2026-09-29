@@ -791,6 +791,49 @@ def _bobi(env: dict[str, str], *argv: str, timeout: int = 300) -> str:
     return completed.stdout.strip()
 
 
+def _start_disposable_supervisor(
+    env: dict[str, str], agent: str, run_root: Path
+) -> tuple[subprocess.Popen, object]:
+    """Start the sidecar required by live Admin/MCP transport checks."""
+    executable = Path(sys.executable).with_name("bobi")
+    log_path = run_root / "state" / "metrics" / "smoke-supervisor.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("a")
+    try:
+        process = subprocess.Popen(
+            [
+                str(executable), "agent", agent, "supervise", "--",
+                "--foreground", "--fresh",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    except Exception:
+        log_file.close()
+        raise
+    return process, log_file
+
+
+def _stop_disposable_supervisor(
+    process: subprocess.Popen, log_file: object, *, timeout: float = 30
+) -> None:
+    """Stop a smoke sidecar and its manager child, escalating if necessary."""
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+    finally:
+        log_file.close()
+
+
 def _wait_agent_ready(run_root: Path, timeout: float = 120) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     sessions = run_root / "state" / "sessions"
@@ -1524,13 +1567,19 @@ def installed_matrix(args: argparse.Namespace) -> None:
         run_root = home / "agents" / agent / "run"
         db = run_root / "state" / "metrics" / "metrics.db"
         tool_turn_id = None
+        supervisor_process = None
+        supervisor_log = None
         try:
             if transport_checks:
                 removed = _reset_disposable_transport_state(home, run_root)
                 print(
                     f"RESET provider={provider} transport_identity_files={len(removed)}"
                 )
-            _bobi(provider_env, "agent", agent, "start", "--fresh", timeout=120)
+                supervisor_process, supervisor_log = _start_disposable_supervisor(
+                    provider_env, agent, run_root
+                )
+            else:
+                _bobi(provider_env, "agent", agent, "start", "--fresh", timeout=120)
             _wait_agent_ready(run_root)
             if "single-turn" in checks:
                 after_us = time.time_ns() // 1000
@@ -1635,14 +1684,17 @@ def installed_matrix(args: argparse.Namespace) -> None:
                 "uncommitted_spool_bytes=0"
             )
         finally:
-            subprocess.run(
-                [str(Path(sys.executable).with_name("bobi")), "agent", agent, "stop"],
-                cwd=REPO_ROOT,
-                env=provider_env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            if supervisor_process is not None and supervisor_log is not None:
+                _stop_disposable_supervisor(supervisor_process, supervisor_log)
+            else:
+                subprocess.run(
+                    [str(Path(sys.executable).with_name("bobi")), "agent", agent, "stop"],
+                    cwd=REPO_ROOT,
+                    env=provider_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
 
 
 def provider_probe(args: argparse.Namespace) -> None:

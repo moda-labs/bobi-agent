@@ -20,6 +20,8 @@ from scripts.live_metrics_smoke import (
     _isolated_brain_defaults,
     _reset_disposable_transport_state,
     _smoke_env,
+    _start_disposable_supervisor,
+    _stop_disposable_supervisor,
     _wait_claude_invocation_usage,
     _wait_manager_restarted,
     _write_database,
@@ -276,6 +278,62 @@ def test_transport_reset_refuses_run_root_outside_home(tmp_path):
         _reset_disposable_transport_state(home, outside)
 
     assert bubble.read_text() == "must survive\n"
+
+
+def test_transport_supervisor_uses_foreground_fresh_sidecar(monkeypatch, tmp_path):
+    captured = {}
+
+    class Process:
+        pass
+
+    process = Process()
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr(live_smoke.subprocess, "Popen", fake_popen)
+    run_root = tmp_path / "run"
+
+    actual, log_file = _start_disposable_supervisor(
+        {"BOBI_EVENT_SERVER": "http://localhost:1234"}, "smoke", run_root
+    )
+    log_file.close()
+
+    assert actual is process
+    assert captured["argv"][1:] == [
+        "agent", "smoke", "supervise", "--", "--foreground", "--fresh",
+    ]
+    assert captured["kwargs"]["env"]["BOBI_EVENT_SERVER"].endswith(":1234")
+    assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["stderr"] is live_smoke.subprocess.STDOUT
+
+
+def test_transport_supervisor_cleanup_terminates_and_closes_log(tmp_path):
+    class Process:
+        def __init__(self):
+            self.terminated = False
+            self.waited = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout):
+            self.waited = True
+            return 0
+
+    process = Process()
+    log_file = (tmp_path / "supervisor.log").open("w")
+
+    _stop_disposable_supervisor(process, log_file)
+
+    assert process.terminated is True
+    assert process.waited is True
+    assert log_file.closed is True
 
 
 def test_wait_crash_window_requires_running_turn_tool_and_provider_usage(
