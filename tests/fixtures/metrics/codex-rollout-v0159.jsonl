@@ -1,0 +1,8 @@
+{"timestamp":"2026-09-25T00:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"cli_version":"0.159.0","id":"fixture-codex-v0159","model_provider":"openai"}}
+{"timestamp":"2026-09-25T00:00:00.100Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-v0159-1"}}
+{"timestamp":"2026-09-25T00:00:00.200Z","ordinal":2,"type":"turn_context","payload":{"turn_id":"turn-v0159-1","model":"gpt-test"}}
+{"timestamp":"2026-09-25T00:00:00.300Z","ordinal":3,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"cache_write_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":3,"total_tokens":110}}}}
+{"timestamp":"2026-09-25T00:00:01.000Z","ordinal":4,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":60,"cache_write_input_tokens":0,"output_tokens":15,"reasoning_output_tokens":4,"total_tokens":165}}}}
+{"timestamp":"2026-09-25T00:00:02.000Z","ordinal":5,"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-v0159-2"}}
+{"timestamp":"2026-09-25T00:00:02.100Z","ordinal":6,"type":"turn_context","payload":{"turn_id":"turn-v0159-2","model":"gpt-test"}}
+{"timestamp":"2026-09-25T00:00:02.200Z","ordinal":7,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":230,"cached_input_tokens":90,"cache_write_input_tokens":0,"output_tokens":22,"reasoning_output_tokens":6,"total_tokens":252}}}}

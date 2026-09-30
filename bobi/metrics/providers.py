@@ -14,7 +14,7 @@ class ProviderContractError(ValueError):
     """The provider event does not match a supported exact-usage contract."""
 
 
-SUPPORTED_CODEX_ROLLOUT_PREFIXES = ("0.156.", "0.157.")
+SUPPORTED_CODEX_ROLLOUT_PREFIXES = ("0.156.", "0.157.", "0.159.")
 
 
 def _token(value: Any) -> int | None:
@@ -318,9 +318,12 @@ def parse_codex_rollout_records(
 ) -> list[ProviderUsageRecord]:
     """Select the final exact usage row per turn from a supported rollout."""
     latest: dict[str, ProviderUsageRecord] = {}
+    cumulative: dict[str, tuple[dict[str, Any], int, int]] = {}
+    turn_order: list[str] = []
     turn_models: dict[str, str] = {}
     provider_session_id = ""
     cli_version = ""
+    current_turn_id = ""
     with Path(path).open(encoding="utf-8", errors="replace") as stream:
         for line in stream:
             try:
@@ -335,10 +338,30 @@ def parse_codex_rollout_records(
             if event.get("type") == "turn_context":
                 payload = event.get("payload") or {}
                 turn_id = str(payload.get("turn_id") or "")
+                current_turn_id = turn_id or current_turn_id
                 selected_model = str(payload.get("model") or "")
                 if turn_id and selected_model:
                     turn_models[turn_id] = selected_model
                 continue
+            if event.get("type") == "event_msg":
+                payload = event.get("payload") or {}
+                payload_type = payload.get("type")
+                if payload_type == "task_started":
+                    current_turn_id = str(payload.get("turn_id") or "")
+                    if current_turn_id and current_turn_id not in turn_order:
+                        turn_order.append(current_turn_id)
+                    continue
+                if payload_type == "token_count" and current_turn_id:
+                    info = payload.get("info") or {}
+                    usage = info.get("total_token_usage")
+                    observed_at_us = _timestamp_us(event.get("timestamp"))
+                    if isinstance(usage, dict) and observed_at_us is not None:
+                        ordinal = event.get("ordinal")
+                        ordinal = ordinal if isinstance(ordinal, int) else -1
+                        cumulative[current_turn_id] = (
+                            usage, observed_at_us, ordinal
+                        )
+                    continue
             if event.get("type") != "token_usage_record":
                 continue
             payload = event.get("payload") or {}
@@ -374,6 +397,39 @@ def parse_codex_rollout_records(
         raise ProviderContractError(
             f"unsupported codex rollout version: {cli_version}"
         )
+    if cli_version.startswith("0.159."):
+        previous: dict[str, Any] = {}
+        for turn_id in turn_order:
+            snapshot = cumulative.get(turn_id)
+            if snapshot is None:
+                continue
+            usage, observed_at_us, ordinal = snapshot
+            delta = {}
+            for key, value in usage.items():
+                prior = previous.get(key)
+                if (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and isinstance(prior, int)
+                    and not isinstance(prior, bool)
+                ):
+                    delta[key] = value - prior if value >= prior else value
+                else:
+                    delta[key] = value
+            previous = usage
+            parsed = codex_usage(
+                delta,
+                model=turn_models.get(turn_id) or model,
+                provider_event_id=turn_id,
+                source="codex_rollout",
+            )
+            latest[turn_id] = ProviderUsageRecord(
+                usage=parsed,
+                observed_at_us=observed_at_us,
+                provider_session_id=provider_session_id,
+                provider_turn_id=turn_id,
+                ordinal=ordinal,
+            )
     return [latest[key] for key in sorted(latest)]
 
 

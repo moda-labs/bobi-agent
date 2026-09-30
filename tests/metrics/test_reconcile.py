@@ -108,6 +108,25 @@ def test_provider_record_parsers_preserve_correlation_and_deduplicate():
     assert codex[0].usage.input_tokens == 4096
 
 
+def test_codex_v0159_rollout_parser_converts_cumulative_usage_to_turn_deltas():
+    records = parse_codex_rollout_records(
+        FIXTURES / "codex-rollout-v0159.jsonl"
+    )
+
+    assert [record.provider_turn_id for record in records] == [
+        "turn-v0159-1",
+        "turn-v0159-2",
+    ]
+    assert records[0].provider_session_id == "fixture-codex-v0159"
+    assert records[0].usage.input_tokens == 150
+    assert records[0].usage.cache_read_input_tokens == 60
+    assert records[0].usage.output_tokens == 15
+    assert records[1].usage.input_tokens == 80
+    assert records[1].usage.cache_read_input_tokens == 30
+    assert records[1].usage.output_tokens == 7
+    assert records[1].usage.reasoning_output_tokens == 2
+
+
 def test_reconciled_turn_aggregate_preserves_unreported_dimensions_as_null():
     record = parse_claude_transcript_records(
         FIXTURES / "claude-transcript.jsonl"
