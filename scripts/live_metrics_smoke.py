@@ -921,6 +921,14 @@ def _wait_manager_restarted(
     )
 
 
+def _start_or_join_restarted_manager(
+    env: dict[str, str], agent: str, run_root: Path, previous_pid: int
+) -> dict[str, object]:
+    """Start recovery or join a supervisor replacement that already won."""
+    _bobi(env, "agent", agent, "start", timeout=120)
+    return _wait_manager_restarted(run_root, previous_pid, timeout=120)
+
+
 def arm_fault(args: argparse.Namespace) -> None:
     home = args.bobi_home.resolve()
     if not (home / SMOKE_MARKER).exists():
@@ -1095,11 +1103,8 @@ def _process_kill_smoke(
         time.sleep(0.1)
     if pid_alive(manager_pid):
         raise RuntimeError(f"manager pid {manager_pid} survived SIGKILL")
-    restart_output = _bobi(env, "agent", agent, "start", timeout=120)
-    if "already running" in restart_output.lower():
-        raise RuntimeError(f"manager did not restart: {restart_output}")
-    restart_health = _wait_manager_restarted(
-        root, manager_pid, timeout=120
+    restart_health = _start_or_join_restarted_manager(
+        env, agent, root, manager_pid
     )
     (artifacts / f"{provider}-process-kill-restart.json").write_text(
         json.dumps(restart_health, indent=2, sort_keys=True) + "\n"

@@ -27,6 +27,7 @@ from scripts.live_metrics_smoke import (
     _reset_disposable_transport_state,
     _smoke_env,
     _start_disposable_supervisor,
+    _start_or_join_restarted_manager,
     _stop_disposable_supervisor,
     _verify_experiment_database,
     _wait_claude_invocation_usage,
@@ -517,6 +518,34 @@ def test_wait_manager_restarted_requires_new_live_health_pid(monkeypatch, tmp_pa
     health = _wait_manager_restarted(run_root, os.getpid() + 1, timeout=0.5)
 
     assert health["pid"] == os.getpid()
+
+
+def test_process_kill_recovery_accepts_supervisor_restart_winner(
+    monkeypatch, tmp_path
+):
+    calls = []
+    monkeypatch.setattr(
+        live_smoke,
+        "_bobi",
+        lambda env, *argv, **kwargs: calls.append(argv) or (
+            "Already running (pid 222). Use restart."
+        ),
+    )
+    monkeypatch.setattr(
+        live_smoke,
+        "_wait_manager_restarted",
+        lambda run_root, previous_pid, timeout: {
+            "pid": 222,
+            "manager": {"status": "idle"},
+        },
+    )
+
+    health = _start_or_join_restarted_manager(
+        {"BOBI_HOME": str(tmp_path)}, "agent", tmp_path, 111
+    )
+
+    assert calls == [("agent", "agent", "start")]
+    assert health["pid"] == 222
 
 
 def test_parser_and_dispatch_expose_phase2_recovery_commands(monkeypatch, tmp_path):
