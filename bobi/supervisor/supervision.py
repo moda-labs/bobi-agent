@@ -298,7 +298,9 @@ class Supervisor:
             *self.start_args,
         ]
         log.info("supervisor: spawning manager child: %s", " ".join(cmd))
-        return subprocess.Popen(cmd)
+        env = os.environ.copy()
+        env["BOBI_METRICS_COLLECTOR_OWNER"] = "supervisor"
+        return subprocess.Popen(cmd, env=env)
 
     def _port_file(self) -> Path:
         return paths.state_path(self.project_root) / "manager-health.port"

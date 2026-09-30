@@ -1,5 +1,6 @@
 import os
 import time
+import json
 from collections import namedtuple
 
 from bobi.metrics.collector import MetricsCollector
@@ -103,6 +104,57 @@ def test_disk_pressure_marks_retention_truncated(tmp_path):
 
     assert plan["disk"]["pressure"] is True
     assert plan["retention_truncated"] is True
+
+
+def test_retention_reclaims_the_only_segment_of_a_closed_producer(tmp_path):
+    now_us = time.time_ns() // 1000
+    spool = tmp_path / "state" / "metrics" / "spool" / "producer-closed"
+    segment = spool / "one.telemetry"
+    with SpoolWriter(segment) as writer:
+        writer.append(_session_event(
+            "producer-closed", 0, "old-session", now_us - 40 * DAY_US
+        ))
+    (spool / "health.json").write_text(json.dumps({
+        "producer_id": "producer-closed",
+        "pid": os.getpid(),
+        "writer_closed": True,
+    }))
+    MetricsCollector(tmp_path / "state" / "metrics" / "metrics.db").collect_segment(
+        segment
+    )
+    old_time = (now_us - 40 * DAY_US) / 1_000_000
+    os.utime(segment, (old_time, old_time))
+
+    plan = plan_retention(tmp_path, now_us=now_us)
+
+    assert [item["path"] for item in plan["archive_segments"]] == [str(segment)]
+
+
+def test_retention_reclaims_fully_imported_segment_after_sigkill(
+    tmp_path, monkeypatch
+):
+    now_us = time.time_ns() // 1000
+    spool = tmp_path / "state" / "metrics" / "spool" / "producer-dead"
+    segment = spool / "one.telemetry"
+    with SpoolWriter(segment) as writer:
+        writer.append(_session_event(
+            "producer-dead", 0, "old-session", now_us - 40 * DAY_US
+        ))
+    (spool / "health.json").write_text(json.dumps({
+        "producer_id": "producer-dead",
+        "pid": 424242,
+        "writer_closed": False,
+    }))
+    monkeypatch.setattr("bobi.metrics.retention._process_alive", lambda _pid: False)
+    MetricsCollector(tmp_path / "state" / "metrics" / "metrics.db").collect_segment(
+        segment
+    )
+    old_time = (now_us - 40 * DAY_US) / 1_000_000
+    os.utime(segment, (old_time, old_time))
+
+    plan = plan_retention(tmp_path, now_us=now_us)
+
+    assert [item["path"] for item in plan["archive_segments"]] == [str(segment)]
 
 
 def test_retention_handles_session_dependencies_without_orphaning_children(tmp_path):

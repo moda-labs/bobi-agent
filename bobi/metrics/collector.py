@@ -1,4 +1,4 @@
-"""Single-winner prototype collector for Phase 0 verification."""
+"""Single-winner collector for durable metrics ingestion and projection."""
 
 from __future__ import annotations
 

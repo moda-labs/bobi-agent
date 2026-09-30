@@ -882,10 +882,11 @@ class _FakeSDKClient:
             yield m
 
 
-def _claude_session_over(messages):
+def _claude_session_over(messages, *, provider="anthropic"):
     """A _ClaudeSession whose underlying SDK client is swapped for a fake."""
     sess = _ClaudeSession.__new__(_ClaudeSession)
     sess._client = _FakeSDKClient(messages)
+    sess.provider = provider
     return sess
 
 
@@ -1005,12 +1006,38 @@ async def test_receive_response_uses_gateway_invocation_model_for_turn_usage():
 
     turn = [
         message
-        async for message in _claude_session_over([assistant, result]).receive_response()
+        async for message in _claude_session_over(
+            [assistant, result], provider="gateway"
+        ).receive_response()
     ][-1]
 
     assert [item.model for item in turn.usage] == ["deepseek-flash"]
     assert [item.model for item in turn.costs] == ["deepseek-flash"]
     assert turn.usage[0].raw_usage["canonicalModel"] == "claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_receive_response_preserves_native_anthropic_usage_model():
+    assistant = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="claude-sonnet-4-5-20250929",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    result = _result(model_usage={
+        "claude-3-7-sonnet-20250219": {
+            "inputTokens": 5,
+            "outputTokens": 2,
+        }
+    })
+
+    turn = [
+        message
+        async for message in _claude_session_over([assistant, result]).receive_response()
+    ][-1]
+
+    assert [item.model for item in turn.usage] == ["claude-3-7-sonnet-20250219"]
+    assert [item.model for item in turn.costs] == ["claude-3-7-sonnet-20250219"]
 
 
 @pytest.mark.asyncio

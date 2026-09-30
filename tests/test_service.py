@@ -176,6 +176,42 @@ def test_manager_owns_a_fail_safe_metrics_collector_in_shadow_mode(
     ]
 
 
+def test_supervised_manager_does_not_start_a_second_metrics_collector(
+    bobi_install, monkeypatch, tmp_path
+):
+    import signal
+
+    from bobi.config import Config
+    from bobi.service import run_manager_from_config
+
+    calls = []
+
+    class Collector:
+        def __init__(self, root):
+            calls.append(("init", root))
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".codex").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("BOBI_METRICS_MODE", "shadow")
+    monkeypatch.setenv("BOBI_METRICS_COLLECTOR_OWNER", "supervisor")
+    monkeypatch.setattr("bobi.metrics.collector.MetricsCollectorService", Collector)
+    monkeypatch.setattr("bobi.manager_health.start", lambda *args, **kwargs: 1)
+    monkeypatch.setattr("bobi.subagent.run_persistent_agent", lambda **kwargs: None)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    try:
+        run_manager_from_config(
+            bobi_install.repo_path, Config.load(bobi_install.repo_path)
+        )
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
+
+    assert calls == []
+
+
 def test_startup_info_warns_when_inbound_events_use_local_ingress(bobi_install):
     from bobi.service import build_startup_info
 

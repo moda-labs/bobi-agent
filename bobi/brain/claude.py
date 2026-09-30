@@ -384,7 +384,8 @@ class _ClaudeSession:
                     self._total_cost_baseline = float(cumulative_cost)
                     self._cumulative_usage_ready = True
                 result.invocations = invocations
-                _align_result_usage_models(result)
+                if getattr(self, "provider", "anthropic") == "gateway":
+                    _align_result_usage_models(result)
                 result.tool_executions = [
                     BrainToolExecution(**state)
                     for state in tool_states.values()
@@ -504,22 +505,6 @@ def _model_usage_delta(
     return result
 
 
-def _model_usage_to_costs(model_usage: Any) -> list[BrainCost]:
-    """Normalize Claude SDK per-model usage into stored token facts.
-
-    The SDK's real shape is ``dict[model, usage]``. Older tests and call sites
-    also exercise a list-of-objects shape, so keep both. Anthropic reports
-    prompt-cache reads/writes as separate fields; for display parity the
-    recorded input volume is the full context input, while cache reads stay
-    split for downstream renderers.
-    """
-    return [usage.legacy_cost() for usage in _model_usage_to_usage(model_usage)]
-
-
-def _one_model_usage_to_cost(model: str, usage: Any) -> BrainCost:
-    return _one_model_usage(model, usage).legacy_cost()
-
-
 def _model_usage_to_usage(
     model_usage: Any, *, result_usage: Any = None
 ) -> list[BrainUsage]:
@@ -607,7 +592,7 @@ def _one_model_usage(
 
 
 def _align_result_usage_models(result: TurnResult) -> None:
-    """Use the single provider-reported invocation model for one-model turns."""
+    """Align a gateway alias with its single backend-reported invocation model."""
     invocation_models = {item.model for item in result.invocations if item.model}
     usage_models = {item.model for item in result.usage if item.model}
     if len(invocation_models) != 1 or len(usage_models) != 1:

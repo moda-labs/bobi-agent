@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -32,6 +33,8 @@ class MetricsProducer:
         self._stop = threading.Event()
         self._started = False
         self._closed = False
+        self._writer_closed = False
+        self._started_at_us = time.time_ns() // 1000
         self.telemetry_events_dropped = 0
         self.writer_errors = 0
         self.events_written = 0
@@ -73,6 +76,10 @@ class MetricsProducer:
             "events_written": self.events_written,
             "last_write_at_us": self.last_write_at_us,
             "writer_alive": self._thread.is_alive(),
+            "writer_closed": self._writer_closed,
+            "pid": os.getpid(),
+            "started_at_us": self._started_at_us,
+            "heartbeat_at_us": time.time_ns() // 1000,
         }
 
     def _write_health(self, *, force: bool = False) -> None:
@@ -115,4 +122,5 @@ class MetricsProducer:
                 self._writer.close()
             except Exception:
                 self.writer_errors += 1
+            self._writer_closed = True
             self._write_health(force=True)

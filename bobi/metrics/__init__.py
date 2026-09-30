@@ -1,4 +1,4 @@
-"""Fine-grained metrics contracts and Phase 0 ingestion prototypes."""
+"""Fine-grained metrics ingestion, storage, and query contracts."""
 
 from bobi.metrics.events import MetricsEvent
 from bobi.metrics.providers import ProviderContractError, ProviderUsage

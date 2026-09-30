@@ -1,5 +1,6 @@
 from bobi.metrics.collector import MetricsCollector
 from bobi.metrics.events import MetricsEvent
+from bobi.metrics.projection import ORPHAN_TTL_US, project_pending
 from bobi.metrics.spool import SpoolWriter
 from bobi.metrics.store import connect
 
@@ -81,6 +82,151 @@ def test_child_stages_before_parent_and_projects_after_parent_arrives(tmp_path):
     conn = connect(db)
     assert conn.execute("SELECT COUNT(*) FROM best_usage").fetchone()[0] == 1
     conn.close()
+
+
+def test_missing_parent_is_quarantined_after_orphan_ttl(tmp_path):
+    segment = tmp_path / "segment.telemetry"
+    db = tmp_path / "metrics.db"
+    with SpoolWriter(segment) as writer:
+        writer.append(_event(
+            "usage.recorded",
+            1,
+            {
+                "measurement_id": "orphan",
+                "scope": "turn",
+                "turn_id": "missing-turn",
+                "provider": "openai",
+                "model": "gpt-test",
+                "measurement_source": "provider_stream",
+                "is_estimated": 0,
+                "token_semantics_version": 1,
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "observed_at_us": 1,
+            },
+            session_id="missing-session",
+            turn_id="missing-turn",
+        ))
+    MetricsCollector(db).collect_segment(segment)
+    conn = connect(db)
+    received = conn.execute(
+        "SELECT received_at_us FROM raw_events WHERE event_id IS NOT NULL"
+    ).fetchone()[0]
+
+    result = project_pending(conn, now_us=received + ORPHAN_TTL_US)
+    row = conn.execute(
+        "SELECT projection_state,projection_attempts,projection_not_before_us,"
+        "projection_error FROM raw_events"
+    ).fetchone()
+    conn.close()
+
+    assert result["quarantined"] == 1
+    assert tuple(row) == (
+        "quarantined",
+        2,
+        None,
+        "missing_parent_ttl_expired",
+    )
+
+    with SpoolWriter(segment) as writer:
+        writer.append(_event(
+            "session.recorded",
+            2,
+            {
+                "session_id": "missing-session",
+                "session_name": "agent",
+                "brain": "codex",
+                "provider": "openai",
+                "started_at_us": 1,
+                "status": "running",
+            },
+            session_id="missing-session",
+        ))
+        writer.append(_event(
+            "turn.recorded",
+            3,
+            {
+                "turn_id": "missing-turn",
+                "session_id": "missing-session",
+                "turn_index": 1,
+                "trigger_kind": "user",
+                "is_user_initiated": 1,
+                "started_at_us": 2,
+                "status": "completed",
+            },
+            session_id="missing-session",
+            turn_id="missing-turn",
+        ))
+
+    resumed = MetricsCollector(db).collect_segment(segment)
+    conn = connect(db, readonly=True)
+    try:
+        orphan = conn.execute(
+            "SELECT projection_state FROM raw_events WHERE event_type='usage.recorded'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert resumed["projected"] == 3
+    assert orphan == "projected"
+
+
+def test_unrelated_parent_does_not_requeue_ttl_quarantined_orphan(tmp_path):
+    segment = tmp_path / "segment.telemetry"
+    db = tmp_path / "metrics.db"
+    with SpoolWriter(segment) as writer:
+        writer.append(_event(
+            "usage.recorded",
+            1,
+            {
+                "measurement_id": "orphan",
+                "scope": "turn",
+                "turn_id": "missing-turn",
+                "provider": "openai",
+                "model": "gpt-test",
+                "measurement_source": "provider_stream",
+                "is_estimated": 0,
+                "token_semantics_version": 1,
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "observed_at_us": 1,
+            },
+            session_id="missing-session",
+            turn_id="missing-turn",
+        ))
+    MetricsCollector(db).collect_segment(segment)
+    conn = connect(db)
+    received = conn.execute(
+        "SELECT received_at_us FROM raw_events WHERE event_id IS NOT NULL"
+    ).fetchone()[0]
+    project_pending(conn, now_us=received + ORPHAN_TTL_US)
+    conn.close()
+
+    with SpoolWriter(segment) as writer:
+        writer.append(_event(
+            "session.recorded",
+            2,
+            {
+                "session_id": "unrelated-session",
+                "session_name": "unrelated",
+                "brain": "codex",
+                "provider": "openai",
+                "started_at_us": 1,
+                "status": "running",
+            },
+            session_id="unrelated-session",
+        ))
+
+    MetricsCollector(db).collect_segment(segment)
+    conn = connect(db, readonly=True)
+    try:
+        orphan = conn.execute(
+            "SELECT projection_state,projection_error FROM raw_events "
+            "WHERE event_type='usage.recorded'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert tuple(orphan) == ("quarantined", "missing_parent_ttl_expired")
 
 
 def test_same_producer_lifecycle_events_project_in_emission_order(tmp_path):

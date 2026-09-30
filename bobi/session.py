@@ -1674,6 +1674,13 @@ class Session:
         finally:
             self._main_task = None
             self._shutdown_client()
+            from bobi.metrics.runtime import finish_metrics_session
+
+            finish_metrics_session(
+                self.name,
+                status="failed" if self._state == "error" else "stopped",
+                error_kind=self._last_error_kind if self._state == "error" else "",
+            )
             self._loop.close()
             self._loop = None
 

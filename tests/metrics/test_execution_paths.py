@@ -209,6 +209,86 @@ def test_online_turn_aggregate_preserves_unreported_dimensions_as_null():
     assert aggregate["cache_write_breakdown_complete"] == 0
 
 
+def test_turn_aggregate_fills_missing_dimensions_from_exact_invocations(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    observation = runtime.begin_turn(
+        "agent", provider="anthropic", model_requested="claude-test"
+    )
+    turn_usage = BrainUsage(
+        model="claude-test",
+        input_tokens=10,
+        output_tokens=4,
+    )
+    invocation_usage = BrainUsage(
+        model="claude-test",
+        input_tokens=10,
+        cache_read_input_tokens=7,
+        output_tokens=4,
+    )
+    observation.record_result(TurnResult(
+        usage=[turn_usage],
+        invocations=[BrainInvocation(
+            model="claude-test",
+            provider_event_id="message-1",
+            usage=invocation_usage,
+        )],
+    ))
+    observation.finish(status="completed")
+    runtime.finish_session("agent", status="completed")
+    assert runtime.close(timeout=2)
+    service = MetricsCollectorService(tmp_path)
+    service.collect_once()
+    conn = connect(service.db_path, readonly=True)
+    try:
+        row = conn.execute(
+            "SELECT cache_read_input_tokens FROM best_usage WHERE scope='turn'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert row["cache_read_input_tokens"] == 7
+
+
+def test_turn_aggregate_fills_alias_dimension_without_rewriting_model(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    observation = runtime.begin_turn(
+        "agent", provider="anthropic", model_requested="claude-sonnet"
+    )
+    turn_usage = BrainUsage(
+        model="claude-3-7-sonnet-20250219",
+        input_tokens=10,
+        output_tokens=4,
+    )
+    invocation_usage = BrainUsage(
+        model="claude-sonnet-4-5-20250929",
+        input_tokens=10,
+        cache_read_input_tokens=7,
+        output_tokens=4,
+    )
+    observation.record_result(TurnResult(
+        usage=[turn_usage],
+        invocations=[BrainInvocation(
+            model="claude-sonnet-4-5-20250929",
+            provider_event_id="message-1",
+            usage=invocation_usage,
+        )],
+    ))
+    observation.finish(status="completed")
+    runtime.finish_session("agent", status="completed")
+    assert runtime.close(timeout=2)
+    service = MetricsCollectorService(tmp_path)
+    service.collect_once()
+    conn = connect(service.db_path, readonly=True)
+    try:
+        row = conn.execute(
+            "SELECT model,cache_read_input_tokens FROM best_usage WHERE scope='turn'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert tuple(row) == ("claude-3-7-sonnet-20250219", 7)
+
+
 def test_runtime_startup_failure_never_reaches_the_turn(tmp_path):
     def fail(*args, **kwargs):
         raise OSError("disk unavailable")
@@ -275,9 +355,69 @@ def test_session_row_emits_once_then_only_when_provider_correlation_changes(
         for frame in iter_frames(segment)
         if frame.event.event_type == "session.recorded"
     ]
-    assert len(session_events) == 2
+    assert len(session_events) == 3
     assert session_events[0].payload["provider_session_id"] is None
     assert session_events[1].payload["provider_session_id"] == "provider-session"
+    assert session_events[2].payload["status"] == "stopped"
+    assert session_events[2].payload["ended_at_us"] is not None
+
+
+def test_session_finalization_is_terminal_and_evicts_runtime_state(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    observation = runtime.begin_turn("agent", provider="anthropic", brain="claude")
+    observation.finish(status="completed")
+
+    assert runtime.finish_session("agent", status="completed") is True
+    assert observation.session_id not in runtime._turn_indexes
+    assert observation.session_id not in runtime._session_starts
+    assert observation.session_id not in runtime._emitted_sessions
+    assert observation.session_id not in runtime._provider_sessions
+    assert observation.session_id not in runtime._session_contexts
+    assert runtime.close(timeout=2)
+
+    service = MetricsCollectorService(tmp_path)
+    service.collect_once()
+    conn = connect(service.db_path, readonly=True)
+    try:
+        session = conn.execute(
+            "SELECT status,ended_at_us FROM sessions WHERE session_id=?",
+            (observation.session_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert session["status"] == "completed"
+    assert session["ended_at_us"] is not None
+
+
+def test_rejected_session_finalization_keeps_state_for_retry(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    observation = runtime.begin_turn("agent", provider="anthropic")
+    real_emit = runtime.emit
+
+    def reject_terminal(event_type, payload, **ids):
+        if event_type == "session.recorded" and payload.get("ended_at_us") is not None:
+            return False
+        return real_emit(event_type, payload, **ids)
+
+    runtime.emit = reject_terminal
+
+    assert runtime.finish_session("agent", status="completed") is False
+    assert observation.session_id in runtime._session_contexts
+    runtime.emit = real_emit
+    assert runtime.close(timeout=2)
+
+
+def test_restarting_a_finished_name_creates_a_new_metrics_session(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    first = runtime.begin_turn("agent", provider="anthropic")
+    first.finish(status="completed")
+    assert runtime.finish_session("agent", status="completed")
+
+    second = runtime.begin_turn("agent", provider="anthropic")
+
+    assert second.session_id != first.session_id
+    assert second.turn_index == 1
+    assert runtime.close(timeout=2)
 
 
 def test_rejected_session_event_is_retried_on_the_next_turn(tmp_path):

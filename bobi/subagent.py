@@ -583,6 +583,13 @@ async def _run_agent_supervised(
             await client.disconnect()
         except Exception:
             pass
+        from bobi.metrics.runtime import finish_metrics_session
+
+        finish_metrics_session(
+            name,
+            status="completed" if result.success else "failed",
+            error_kind=result.error_kind or ("agent_error" if result.error else ""),
+        )
 
     return result
 

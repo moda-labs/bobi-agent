@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -82,9 +83,37 @@ def disk_policy(
     )
 
 
-def _latest_segments_by_producer(spool_root: Path) -> set[Path]:
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _producer_is_inactive(producer: Path) -> bool:
+    try:
+        health = json.loads((producer / "health.json").read_text())
+    except (OSError, TypeError, ValueError):
+        return False
+    if health.get("writer_closed") is True:
+        return True
+    try:
+        pid = int(health.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(pid) and not _process_alive(pid)
+
+
+def _latest_active_segments_by_producer(spool_root: Path) -> set[Path]:
     latest = set()
     for producer in spool_root.glob("*"):
+        if _producer_is_inactive(producer):
+            continue
         segments = [path for path in producer.glob("*.telemetry") if path.is_file()]
         if segments:
             latest.add(max(segments, key=lambda path: path.stat().st_mtime_ns))
@@ -136,7 +165,7 @@ def plan_retention(
             oldest_retained_us = row[0] if row else None
         finally:
             conn.close()
-        active = _latest_segments_by_producer(metrics_root / "spool")
+        active = _latest_active_segments_by_producer(metrics_root / "spool")
         for segment in sorted((metrics_root / "spool").glob("*/*.telemetry")):
             stat = segment.stat()
             if segment in active or cursors.get(str(segment), -1) != stat.st_size:

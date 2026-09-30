@@ -75,20 +75,25 @@ def _strict_sum(column: str) -> str:
 
 def _complete_exact_invocation_usage(alias: str) -> str:
     return (
-        f"EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id={alias}.turn_id) "
+        f"EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id={alias}.turn_id "
+        f"AND i.model_selected={alias}.model) "
         f"AND NOT EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id={alias}.turn_id "
+        f"AND i.model_selected={alias}.model "
         "AND NOT EXISTS (SELECT 1 FROM best_usage measured "
         "WHERE measured.scope='invocation' AND measured.invocation_id=i.invocation_id "
-        "AND measured.is_estimated=0))"
+        f"AND measured.model={alias}.model AND measured.is_estimated=0))"
     )
 
 
 def _complete_effective_invocation_usage(alias: str) -> str:
     return (
-        f"EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id={alias}.turn_id) "
+        f"EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id={alias}.turn_id "
+        f"AND i.model_selected={alias}.model) "
         f"AND NOT EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id={alias}.turn_id "
+        f"AND i.model_selected={alias}.model "
         "AND NOT EXISTS (SELECT 1 FROM best_usage measured "
-        "WHERE measured.scope='invocation' AND measured.invocation_id=i.invocation_id))"
+        "WHERE measured.scope='invocation' AND measured.invocation_id=i.invocation_id "
+        f"AND measured.model={alias}.model))"
     )
 
 
@@ -96,7 +101,18 @@ def _exact_turn_usage_exists(alias: str) -> str:
     return (
         "EXISTS (SELECT 1 FROM best_usage turn_exact "
         f"WHERE turn_exact.scope='turn' AND turn_exact.turn_id={alias}.turn_id "
-        "AND turn_exact.is_estimated=0)"
+        f"AND turn_exact.model={alias}.model AND turn_exact.is_estimated=0)"
+    )
+
+
+def _single_invocation_model_has_exact_turn(alias: str) -> str:
+    """Treat a sole invocation/terminal model mismatch as a provider alias."""
+    return (
+        f"((SELECT COUNT(DISTINCT i.model_selected) FROM llm_invocations i "
+        f"WHERE i.turn_id={alias}.turn_id)=1 AND EXISTS ("
+        "SELECT 1 FROM best_usage turn_exact "
+        f"WHERE turn_exact.scope='turn' AND turn_exact.turn_id={alias}.turn_id "
+        "AND turn_exact.is_estimated=0))"
     )
 
 
@@ -113,9 +129,11 @@ def _chosen_usage(alias: str = "b") -> str:
     exact_invocations = _complete_exact_invocation_usage(alias)
     effective_invocations = _complete_effective_invocation_usage(alias)
     exact_turn = _exact_turn_usage_exists(alias)
+    aliased_terminal_turn = _single_invocation_model_has_exact_turn(alias)
     return (
         f"({_effective_usage(alias)} AND ("
-        f"({alias}.scope='invocation' AND NOT ({exact_turn}) AND "
+        f"({alias}.scope='invocation' AND NOT ({exact_turn}) "
+        f"AND NOT ({aliased_terminal_turn}) AND "
         f"(({exact_invocations}) OR ({effective_invocations}))) OR "
         f"({alias}.scope='turn' AND (({exact_turn}) OR "
         f"(NOT ({exact_invocations}) AND NOT ({effective_invocations}))))"

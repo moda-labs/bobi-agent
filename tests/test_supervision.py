@@ -22,6 +22,24 @@ from bobi.supervisor.supervision import (
 )
 
 
+def test_default_spawn_marks_supervisor_as_metrics_collector_owner(
+    monkeypatch, tmp_path
+):
+    captured = {}
+
+    def popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr("bobi.supervisor.supervision.subprocess.Popen", popen)
+    supervisor = Supervisor([], SupervisorConfig(), project_root=tmp_path)
+
+    supervisor._default_spawn()
+
+    assert captured["env"]["BOBI_METRICS_COLLECTOR_OWNER"] == "supervisor"
+
+
 # --- the wedge discriminator ---------------------------------------------
 
 class TestIsWedged:

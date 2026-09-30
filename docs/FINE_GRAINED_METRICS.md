@@ -228,7 +228,9 @@ sequenceDiagram
 8. The producer performs `queue.put_nowait(envelope)` and returns immediately.
 9. A background thread serializes canonical UTF-8 JSON into a per-process
    append-only segment.
-10. One supervisor-owned collector wins a non-blocking file-lock election.
+10. One collector wins a non-blocking file-lock election. Supervised managers
+    inherit `BOBI_METRICS_COLLECTOR_OWNER=supervisor` and do not start a second
+    collector; standalone managers retain their local collector.
 11. The collector validates each frame and stages it in `raw_events`.
 12. Only after staging commits does the collector advance `spool_cursors`.
 13. A separate projection pass creates or updates normalized rows in dependency
@@ -406,7 +408,8 @@ Rules:
 - batches stop at 500 events or 25 ms, whichever happens first;
 - foreign keys are `DEFERRABLE INITIALLY DEFERRED`;
 - a missing parent remains pending with exponential backoff capped at 60 s;
-- after 24 hours, reconciliation runs and unresolved rows become quarantined;
+- after 24 hours, unresolved rows become quarantined with
+  `missing_parent_ttl_expired`;
 - a later parent automatically requeues dependent quarantined rows;
 - projector bugs quarantine only the affected event;
 - accepted raw events are never rejected because normalized order was wrong.
@@ -808,6 +811,14 @@ The experiment ID is an immutable analysis contract. Reusing it with different
 variants, weights, model mapping, router/policy/feature versions, control model,
 or cohort quarantines the conflicting event. Create a new experiment ID for a
 new policy.
+
+> [!WARNING]
+> The current runtime records each router decision before its invocation, but a
+> preconstructed persistent treatment client is not atomically coupled to
+> successful queue admission for every later turn. Queue saturation can therefore
+> drop a per-turn decision without changing the already selected client model.
+> Do not treat the strict treatment-admission guarantee as complete until model
+> selection and router-event reservation share one atomic API.
 
 Runtime completion, error, and latency outcomes are separate from versioned
 quality outcomes. If execution falls back after assignment, analysis keeps the
@@ -1643,6 +1654,12 @@ The pruner must never delete:
 - a pending or quarantined raw event;
 - the newest verified SQLite backup.
 
+The producer health record carries its PID and explicit writer-closed state.
+Retention protects the newest segment only for a live producer; once the writer
+closes or the producer PID is gone, a fully imported single segment is eligible
+for normal archival. This prevents one-segment producer directories from growing
+forever after graceful shutdown or `SIGKILL`.
+
 Default raw retention is 30 days. The adaptive metrics budget is:
 
 ```text
@@ -1677,9 +1694,10 @@ It must not discard the entire segment.
 
 ### What if a projected child has no parent?
 
-The raw event is already durable. Projection records `missing_parent`, retries
-with backoff, then reconciles after 24 hours. If the parent is still absent,
-the child becomes quarantined. Arrival of the parent requeues it automatically.
+The raw event is already durable. Projection records `missing_parent` and retries
+with backoff. At 24 hours it becomes quarantined with
+`missing_parent_ttl_expired`. A later successfully projected parent requeues
+these TTL-quarantined dependents for another idempotent projection pass.
 
 ### What if SQLite is corrupt or read-only?
 
@@ -1702,12 +1720,16 @@ per-tool usage.
 ### Why does a summary use turn totals when invocation rows are exact?
 
 Provider gateways can expose exact intermediate usage that is incomplete for a
-dimension. For example, AI Box assistant events report exact input/cache
-counters with `output_tokens = 0`, while the terminal result reports the exact
-positive output total. Bobi therefore treats an exact terminal turn aggregate
-as canonical for summary and experiment totals. Invocation rows remain exact
-provider facts for drill-down, but Bobi never splices dimensions or sums both
-scopes.
+dimension: assistant events may report exact input/cache counters with
+`output_tokens = 0`, while the terminal result reports the exact positive output
+total. Bobi therefore treats an exact terminal turn aggregate as canonical for
+that model in summary and experiment totals. Missing terminal dimensions are
+filled only from complete exact invocation facts for the same model. When a
+single invocation and a single terminal aggregate use different native provider
+aliases, Bobi preserves the terminal model identity, fills only missing
+dimensions from that invocation, and counts the logical model once. Invocation
+rows for a genuinely additional model remain independently eligible; Bobi never
+sums the same logical model's parent and child scopes together.
 
 ### Why are summary totals lower than raw measurement rows?
 

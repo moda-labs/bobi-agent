@@ -241,6 +241,68 @@ def test_exact_turn_usage_remains_canonical_when_invocation_totals_match(metrics
     assert summary["coverage"]["usage_granularity"] == "turn"
 
 
+def test_turn_usage_for_one_model_does_not_hide_another_model(metrics_root):
+    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
+    conn.execute(
+        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
+        "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
+        "VALUES('i2','t1',1,'anthropic','haiku',2910000,2950000,40,'completed')"
+    )
+    conn.execute(
+        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
+        "model,measurement_source,is_estimated,token_semantics_version,input_tokens,"
+        "output_tokens,observed_at_us) VALUES"
+        "('u2','invocation','t1','i2','anthropic','haiku','provider_stream',0,1,40,5,3000000)"
+    )
+    conn.execute(
+        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
+        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
+        "observed_at_us) VALUES"
+        "('u-turn','turn','t1','anthropic','sonnet','provider_stream',0,1,100,30,3000001)"
+    )
+    conn.commit()
+    conn.close()
+
+    result = MetricsQueries(metrics_root).summary({
+        "window_seconds": 10,
+        "end_at": 4,
+        "group_by": ["model"],
+    })
+
+    assert result["totals"]["input_tokens"] == 140
+    assert result["totals"]["output_tokens"] == 35
+    assert [(row["model"], row["input_tokens"]) for row in result["groups"]] == [
+        ("haiku", 40),
+        ("sonnet", 100),
+    ]
+
+
+def test_single_invocation_model_alias_does_not_double_count_turn(metrics_root):
+    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
+    conn.execute("UPDATE llm_invocations SET model_selected='claude-current'")
+    conn.execute("UPDATE usage_measurements SET model='claude-current' WHERE scope='invocation'")
+    conn.execute(
+        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
+        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
+        "observed_at_us) VALUES"
+        "('u-turn','turn','t1','anthropic','claude-versioned','provider_stream',0,1,100,30,3000001)"
+    )
+    conn.commit()
+    conn.close()
+
+    result = MetricsQueries(metrics_root).summary({
+        "window_seconds": 10,
+        "end_at": 4,
+        "group_by": ["model"],
+    })
+
+    assert result["totals"]["input_tokens"] == 100
+    assert result["totals"]["output_tokens"] == 30
+    assert [(row["model"], row["input_tokens"]) for row in result["groups"]] == [
+        ("claude-versioned", 100),
+    ]
+
+
 def test_exact_turn_usage_precedes_complete_estimated_invocation_usage(metrics_root):
     conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
     conn.execute("DELETE FROM usage_measurements WHERE measurement_id='u1'")

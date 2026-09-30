@@ -568,7 +568,8 @@ def run_manager_from_config(
         from bobi.metrics.collector import MetricsCollectorService
         from bobi.metrics.runtime import ENABLED_MODES, resolve_mode
 
-        if resolve_mode() in ENABLED_MODES:
+        collector_owner = os.environ.get("BOBI_METRICS_COLLECTOR_OWNER", "").strip()
+        if resolve_mode() in ENABLED_MODES and collector_owner != "supervisor":
             metrics_collector = MetricsCollectorService(project_path)
             metrics_collector.start()
     except Exception:
@@ -831,4 +832,3 @@ def ask(
     append_chat(project_path, agent, "user", text)
     append_chat(project_path, agent, "agent", result.response)
     return result
-

@@ -66,10 +66,12 @@ class MetricsRuntime:
         self.pid = os.getpid()
         self.producer_id = f"producer-{self.pid}-{uuid7()}"
         self._sequence = itertools.count()
+        self._session_ids: dict[str, str] = {}
         self._turn_indexes: dict[str, int] = {}
         self._session_starts: dict[str, int] = {}
         self._emitted_sessions: set[str] = set()
         self._provider_sessions: dict[str, str] = {}
+        self._session_contexts: dict[str, dict[str, object]] = {}
         self._fault_injection_enabled = False
         self._producer: MetricsProducer | None = None
         self._init_error = ""
@@ -128,7 +130,13 @@ class MetricsRuntime:
         return self._producer is not None
 
     def session_id(self, session_name: str) -> str:
-        return _stable_id("ses", self.producer_id, session_name)
+        session_id = self._session_ids.get(session_name)
+        if session_id is None:
+            session_id = _stable_id(
+                "ses", self.producer_id, session_name, str(uuid7())
+            )
+            self._session_ids[session_name] = session_id
+        return session_id
 
     def resolve_model(
         self,
@@ -193,15 +201,31 @@ class MetricsRuntime:
             return False
 
     def close(self, *, timeout: float = 2.0) -> bool:
+        for context in list(self._session_contexts.values()):
+            self.finish_session(
+                str(context["session_name"]),
+                status="stopped",
+            )
         producer = self._producer
         self._producer = None
         if producer is None:
+            self._clear_session_state()
             return True
         try:
-            return producer.close(timeout=timeout)
+            closed = producer.close(timeout=timeout)
         except Exception:
             log.debug("metrics: producer shutdown failed", exc_info=True)
-            return False
+            closed = False
+        self._clear_session_state()
+        return closed
+
+    def _clear_session_state(self) -> None:
+        self._turn_indexes.clear()
+        self._session_ids.clear()
+        self._session_starts.clear()
+        self._emitted_sessions.clear()
+        self._provider_sessions.clear()
+        self._session_contexts.clear()
 
     def health(self) -> dict[str, object]:
         producer = self._producer
@@ -215,6 +239,37 @@ class MetricsRuntime:
         if producer is not None:
             health.update(producer.health())
         return health
+
+    def finish_session(
+        self,
+        session_name: str,
+        *,
+        status: str,
+        error_kind: str = "",
+        ended_at_us: int | None = None,
+    ) -> bool:
+        session_id = self._session_ids.get(session_name)
+        if session_id is None:
+            return True
+        context = self._session_contexts.get(session_id)
+        if context is None:
+            return True
+        payload = {
+            **context,
+            "provider_session_id": self._provider_sessions.get(session_id) or None,
+            "ended_at_us": ended_at_us or time.time_ns() // 1000,
+            "status": status,
+            "terminal_error_kind": error_kind or None,
+        }
+        accepted = self.emit("session.recorded", payload, session_id=session_id)
+        if accepted:
+            self._turn_indexes.pop(session_id, None)
+            self._session_starts.pop(session_id, None)
+            self._emitted_sessions.discard(session_id)
+            self._provider_sessions.pop(session_id, None)
+            self._session_contexts.pop(session_id, None)
+            self._session_ids.pop(session_name, None)
+        return accepted
 
     def begin_turn(
         self,
@@ -238,6 +293,19 @@ class MetricsRuntime:
         started = started_at_us or time.time_ns() // 1000
         session_id = self.session_id(session_name)
         self._session_starts.setdefault(session_id, started)
+        self._session_contexts.setdefault(session_id, {
+            "session_id": session_id,
+            "session_name": session_name,
+            "brain": brain or _brain_name(provider),
+            "provider": provider or "unknown",
+            "role": role or None,
+            "run_key": run_key or None,
+            "project": project or None,
+            "workflow_name": workflow_name or None,
+            "started_at_us": self._session_starts[session_id],
+            "parent_session_id": None,
+            "metadata_json": "{}",
+        })
         turn_index = self._turn_indexes.get(session_id, 0) + 1
         self._turn_indexes[session_id] = turn_index
         observation = TurnObservation(
@@ -285,6 +353,19 @@ class MetricsRuntime:
         started = time.time_ns() // 1000
         session_id = self.session_id(session_name)
         self._session_starts.setdefault(session_id, started)
+        self._session_contexts.setdefault(session_id, {
+            "session_id": session_id,
+            "session_name": session_name,
+            "brain": brain,
+            "provider": provider,
+            "role": role or None,
+            "run_key": run_key or None,
+            "project": None,
+            "workflow_name": workflow_name,
+            "started_at_us": self._session_starts[session_id],
+            "parent_session_id": None,
+            "metadata_json": "{}",
+        })
         return WorkflowStepObservation(
             runtime=self,
             workflow_step_id=f"step_{uuid7()}",
@@ -391,27 +472,20 @@ class WorkflowStepObservation:
     _finished: bool = False
 
     def __post_init__(self) -> None:
-        self.runtime.emit(
-            "session.recorded",
-            {
-                "session_id": self.session_id,
-                "session_name": self.session_name,
-                "provider_session_id": None,
-                "brain": self.brain,
-                "provider": self.provider,
-                "role": self.role or None,
-                "run_key": self.run_key or None,
-                "project": None,
-                "workflow_name": self.workflow_name,
-                "started_at_us": self.runtime._session_starts[self.session_id],
-                "ended_at_us": None,
-                "status": "running",
-                "terminal_error_kind": None,
-                "parent_session_id": None,
-                "metadata_json": "{}",
-            },
-            session_id=self.session_id,
-        )
+        if self.session_id not in self.runtime._emitted_sessions:
+            accepted = self.runtime.emit(
+                "session.recorded",
+                {
+                    **self.runtime._session_contexts[self.session_id],
+                    "provider_session_id": None,
+                    "ended_at_us": None,
+                    "status": "running",
+                    "terminal_error_kind": None,
+                },
+                session_id=self.session_id,
+            )
+            if accepted:
+                self.runtime._emitted_sessions.add(self.session_id)
 
     def finish(self, *, status: str, error_kind: str = "") -> None:
         if self._finished:
@@ -518,21 +592,11 @@ def _emit_session(observation: TurnObservation, provider_session_id: str) -> Non
     accepted = runtime.emit(
         "session.recorded",
         {
-            "session_id": observation.session_id,
-            "session_name": observation.session_name,
+            **runtime._session_contexts[observation.session_id],
             "provider_session_id": provider_session_id or None,
-            "brain": observation.brain,
-            "provider": observation.provider,
-            "role": observation.role or None,
-            "run_key": observation.run_key or None,
-            "project": observation.project or None,
-            "workflow_name": observation.workflow_name or None,
-            "started_at_us": runtime._session_starts[observation.session_id],
             "ended_at_us": None,
             "status": "running",
             "terminal_error_kind": None,
-            "parent_session_id": None,
-            "metadata_json": "{}",
         },
         session_id=observation.session_id,
     )
@@ -800,6 +864,12 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             )
 
     usage_by_model: dict[str, list[BrainUsage]] = {}
+    invocation_usage_by_model: dict[str, list[BrainUsage]] = {}
+    for _invocation_id, invocation, _result in invocation_rows:
+        if invocation.usage is not None:
+            invocation_usage_by_model.setdefault(
+                invocation.usage.model or invocation.model or "unknown", []
+            ).append(invocation.usage)
     for result in observation.results:
         for usage in result.usage:
             usage_by_model.setdefault(usage.model or "unknown", []).append(usage)
@@ -807,6 +877,29 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
         if fault_action is not None:
             continue
         aggregate = _aggregate_usage(usage_items)
+        invocation_items = invocation_usage_by_model.get(model, [])
+        if (
+            not invocation_items
+            and len(usage_by_model) == 1
+            and len(invocation_usage_by_model) == 1
+        ):
+            invocation_items = next(iter(invocation_usage_by_model.values()))
+        invocation_aggregate = _aggregate_usage(
+            invocation_items
+        )
+        for field in (
+            "input_tokens",
+            "uncached_input_tokens",
+            "cache_read_input_tokens",
+            "cache_write_input_tokens",
+            "cache_write_5m_input_tokens",
+            "cache_write_1h_input_tokens",
+            "cache_write_unknown_ttl_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        ):
+            if aggregate[field] is None and invocation_aggregate[field] is not None:
+                aggregate[field] = invocation_aggregate[field]
         measurement_id = _stable_id("use", observation.turn_id, "turn", model)
         runtime.emit(
             "usage.recorded",
@@ -1003,6 +1096,23 @@ def resolve_experiment_model(
     except Exception:
         log.debug("metrics: experiment model resolution failed open", exc_info=True)
         return requested_model
+
+
+def finish_metrics_session(
+    session_name: str,
+    *,
+    status: str,
+    error_kind: str = "",
+) -> bool:
+    try:
+        return get_runtime().finish_session(
+            session_name,
+            status=status,
+            error_kind=error_kind,
+        )
+    except Exception:
+        log.debug("metrics: session finalization failed", exc_info=True)
+        return False
 
 
 def observe_workflow_step(

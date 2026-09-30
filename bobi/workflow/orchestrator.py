@@ -1532,6 +1532,14 @@ async def _run_workflow_async(
                 await client.disconnect()
             except Exception:
                 pass
+        if not suspended:
+            from bobi.metrics.runtime import finish_metrics_session
+
+            finish_metrics_session(
+                session_name,
+                status="failed" if run_failed else "completed",
+                error_kind="workflow_error" if run_failed else "",
+            )
 
 
 async def _drain_response(

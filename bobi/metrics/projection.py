@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from bobi.metrics.store import raw_payload
 
+ORPHAN_TTL_US = 24 * 60 * 60 * 1_000_000
+
 
 @dataclass(frozen=True)
 class ProjectionTarget:
@@ -165,6 +167,53 @@ def _require_parents(
             raise MissingParentError(f"missing {table}.{primary_key}={value}")
 
 
+def _requeue_resolved_orphans(
+    conn: sqlite3.Connection,
+    projected_parents: set[tuple[str, str, object]],
+) -> None:
+    """Wake only TTL-quarantined rows whose newly arrived parents now exist."""
+    candidate_ids: set[str] = set()
+    for event_type, parents in PARENTS.items():
+        for table, primary_key, payload_key, _required in parents:
+            values = {
+                value
+                for parent_table, parent_key, value in projected_parents
+                if parent_table == table and parent_key == primary_key
+            }
+            for value in values:
+                rows = conn.execute(
+                    """SELECT event_id FROM raw_events
+                       WHERE projection_state='quarantined'
+                         AND projection_error='missing_parent_ttl_expired'
+                         AND event_type=?
+                         AND json_extract(payload_json, ?) = ?""",
+                    (event_type, f"$.{payload_key}", value),
+                ).fetchall()
+                candidate_ids.update(str(row["event_id"]) for row in rows)
+
+    for event_id in candidate_ids:
+        row = conn.execute(
+            "SELECT event_type,payload_json FROM raw_events WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        if row is None:
+            continue
+        try:
+            _require_parents(
+                conn,
+                str(row["event_type"]),
+                json.loads(str(row["payload_json"])),
+            )
+        except MissingParentError:
+            continue
+        conn.execute(
+            """UPDATE raw_events SET projection_state='pending',
+               projection_not_before_us=NULL, projection_error='missing_parent'
+               WHERE event_id=?""",
+            (event_id,),
+        )
+
+
 def project_pending(
     conn: sqlite3.Connection,
     *,
@@ -195,6 +244,7 @@ def project_pending(
         "deferred": 0,
         "quarantined": 0,
     }
+    projected_parents: set[tuple[str, str, object]] = set()
     deadline_ns = time.perf_counter_ns() + 25_000_000
     conn.execute("BEGIN")
     try:
@@ -221,6 +271,16 @@ def project_pending(
                 conn.execute("ROLLBACK TO project_one")
                 conn.execute("RELEASE project_one")
                 attempts = int(row["projection_attempts"]) + 1
+                if now_us - int(row["received_at_us"]) >= ORPHAN_TTL_US:
+                    conn.execute(
+                        """UPDATE raw_events SET projection_state='quarantined',
+                           projection_attempts=?, projection_not_before_us=NULL,
+                           projection_error='missing_parent_ttl_expired'
+                           WHERE event_id=?""",
+                        (attempts, row["event_id"]),
+                    )
+                    result["quarantined"] += 1
+                    continue
                 backoff_us = min(60, 2 ** min(attempts, 6)) * 1_000_000
                 conn.execute(
                     """UPDATE raw_events SET projection_attempts=?,
@@ -260,12 +320,16 @@ def project_pending(
                 (now_us, row["event_id"]),
             )
             result["projected"] += 1
+            projected_parents.add(
+                (target.table, target.primary_key, payload[target.primary_key])
+            )
         if result["projected"]:
             conn.execute(
                 """UPDATE raw_events SET projection_not_before_us=NULL
                    WHERE projection_state='pending'
                      AND projection_error='missing_parent'"""
             )
+            _requeue_resolved_orphans(conn, projected_parents)
         conn.commit()
     except Exception:
         conn.rollback()
