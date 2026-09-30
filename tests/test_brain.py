@@ -954,6 +954,34 @@ async def test_receive_response_captures_invocation_and_tool_metadata():
 
 
 @pytest.mark.asyncio
+async def test_receive_response_uses_gateway_invocation_model_for_turn_usage():
+    assistant = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="deepseek-flash",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    result = _result(
+        model_usage={
+            "claude-opus-5": {
+                "inputTokens": 5,
+                "outputTokens": 2,
+                "canonicalModel": "claude-opus-5",
+            }
+        }
+    )
+
+    turn = [
+        message
+        async for message in _claude_session_over([assistant, result]).receive_response()
+    ][-1]
+
+    assert [item.model for item in turn.usage] == ["deepseek-flash"]
+    assert [item.model for item in turn.costs] == ["deepseek-flash"]
+    assert turn.usage[0].raw_usage["canonicalModel"] == "claude-opus-5"
+
+
+@pytest.mark.asyncio
 async def test_receive_response_deltas_persistent_session_usage_and_cost():
     session = _claude_session_over([
         AssistantMessage(

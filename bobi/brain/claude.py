@@ -23,6 +23,7 @@ import shutil
 import time
 from collections import deque
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -366,6 +367,7 @@ class _ClaudeSession:
                     self._total_cost_baseline = float(cumulative_cost)
                     self._cumulative_usage_ready = True
                 result.invocations = invocations
+                _align_result_usage_models(result)
                 result.tool_executions = [
                     BrainToolExecution(**state)
                     for state in tool_states.values()
@@ -585,6 +587,28 @@ def _one_model_usage(
         raw_usage=normalized.raw_usage,
         token_semantics_version=normalized.token_semantics_version,
     )
+
+
+def _align_result_usage_models(result: TurnResult) -> None:
+    """Use the single provider-reported invocation model for one-model turns."""
+    invocation_models = {item.model for item in result.invocations if item.model}
+    usage_models = {item.model for item in result.usage if item.model}
+    if len(invocation_models) != 1 or len(usage_models) != 1:
+        return
+    invocation_model = next(iter(invocation_models))
+    usage_model = next(iter(usage_models))
+    if invocation_model == usage_model:
+        return
+    # Gateway modelUsage may retain the Claude alias while assistant messages
+    # carry the backend's canonical model ID.
+    result.usage = [
+        replace(item, model=invocation_model) if item.model == usage_model else item
+        for item in result.usage
+    ]
+    result.costs = [
+        replace(item, model=invocation_model) if item.model == usage_model else item
+        for item in result.costs
+    ]
 
 
 def _usage_value(usage: Any, *keys: str) -> Any:

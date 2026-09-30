@@ -74,14 +74,14 @@ def test_claude_missing_cache_dimension_stays_null_not_zero():
     assert usage.input_tokens == 7
 
 
-def test_claude_usage_prefers_provider_canonical_model_over_requested_alias():
+def test_claude_usage_keeps_normalized_model_over_raw_cli_alias():
     usage = claude_usage(
         {
             "inputTokens": 7,
             "outputTokens": 3,
-            "canonicalModel": "deepseek-flash",
+            "canonicalModel": "claude-opus-5",
         },
-        model="ds/deepseek-flash",
+        model="deepseek-flash",
         provider_event_id="req-1",
     )
 
