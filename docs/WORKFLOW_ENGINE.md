@@ -101,7 +101,14 @@ turn, then reads a handoff file. This is the only step type that uses the LLM.
     timeout: 1800
 ```
 
-`agent` names the role whose prompt frames the turn. `timeout` (seconds, default
+`agent` names the role whose prompt frames the turn - unless the run was
+launched with a role (`subagents launch --role <r>`), which pins EVERY step to
+that role and overrides each step's `agent`. To run a multi-role workflow as
+written, launch it without `--role`, exactly as auto-dispatch does: each step
+then runs as its own `agent`. The CLI allows that only when every prompt step
+(not route/action/notify/await) names an installed `agent`; otherwise `--role`
+is required. A prompt step with no `agent` inherits the previous step's.
+`timeout` (seconds, default
 1800) is the step's wall-clock budget, and it has exactly one enforcement point:
 it gates whether a turn-cap restart is allowed to **start** (see [Turn
 budget](#turn-budget) for the resulting bound). Nothing interrupts a drain already in
@@ -172,15 +179,14 @@ whenever a resumable session id exists (the rare fallbacks that clear it - a
 stale resume, a session that never reported an id - re-seed a fresh session
 from the workflow context, exactly as a model switch would).
 
-An `agent:` change is **not** on its own a session boundary. The engine only
-rebuilds the session when a step changes `model`, `effort`, or `max_turns`; a
-step that switches `agent:` while all three of those match continues in the live
-session and inherits the previous agent's transcript under its own system
-prompt. That is a known gap, not an intended behavior - a reviewer step
-following a builder step at identical dials sees the builder's reasoning. When a
-step must start clean, give it an explicit dial change (a different `model`,
-`effort`, or `max_turns`): that enters the rebuild branch, and an agent change
-inside it always starts fresh rather than resuming natively.
+An `agent:` change is a session boundary. A step whose acting agent differs
+from the previous prompt step's always starts a fresh session - never a native
+resume - seeded with the accumulated workflow context, so a reviewer step
+following a builder step does not see the builder's reasoning and runs under its
+own role prompt. (It used to be a boundary only when `model`, `effort`, or
+`max_turns` changed too, which silently ran a role-less multi-role launch as a
+single role.) A launch `--role` pins every step to one agent, so it never
+crosses this boundary.
 
 ### Turn budget
 

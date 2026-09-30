@@ -510,13 +510,124 @@ class TestSubagents:
         assert result.exit_code != 0
         assert "--workflow" in result.output
 
-    def test_role_required(self, bobi_install):
-        result = CliRunner().invoke(main, [
-            "agent", TEST_AGENT_NAME, "subagents", "launch",
-            "-w", "adhoc", "--task", "X",
+    @staticmethod
+    def _install_workflow(bobi_install, name, steps):
+        import yaml
+        wf_dir = bobi_install.repo_path / "package" / "workflows"
+        (wf_dir / f"{name}.yaml").write_text(yaml.dump(
+            {"name": name, "steps": steps}))
+
+    def _install_multi_role(self, bobi_install, *, second_agent="engineer"):
+        """director -> engineer -> director, with route/notify steps that name
+        no agent: only PROMPT steps must name one."""
+        self._install_workflow(bobi_install, "multi-role", [
+            {"name": "draft", "agent": "director", "prompt": "draft"},
+            {"name": "announce", "notify": "slack", "message": "drafted"},
+            {"name": "build", "agent": second_agent, "prompt": "build"},
+            {"name": "route", "if": "ok == true", "goto": "review",
+             "else": "review"},
+            {"name": "review", "agent": "director", "prompt": "review"},
         ])
+
+    def test_omitted_role_launches_each_step_as_its_own_agent(
+            self, bobi_install):
+        """No --role on a workflow whose every prompt step names its agent:
+        launches with role "" - the auto-dispatch path - so the executor's
+        `role or step.agent` falls through to each step's own agent instead
+        of pinning them all to one."""
+        self._install_multi_role(bobi_install)
+        with patch("bobi.subagent.launch_agent",
+                   return_value="wf-multi-role-7") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "multi-role", "--id", "7", "--task", "Ship #7",
+            ])
+        assert result.exit_code == 0, result.output
+        mock.assert_called_once()
+        assert mock.call_args.kwargs["role"] == ""
+        assert mock.call_args.kwargs["workflow_name"] == "multi-role"
+
+    def test_omitted_role_on_adhoc_is_refused(self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--task", "X",
+            ])
         assert result.exit_code != 0
-        assert "--role" in result.output
+        assert ("--role is required: workflow adhoc has steps without an "
+                "agent: (task)") in result.output
+        mock.assert_not_called()
+
+    def test_omitted_role_names_every_agentless_prompt_step(
+            self, bobi_install):
+        self._install_workflow(bobi_install, "half-roled", [
+            {"name": "plan", "agent": "director", "prompt": "plan"},
+            {"name": "build", "prompt": "build"},
+            {"name": "ship", "prompt": "ship"},
+        ])
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "half-roled", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert ("workflow half-roled has steps without an agent: "
+                "(build, ship)") in result.output
+        mock.assert_not_called()
+
+    def test_omitted_role_refuses_an_unknown_step_role(self, bobi_install):
+        """Checked at launch, not mid-run after earlier steps already spent."""
+        self._install_multi_role(bobi_install, second_agent="ghost")
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "multi-role", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert ("Unknown role 'ghost' (workflow multi-role, step 'build')"
+                in result.output)
+        assert "director" in result.output  # the available roles are listed
+        mock.assert_not_called()
+
+    def test_omitted_role_on_an_unknown_workflow_is_refused(
+            self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "no-such-workflow", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert "--role is required" in result.output
+        mock.assert_not_called()
+
+    def test_omitted_role_is_refused_for_a_persistent_launch(
+            self, bobi_install):
+        """A persistent session never runs the steps, so their agent: fields
+        cannot supply its role - it would silently run with no role prompt."""
+        self._install_multi_role(bobi_install)
+        for flags in (["--persistent"], ["--subscribe", "slack:T1"]):
+            with patch("bobi.subagent.launch_agent") as mock:
+                result = CliRunner().invoke(main, [
+                    "agent", TEST_AGENT_NAME, "subagents", "launch",
+                    "-w", "multi-role", *flags, "--task", "X",
+                ])
+            assert result.exit_code != 0, flags
+            assert "--role is required with --persistent" in result.output
+            mock.assert_not_called()
+
+    def test_explicit_role_still_pins_a_multi_role_workflow(
+            self, bobi_install):
+        """--role given is unchanged: it is passed through as-is and the step
+        agent: fields are not consulted (not even validated)."""
+        self._install_multi_role(bobi_install, second_agent="ghost")
+        with patch("bobi.subagent.launch_agent",
+                   return_value="wf-multi-role-7") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "multi-role", "--role", "engineer", "--task", "X",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args.kwargs["role"] == "engineer"
 
     def test_invalid_role(self, bobi_install):
         result = CliRunner().invoke(main, [
