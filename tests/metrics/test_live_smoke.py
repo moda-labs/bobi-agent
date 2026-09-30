@@ -383,6 +383,63 @@ def test_transport_supervisor_cleanup_signals_complete_process_group(
     assert log_file.closed is True
 
 
+def test_wait_agent_ready_ignores_stale_idle_session(monkeypatch, tmp_path):
+    from bobi import manager_health
+    from bobi import sdk
+
+    state = tmp_path / "state"
+    session = state / "sessions" / "manager"
+    session.mkdir(parents=True)
+    (session / "state.json").write_text(json.dumps({
+        "role": "manager",
+        "status": "idle",
+        "pid": 111,
+    }))
+    (state / "manager.pid").write_text("222")
+    (state / "manager-health.port").write_text("12345")
+    monkeypatch.setattr(sdk, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        manager_health,
+        "health",
+        lambda url, timeout: {
+            "pid": 222,
+            "manager": {"status": "idle"},
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="did not become idle"):
+        live_smoke._wait_agent_ready(tmp_path, timeout=0.01)
+
+
+def test_wait_agent_ready_requires_matching_live_health(monkeypatch, tmp_path):
+    from bobi import manager_health
+    from bobi import sdk
+
+    state = tmp_path / "state"
+    session = state / "sessions" / "manager"
+    session.mkdir(parents=True)
+    (session / "state.json").write_text(json.dumps({
+        "role": "manager",
+        "status": "idle",
+        "pid": 222,
+    }))
+    (state / "manager.pid").write_text("222")
+    (state / "manager-health.port").write_text("12345")
+    monkeypatch.setattr(sdk, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(
+        manager_health,
+        "health",
+        lambda url, timeout: {
+            "pid": 222,
+            "manager": {"status": "idle"},
+        },
+    )
+
+    ready = live_smoke._wait_agent_ready(tmp_path, timeout=0.1)
+
+    assert ready["pid"] == 222
+
+
 def test_wait_crash_window_requires_running_turn_tool_and_provider_usage(
     monkeypatch, tmp_path
 ):

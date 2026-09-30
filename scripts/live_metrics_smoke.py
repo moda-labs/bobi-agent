@@ -878,8 +878,13 @@ def _stop_disposable_supervisor(
 
 
 def _wait_agent_ready(run_root: Path, timeout: float = 120) -> dict[str, object]:
+    from bobi import manager_health
+    from bobi.sdk import pid_alive
+
     deadline = time.monotonic() + timeout
     sessions = run_root / "state" / "sessions"
+    pid_path = run_root / "state" / "manager.pid"
+    port_path = run_root / "state" / "manager-health.port"
     while time.monotonic() < deadline:
         for state_path in sessions.glob("*/state.json"):
             try:
@@ -888,7 +893,23 @@ def _wait_agent_ready(run_root: Path, timeout: float = 120) -> dict[str, object]
                 continue
             if state.get("role") != "manager":
                 continue
-            if state.get("status") == "idle":
+            try:
+                state_pid = int(state.get("pid") or 0)
+                manager_pid = int(pid_path.read_text().strip())
+                port = int(port_path.read_text().strip())
+            except (OSError, TypeError, ValueError):
+                continue
+            if not state_pid or state_pid != manager_pid or not pid_alive(manager_pid):
+                continue
+            health = manager_health.health(
+                f"http://127.0.0.1:{port}", timeout=0.5
+            )
+            if not health or int(health.get("pid") or 0) != manager_pid:
+                continue
+            health_manager = health.get("manager") or {}
+            if state.get("status") == "idle" and health_manager.get("status") in {
+                "running", "idle",
+            }:
                 return state
             if state.get("status") in {"error", "crashed", "failed"}:
                 raise RuntimeError(
