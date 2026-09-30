@@ -703,7 +703,7 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
         "",
     )
     fault_action = None
-    if runtime._fault_injection_enabled:
+    if runtime._fault_injection_enabled and observation.is_user_initiated:
         try:
             from bobi.metrics.faults import consume_drop_online_usage
 

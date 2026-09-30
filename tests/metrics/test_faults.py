@@ -39,7 +39,11 @@ def test_drop_online_usage_is_one_shot_and_preserves_reconciliation_metadata(
     runtime = MetricsRuntime(root, mode="shadow")
     assert runtime._fault_injection_enabled is True
     observation = runtime.begin_turn(
-        "agent", provider="anthropic", brain="claude", prompt_bytes=10
+        "agent",
+        provider="anthropic",
+        brain="claude",
+        prompt_bytes=10,
+        is_user_initiated=True,
     )
     usage = BrainUsage(
         model="claude-test",
@@ -80,3 +84,56 @@ def test_drop_online_usage_is_one_shot_and_preserves_reconciliation_metadata(
         ).fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_background_turn_cannot_consume_recovery_fault(monkeypatch, tmp_path):
+    root = _smoke_root(tmp_path)
+    monkeypatch.setenv("BOBI_METRICS_FAULT_INJECTION", "1")
+    arm_fault(root, "drop-next-online-usage", hold_seconds=0)
+    runtime = MetricsRuntime(root, mode="shadow")
+    usage = BrainUsage(
+        model="claude-test",
+        provider_event_id="message-1",
+        input_tokens=10,
+        output_tokens=2,
+    )
+    background = runtime.begin_turn(
+        "curator",
+        provider="anthropic",
+        brain="claude",
+        is_user_initiated=False,
+    )
+    background.record_result(TurnResult(
+        session_id="provider-session",
+        usage=[usage],
+        invocations=[BrainInvocation(
+            provider_event_id="message-1",
+            model="claude-test",
+            usage=usage,
+        )],
+    ))
+    background.finish(status="completed")
+
+    assert read_fault(root)["status"] == "armed"
+
+    foreground = runtime.begin_turn(
+        "manager",
+        provider="anthropic",
+        brain="claude",
+        is_user_initiated=True,
+    )
+    foreground.record_result(TurnResult(
+        session_id="provider-session",
+        usage=[usage],
+        invocations=[BrainInvocation(
+            provider_event_id="message-1",
+            model="claude-test",
+            usage=usage,
+        )],
+    ))
+    foreground.finish(status="completed")
+    runtime.close()
+
+    state = read_fault(root)
+    assert state["status"] == "consumed"
+    assert state["turn_id"] == foreground.turn_id
