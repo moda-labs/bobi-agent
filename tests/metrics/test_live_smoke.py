@@ -25,6 +25,7 @@ from scripts.live_metrics_smoke import (
     _find_claude_transcript,
     _isolated_brain_defaults,
     _reset_disposable_transport_state,
+    _sanitized_reconciliation_result,
     _smoke_env,
     _start_disposable_supervisor,
     _start_or_join_restarted_manager,
@@ -546,6 +547,25 @@ def test_process_kill_recovery_accepts_supervisor_restart_winner(
 
     assert calls == [("agent", "agent", "start")]
     assert health["pid"] == 222
+
+
+def test_reconciliation_accepts_idempotent_winner_and_removes_source_path():
+    sanitized = _sanitized_reconciliation_result({
+        "status": "done",
+        "errors": 0,
+        "turns_repaired": 0,
+        "duplicates_skipped": 3,
+        "source_path": "/private/provider/transcript.jsonl",
+    })
+
+    assert sanitized["turns_repaired"] == 0
+    assert sanitized["duplicates_skipped"] == 3
+    assert "source_path" not in sanitized
+
+
+def test_reconciliation_rejects_errors():
+    with pytest.raises(RuntimeError, match="reconciliation failed"):
+        _sanitized_reconciliation_result({"status": "done", "errors": 1})
 
 
 def test_parser_and_dispatch_expose_phase2_recovery_commands(monkeypatch, tmp_path):

@@ -929,6 +929,15 @@ def _start_or_join_restarted_manager(
     return _wait_manager_restarted(run_root, previous_pid, timeout=120)
 
 
+def _sanitized_reconciliation_result(
+    result: dict[str, object],
+) -> dict[str, object]:
+    """Validate reconcile completion and remove machine-local source paths."""
+    if result.get("status") != "done" or int(result.get("errors") or 0):
+        raise RuntimeError(f"reconciliation failed: {result}")
+    return {key: value for key, value in result.items() if key != "source_path"}
+
+
 def arm_fault(args: argparse.Namespace) -> None:
     home = args.bobi_home.resolve()
     if not (home / SMOKE_MARKER).exists():
@@ -1116,11 +1125,12 @@ def _process_kill_smoke(
         timeout=120,
     )
     reconciliation = json.loads(output)
-    if reconciliation.get("errors") or not reconciliation.get("turns_repaired"):
-        raise RuntimeError(f"reconciliation failed: {reconciliation}")
+    sanitized_reconciliation = _sanitized_reconciliation_result(reconciliation)
     (artifacts / f"{provider}-process-kill-reconcile.json").write_text(
-        json.dumps(reconciliation, indent=2, sort_keys=True) + "\n"
+        json.dumps(sanitized_reconciliation, indent=2, sort_keys=True) + "\n"
     )
+    # The collector may win the same idempotent repair race before the explicit
+    # command. Database state, not turns_repaired for this caller, is the gate.
     wait_reconciliation(argparse.Namespace(db=db, turn_id=turn_id, timeout=60.0))
     verify_token_parity(argparse.Namespace(
         agent=agent,
