@@ -954,6 +954,38 @@ async def test_receive_response_captures_invocation_and_tool_metadata():
 
 
 @pytest.mark.asyncio
+async def test_receive_response_deduplicates_repeated_provider_message_chunks():
+    first = AssistantMessage(
+        content=[ToolUseBlock(id="tool-1", name="view_file", input={"path": "x"})],
+        model="deepseek-flash",
+        usage={"input_tokens": 5, "output_tokens": 0},
+        message_id="message-1",
+    )
+    repeated = AssistantMessage(
+        content=[TextBlock(text="working")],
+        model="deepseek-flash",
+        usage={"input_tokens": 5, "output_tokens": 0},
+        message_id="message-1",
+    )
+    turn = [
+        message
+        async for message in _claude_session_over(
+            [
+                first,
+                repeated,
+                _result(model_usage={
+                    "claude-opus-5": {"inputTokens": 5, "outputTokens": 2}
+                }),
+            ]
+        ).receive_response()
+    ][-1]
+
+    assert [item.provider_event_id for item in turn.invocations] == ["message-1"]
+    assert turn.invocations[0].usage.input_tokens == 5
+    assert turn.invocations[0].ended_at_us >= turn.invocations[0].started_at_us
+
+
+@pytest.mark.asyncio
 async def test_receive_response_uses_gateway_invocation_model_for_turn_usage():
     assistant = AssistantMessage(
         content=[TextBlock(text="done")],

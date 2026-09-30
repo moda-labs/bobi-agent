@@ -756,14 +756,16 @@ WHERE usage_rank = 1;
 ```
 
 Aggregation adds one more rule: choose one granularity per turn in this order:
-complete exact invocation coverage, an exact turn aggregate, complete effective
-invocation coverage (exact rows plus estimates for otherwise unmeasured
-siblings), then an estimated turn fallback. Exactness outranks granularity, so
-a complete estimated child partition never replaces an exact provider turn
-total. Never sum both levels. When exact rows exist for a logical target,
-estimates for that target remain available in drill-down provenance but are
-excluded from totals and rankings. A multi-model exact invocation keeps all
-exact model partitions. Aggregates preserve an unknown dimension as `NULL`
+an exact terminal turn aggregate, complete exact invocation coverage, complete
+effective invocation coverage (exact rows plus estimates for otherwise
+unmeasured siblings), then an estimated turn fallback. The terminal aggregate
+is the provider's authoritative complete-turn fact; invocation rows remain
+available for granular hotspots and provenance. Never sum both levels.
+Repeated Claude SDK assistant chunks with the same provider message ID are one
+logical invocation, not additive measurements. When exact rows exist for a
+logical target, estimates for that target remain available in drill-down
+provenance but are excluded from totals and rankings. A multi-model exact
+invocation keeps all exact model partitions. Aggregates preserve an unknown dimension as `NULL`
 when any selected component did not report it. Coverage reports
 `usage_granularity` (`invocation`, `turn`, `mixed`, or `none`) and the number of
 turns selected at invocation and turn granularity in addition to
@@ -1696,6 +1698,16 @@ incremental contribution of one result is often inferential. Tool rows therefore
 store byte size and an estimated token contribution with
 `attribution_method`/`attribution_confidence`; they do not claim provider-billed
 per-tool usage.
+
+### Why does a summary use turn totals when invocation rows are exact?
+
+Provider gateways can expose exact intermediate usage that is incomplete for a
+dimension. For example, AI Box assistant events report exact input/cache
+counters with `output_tokens = 0`, while the terminal result reports the exact
+positive output total. Bobi therefore treats an exact terminal turn aggregate
+as canonical for summary and experiment totals. Invocation rows remain exact
+provider facts for drill-down, but Bobi never splices dimensions or sums both
+scopes.
 
 ### Why are summary totals lower than raw measurement rows?
 

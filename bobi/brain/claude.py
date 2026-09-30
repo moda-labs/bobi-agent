@@ -244,6 +244,7 @@ class _ClaudeSession:
         turn_started_us = time.time_ns() // 1000
         last_event_us = turn_started_us
         invocations: list[BrainInvocation] = []
+        invocation_indexes: dict[str, int] = {}
         tool_states: dict[str, dict[str, Any]] = {}
         completed_tool_ids: list[str] = []
 
@@ -290,17 +291,33 @@ class _ClaudeSession:
                         msg.usage,
                         provider_event_id=provider_event_id,
                     )
-                invocations.append(
-                    BrainInvocation(
-                        provider_event_id=provider_event_id,
-                        model=str(getattr(msg, "model", "") or ""),
-                        started_at_us=last_event_us,
-                        ended_at_us=observed_at_us,
-                        stop_reason=str(getattr(msg, "stop_reason", "") or ""),
-                        status="failed" if error_kind else "completed",
-                        usage=invocation_usage,
-                    )
+                invocation = BrainInvocation(
+                    provider_event_id=provider_event_id,
+                    model=str(getattr(msg, "model", "") or ""),
+                    started_at_us=last_event_us,
+                    ended_at_us=observed_at_us,
+                    stop_reason=str(getattr(msg, "stop_reason", "") or ""),
+                    status="failed" if error_kind else "completed",
+                    usage=invocation_usage,
                 )
+                existing_index = invocation_indexes.get(provider_event_id)
+                if existing_index is None:
+                    invocation_indexes[provider_event_id] = len(invocations)
+                    invocations.append(invocation)
+                else:
+                    existing = invocations[existing_index]
+                    invocations[existing_index] = replace(
+                        invocation,
+                        started_at_us=existing.started_at_us,
+                        model=invocation.model or existing.model,
+                        stop_reason=invocation.stop_reason or existing.stop_reason,
+                        status=(
+                            "failed"
+                            if existing.status == "failed" or invocation.status == "failed"
+                            else invocation.status
+                        ),
+                        usage=invocation.usage or existing.usage,
+                    )
                 for tool_id in completed_tool_ids:
                     if not tool_states[tool_id].get("consuming_provider_event_id"):
                         tool_states[tool_id]["consuming_provider_event_id"] = provider_event_id

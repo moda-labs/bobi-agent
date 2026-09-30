@@ -192,6 +192,55 @@ def test_summary_uses_turn_usage_when_invocation_coverage_is_partial(metrics_roo
     })]
 
 
+def test_exact_turn_usage_wins_over_exact_invocation_usage(metrics_root):
+    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
+    conn.execute("UPDATE usage_measurements SET output_tokens=0 WHERE measurement_id='u1'")
+    conn.execute(
+        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
+        "measurement_source,is_estimated,token_semantics_version,input_tokens,"
+        "cache_read_input_tokens,cache_write_input_tokens,cache_write_5m_input_tokens,"
+        "output_tokens,observed_at_us) VALUES"
+        "('u-turn','turn','t1','anthropic','sonnet','provider_stream',0,1,100,20,10,10,30,3000001)"
+    )
+    conn.commit()
+    conn.close()
+
+    queries = MetricsQueries(metrics_root)
+    summary = queries.summary({"window_seconds": 10, "end_at": 4})
+    experiment = queries.experiment({"experiment_id": "exp1"})
+    hotspots = queries.hotspots({
+        "window_seconds": 10,
+        "end_at": 4,
+        "scope": "turn",
+        "metric": "output_tokens",
+    })
+
+    assert summary["totals"]["input_tokens"] == 100
+    assert summary["totals"]["output_tokens"] == 30
+    assert summary["coverage"]["usage_granularity"] == "turn"
+    assert experiment["variants"][0]["tokens"]["output_tokens"] == 30
+    assert experiment["variants"][0]["coverage"]["usage_granularity"] == "turn"
+    assert hotspots["hotspots"][0]["value"] == 30
+
+
+def test_exact_turn_usage_remains_canonical_when_invocation_totals_match(metrics_root):
+    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
+    conn.execute(
+        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
+        "measurement_source,is_estimated,token_semantics_version,input_tokens,"
+        "cache_read_input_tokens,cache_write_input_tokens,cache_write_5m_input_tokens,"
+        "output_tokens,observed_at_us) VALUES"
+        "('u-turn','turn','t1','anthropic','sonnet','provider_stream',0,1,100,20,10,10,30,3000001)"
+    )
+    conn.commit()
+    conn.close()
+
+    summary = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
+
+    assert summary["totals"]["output_tokens"] == 30
+    assert summary["coverage"]["usage_granularity"] == "turn"
+
+
 def test_exact_turn_usage_precedes_complete_estimated_invocation_usage(metrics_root):
     conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
     conn.execute("DELETE FROM usage_measurements WHERE measurement_id='u1'")

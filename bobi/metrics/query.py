@@ -115,10 +115,10 @@ def _chosen_usage(alias: str = "b") -> str:
     exact_turn = _exact_turn_usage_exists(alias)
     return (
         f"({_effective_usage(alias)} AND ("
-        f"({alias}.scope='invocation' AND (({exact_invocations}) OR "
-        f"(NOT ({exact_turn}) AND ({effective_invocations})))) OR "
-        f"({alias}.scope='turn' AND NOT ({exact_invocations}) AND "
-        f"(({exact_turn}) OR NOT ({effective_invocations})))"
+        f"({alias}.scope='invocation' AND NOT ({exact_turn}) AND "
+        f"(({exact_invocations}) OR ({effective_invocations}))) OR "
+        f"({alias}.scope='turn' AND (({exact_turn}) OR "
+        f"(NOT ({exact_invocations}) AND NOT ({effective_invocations}))))"
         "))"
     )
 
@@ -427,9 +427,9 @@ class MetricsQueries:
                 filters.append("EXISTS (SELECT 1 FROM router_decisions r WHERE r.turn_id=t.turn_id AND r.variant_id=?)")
                 params.append(variant_id)
             where = " AND ".join(filters)
-            # Prefer complete exact invocation coverage, then an exact turn
-            # aggregate, then complete effective invocation coverage, and only
-            # then an estimated turn fallback. Exactness outranks granularity.
+            # Exact terminal aggregates are canonical for totals. Invocation
+            # rows remain available for granular drill-down without mixing
+            # parent and child scopes in one aggregate.
             chosen_usage = _chosen_usage()
             groups: list[dict[str, object]] = []
             if group_by:
