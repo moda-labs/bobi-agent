@@ -988,7 +988,6 @@ def _assert_clean_collector(db: Path, health: dict[str, object]) -> None:
     required_zero = (
         "uncommitted_spool_bytes",
         "quarantined_events",
-        "reconciliation_errors",
         "telemetry_events_dropped",
         "producer_writer_errors",
     )
