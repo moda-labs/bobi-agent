@@ -1,11 +1,14 @@
 import json
 
+import pytest
+
 from bobi.metrics.collector import MetricsCollector
 from bobi.metrics.estimate import (
     CalibrationSample,
     EstimatorQualification,
     EstimatorRegistry,
     calibrate_estimators,
+    estimate_missing,
     estimate_turn,
     qualify_byte_estimator,
 )
@@ -161,6 +164,27 @@ def test_unqualified_registry_produces_no_guess(tmp_path):
         ).fetchone()[0] == 0
     finally:
         conn.close()
+
+
+def test_scheduled_estimation_skips_active_turns(monkeypatch, tmp_path):
+    _seed_uncovered_turn(tmp_path)
+    db = tmp_path / "state" / "metrics" / "metrics.db"
+    conn = connect(db)
+    conn.execute(
+        "UPDATE turns SET ended_at_us=NULL,status='running' WHERE turn_id='turn-1'"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        "bobi.metrics.estimate.estimate_turn",
+        lambda *args, **kwargs: pytest.fail("active turn was estimated"),
+    )
+
+    result = estimate_missing(
+        tmp_path, registry=EstimatorRegistry(), terminal_only=True
+    )
+
+    assert result["turns_considered"] == 0
 
 
 def test_database_calibration_writes_report_and_qualified_registry(tmp_path):

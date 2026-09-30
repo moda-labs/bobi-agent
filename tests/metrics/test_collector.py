@@ -144,12 +144,16 @@ def test_scheduled_reconciliation_collects_exact_before_estimation(
     monkeypatch.setattr(
         reconcile_module,
         "reconcile_missing",
-        lambda root, collect: order.append("reconcile") or {"errors": 0},
+        lambda root, collect, terminal_only: (
+            order.append(("reconcile", terminal_only)) or {"errors": 0}
+        ),
     )
     monkeypatch.setattr(
         estimate_module,
         "estimate_missing",
-        lambda root, collect: order.append("estimate") or {},
+        lambda root, collect, terminal_only: (
+            order.append(("estimate", terminal_only)) or {}
+        ),
     )
     monkeypatch.setattr(
         service,
@@ -159,7 +163,12 @@ def test_scheduled_reconciliation_collects_exact_before_estimation(
 
     service._reconcile_locked(service._empty_result("active"))
 
-    assert order == ["reconcile", "collect", "estimate", "collect"]
+    assert order == [
+        ("reconcile", True),
+        "collect",
+        ("estimate", True),
+        "collect",
+    ]
     assert service.health()["reconciliation_errors"] == 0
     assert service.health()["last_reconciliation_at_us"] is not None
 
@@ -173,12 +182,16 @@ def test_scheduled_reconciliation_failures_are_health_only(monkeypatch, tmp_path
     monkeypatch.setattr(
         reconcile_module,
         "reconcile_missing",
-        lambda root, collect: (_ for _ in ()).throw(RuntimeError("reconcile")),
+        lambda root, collect, terminal_only: (
+            _ for _ in ()
+        ).throw(RuntimeError("reconcile")),
     )
     monkeypatch.setattr(
         estimate_module,
         "estimate_missing",
-        lambda root, collect: (_ for _ in ()).throw(RuntimeError("estimate")),
+        lambda root, collect, terminal_only: (
+            _ for _ in ()
+        ).throw(RuntimeError("estimate")),
     )
     monkeypatch.setattr(
         service, "_collect_once_locked", lambda: service._empty_result("active")

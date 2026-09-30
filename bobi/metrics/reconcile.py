@@ -488,6 +488,7 @@ def reconcile_missing(
     wait: bool = False,
     timeout: float = 60.0,
     collect: bool = True,
+    terminal_only: bool = False,
 ) -> dict[str, object]:
     """Reconcile turns that currently have no exact turn measurement."""
     root = Path(root).resolve()
@@ -500,7 +501,9 @@ def reconcile_missing(
                 "SELECT t.turn_id FROM turns AS t WHERE NOT EXISTS ("
                 "SELECT 1 FROM usage_measurements AS u "
                 "WHERE u.turn_id=t.turn_id AND u.scope='turn' "
-                "AND u.is_estimated=0) ORDER BY t.started_at_us"
+                "AND u.is_estimated=0) "
+                + ("AND t.ended_at_us IS NOT NULL " if terminal_only else "")
+                + "ORDER BY t.started_at_us"
             )
         ]
     finally:

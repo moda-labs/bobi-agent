@@ -278,14 +278,16 @@ class MetricsCollectorService:
 
         errors = int(self.health()["reconciliation_errors"])
         try:
-            reconciliation = reconcile_missing(self.root, collect=False)
+            reconciliation = reconcile_missing(
+                self.root, collect=False, terminal_only=True
+            )
             errors += int(reconciliation["errors"])
         except Exception:
             log.debug("metrics: scheduled reconciliation failed", exc_info=True)
             errors += 1
         result = self._collect_once_locked()
         try:
-            estimate_missing(self.root, collect=False)
+            estimate_missing(self.root, collect=False, terminal_only=True)
         except Exception:
             log.debug("metrics: scheduled estimation failed", exc_info=True)
             errors += 1
@@ -297,7 +299,7 @@ class MetricsCollectorService:
                 uncovered = int(conn.execute(
                     "SELECT COUNT(*) FROM turns AS t WHERE NOT EXISTS ("
                     "SELECT 1 FROM usage_measurements AS u WHERE u.turn_id=t.turn_id "
-                    "AND u.scope='turn')"
+                    "AND u.scope='turn') AND t.ended_at_us IS NOT NULL"
                 ).fetchone()[0])
             finally:
                 conn.close()

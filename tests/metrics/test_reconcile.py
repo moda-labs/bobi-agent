@@ -12,7 +12,7 @@ from bobi.metrics.providers import (
     parse_claude_transcript_records,
     parse_codex_rollout_records,
 )
-from bobi.metrics.reconcile import _aggregate, reconcile_turn
+from bobi.metrics.reconcile import _aggregate, reconcile_missing, reconcile_turn
 from bobi.metrics.spool import SpoolWriter
 from bobi.metrics.store import connect
 
@@ -155,6 +155,52 @@ def test_codex_rollout_parser_rejects_unknown_versions(tmp_path):
 
     with pytest.raises(ProviderContractError, match="unsupported codex rollout"):
         parse_codex_rollout_records(target)
+
+
+def test_scheduled_reconciliation_skips_active_turns(monkeypatch, tmp_path):
+    db = tmp_path / "state" / "metrics" / "metrics.db"
+    conn = connect(db)
+    from bobi.metrics.store import migrate
+
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO sessions(session_id,session_name,brain,provider,"
+        "started_at_us,status) VALUES(?,?,?,?,?,?)",
+        ("session-1", "agent", "claude", "anthropic", 1, "running"),
+    )
+    for turn_id, ended_at_us, status in (
+        ("turn-active", None, "running"),
+        ("turn-complete", 4, "completed"),
+    ):
+        conn.execute(
+            "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,"
+            "is_user_initiated,started_at_us,ended_at_us,status) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (
+                turn_id,
+                "session-1",
+                1 if turn_id == "turn-active" else 2,
+                "test",
+                1,
+                2 if turn_id == "turn-active" else 3,
+                ended_at_us,
+                status,
+            ),
+        )
+    conn.commit()
+    conn.close()
+    seen = []
+    monkeypatch.setattr(
+        "bobi.metrics.reconcile.reconcile_turn",
+        lambda root, turn_id, **kwargs: seen.append(turn_id) or {
+            "exact_measurements_recovered": 0
+        },
+    )
+
+    result = reconcile_missing(tmp_path, terminal_only=True)
+
+    assert seen == ["turn-complete"]
+    assert result["turns_considered"] == 1
 
 
 def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(

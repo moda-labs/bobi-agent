@@ -392,6 +392,7 @@ def estimate_missing(
     *,
     registry: EstimatorRegistry | None = None,
     collect: bool = True,
+    terminal_only: bool = False,
 ) -> dict[str, object]:
     root = Path(root).resolve()
     db_path = root / "state" / "metrics" / "metrics.db"
@@ -405,7 +406,9 @@ def estimate_missing(
             for row in conn.execute(
                 "SELECT t.turn_id FROM turns AS t WHERE NOT EXISTS ("
                 "SELECT 1 FROM usage_measurements AS u WHERE u.turn_id=t.turn_id "
-                "AND u.scope='turn') ORDER BY t.started_at_us"
+                "AND u.scope='turn') "
+                + ("AND t.ended_at_us IS NOT NULL " if terminal_only else "")
+                + "ORDER BY t.started_at_us"
             )
         ]
     finally:
