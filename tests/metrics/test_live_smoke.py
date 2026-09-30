@@ -348,6 +348,41 @@ def test_transport_supervisor_cleanup_terminates_and_closes_log(tmp_path):
     assert log_file.closed is True
 
 
+def test_transport_supervisor_cleanup_signals_complete_process_group(
+    monkeypatch, tmp_path
+):
+    calls = []
+
+    class Process:
+        pid = 1234
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout):
+            calls.append(("wait", timeout))
+            return 0
+
+    def fake_killpg(process_group, signum):
+        calls.append(("killpg", process_group, signum))
+        if signum == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(live_smoke.os, "getpgid", lambda pid: 4321)
+    monkeypatch.setattr(live_smoke.os, "getpgrp", lambda: 9999)
+    monkeypatch.setattr(live_smoke.os, "killpg", fake_killpg)
+    log_file = (tmp_path / "supervisor.log").open("w")
+
+    _stop_disposable_supervisor(Process(), log_file)
+
+    assert calls == [
+        ("killpg", 4321, live_smoke.signal.SIGTERM),
+        ("wait", 30),
+        ("killpg", 4321, 0),
+    ]
+    assert log_file.closed is True
+
+
 def test_wait_crash_window_requires_running_turn_tool_and_provider_usage(
     monkeypatch, tmp_path
 ):

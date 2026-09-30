@@ -836,15 +836,43 @@ def _start_disposable_supervisor(
 def _stop_disposable_supervisor(
     process: subprocess.Popen, log_file: object, *, timeout: float = 30
 ) -> None:
-    """Stop a smoke sidecar and its manager child, escalating if necessary."""
+    """Stop the complete disposable supervisor process group."""
+    process_group = None
     try:
         if process.poll() is None:
-            process.terminate()
+            try:
+                candidate = os.getpgid(process.pid)
+                if candidate != os.getpgrp():
+                    process_group = candidate
+            except (AttributeError, OSError):
+                pass
+            if process_group is None:
+                process.terminate()
+            else:
+                os.killpg(process_group, signal.SIGTERM)
             try:
                 process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                process.kill()
+                if process_group is None:
+                    process.kill()
+                else:
+                    os.killpg(process_group, signal.SIGKILL)
                 process.wait(timeout=10)
+            if process_group is not None:
+                deadline = time.monotonic() + min(timeout, 10)
+                while time.monotonic() < deadline:
+                    try:
+                        os.killpg(process_group, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.05)
+                else:
+                    # The supervisor can exit before an in-flight provider CLI.
+                    # The next experiment variant must not reuse that thread.
+                    try:
+                        os.killpg(process_group, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
     finally:
         log_file.close()
 
