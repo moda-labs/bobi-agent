@@ -662,6 +662,27 @@ def test_reconciliation_rejects_errors():
         _sanitized_reconciliation_result({"status": "done", "errors": 1})
 
 
+def test_collector_acceptance_rejects_quarantined_projection(tmp_path):
+    db = tmp_path / "metrics.db"
+    conn = connect(db)
+    migrate(conn)
+    conn.execute(
+        "INSERT INTO raw_events(event_id,schema_version,event_type,producer_id,"
+        "producer_sequence,emitted_at_us,received_at_us,source,payload_json,"
+        "payload_sha256,segment_path,segment_offset,projection_state) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "event-1", 1, "turn.recorded", "producer", 1, 1, 1, "test",
+            "{}", "sha", "segment", 0, "quarantined",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="collector acceptance gate failed"):
+        live_smoke._assert_clean_collector(db, {"quarantined_events": 1})
+
+
 def test_parser_and_dispatch_expose_phase2_recovery_commands(monkeypatch, tmp_path):
     parsed = parser().parse_args([
         "verify-token-parity", "--agent", "smoke", "--provider", "claude",

@@ -230,17 +230,21 @@ def build_reconcile_plan(
         source_path, records = _select_records(
             conn, row, upper_us, provider_session_id
         )
+        invocation_rows = conn.execute(
+            "SELECT invocation_id,invocation_index,provider_event_id,model_selected "
+            "FROM llm_invocations WHERE turn_id=? ORDER BY invocation_index",
+            (turn_id,),
+        ).fetchall()
         existing_invocations = {
-            str(item["provider_event_id"]): (
-                str(item["invocation_id"]), int(item["invocation_index"])
-            )
-            for item in conn.execute(
-                "SELECT invocation_id,invocation_index,provider_event_id "
-                "FROM llm_invocations WHERE turn_id=? "
-                "AND provider_event_id IS NOT NULL",
-                (turn_id,),
-            )
+            str(item["provider_event_id"]): item
+            for item in invocation_rows
+            if item["provider_event_id"] is not None
         }
+        uncorrelated_invocations = [
+            item for item in invocation_rows
+            if item["provider_event_id"] is None
+        ]
+        claimed_invocations: set[str] = set()
         provider = str(row["provider"])
         session_id = str(row["session_id"])
         session_row = conn.execute(
@@ -270,27 +274,46 @@ def build_reconcile_plan(
         ))
         sequence += 1
         next_invocation_index = max(
-            (value[1] for value in existing_invocations.values()),
+            (int(value["invocation_index"]) for value in invocation_rows),
             default=0,
         )
 
         for index, record in enumerate(records, 1):
             provider_event_id = record.usage.provider_event_id
             existing = existing_invocations.get(provider_event_id)
-            invocation_id = (
-                existing[0]
-                if existing is not None
-                else _stable_id("inv", turn_id, provider_event_id)
-            )
             if existing is None:
+                existing = next((
+                    item for item in uncorrelated_invocations
+                    if str(item["invocation_id"]) not in claimed_invocations
+                    and str(item["model_selected"] or "") == record.usage.model
+                ), None)
+            invocation_id = (
+                str(existing["invocation_id"])
+                if existing is not None
+                else (
+                    None if provider == "openai"
+                    else _stable_id("inv", turn_id, provider_event_id)
+                )
+            )
+            if existing is not None:
+                assert invocation_id is not None
+                claimed_invocations.add(invocation_id)
+                invocation_index = int(existing["invocation_index"])
+            elif invocation_id is not None:
                 next_invocation_index += 1
+                invocation_index = next_invocation_index
+            else:
+                invocation_index = None
+            if invocation_id is not None and (
+                existing is None or existing["provider_event_id"] is None
+            ):
                 payload = {
                     "invocation_id": invocation_id,
                     "turn_id": turn_id,
                     "workflow_step_id": None,
                     "router_decision_id": None,
                     "parent_invocation_id": None,
-                    "invocation_index": next_invocation_index,
+                    "invocation_index": invocation_index,
                     "provider": provider,
                     "model_requested": None,
                     "model_selected": record.usage.model,
@@ -326,6 +349,7 @@ def build_reconcile_plan(
             sequence += 1
 
             if provider == "anthropic":
+                assert invocation_id is not None
                 measurement_id = _stable_id(
                     "use", turn_id, invocation_id, provider_event_id,
                     record.usage.measurement_source,

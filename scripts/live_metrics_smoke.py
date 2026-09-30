@@ -984,6 +984,36 @@ def _sanitized_reconciliation_result(
     return {key: value for key, value in result.items() if key != "source_path"}
 
 
+def _assert_clean_collector(db: Path, health: dict[str, object]) -> None:
+    required_zero = (
+        "uncommitted_spool_bytes",
+        "quarantined_events",
+        "reconciliation_errors",
+        "telemetry_events_dropped",
+        "producer_writer_errors",
+    )
+    failures = {
+        key: int(health.get(key) or 0)
+        for key in required_zero
+        if int(health.get(key) or 0) != 0
+    }
+    conn = connect(db, readonly=True)
+    try:
+        projection_counts = {
+            str(row[0]): int(row[1])
+            for row in conn.execute(
+                "SELECT projection_state,COUNT(*) FROM raw_events "
+                "WHERE projection_state<>'projected' GROUP BY projection_state"
+            )
+        }
+    finally:
+        conn.close()
+    if projection_counts:
+        failures["projection_states"] = projection_counts
+    if failures:
+        raise RuntimeError(f"collector acceptance gate failed: {failures}")
+
+
 def arm_fault(args: argparse.Namespace) -> None:
     home = args.bobi_home.resolve()
     if not (home / SMOKE_MARKER).exists():
@@ -1784,11 +1814,10 @@ def installed_matrix(args: argparse.Namespace) -> None:
             (artifacts / f"{provider}-collector-health.json").write_text(
                 json.dumps(health, indent=2, sort_keys=True) + "\n"
             )
-            if health.get("uncommitted_spool_bytes") != 0:
-                raise RuntimeError(f"collector backlog remains for {provider}: {health}")
+            _assert_clean_collector(db, health)
             print(
                 f"PASS provider={provider} collector_role=active "
-                "uncommitted_spool_bytes=0"
+                "uncommitted_spool_bytes=0 quarantined=0 pending=0"
             )
         finally:
             if supervisor_process is not None and supervisor_log is not None:

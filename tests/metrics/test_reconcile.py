@@ -329,6 +329,71 @@ def test_codex_reconciliation_uses_final_turn_usage(monkeypatch, tmp_path):
         assert exact["cache_read_input_tokens"] == 1024
         assert exact["reasoning_output_tokens"] == 12
         assert exact["supersedes_measurement_id"] == "estimate-codex"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM llm_invocations WHERE turn_id=?",
+            (turn_id,),
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_codex_reconciliation_backfills_uncorrelated_online_invocation(
+    monkeypatch, tmp_path
+):
+    root = tmp_path / "agent"
+    turn_id = "turn-codex-online"
+    _seed_turn(
+        root,
+        provider="openai",
+        brain="codex",
+        provider_session_id="fixture-codex-thread",
+        turn_id=turn_id,
+        estimate=None,
+    )
+    segment = root / "state" / "metrics" / "spool" / "online" / "one.telemetry"
+    with SpoolWriter(segment) as writer:
+        writer.append(MetricsEvent(
+            event_type="invocation.recorded",
+            producer_id="online-fixture",
+            producer_sequence=1,
+            source="test",
+            payload={
+                "invocation_id": "online-invocation",
+                "turn_id": turn_id,
+                "invocation_index": 1,
+                "provider": "openai",
+                "model_selected": "gpt-test",
+                "provider_event_id": None,
+                "started_at_us": _us("2026-09-25T00:00:00Z"),
+                "ended_at_us": _us("2026-09-25T00:00:01Z"),
+                "status": "completed",
+            },
+            turn_id=turn_id,
+            invocation_id="online-invocation",
+        ))
+    db = root / "state" / "metrics" / "metrics.db"
+    MetricsCollector(db).collect_segment(segment)
+    monkeypatch.setattr(
+        "bobi.metrics.reconcile.find_codex_rollout",
+        lambda _session_id: FIXTURES / "codex-rollout.jsonl",
+    )
+
+    result = reconcile_turn(root, turn_id, wait=True)
+
+    assert result["status"] == "done"
+    conn = connect(db, readonly=True)
+    try:
+        invocation = conn.execute(
+            "SELECT invocation_id,invocation_index,provider_event_id "
+            "FROM llm_invocations WHERE turn_id=?",
+            (turn_id,),
+        ).fetchone()
+        assert tuple(invocation) == (
+            "online-invocation", 1, "resp-fixture-final"
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM raw_events WHERE projection_state='quarantined'"
+        ).fetchone()[0] == 0
     finally:
         conn.close()
 
