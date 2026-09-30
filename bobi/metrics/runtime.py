@@ -146,7 +146,7 @@ class MetricsRuntime:
         run_key: str = "",
         session_name: str = "",
     ) -> str:
-        """Resolve a treatment only when its decision can enter the spool."""
+        """Resolve a treatment only while the metrics producer is available."""
         if not self.enabled or self._experiment is None:
             return requested_model
         try:
