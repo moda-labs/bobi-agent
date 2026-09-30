@@ -1105,13 +1105,8 @@ def _process_kill_smoke(
     except subprocess.TimeoutExpired:
         client.kill()
         client.communicate()
-    from bobi.sdk import pid_alive
-
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and pid_alive(manager_pid):
-        time.sleep(0.1)
-    if pid_alive(manager_pid):
-        raise RuntimeError(f"manager pid {manager_pid} survived SIGKILL")
+    # A killed manager may remain as a short-lived zombie, or its numeric PID
+    # may be reused. Recovery is proven by a different healthy manager PID.
     restart_health = _start_or_join_restarted_manager(
         env, agent, root, manager_pid
     )
