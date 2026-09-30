@@ -197,7 +197,12 @@ def claude_usage(
         )
     return ProviderUsage(
         provider="anthropic",
-        model=str(model or _first(raw_usage, "canonicalModel", "model") or "claude"),
+        model=str(
+            _first(raw_usage, "canonicalModel", "canonical_model")
+            or model
+            or _first(raw_usage, "model")
+            or "claude"
+        ),
         provider_event_id=_event_id("claude", provider_event_id, raw_usage),
         measurement_source=source,
         scope=scope,
