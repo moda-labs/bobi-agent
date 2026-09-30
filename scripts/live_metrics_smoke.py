@@ -601,7 +601,6 @@ def verify_token_parity(args: argparse.Namespace) -> dict[str, object]:
         )
         expected = _aggregate(exact, source="claude_transcript")
         _assert_common_parity(database, expected, allow_left_extras=True)
-        source = transcript
     else:
         rollout = _find_named_jsonl(
             _codex_sessions_root(), provider_session_id, int(turn["started_at_us"]) * 1000
@@ -623,14 +622,12 @@ def verify_token_parity(args: argparse.Namespace) -> dict[str, object]:
         )
         expected = [_codex_parity_expected(database[0], rollout_usage)]
         _assert_common_parity(database, expected)
-        source = rollout
 
     artifact = {
         "provider": args.provider,
         "turn_id": args.turn_id,
         "is_estimated": 0,
         "parity": "exact",
-        "provider_source": str(source),
         "usage": {item.model: item.comparable_tokens() for item in database},
     }
     conn = connect(args.db, readonly=True)

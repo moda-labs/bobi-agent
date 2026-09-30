@@ -444,6 +444,7 @@ def test_reconciled_parity_accepts_transcript_source(monkeypatch, tmp_path):
     ))
 
     assert artifact["duplicates"] == 0
+    assert "provider_source" not in artifact
 
 
 def test_reconciled_codex_parity_accepts_interrupted_turn(monkeypatch, tmp_path):
@@ -496,6 +497,7 @@ def test_reconciled_codex_parity_accepts_interrupted_turn(monkeypatch, tmp_path)
 
     assert captured["ended_at_us"] == observed_at_us
     assert artifact["duplicates"] == 0
+    assert "provider_source" not in artifact
 
 
 def test_wait_manager_restarted_requires_new_live_health_pid(monkeypatch, tmp_path):
