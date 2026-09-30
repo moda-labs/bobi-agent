@@ -300,3 +300,49 @@ def public_config(config: ExperimentConfig) -> dict[str, object]:
         "control_model": config.control_model,
         "cohort": config.cohort,
     }
+
+
+def projection_fields(
+    decision: RouterDecision,
+    *,
+    decided_at_us: int | None = None,
+) -> dict[str, object]:
+    """Return the privacy-safe fields used by router decision projections."""
+    return {
+        "experiment_id": decision.experiment_id,
+        "variant_id": decision.variant_id,
+        "assignment_unit": decision.assignment_unit,
+        "assignment_status": decision.assignment_status,
+        "assignment_key_hash": decision.assignment_key_hash,
+        "assignment_algorithm": decision.assignment_algorithm,
+        "cohort": decision.cohort,
+        "router_name": decision.router_name,
+        "router_version": decision.router_version,
+        "policy_version": decision.policy_version,
+        "feature_schema_version": decision.feature_schema_version,
+        "candidate_models_json": json.dumps(
+            decision.candidate_models,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        "model_selected": decision.model_selected,
+        "control_model": decision.control_model,
+        "router_score": decision.router_score,
+        "router_reason": decision.router_reason,
+        "router_latency_ms": decision.router_latency_ms,
+        "fallback_reason": decision.fallback_reason,
+        "decided_at_us": (
+            decision.decided_at_us if decided_at_us is None else decided_at_us
+        ),
+        "metadata_json": json.dumps(
+            {
+                "config_fingerprint": decision.config_fingerprint,
+                "expected_weight": decision.expected_weight,
+                "expected_weights": dict(decision.expected_weights),
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    }

@@ -110,3 +110,50 @@ def test_experiment_srm_includes_configured_variant_with_zero_observations(tmp_p
     srm = result["diagnostics"]["sample_ratio_mismatch"]
     assert srm["observed"] == {"control": 20, "treatment": 0}
     assert srm["detected"] is True
+
+
+def test_experiment_srm_counts_assignment_units_instead_of_turns(tmp_path):
+    root = tmp_path / "agent"
+    conn = connect(root / "state/metrics/metrics.db")
+    migrate(conn)
+    metadata = json.dumps({
+        "config_fingerprint": "same",
+        "expected_weights": {"control": 0.5, "treatment": 0.5},
+    })
+    for index in range(101):
+        variant = "control" if index < 100 else "treatment"
+        assignment_hash = "control-unit" if variant == "control" else "treatment-unit"
+        conn.execute(
+            "INSERT INTO sessions(session_id,session_name,brain,provider,started_at_us,status) "
+            "VALUES(?,?,?,?,?,?)",
+            (f"s{index}", f"s{index}", "test", "test", index + 1, "completed"),
+        )
+        conn.execute(
+            "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
+            "started_at_us,ended_at_us,status) VALUES(?,?,?,?,?,?,?,?)",
+            (f"t{index}", f"s{index}", 1, "test", 0, index + 1, index + 2, "completed"),
+        )
+        conn.execute(
+            "INSERT INTO router_decisions(router_decision_id,turn_id,experiment_id,variant_id,"
+            "assignment_unit,assignment_status,assignment_key_hash,router_name,router_version,"
+            "policy_version,feature_schema_version,candidate_models_json,model_selected,"
+            "control_model,router_latency_ms,decided_at_us,metadata_json) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"r{index}", f"t{index}", "exp", variant, "session_id", "assigned",
+             assignment_hash, "jev", "1", "p1", "f1", '["control","treatment"]',
+             variant, "control", 0.1, index + 1, metadata),
+        )
+    conn.commit()
+    conn.close()
+
+    result = MetricsQueries(root).experiment({"experiment_id": "exp"})
+    variants = {row["variant_id"]: row for row in result["variants"]}
+    assert variants["control"]["sample_size"] == 100
+    assert variants["control"]["assignment_sample_size"] == 1
+    assert variants["treatment"]["sample_size"] == 1
+    assert variants["treatment"]["assignment_sample_size"] == 1
+    assert variants["control"]["router_latency_ms"] == pytest.approx(0.1)
+    srm = result["diagnostics"]["sample_ratio_mismatch"]
+    assert srm["observed"] == {"control": 1, "treatment": 1}
+    assert srm["sample_size"] == 2
+    assert srm["detected"] is False

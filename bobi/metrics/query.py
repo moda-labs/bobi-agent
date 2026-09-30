@@ -900,7 +900,6 @@ class MetricsQueries:
             rows = conn.execute(
                 decisions_cte
                 + "SELECT d.variant_id,COUNT(*) AS sample_size,"
-                "AVG(d.router_latency_ms) AS router_latency_ms,"
                 "AVG(t.wall_duration_ms) AS turn_latency_ms,"
                 "AVG(CASE WHEN t.status='completed' THEN 1.0 ELSE 0.0 END) AS completion_rate,"
                 "AVG(CASE WHEN t.error_kind IS NOT NULL OR t.status IN ('failed','error','crashed') "
@@ -908,6 +907,21 @@ class MetricsQueries:
                 "AVG(CASE WHEN d.fallback_reason IS NOT NULL THEN 1.0 ELSE 0.0 END) AS fallback_rate "
                 "FROM decisions d JOIN turns t ON t.turn_id=d.turn_id "
                 "GROUP BY d.variant_id ORDER BY d.variant_id",
+                tuple(decision_params),
+            ).fetchall()
+            assignment_rows = conn.execute(
+                decisions_cte
+                + "SELECT variant_id,COUNT(*) AS assignment_sample_size,"
+                "AVG(router_latency_ms) AS router_latency_ms FROM ("
+                "SELECT d.variant_id,d.router_latency_ms,"
+                "ROW_NUMBER() OVER (PARTITION BY d.variant_id,"
+                "CASE WHEN d.assignment_status='assigned' "
+                "AND d.assignment_unit IS NOT NULL "
+                "AND d.assignment_key_hash IS NOT NULL "
+                "THEN d.assignment_unit || ':' || d.assignment_key_hash "
+                "ELSE 'turn:' || d.turn_id END "
+                "ORDER BY d.decided_at_us,d.turn_id) AS assignment_rank "
+                "FROM decisions d) WHERE assignment_rank=1 GROUP BY variant_id",
                 tuple(decision_params),
             ).fetchall()
             decision_metadata = conn.execute(
@@ -998,10 +1012,19 @@ class MetricsQueries:
                     "estimated_invocations": estimated,
                     "unknown_invocations": max(0, total - exact - estimated),
                 }
+            assignments_by_variant = {
+                row["variant_id"]: _row(row, omit=("variant_id",)) or {}
+                for row in assignment_rows
+            }
             variants = []
             for row in rows:
                 variant = _row(row) or {}
                 variant_id = row["variant_id"]
+                assignment = assignments_by_variant.get(variant_id, {})
+                variant["assignment_sample_size"] = int(
+                    assignment.get("assignment_sample_size") or 0
+                )
+                variant["router_latency_ms"] = assignment.get("router_latency_ms")
                 usage = usage_by_variant.get(variant_id, {})
                 variant["tokens"] = {
                     column: usage.get(column) for column in TOKEN_COLUMNS
@@ -1066,8 +1089,8 @@ class MetricsQueries:
                         ):
                             expected_weights[variant_id] = float(weight)
             observed_samples = {
-                row["variant_id"]: int(row["sample_size"] or 0)
-                for row in rows if row["variant_id"] is not None
+                variant["variant_id"]: int(variant["assignment_sample_size"] or 0)
+                for variant in variants if variant["variant_id"] is not None
             }
             expected_variants = list(expected_weights)
             if len(expected_variants) >= 2:

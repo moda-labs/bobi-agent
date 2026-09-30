@@ -68,8 +68,13 @@ def test_producer_contains_spool_failures_after_startup(tmp_path):
     producer.start()
 
     assert producer.try_emit(_event()) is True
+    deadline = time.monotonic() + 1
+    while producer.writer_errors == 0 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert producer.try_emit(_event(2)) is False
     assert producer.close(timeout=2) is True
     assert producer.writer_errors == 1
+    assert producer.health()["writer_available"] is False
 
 
 def test_producer_shutdown_is_bounded_when_writer_is_stuck(tmp_path):

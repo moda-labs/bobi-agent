@@ -31,6 +31,7 @@ class MetricsProducer:
         self._producer_id = producer_id
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._stop = threading.Event()
+        self._writer_failed = threading.Event()
         self._started = False
         self._closed = False
         self._writer_closed = False
@@ -49,7 +50,7 @@ class MetricsProducer:
             self._started = True
 
     def try_emit(self, event: MetricsEvent) -> bool:
-        if not self._started or self._closed:
+        if not self._started or self._closed or self._writer_failed.is_set():
             self.telemetry_events_dropped += 1
             return False
         try:
@@ -76,6 +77,7 @@ class MetricsProducer:
             "events_written": self.events_written,
             "last_write_at_us": self.last_write_at_us,
             "writer_alive": self._thread.is_alive(),
+            "writer_available": not self._writer_failed.is_set(),
             "writer_closed": self._writer_closed,
             "pid": os.getpid(),
             "started_at_us": self._started_at_us,
@@ -109,6 +111,7 @@ class MetricsProducer:
                         self._writer.flush_if_due()
                     except Exception:
                         self.writer_errors += 1
+                        self._writer_failed.set()
                     self._write_health()
                     continue
                 try:
@@ -117,6 +120,7 @@ class MetricsProducer:
                     self.last_write_at_us = time.time_ns() // 1000
                 except Exception:
                     self.writer_errors += 1
+                    self._writer_failed.set()
         finally:
             try:
                 self._writer.close()

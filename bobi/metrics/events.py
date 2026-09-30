@@ -48,6 +48,12 @@ def deterministic_event_id(provider: str, provider_event_id: str) -> str:
     return f"evt_{hashlib.sha256(material).hexdigest()}"
 
 
+def deterministic_metric_id(prefix: str, *parts: object) -> str:
+    """Return the stable identifier used for normalized telemetry entities."""
+    material = json.dumps(parts, ensure_ascii=True, separators=(",", ":"))
+    return f"{prefix}_{hashlib.sha256(material.encode()).hexdigest()}"
+
+
 @dataclass(frozen=True)
 class MetricsEvent:
     event_type: str

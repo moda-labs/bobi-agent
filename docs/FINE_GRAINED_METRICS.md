@@ -167,6 +167,8 @@ literal claim that recording an event costs no CPU:
 Telemetry is observational. It must never change the agent result:
 
 - a full queue drops telemetry and increments `telemetry_events_dropped`;
+- a detected spool-writer failure marks that producer unavailable and rejects
+  later enqueues instead of reporting false acceptance;
 - a spool, schema, database, or query failure stays inside the metrics boundary;
 - a failed or absent collector does not fail a turn;
 - exact provider facts are reconciled later from retained transcripts where
@@ -812,13 +814,15 @@ variants, weights, model mapping, router/policy/feature versions, control model,
 or cohort quarantines the conflicting event. Create a new experiment ID for a
 new policy.
 
-> [!WARNING]
-> The current runtime records each router decision before its invocation, but a
-> preconstructed persistent treatment client is not atomically coupled to
-> successful queue admission for every later turn. Queue saturation can therefore
-> drop a per-turn decision without changing the already selected client model.
-> Do not treat the strict treatment-admission guarantee as complete until model
-> selection and router-event reservation share one atomic API.
+Before constructing a treatment client, the runtime admits the deterministic
+session assignment through the same non-blocking producer queue. Rejected
+admission falls back to the configured control model and does not enroll the
+session. A producer with a known spool-writer failure also rejects later
+admissions. The accepted session event carries only privacy-safe assignment
+metadata; projection deterministically materializes each turn's router decision
+from that admission, so a later dropped per-turn decision event does not create
+an unmeasured treatment turn. This avoids reconnecting persistent clients and
+keeps admission to one `put_nowait()` operation.
 
 Runtime completion, error, and latency outcomes are separate from versioned
 quality outcomes. If execution falls back after assignment, analysis keeps the
@@ -995,11 +999,13 @@ rows instead of returning a partial atomic view. Every serialized result is
 also capped at 512 KiB.
 
 Experiment filters (`from`/`to`, cohort, outcome definition, evaluator
-name/version) are applied by the read model. Each variant reports sample size,
-completion/error/fallback rates, router and turn latency, token dimensions,
-separate reported/estimated cost, and exact/estimated/unknown invocation
-coverage. Numeric outcomes remain separated by definition, source, evaluator,
-evaluator version, and estimate status.
+name/version) are applied by the read model. Each variant reports turn
+`sample_size`, independent `assignment_sample_size`, completion/error/fallback
+rates, router and turn latency, token dimensions, separate reported/estimated
+cost, and exact/estimated/unknown invocation coverage. Sample-ratio mismatch
+uses distinct assignment units rather than correlated turns. Numeric outcomes
+remain separated by definition, source, evaluator, evaluator version, and
+estimate status.
 
 Example:
 

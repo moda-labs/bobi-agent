@@ -7,6 +7,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from bobi.metrics.events import deterministic_metric_id
 from bobi.metrics.store import raw_payload
 
 ORPHAN_TTL_US = 24 * 60 * 60 * 1_000_000
@@ -149,6 +150,47 @@ def _project_row(
     )
 
 
+def _project_admitted_router_decision(
+    conn: sqlite3.Connection,
+    turn_payload: dict[str, object],
+) -> None:
+    session = conn.execute(
+        "SELECT metadata_json FROM sessions WHERE session_id=?",
+        (turn_payload.get("session_id"),),
+    ).fetchone()
+    if session is None:
+        return
+    try:
+        metadata = json.loads(str(session["metadata_json"] or "{}"))
+    except (TypeError, ValueError):
+        return
+    assignment = metadata.get("router_assignment")
+    if not isinstance(assignment, dict) or not assignment.get("experiment_id"):
+        return
+    turn_id = turn_payload.get("turn_id")
+    if not isinstance(turn_id, str) or not turn_id:
+        return
+    try:
+        _project_row(
+            conn,
+            TARGETS["router_decision.recorded"],
+            {
+                "router_decision_id": deterministic_metric_id(
+                    "route", turn_id, assignment["experiment_id"]
+                ),
+                "turn_id": turn_id,
+                **assignment,
+                "decided_at_us": (
+                    turn_payload.get("started_at_us")
+                    or assignment.get("decided_at_us")
+                ),
+            },
+        )
+    except (TypeError, ValueError, sqlite3.IntegrityError):
+        # Recovery metadata is optional; it must never block the turn row.
+        return
+
+
 def _require_parents(
     conn: sqlite3.Connection,
     event_type: str,
@@ -267,6 +309,8 @@ def project_pending(
                 payload = raw_payload(row)
                 _require_parents(conn, row["event_type"], payload)
                 _project_row(conn, target, payload)
+                if row["event_type"] == "turn.recorded":
+                    _project_admitted_router_decision(conn, payload)
             except MissingParentError:
                 conn.execute("ROLLBACK TO project_one")
                 conn.execute("RELEASE project_one")

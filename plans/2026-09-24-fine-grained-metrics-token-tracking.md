@@ -1179,9 +1179,11 @@ Definition of done: versioned Admin protocol; existing `usage` and `bobi_usage_s
 ### Phase 4 - JEV router experiments
 
 - Introduce the router interface and emit `router_decision` before invocation.
+- Admit a deterministic session assignment before constructing a treatment client. If the bounded producer rejects admission or has detected an unrecoverable spool-writer failure, run the configured control model without enrolling the session. Carry the privacy-safe admitted assignment in session metadata so deferred projection can reconstruct a missing per-turn router decision without reconnecting a persistent client.
 - Implement deterministic experiment assignment and immutable policy/feature versions.
 - Record fallbacks and outcomes separately.
 - Add experiment aggregation and guard against sample-ratio mismatch, missing outcomes, and exact/estimated coverage imbalance between variants.
+- Compute sample-ratio mismatch over distinct randomized assignment units, never over correlated turns from the same session or run. Report turn and assignment sample sizes separately.
 - Rerun the full live smoke matrix under both control and treatment assignments and prove the routing record precedes the model invocation.
 
 Verification tooling:
