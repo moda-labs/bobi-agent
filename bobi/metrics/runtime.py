@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from bobi.metrics.events import MetricsEvent, uuid7
 from bobi.metrics.producer import MetricsProducer
+from bobi.metrics.router import RouterDecision, load_experiment, route
 
 if TYPE_CHECKING:
     from bobi.brain.base import BrainInvocation, BrainToolExecution, BrainUsage, TurnResult
@@ -73,6 +74,7 @@ class MetricsRuntime:
         self._producer: MetricsProducer | None = None
         self._init_error = ""
         self.events_emitted = 0
+        self._experiment = None
 
         try:
             from bobi.metrics.faults import (
@@ -91,6 +93,14 @@ class MetricsRuntime:
         if self.mode not in ENABLED_MODES:
             self.mode = DISABLED
             return
+
+        try:
+            self._experiment = load_experiment()
+        except Exception as exc:
+            # Bad experiment configuration disables routing, never the turn or
+            # the metrics producer.  The warning intentionally contains no
+            # configuration value because it may include deployment metadata.
+            log.warning("metrics: experiment routing disabled: %s", exc)
 
         metrics_root = self.root / "state" / "metrics"
         segment = (
@@ -119,6 +129,35 @@ class MetricsRuntime:
 
     def session_id(self, session_name: str) -> str:
         return _stable_id("ses", self.producer_id, session_name)
+
+    def resolve_model(
+        self,
+        requested_model: str,
+        *,
+        experiment_subject: str = "",
+        run_key: str = "",
+        session_name: str = "",
+    ) -> str:
+        """Resolve a treatment only when its decision can enter the spool."""
+        if not self.enabled or self._experiment is None:
+            return requested_model
+        try:
+            decision = route(
+                self._experiment,
+                requested_model="",
+                experiment_subject=(
+                    experiment_subject
+                    or os.environ.get("BOBI_METRICS_EXPERIMENT_SUBJECT", "")
+                ),
+                run_key=run_key,
+                session_id=session_name,
+            )
+        except Exception:
+            log.debug("metrics: model routing failed open", exc_info=True)
+            return requested_model
+        if decision is None or decision.assignment_status != "assigned":
+            return requested_model
+        return decision.model_selected or requested_model
 
     def emit(
         self,
@@ -193,6 +232,7 @@ class MetricsRuntime:
         is_user_initiated: bool = False,
         model_requested: str = "",
         prompt_bytes: int | None = None,
+        experiment_subject: str = "",
         started_at_us: int | None = None,
     ) -> "TurnObservation":
         started = started_at_us or time.time_ns() // 1000
@@ -218,6 +258,10 @@ class MetricsRuntime:
             is_user_initiated=is_user_initiated,
             model_requested=model_requested,
             prompt_bytes=prompt_bytes,
+            experiment_subject=(
+                experiment_subject
+                or os.environ.get("BOBI_METRICS_EXPERIMENT_SUBJECT", "")
+            ),
             started_at_us=started,
         )
         observation.start()
@@ -279,9 +323,12 @@ class TurnObservation:
     is_user_initiated: bool
     model_requested: str
     prompt_bytes: int | None
+    experiment_subject: str
     started_at_us: int
     first_output_at_us: int | None = None
     results: list["TurnResult"] = field(default_factory=list)
+    router_decision_id: str | None = None
+    router_decision: RouterDecision | None = None
     _finished: bool = False
 
     def start(self) -> None:
@@ -291,6 +338,20 @@ class TurnObservation:
                 self.runtime._provider_sessions.get(self.session_id, ""),
             )
         _emit_turn_row(self, status="running", ended_at_us=None, error_kind="")
+        self.router_decision = route(
+            self.runtime._experiment,
+            requested_model=self.model_requested,
+            experiment_subject=self.experiment_subject,
+            run_key=self.run_key,
+            # The Bobi session name is stable across process restarts; the
+            # telemetry session UUID intentionally is not.
+            session_id=self.session_name,
+        )
+        if self.router_decision is not None:
+            self.router_decision_id = _stable_id(
+                "route", self.turn_id, self.router_decision.experiment_id
+            )
+            _emit_router_decision(self)
 
     def mark_first_output(self) -> None:
         if self.first_output_at_us is None:
@@ -530,6 +591,78 @@ def _emit_turn_row(
     )
 
 
+def _emit_router_decision(observation: TurnObservation) -> None:
+    decision = observation.router_decision
+    decision_id = observation.router_decision_id
+    if decision is None or decision_id is None:
+        return
+    observation.runtime.emit(
+        "router_decision.recorded",
+        {
+            "router_decision_id": decision_id,
+            "turn_id": observation.turn_id,
+            "experiment_id": decision.experiment_id,
+            "variant_id": decision.variant_id,
+            "assignment_unit": decision.assignment_unit,
+            "assignment_status": decision.assignment_status,
+            "assignment_key_hash": decision.assignment_key_hash,
+            "assignment_algorithm": decision.assignment_algorithm,
+            "cohort": decision.cohort,
+            "router_name": decision.router_name,
+            "router_version": decision.router_version,
+            "policy_version": decision.policy_version,
+            "feature_schema_version": decision.feature_schema_version,
+            "candidate_models_json": _json(decision.candidate_models),
+            "model_selected": decision.model_selected,
+            "control_model": decision.control_model,
+            "router_score": decision.router_score,
+            "router_reason": decision.router_reason,
+            "router_latency_ms": decision.router_latency_ms,
+            "fallback_reason": decision.fallback_reason,
+            "decided_at_us": decision.decided_at_us,
+            "metadata_json": _json({
+                "config_fingerprint": decision.config_fingerprint,
+                "expected_weight": decision.expected_weight,
+                "expected_weights": dict(decision.expected_weights),
+            }),
+        },
+        session_id=observation.session_id,
+        turn_id=observation.turn_id,
+    )
+
+
+def _emit_runtime_outcome(
+    observation: TurnObservation,
+    *,
+    name: str,
+    value: float | None = None,
+    text: str | None = None,
+    observed_at_us: int,
+) -> None:
+    decision_id = observation.router_decision_id
+    if decision_id is None:
+        return
+    observation.runtime.emit(
+        "experiment_outcome.recorded",
+        {
+            "outcome_id": _stable_id("outcome", decision_id, name),
+            "router_decision_id": decision_id,
+            "outcome_name": name,
+            "outcome_value": value,
+            "outcome_text": text,
+            "outcome_definition_version": "bobi-runtime-v1",
+            "outcome_source": "runtime",
+            "evaluator_name": "bobi-runtime",
+            "evaluator_version": "1",
+            "is_estimated": 0,
+            "observed_at_us": observed_at_us,
+            "metadata_json": "{}",
+        },
+        session_id=observation.session_id,
+        turn_id=observation.turn_id,
+    )
+
+
 def _invocation_rows(
     observation: TurnObservation,
     ended_at_us: int,
@@ -612,7 +745,7 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
                 "invocation_id": invocation_id,
                 "turn_id": observation.turn_id,
                 "workflow_step_id": observation.workflow_step_id,
-                "router_decision_id": None,
+                "router_decision_id": observation.router_decision_id,
                 "parent_invocation_id": None,
                 "invocation_index": index,
                 "provider": observation.provider,
@@ -721,6 +854,25 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             session_id=observation.session_id,
             turn_id=observation.turn_id,
         )
+    _emit_runtime_outcome(
+        observation,
+        name="completion",
+        value=1.0 if status == "completed" else 0.0,
+        observed_at_us=ended_at_us,
+    )
+    _emit_runtime_outcome(
+        observation,
+        name="error",
+        value=0.0 if status == "completed" and not error_kind else 1.0,
+        text=error_kind or None,
+        observed_at_us=ended_at_us,
+    )
+    _emit_runtime_outcome(
+        observation,
+        name="turn_latency_ms",
+        value=max(0, ended_at_us - observation.started_at_us) / 1000,
+        observed_at_us=ended_at_us,
+    )
     if fault_action is not None:
         time.sleep(fault_action.hold_seconds)
         _emit_turn_row(
@@ -832,6 +984,25 @@ def observe_turn(session_name: str, **kwargs: Any) -> TurnObservation:
         return MetricsRuntime(Path.cwd(), mode=DISABLED).begin_turn(
             session_name, **kwargs
         )
+
+
+def resolve_experiment_model(
+    requested_model: str,
+    *,
+    experiment_subject: str = "",
+    run_key: str = "",
+    session_name: str = "",
+) -> str:
+    try:
+        return get_runtime().resolve_model(
+            requested_model,
+            experiment_subject=experiment_subject,
+            run_key=run_key,
+            session_name=session_name,
+        )
+    except Exception:
+        log.debug("metrics: experiment model resolution failed open", exc_info=True)
+        return requested_model
 
 
 def observe_workflow_step(

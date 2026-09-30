@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from bobi.metrics.schema import SCHEMA_VERSION
+from bobi.metrics.experiment import sample_ratio_mismatch
 from bobi.metrics.store import connect
 
 MAX_ROWS = 200
@@ -862,13 +863,6 @@ class MetricsQueries:
             if value:
                 outcome_filters.append(f"o.{column}=?")
                 outcome_params.append(value)
-        if outcome_filters:
-            decision_filters.append(
-                "EXISTS (SELECT 1 FROM experiment_outcomes o "
-                "WHERE o.router_decision_id=r.router_decision_id AND "
-                + " AND ".join(outcome_filters) + ")"
-            )
-            decision_params.extend(outcome_params)
         decision_where = " AND ".join(decision_filters)
 
         def build(conn: sqlite3.Connection) -> dict[str, object]:
@@ -898,6 +892,11 @@ class MetricsQueries:
                 "GROUP BY d.variant_id ORDER BY d.variant_id",
                 tuple(decision_params),
             ).fetchall()
+            decision_metadata = conn.execute(
+                decisions_cte
+                + "SELECT variant_id,assignment_status,metadata_json FROM decisions",
+                tuple(decision_params),
+            ).fetchall()
             usage_rows = conn.execute(
                 decisions_cte
                 + "SELECT vt.variant_id,"
@@ -907,6 +906,10 @@ class MetricsQueries:
                     for column in TOKEN_COLUMNS
                 )
                 + ",COUNT(DISTINCT b.turn_id) AS measured_turns,"
+                "COUNT(DISTINCT CASE WHEN b.is_estimated=0 THEN b.turn_id END) "
+                "AS exact_measurement_turns,"
+                "COUNT(DISTINCT CASE WHEN b.is_estimated=1 THEN b.turn_id END) "
+                "AS estimated_measurement_turns,"
                 "COUNT(DISTINCT CASE WHEN b.scope='invocation' THEN b.turn_id END) "
                 "AS invocation_granularity_turns,"
                 "COUNT(DISTINCT CASE WHEN b.scope='turn' THEN b.turn_id END) "
@@ -946,8 +949,6 @@ class MetricsQueries:
             ).fetchall()
             outcome_where = decision_where
             outcome_values = list(decision_params)
-            if not outcome_filters:
-                outcome_where += " AND 1=1"
             outcomes = conn.execute(
                 "SELECT r.variant_id,o.outcome_name,o.outcome_definition_version,"
                 "o.outcome_source,o.evaluator_name,o.evaluator_version,o.is_estimated,"
@@ -1003,17 +1004,150 @@ class MetricsQueries:
                     usage.get("invocation_granularity_turns"),
                     usage.get("turn_granularity_turns"),
                 )
+                exact_turns = int(usage.get("exact_measurement_turns") or 0)
+                estimated_turns = int(usage.get("estimated_measurement_turns") or 0)
+                sample_size = int(row["sample_size"] or 0)
+                variant["coverage"].update({
+                    "exact_measurement_turns": exact_turns,
+                    "estimated_measurement_turns": estimated_turns,
+                    "unknown_measurement_turns": max(
+                        0, sample_size - exact_turns - estimated_turns
+                    ),
+                })
                 variants.append(variant)
+            variant_samples = {
+                row["variant_id"]: int(row["sample_size"] or 0) for row in rows
+            }
             outcome_views = [_row(row) or {} for row in outcomes]
             _enforce_row_count(variants, outcome_views)
             coverage_where = (
                 "EXISTS (SELECT 1 FROM router_decisions r WHERE r.turn_id=i.turn_id AND "
                 + decision_where + ")"
             )
+            expected_weights: dict[str, float] = {}
+            config_fingerprints: set[str] = set()
+            missing_config_fingerprints = 0
+            for decision in decision_metadata:
+                try:
+                    metadata = json.loads(decision["metadata_json"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    metadata = {}
+                fingerprint = metadata.get("config_fingerprint")
+                if isinstance(fingerprint, str) and fingerprint:
+                    config_fingerprints.add(fingerprint)
+                else:
+                    missing_config_fingerprints += 1
+                weights = metadata.get("expected_weights")
+                if isinstance(weights, dict):
+                    for variant_id, weight in weights.items():
+                        if (
+                            isinstance(variant_id, str)
+                            and not isinstance(weight, bool)
+                            and isinstance(weight, (int, float))
+                            and float(weight) > 0
+                        ):
+                            expected_weights[variant_id] = float(weight)
+            observed_samples = {
+                row["variant_id"]: int(row["sample_size"] or 0)
+                for row in rows if row["variant_id"] is not None
+            }
+            expected_variants = list(expected_weights)
+            if len(expected_variants) >= 2:
+                srm = sample_ratio_mismatch(
+                    [observed_samples.get(variant_id, 0) for variant_id in expected_variants],
+                    [expected_weights[variant_id] for variant_id in expected_variants],
+                )
+                srm["expected_weights"] = dict(expected_weights)
+                srm["observed"] = {
+                    variant_id: observed_samples.get(variant_id, 0)
+                    for variant_id in expected_variants
+                }
+            else:
+                srm = {
+                    "sample_size": sum(observed_samples.values()),
+                    "chi_square": None,
+                    "degrees_of_freedom": max(0, len(observed_samples) - 1),
+                    "p_value": None,
+                    "alpha": 0.001,
+                    "detected": False,
+                    "expected_weights": None,
+                    "status": "expected_weights_unavailable",
+                }
+            coverage_rates = {}
+            for variant in variants:
+                coverage = variant["coverage"]
+                total = int(variant["sample_size"] or 0)
+                coverage_rates[variant["variant_id"]] = {
+                    "total_turns": total,
+                    "exact_rate": (
+                        coverage["exact_measurement_turns"] / total if total else None
+                    ),
+                    "estimated_rate": (
+                        coverage["estimated_measurement_turns"] / total if total else None
+                    ),
+                }
+            exact_rates = [
+                row["exact_rate"] for row in coverage_rates.values()
+                if row["exact_rate"] is not None
+            ]
+            estimated_rates = [
+                row["estimated_rate"] for row in coverage_rates.values()
+                if row["estimated_rate"] is not None
+            ]
+            outcome_identity_fields = (
+                "outcome_name", "outcome_definition_version", "outcome_source",
+                "evaluator_name", "evaluator_version", "is_estimated",
+            )
+            outcome_samples = {
+                (
+                    outcome["variant_id"],
+                    *(outcome[field] for field in outcome_identity_fields),
+                ): int(outcome["sample_size"] or 0)
+                for outcome in outcome_views
+            }
+            outcome_identities = sorted({
+                tuple(outcome[field] for field in outcome_identity_fields)
+                for outcome in outcome_views
+            }, key=lambda item: tuple(str(value) for value in item))
+            outcome_missing = []
+            for variant_id, variant_sample_size in variant_samples.items():
+                for identity in outcome_identities:
+                    observed = outcome_samples.get((variant_id, *identity), 0)
+                    missing = max(0, variant_sample_size - observed)
+                    outcome_missing.append({
+                        "variant_id": variant_id,
+                        **dict(zip(outcome_identity_fields, identity)),
+                        "missing_count": missing,
+                        "missing_rate": (
+                            missing / variant_sample_size
+                            if variant_sample_size else None
+                        ),
+                    })
             return {
                 "experiment_id": experiment_id,
                 "variants": variants,
                 "outcomes": outcome_views,
+                "diagnostics": {
+                    "sample_ratio_mismatch": srm,
+                    "outcome_missingness": outcome_missing,
+                    "missing_outcomes": sum(
+                        int(outcome["missing_count"]) for outcome in outcome_missing
+                    ),
+                    "coverage_rates": coverage_rates,
+                    "exact_coverage_rate_spread": (
+                        max(exact_rates) - min(exact_rates)
+                        if len(exact_rates) >= 2 else None
+                    ),
+                    "estimated_coverage_rate_spread": (
+                        max(estimated_rates) - min(estimated_rates)
+                        if len(estimated_rates) >= 2 else None
+                    ),
+                    "config_consistent": (
+                        len(config_fingerprints) == 1
+                        and missing_config_fingerprints == 0
+                    ),
+                    "missing_config_fingerprints": missing_config_fingerprints,
+                },
                 "coverage": _coverage(conn, coverage_where, tuple(decision_params)),
             }
 

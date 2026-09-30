@@ -37,6 +37,34 @@ def _make_msg(wait=False):
     return Message(id="m1", sender="test", text="hello", wait=wait)
 
 
+def test_session_routes_model_before_brain_session_construction(
+    bobi_install, monkeypatch
+):
+    captured = {}
+
+    def route_model(requested, **context):
+        captured.update(context)
+        return "treatment-model"
+
+    monkeypatch.setattr(
+        "bobi.metrics.runtime.resolve_experiment_model", route_model
+    )
+    routed = Session(
+        name="experiment-session",
+        cwd=str(bobi_install.repo_path),
+        extra_options={"model": "control-model"},
+        run_key="run-1",
+        experiment_subject="subject-1",
+    )
+
+    assert routed._extra_options["model"] == "treatment-model"
+    assert captured == {
+        "experiment_subject": "subject-1",
+        "run_key": "run-1",
+        "session_name": "experiment-session",
+    }
+
+
 def _fake_client(session, drain_response="response text"):
     """Attach a fake client with query() and a fake _drain_turn."""
 

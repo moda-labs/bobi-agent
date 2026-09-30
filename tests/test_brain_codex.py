@@ -365,6 +365,28 @@ async def test_spawn_codex_accepts_large_ndjson_events(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_spawn_codex_scrubs_metrics_routing_secrets(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "private-config")
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "private-secret")
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", "private-subject")
+    script = (
+        "import json, os\n"
+        "names = ['BOBI_METRICS_EXPERIMENT_JSON', "
+        "'BOBI_METRICS_ASSIGNMENT_SECRET', 'BOBI_METRICS_EXPERIMENT_SUBJECT']\n"
+        "print(json.dumps({'type': 'env', 'present': "
+        "[name for name in names if name in os.environ]}), flush=True)\n"
+    )
+
+    events = [
+        event async for event in _spawn_codex(
+            [sys.executable, "-c", script], str(tmp_path)
+        )
+    ]
+
+    assert events == [{"type": "env", "present": []}]
+
+
+@pytest.mark.asyncio
 async def test_spawn_codex_writes_and_closes_large_stdin(tmp_path):
     script = (
         "import json, sys\n"

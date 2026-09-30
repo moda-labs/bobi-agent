@@ -406,6 +406,8 @@ async def _run_agent_supervised(
     name = _session_name(run_key, role=role, phase=phase)
     _cfg = _load_team_config()
     model = _resolve_launch_model(role, cfg=_cfg)
+    from bobi.metrics.runtime import resolve_experiment_model
+    model = resolve_experiment_model(model, run_key=run_key, session_name=name)
     effort = _resolve_launch_effort(role, cfg=_cfg)
     max_turns = _resolve_launch_max_turns(role, explicit=max_turns, cfg=_cfg)
     saved_id = "" if fresh else load_resumable_session_id(name, model)
@@ -647,6 +649,7 @@ def run_phase_blocking(
             **({"model": model} if model else {}),
             **({"effort": effort} if effort else {}),
         },
+        run_key=run_key,
     )
 
     ok = session.start(startup_prompt=prompt, timeout=effective_timeout)
@@ -875,6 +878,8 @@ def run_persistent_agent(
     merged_mcp = mcp_servers if mcp_servers is not None else (
         _cfg.mcp_servers if _cfg else None)
     model = _resolve_launch_model(role, explicit=model, cfg=_cfg)
+    from bobi.metrics.runtime import resolve_experiment_model
+    model = resolve_experiment_model(model, session_name=name)
     effort = _resolve_launch_effort(role, explicit=effort, cfg=_cfg)
 
     session = Session(

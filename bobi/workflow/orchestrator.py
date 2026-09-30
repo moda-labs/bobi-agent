@@ -28,6 +28,7 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
 from bobi.brain.turns import drain_turn
+from bobi.metrics.runtime import TurnObservation, observe_turn
 from bobi.subagent import _emit_lifecycle_event
 from bobi.timeutil import now_iso
 from bobi.workflow.schema import Workflow, StepDef
@@ -652,11 +653,16 @@ async def _run_workflow_async(
         # team default (#617). The acting role mirrors prompt resolution:
         # a forced --role wins, else the step's agent, else the inherited one.
         if launch_model:
-            return launch_model
-        if step and step.model:
-            return step.model
-        step_role = role or ((step.agent if step else "") or current_agent)
-        return resolve_model(team_cfg, role=step_role)
+            requested = launch_model
+        elif step and step.model:
+            requested = step.model
+        else:
+            step_role = role or ((step.agent if step else "") or current_agent)
+            requested = resolve_model(team_cfg, role=step_role)
+        from bobi.metrics.runtime import resolve_experiment_model
+        return resolve_experiment_model(
+            requested, run_key=run_key, session_name=session_name
+        )
 
     def _effective_step_effort(step: StepDef | None) -> str:
         # The reasoning-effort sibling of _effective_step_model (#778), same
@@ -1252,12 +1258,19 @@ async def _run_workflow_async(
             telemetry_context["prompt_bytes"] = len(prompt.encode("utf-8"))
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
+            turn_observation = observe_turn(
+                session_name,
+                provider=getattr(client, "provider", "anthropic"),
+                model_requested=current_model,
+                **telemetry_context,
+            )
             await client.query(prompt)
             drain = await _drain_response(
                 client,
                 session_name,
                 model=current_model,
                 telemetry_context=telemetry_context,
+                observation=turn_observation,
             )
 
             # A turn-cap kill is recoverable, not terminal (#845): the harness
@@ -1310,6 +1323,12 @@ async def _run_workflow_async(
                     telemetry_context["prompt_bytes"] = len(
                         resume_prompt.encode("utf-8")
                     )
+                    turn_observation = observe_turn(
+                        session_name,
+                        provider=getattr(client, "provider", "anthropic"),
+                        model_requested=current_model,
+                        **telemetry_context,
+                    )
                     await client.query(resume_prompt)
                 except Exception as e:
                     log.error(
@@ -1328,6 +1347,7 @@ async def _run_workflow_async(
                     session_name,
                     model=current_model,
                     telemetry_context=telemetry_context,
+                    observation=turn_observation,
                 )
 
             if drain.final_text is None:
@@ -1360,12 +1380,19 @@ async def _run_workflow_async(
                 telemetry_context["prompt_bytes"] = len(
                     fix_prompt.encode("utf-8")
                 )
+                turn_observation = observe_turn(
+                    session_name,
+                    provider=getattr(client, "provider", "anthropic"),
+                    model_requested=current_model,
+                    **telemetry_context,
+                )
                 await client.query(fix_prompt)
                 await _drain_response(
                     client,
                     session_name,
                     model=current_model,
                     telemetry_context=telemetry_context,
+                    observation=turn_observation,
                 )
                 handoff = _read_handoff(session_name, step.name)
                 missing = _validate_handoff(step, handoff)
@@ -1513,6 +1540,7 @@ async def _drain_response(
     *,
     model: str,
     telemetry_context: dict | None = None,
+    observation: TurnObservation | None = None,
 ) -> DrainResult:
     """Adapt one drained turn into the step loop's flat shape.
 
@@ -1531,6 +1559,7 @@ async def _drain_response(
         session_name,
         model=model,
         telemetry_context=telemetry_context,
+        observation=observation,
     )
     msg = outcome.result
     if msg is None:

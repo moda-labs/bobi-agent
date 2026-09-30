@@ -191,9 +191,13 @@ async def _spawn_codex(
     ``codex exec`` blocks reading a piped-but-open stdin (Phase-0 gotcha).
     Non-JSON lines (banners) are skipped.
     """
+    from bobi.env import agent_spawn_env
+    from bobi.metrics.router import provider_subprocess_env
+
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
+        env=provider_subprocess_env(agent_spawn_env()),
         stdin=asyncio.subprocess.PIPE if stdin_text is not None
         else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
@@ -310,11 +314,12 @@ class _CodexSession:
         direct uses outside validation."""
         from bobi.env import agent_spawn_env
         from bobi.mcp_handshake import preflight_timeout, probe_servers
+        from bobi.metrics.router import provider_subprocess_env
 
         return await probe_servers(
             self._mcp_servers,
             timeout=preflight_timeout(),
-            env=self._mcp_env or agent_spawn_env(),
+            env=provider_subprocess_env(self._mcp_env or agent_spawn_env()),
         )
 
     async def connect(self) -> None:

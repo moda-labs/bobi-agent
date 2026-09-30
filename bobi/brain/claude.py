@@ -815,6 +815,13 @@ class ClaudeBrain(GatewayAwareEngine):
         extra = with_default_effort_option(with_default_model_option(options))
         if gateway_base_url():
             extra = with_gateway_env(extra)
+        from bobi.env import agent_spawn_env
+        from bobi.metrics.router import provider_subprocess_env
+
+        extra["env"] = provider_subprocess_env({
+            **agent_spawn_env(),
+            **(extra.get("env") or {}),
+        })
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
         # Never inherit the SDK's 1 MB max_buffer_size default — a single >1 MB
@@ -863,6 +870,13 @@ class ClaudeBrain(GatewayAwareEngine):
         extra = with_default_effort_option(options)
         if gateway_base_url():
             extra = with_gateway_env(extra)
+        from bobi.env import agent_spawn_env
+        from bobi.metrics.router import provider_subprocess_env
+
+        extra["env"] = provider_subprocess_env({
+            **agent_spawn_env(),
+            **(extra.get("env") or {}),
+        })
         model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)

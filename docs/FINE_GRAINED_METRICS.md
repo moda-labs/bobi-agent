@@ -4,13 +4,11 @@ This document is the implementation and operations guide for Bobi's
 fine-grained token, latency, cost, and model-routing telemetry.
 
 > [!IMPORTANT]
-> **Implementation status:** Phase 0-2 are accepted. Phase 3 Admin/MCP code,
-> query isolation, pagination/caps, the operator client, and local performance
-> gates are implemented. Current-source real Worker/Admin/MCP transport passes
-> for summary, session, turn, hotspot, and experiment queries. Earlier
-> development Claude/Codex S1/S2/S4 evidence is source-stale after later
-> corrections. Phase 3 acceptance requires the full live matrix to be rerun
-> from the accepted commit. Phase 4 routing is not started.
+> **Implementation status:** Phase 0-3 are accepted. Phase 4 deterministic
+> routing, experiment outcomes, aggregation diagnostics, benchmarks, and live
+> matrix orchestration are implemented locally. Phase 4 is not accepted until
+> the commit-bound S1-S4 control/treatment matrix passes for both Claude and
+> Codex with exact provider coverage.
 > Metrics remain disabled by default; set
 > `BOBI_METRICS_MODE=shadow` or `full` to exercise the pipeline.
 
@@ -433,8 +431,8 @@ deadline. They never migrate, checkpoint, or write.
 ## 3. Codebase and Module Map
 
 > [!NOTE]
-> Phase 0-3 modules and runtime/Admin/MCP wiring are implemented. Phase 3 is
-> not accepted until its live gates pass.
+> Phase 0-3 modules and runtime/Admin/MCP wiring are accepted. Phase 4 modules
+> are implemented locally; the real-provider control/treatment gate remains.
 
 ### New `bobi/metrics/` modules
 
@@ -449,10 +447,13 @@ deadline. They never migrate, checkpoint, or write.
 | `bobi/metrics/schema.py` | 0 | Executable v1 DDL and canonical `best_usage` view | Open connections or perform migrations |
 | `bobi/metrics/store.py` | 0-2 | SQLite connection profiles, migrations, raw staging, snapshots, backup/rebuild/prune | Expose writable connections to Admin readers |
 | `bobi/metrics/projection.py` | 0-2 | Dependency-ordered deferred projection, retry, and per-event quarantine | Reject raw ingestion because a normalized parent is late |
-| `bobi/metrics/runtime.py` | 1 | Process-local session/turn/step observer, provider metadata normalization, and fail-safe event emission | Write SQLite, wait on locks, or retain prompt/tool bodies |
+| `bobi/metrics/runtime.py` | 1, 4 | Process-local session/turn/step observer, provider metadata normalization, pre-invocation routing, runtime outcomes, and fail-safe event emission | Write SQLite, wait on locks, retain prompt/tool bodies, or route when the producer is unavailable |
 | `bobi/metrics/reconcile.py` | 2 | Claude transcript and version-gated Codex rollout adapters; provider deduplication | Blindly sum repeated transcript rows |
 | `bobi/metrics/estimate.py` | 2 | Collector-owned estimator registry, model qualification, calibrated fallback rows | Run token counting synchronously in a model turn |
-| `bobi/metrics/query.py` | 3 | Summary/session/turn/hotspot/experiment read models, cursor binding, coverage, response caps | Return prompt/tool bodies or combine incompatible granularities |
+| `bobi/metrics/query.py` | 3-4 | Summary/session/turn/hotspot/experiment read models, cursor binding, SRM/missing-outcome/config/coverage diagnostics, and response caps | Return prompt/tool bodies or combine incompatible granularities |
+| `bobi/metrics/router.py` | 4 | Strict experiment config, HMAC assignment, stable-key precedence, intent-to-treat fallback, public fingerprints, and subprocess environment scrubbing | Persist raw assignment keys/secrets or silently change models without a live producer |
+| `bobi/metrics/experiment.py` | 4 | Chi-square sample-ratio-mismatch calculation and p-value reporting | Claim significance without the configured method and threshold |
+| `bobi/metrics/outcomes.py` | 4 | Strict, idempotent external evaluator/human quality-outcome ingestion | Permit the router or tested model to self-grade quality |
 
 Projection logic may remain private helpers in `collector.py` and `store.py`.
 Create a separate projector module only if those files become hard to test or
@@ -463,8 +464,8 @@ their ownership becomes ambiguous.
 | File | Required change |
 |---|---|
 | `bobi/brain/base.py` | Replace or extend lossy `BrainCost` with a provider-neutral usage type that preserves cache write, reasoning output, raw usage, and provenance |
-| `bobi/brain/claude.py` | Emit exact usage/model/invocation facts from SDK events; preserve cache-creation detail and difference persistent-session terminal totals |
-| `bobi/brain/codex.py` | Difference resumed-thread `turn.completed.usage`; preserve cache-write/reasoning output and live tool timing; retain unknown provider turn/model fields for Phase 2 enrichment |
+| `bobi/brain/claude.py` | Emit exact usage/model/invocation facts and remove experiment config, subject, and secret from the Claude subprocess environment |
+| `bobi/brain/codex.py` | Preserve exact usage/tool timing and remove experiment config, subject, and secret from Codex and MCP-preflight subprocess environments |
 | `bobi/brain/turns.py` | Attach the shared telemetry observer to workflow and supervised/detached turn drains |
 | `bobi/session.py` | Attach the same observer to persistent `Session._drain_turn()` without duplicating semantics |
 | `bobi/chat_history.py` | Keep transcript discovery/ordered tool information compatible with reconciliation |
@@ -770,6 +771,53 @@ exact/estimated/unknown invocation evidence.
 
 ## 5. Developer and Operator Guide
 
+### Enable an experiment
+
+Routing is opt-in and fail-open. It is active only when metrics mode is
+`shadow` or `full`, the experiment configuration and secret are valid, and the
+process-local metrics producer starts successfully. With metrics disabled, an
+invalid config, or a spool startup failure, Bobi preserves the configured
+model.
+
+```bash
+export BOBI_METRICS_MODE=full
+export BOBI_METRICS_ASSIGNMENT_SECRET='<stable deployment secret>'
+export BOBI_METRICS_EXPERIMENT_JSON='{
+  "experiment_id":"jev-router-v1",
+  "router_name":"jev",
+  "router_version":"1",
+  "policy_version":"policy-2026-09-30",
+  "feature_schema_version":"features-v1",
+  "control_model":"sonnet",
+  "cohort":"production-opt-in",
+  "variants":[
+    {"variant_id":"control","weight":0.5,"model":"sonnet"},
+    {"variant_id":"treatment","weight":0.5,"model":"opus"}
+  ]
+}'
+```
+
+Assignment-key precedence is explicit `experiment_subject`, then stable
+workflow/monitor `run_key`, then stable Bobi session name. Bobi persists only
+an HMAC of the selected key. The raw key and assignment secret never enter the
+database, spool, provider environment, or sanitized evidence.
+
+The experiment ID is an immutable analysis contract. Reusing it with different
+variants, weights, model mapping, router/policy/feature versions, control model,
+or cohort quarantines the conflicting event. Create a new experiment ID for a
+new policy.
+
+Runtime completion, error, and latency outcomes are separate from versioned
+quality outcomes. If execution falls back after assignment, analysis keeps the
+original intent-to-treat variant and records the fallback reason. Quality rows
+require an external evaluator or human source plus a definition version,
+evaluator name/version, and idempotency key.
+
+> [!IMPORTANT]
+> Claude, Codex, and Codex MCP-preflight child processes receive a scrubbed
+> environment without `BOBI_METRICS_EXPERIMENT_JSON`,
+> `BOBI_METRICS_ASSIGNMENT_SECRET`, or `BOBI_METRICS_EXPERIMENT_SUBJECT`.
+
 ### Locate the database
 
 The canonical path is under the selected agent's runtime, not directly under
@@ -996,7 +1044,7 @@ Available/current and planned tools:
 | `bobi_usage_session` | Implemented | One session plus paginated turns |
 | `bobi_usage_turn` | Implemented | Turn, invocations, tools, provenance, coverage |
 | `bobi_usage_hotspots` | Implemented | Ranked cost/token/latency hotspots |
-| `bobi_usage_experiment` | Implemented query surface; Phase 4 supplies router data | Per-variant JEV outcomes and coverage |
+| `bobi_usage_experiment` | Implemented | Per-variant JEV outcomes, SRM, configuration consistency, missing outcomes, and exact/estimated coverage |
 
 Claude Code:
 
@@ -1428,6 +1476,47 @@ PASS turn_id=<id> process_exit=SIGKILL source=<claude_transcript|codex_rollout> 
 Benchmark artifacts must include host, Python, SQLite, provider CLI, dataset,
 event-count, and percentile metadata. A number without its environment is not a
 transition gate.
+
+### Phase 4 experiment gate
+
+Run deterministic assignment, experiment-query, quality-outcome, performance,
+and SRM checks before using paid providers:
+
+```bash
+.venv/bin/python -m pytest \
+  tests/metrics/test_router_assignment.py \
+  tests/metrics/test_experiment_queries.py \
+  tests/metrics/test_quality_outcomes.py \
+  -q --timeout=30
+
+.venv/bin/python scripts/benchmark_metrics.py router --samples 100000
+.venv/bin/python scripts/check_srm.py \
+  --expected 50,50 --observed 5500,4500 --max-p-value 0.001
+```
+
+The blocking live gate uses the existing real S1-S4 paths for both assignments
+and providers. It requires a disposable Worker URL/operator token and real
+authenticated Claude/Codex CLIs:
+
+```bash
+export BOBI_ADMIN_URL="$DISPOSABLE_WORKER_URL"
+export FLEET_OPERATOR_TOKEN="$DISPOSABLE_OPERATOR_TOKEN"
+
+.venv/bin/python scripts/live_metrics_smoke.py experiment-matrix \
+  --bobi-home "$BOBI_HOME" \
+  --claude-agent "$BOBI_CLAUDE_AGENT" \
+  --codex-agent "$BOBI_CODEX_AGENT" \
+  --experiment-id metrics-live-smoke-v1 \
+  --assignment-vectors tests/fixtures/metrics/jev-live-smoke-vectors.json \
+  --checks single-turn,tool-loop,process-kill,admin,mcp \
+  --artifact-dir .tmp/private/task-runs/fine-grained-metrics/evidence/phase-4/commit-<sha>-live
+```
+
+Acceptance requires both variants for both providers, stable assignment across
+restart/process boundaries, router event ordering before invocation, matching
+Admin/MCP experiment payloads, and at least one exact provider measurement at
+turn or invocation granularity for every variant. An unavailable provider,
+model, Worker, or credential is `NOT VERIFIED`.
 
 ## 7. Troubleshooting and Operational FAQ
 

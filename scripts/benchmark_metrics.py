@@ -29,6 +29,7 @@ from bobi.metrics.producer import MetricsProducer
 from bobi.metrics.spool import SpoolWriter
 from bobi.metrics.store import connect, integrity_check, logical_snapshot
 from bobi.metrics.query import MetricsQueries
+from bobi.metrics.router import ExperimentConfig, route
 
 
 def percentile(values: list[int], quantile: float) -> float:
@@ -669,6 +670,49 @@ def benchmark_queries(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def benchmark_router(args: argparse.Namespace) -> dict[str, object]:
+    config = ExperimentConfig.from_mapping({
+        "experiment_id": "router-benchmark-v1",
+        "router_name": "jev",
+        "router_version": "1",
+        "policy_version": "benchmark-v1",
+        "feature_schema_version": "benchmark-v1",
+        "control_model": "control",
+        "variants": [
+            {"variant_id": "control", "weight": 0.5, "model": "control"},
+            {"variant_id": "treatment", "weight": 0.5, "model": "treatment"},
+        ],
+    })
+    configured = (config, b"public-router-benchmark-secret")
+    samples_ns = []
+    variants = {"control": 0, "treatment": 0}
+    for index in range(args.samples):
+        started = time.perf_counter_ns()
+        decision = route(
+            configured,
+            requested_model="",
+            experiment_subject=f"benchmark-{index}",
+        )
+        samples_ns.append(time.perf_counter_ns() - started)
+        variants[decision.variant_id] += 1
+    latency = {
+        "p50": percentile(samples_ns, 0.50) / 1000,
+        "p95": percentile(samples_ns, 0.95) / 1000,
+        "p99": percentile(samples_ns, 0.99) / 1000,
+    }
+    if latency["p95"] > args.assert_p95_ms or latency["p99"] > args.assert_p99_ms:
+        raise SystemExit(
+            f"router latency exceeds SLO: p95={latency['p95']:.6f} ms "
+            f"p99={latency['p99']:.6f} ms"
+        )
+    return {
+        "benchmark": "router",
+        "metadata": metadata(),
+        "samples": args.samples,
+        "latency_ms": latency,
+        "slo_ms": {"p95": args.assert_p95_ms, "p99": args.assert_p99_ms},
+        "variants": variants,
+    }
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     root.add_argument("--json-out", type=Path)
@@ -698,6 +742,10 @@ def parser() -> argparse.ArgumentParser:
                          help="Rows to generate when --dataset does not exist.")
     queries.add_argument("--iterations", type=int, default=200)
     queries.add_argument("--saturate", action="store_true")
+    router = commands.add_parser("router")
+    router.add_argument("--samples", type=int, default=100_000)
+    router.add_argument("--assert-p95-ms", type=float, default=50)
+    router.add_argument("--assert-p99-ms", type=float, default=100)
     return root
 
 
@@ -713,6 +761,8 @@ def main() -> None:
         report = benchmark_turn_replay(args)
     elif args.command == "queries":
         report = benchmark_queries(args)
+    elif args.command == "router":
+        report = benchmark_router(args)
     else:
         report = benchmark_contention(args)
     rendered = json.dumps(report, indent=2, sort_keys=True)

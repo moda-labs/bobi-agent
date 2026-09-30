@@ -181,7 +181,7 @@ def test_make_session_native_without_pin(monkeypatch):
     )}):
         session = ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
 
-    assert "env" not in captured
+    assert "PATH" in captured["env"]
     assert session.provider == "anthropic"
 
 

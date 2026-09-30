@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -94,6 +95,31 @@ def _project_row(
 ) -> None:
     if target.primary_key not in payload:
         raise ValueError(f"missing {target.primary_key}")
+    if target.table == "router_decisions" and payload.get("experiment_id"):
+        existing = conn.execute(
+            "SELECT router_name,router_version,policy_version,feature_schema_version,"
+            "candidate_models_json,control_model,metadata_json FROM router_decisions "
+            "WHERE experiment_id=? LIMIT 1",
+            (payload["experiment_id"],),
+        ).fetchone()
+        immutable = (
+            "router_name", "router_version", "policy_version",
+            "feature_schema_version", "candidate_models_json", "control_model",
+        )
+        if existing is not None and any(
+            existing[name] != payload.get(name) for name in immutable
+        ):
+            raise ValueError(
+                "experiment configuration changed for an existing experiment_id"
+            )
+        if existing is not None:
+            try:
+                prior = json.loads(existing["metadata_json"])
+                current = json.loads(str(payload.get("metadata_json") or "{}"))
+            except (TypeError, ValueError):
+                raise ValueError("router metadata_json must be valid JSON") from None
+            if prior.get("config_fingerprint") != current.get("config_fingerprint"):
+                raise ValueError("experiment config fingerprint changed")
     allowed = _columns(conn, target.table)
     values = {key: value for key, value in payload.items() if key in allowed}
     names = list(values)

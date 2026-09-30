@@ -1,12 +1,14 @@
 # Fine-grained metrics and token tracking
 
-> **Status:** Phase 3 implemented locally; current-source offline and complete Admin/MCP transport gates pass, acceptance pending commit-bound S1/S2/S3/S4 rerun
+> **Status:** Phase 0-3 accepted; Phase 4 implemented locally, acceptance pending commit-bound S1-S4 control/treatment matrix on Claude and Codex
 > **Created:** 2026-09-24
 > **Phase 0.0 amendment:** 2026-09-25
 > **Phase 0 completed:** 2026-09-28
 > **Phase 1 implemented:** 2026-09-28
 > **Phase 2 completed:** 2026-09-28
 > **Phase 3 implementation started:** 2026-09-28
+> **Phase 3 completed:** 2026-09-30
+> **Phase 4 implementation started:** 2026-09-30
 > **Audited snapshot:** `origin/main` at `de81de3c4060363acdf8936c8ca24d66a006ba55` in worktree `worktrees/fine-grained-metrics`
 > **Scope:** ingestion, schema, local storage, Admin API, MCP tools, and JEV-router experimentation; no Web UI
 
@@ -790,6 +792,21 @@ Operational outcomes are authoritative only when emitted by Bobi's runtime proje
 
 Do not calculate a fictional per-turn ROI by applying the control model's price to the treatment model's tokens. Model choice changes output length, tool behavior, retries, and success rate. ROI should compare randomized cohorts over completed work, with confidence intervals and coverage rates.
 
+The executable opt-in configuration is supplied through
+`BOBI_METRICS_EXPERIMENT_JSON` plus the runtime-only
+`BOBI_METRICS_ASSIGNMENT_SECRET`. Routing is allowed only in metrics `shadow`
+or `full` mode and only after the process-local metrics producer starts. Any
+configuration, assignment, or producer startup failure preserves the requested
+model. `BOBI_METRICS_EXPERIMENT_SUBJECT` is an optional explicit stable cohort
+key; subject precedence is explicit subject, `run_key`, then stable Bobi
+session name.
+
+Provider subprocesses must not inherit the experiment JSON, assignment secret,
+or explicit subject. Claude CLI/SDK subprocesses, Codex CLI subprocesses, and
+Codex MCP preflight processes receive a scrubbed environment. The raw
+assignment key and secret are never persisted; only the HMAC key hash and a
+secret-free configuration fingerprint are stored.
+
 ## Part IV: Admin API and MCP tools
 
 ### Admin protocol decision
@@ -1176,8 +1193,13 @@ pytest tests/metrics/test_router_assignment.py \
 .venv/bin/python scripts/benchmark_metrics.py router --samples 100000
 .venv/bin/python scripts/check_srm.py --expected 50,50 --observed 5500,4500 --max-p-value 0.001
 .venv/bin/python scripts/live_metrics_smoke.py experiment-matrix \
+  --bobi-home "$BOBI_HOME" \
+  --claude-agent "$BOBI_CLAUDE_AGENT" \
+  --codex-agent "$BOBI_CODEX_AGENT" \
+  --experiment-id metrics-live-smoke-v1 \
   --assignment-vectors tests/fixtures/metrics/jev-live-smoke-vectors.json \
-  --checks single-turn,tool-loop,process-kill,admin,mcp
+  --checks single-turn,tool-loop,process-kill,admin,mcp \
+  --artifact-dir .tmp/private/task-runs/fine-grained-metrics/evidence/phase-4/commit-<sha>-live
 ```
 
 Transition gates: deterministic assignment is identical across processes and restarts for 100% of golden vectors; every enrolled router decision commits before its first model invocation; router latency is at or below 50 milliseconds p95 and 100 milliseconds p99; the SRM detector flags a 55/45 split at 10,000 samples with `p < 0.001`; fallback rows remain in their intent-to-treat variant; and experiment aggregation never mixes outcome-definition/evaluator versions or hides exact/estimated coverage imbalance.
@@ -1574,7 +1596,8 @@ jq -e --arg experiment "$JEV_EXPERIMENT_ID" \
   '.status == "done"
    and .result.usage_experiment.experiment_id == $experiment
    and (.result.usage_experiment.variants | length) == 2
-   and ([.result.usage_experiment.variants[].coverage.exact_invocations] | min) >= 1
+   and ([.result.usage_experiment.variants[].coverage
+         | ((.exact_invocations // 0) + (.exact_measurement_turns // 0))] | min) >= 1
    and ([.result.usage_experiment.variants[].sample_size] | min) >= 1' \
   "$JEV_SMOKE_ARTIFACTS/experiment.json"
 ```

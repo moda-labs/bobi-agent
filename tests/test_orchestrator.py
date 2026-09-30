@@ -711,6 +711,24 @@ class TestRunWorkflow:
         assert result is True
         assert calls[0]["options"]["model"] == "haiku"
 
+    def test_experiment_model_is_resolved_before_workflow_client(self, monkeypatch):
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        monkeypatch.setattr(
+            "bobi.metrics.runtime.resolve_experiment_model",
+            lambda requested, **context: "treatment-model",
+        )
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", model="control-model"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="run-1",
+        )
+
+        assert result is True
+        assert calls[0]["options"]["model"] == "treatment-model"
+
     def _run_with_scorer_role(self, tmp_path, monkeypatch, steps, **kwargs):
         """One workflow run against a root whose config maps scorer→haiku;
         returns the models captured from every make_session call (#617)."""

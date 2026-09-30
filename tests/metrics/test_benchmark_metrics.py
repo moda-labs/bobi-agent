@@ -3,6 +3,7 @@ from argparse import Namespace
 from scripts.benchmark_metrics import (
     benchmark_queries,
     benchmark_rebuild,
+    benchmark_router,
     benchmark_turn_replay,
 )
 
@@ -50,3 +51,16 @@ def test_query_benchmark_enforces_latency_and_saturation_gates(tmp_path):
     assert report["queries"]["hotspots"]["latency_ms"]["p95"] <= 500
     assert report["saturation"]["metrics_busy_ms"] <= 50
     assert report["saturation"]["status_latency_ms"]["p99"] <= 100
+
+
+def test_router_benchmark_enforces_assignment_latency_slo():
+    report = benchmark_router(Namespace(
+        samples=1000,
+        assert_p95_ms=50,
+        assert_p99_ms=100,
+    ))
+
+    assert report["samples"] == 1000
+    assert report["latency_ms"]["p95"] <= 50
+    assert report["latency_ms"]["p99"] <= 100
+    assert sum(report["variants"].values()) == 1000

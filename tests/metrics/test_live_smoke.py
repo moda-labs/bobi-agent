@@ -2,11 +2,15 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 import yaml
 
+from bobi.brain.base import BrainInvocation, BrainUsage, TurnResult
+from bobi.metrics.collector import MetricsCollectorService
 from bobi.metrics.providers import claude_usage, codex_usage
+from bobi.metrics.runtime import MetricsRuntime
 from bobi.metrics.store import connect, migrate
 import scripts.live_metrics_smoke as live_smoke
 from scripts.live_metrics_smoke import (
@@ -17,12 +21,14 @@ from scripts.live_metrics_smoke import (
     _codex_sessions_root,
     _codex_parity_expected,
     _configure_installed_smoke_package,
+    _experiment_config,
     _find_claude_transcript,
     _isolated_brain_defaults,
     _reset_disposable_transport_state,
     _smoke_env,
     _start_disposable_supervisor,
     _stop_disposable_supervisor,
+    _verify_experiment_database,
     _wait_claude_invocation_usage,
     _wait_manager_restarted,
     _write_database,
@@ -535,6 +541,71 @@ def test_parser_and_dispatch_expose_phase2_recovery_commands(monkeypatch, tmp_pa
     live_smoke.main()
 
     assert called == ["turn-2"]
+
+
+def test_phase4_parser_and_vectors_expose_experiment_matrix(tmp_path):
+    vectors = Path("tests/fixtures/metrics/jev-live-smoke-vectors.json")
+    parsed = parser().parse_args([
+        "experiment-matrix",
+        "--bobi-home", str(tmp_path),
+        "--experiment-id", "metrics-live-smoke-v1",
+        "--assignment-vectors", str(vectors),
+        "--artifact-dir", str(tmp_path / "artifacts"),
+    ])
+
+    fixture = json.loads(vectors.read_text())
+    claude, assignments = _experiment_config(fixture, "claude", "")
+    codex, _ = _experiment_config(fixture, "codex", "")
+
+    assert parsed.command == "experiment-matrix"
+    assert parsed.checks == "single-turn,tool-loop,process-kill,admin,mcp"
+    assert set(assignments) == {"control", "treatment"}
+    assert [item["model"] for item in claude["variants"]] == ["opus", "sonnet"]
+    assert [item["model"] for item in codex["variants"]] == [
+        "cx/gpt-5.6-sol(high)", "cx/gpt-6-luna"
+    ]
+
+
+def test_phase4_database_verifier_proves_assignment_and_event_order(
+    monkeypatch, tmp_path
+):
+    fixture = json.loads(
+        Path("tests/fixtures/metrics/jev-assignment-vectors.json").read_text()
+    )
+    monkeypatch.setenv(
+        "BOBI_METRICS_EXPERIMENT_JSON", json.dumps(fixture["config"])
+    )
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", fixture["secret"])
+    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    observation = runtime.begin_turn(
+        "agent",
+        provider="anthropic",
+        model_requested="model-control",
+        experiment_subject="subject-001",
+    )
+    usage = BrainUsage(model="model-control", input_tokens=3, output_tokens=1)
+    observation.record_result(TurnResult(
+        session_id="provider-session",
+        usage=[usage],
+        invocations=[BrainInvocation(model="model-control", usage=usage)],
+    ))
+    observation.finish(status="completed")
+    assert runtime.close(timeout=2)
+    MetricsCollectorService(tmp_path).collect_once()
+
+    result = _verify_experiment_database(
+        tmp_path / "state" / "metrics" / "metrics.db",
+        experiment_id=fixture["config"]["experiment_id"],
+        variant_id="control",
+        assignment_key_hash=fixture["vectors"][0]["assignment_key_hash"],
+        decisions_before=0,
+    )
+
+    assert result["stable"] is True
+    assert result["router_before_invocation"] is True
+    assert result["report"]["variants"][0]["coverage"][
+        "exact_measurement_turns"
+    ] == 1
 
 
 def test_phase3_transport_checks_fail_closed_without_inputs(monkeypatch, tmp_path):

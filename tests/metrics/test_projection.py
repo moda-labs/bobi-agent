@@ -210,3 +210,52 @@ def test_exact_measurement_wins_without_deleting_estimate(tmp_path):
     row = conn.execute("SELECT measurement_id FROM best_usage").fetchone()
     assert row[0] == "exact"
     conn.close()
+
+
+def test_experiment_configuration_is_immutable_per_experiment_id(tmp_path):
+    db = tmp_path / "metrics.db"
+    segment = tmp_path / "segment.telemetry"
+    session = {
+        "session_id": "s1", "session_name": "agent", "brain": "claude",
+        "provider": "anthropic", "started_at_us": 1, "status": "running",
+    }
+    turns = [
+        {
+            "turn_id": turn_id, "session_id": "s1", "turn_index": index,
+            "trigger_kind": "user", "is_user_initiated": 1,
+            "started_at_us": index + 1, "status": "completed",
+        }
+        for index, turn_id in enumerate(("t1", "t2"), 1)
+    ]
+    decision = {
+        "router_decision_id": "r1", "turn_id": "t1", "experiment_id": "exp",
+        "variant_id": "control", "assignment_status": "assigned",
+        "router_name": "jev", "router_version": "1", "policy_version": "p1",
+        "feature_schema_version": "f1", "candidate_models_json": '["a","b"]',
+        "model_selected": "a", "control_model": "a", "router_latency_ms": 1,
+        "decided_at_us": 2, "metadata_json": '{"config_fingerprint":"one"}',
+    }
+    changed = {
+        **decision,
+        "router_decision_id": "r2", "turn_id": "t2", "policy_version": "p2",
+        "decided_at_us": 3, "metadata_json": '{"config_fingerprint":"two"}',
+    }
+    with SpoolWriter(segment) as writer:
+        writer.append(_event("session.recorded", 1, session, session_id="s1"))
+        writer.append(_event("turn.recorded", 2, turns[0], session_id="s1", turn_id="t1"))
+        writer.append(_event("router_decision.recorded", 3, decision, session_id="s1", turn_id="t1"))
+        writer.append(_event("turn.recorded", 4, turns[1], session_id="s1", turn_id="t2"))
+        writer.append(_event("router_decision.recorded", 5, changed, session_id="s1", turn_id="t2"))
+
+    result = MetricsCollector(db).collect_segment(segment)
+    conn = connect(db, readonly=True)
+    try:
+        assert result["quarantined"] == 1
+        assert conn.execute("SELECT COUNT(*) FROM router_decisions").fetchone()[0] == 1
+        error = conn.execute(
+            "SELECT projection_error FROM raw_events WHERE event_type='router_decision.recorded' "
+            "AND projection_state='quarantined'"
+        ).fetchone()[0]
+        assert "experiment configuration changed" in error
+    finally:
+        conn.close()

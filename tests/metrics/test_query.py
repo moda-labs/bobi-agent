@@ -245,6 +245,8 @@ def test_exact_turn_usage_precedes_complete_estimated_invocation_usage(metrics_r
     assert summary["coverage"]["turn_granularity_turns"] == 1
     assert experiment["variants"][0]["tokens"]["input_tokens"] == 1000
     assert experiment["variants"][0]["coverage"]["usage_granularity"] == "turn"
+    assert experiment["variants"][0]["coverage"]["exact_measurement_turns"] == 1
+    assert experiment["diagnostics"]["coverage_rates"]["control"]["exact_rate"] == 1
     assert turn_hotspots["hotspots"][0]["value"] == 1000
     assert turn_hotspots["hotspots"][0]["is_estimated"] == 0
     assert [row["value"] for row in invocation_hotspots["hotspots"]] == [400, 300]
@@ -608,6 +610,9 @@ def test_hotspots_and_experiment(metrics_root):
         "exact_invocations": 1,
         "estimated_invocations": 0,
         "unknown_invocations": 0,
+        "exact_measurement_turns": 1,
+        "estimated_measurement_turns": 0,
+        "unknown_measurement_turns": 0,
         "usage_granularity": "invocation",
         "invocation_granularity_turns": 1,
         "turn_granularity_turns": 0,

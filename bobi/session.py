@@ -320,10 +320,14 @@ class Session:
         role: str = "engineer",
         subscribe: list[str] | None = None,
         fresh: bool = False,
+        run_key: str = "",
+        experiment_subject: str = "",
     ) -> None:
         self.name = name
         self.cwd = cwd
         self.role = role
+        self.run_key = run_key
+        self.experiment_subject = experiment_subject
         # ``fresh`` skips resuming this name's saved transcript. Session names
         # are deliberately stable — they name the worktree branch
         # (orchestrator._setup_worktree) and are what the launch admission
@@ -349,6 +353,22 @@ class Session:
         opts = extra_options or {}
         self._rotation_token_cap = opts.pop("rotation_token_cap", DEFAULT_ROTATION_TOKEN_CAP)
         self._extra_options = opts
+        try:
+            from bobi.brain import resolve_model_option
+            from bobi.metrics.runtime import resolve_experiment_model
+
+            requested_model = resolve_model_option(opts.get("model"))
+            routed_model = resolve_experiment_model(
+                requested_model,
+                experiment_subject=experiment_subject,
+                run_key=run_key,
+                session_name=name,
+            )
+            if routed_model and routed_model != requested_model:
+                self._extra_options["model"] = routed_model
+        except Exception:
+            # Experiment routing must never make the session unavailable.
+            pass
 
         # The agent brain (Claude Code by default). A factory: every fresh
         # connect/rotation/recovery builds a new BrainSession from it (#485).
@@ -904,6 +924,8 @@ class Session:
                 self.name,
                 provider=getattr(self._client, "provider", "anthropic"),
                 role=self.role,
+                run_key=self.run_key,
+                experiment_subject=self.experiment_subject,
                 trigger_kind="direct",
                 model_requested=self._session_model(),
             )
@@ -1290,6 +1312,8 @@ class Session:
                 self.name,
                 provider=getattr(self._client, "provider", "anthropic"),
                 role=self.role,
+                run_key=self.run_key,
+                experiment_subject=self.experiment_subject,
                 trigger_kind="startup" if msg.sender == "launch" else "inbox",
                 trigger_id=msg.id,
                 is_user_initiated=msg.sender != "launch",

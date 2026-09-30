@@ -14,9 +14,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import uuid
 from collections import defaultdict
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -50,6 +52,8 @@ from bobi.metrics.providers import (
 )
 from bobi.metrics.spool import SpoolWriter
 from bobi.metrics.store import connect
+from bobi.metrics.query import MetricsQueries
+from bobi.metrics.router import ExperimentConfig, assign_variant
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROVIDER_NAMES = {"claude": "anthropic", "codex": "openai"}
@@ -85,6 +89,20 @@ def _isolated_brain_defaults():
         yield
     finally:
         os.environ.update(previous)
+
+
+@contextmanager
+def _temporary_environment(values: dict[str, str]):
+    previous = {name: os.environ.get(name) for name in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _brain_options(model: str | None) -> dict | None:
@@ -1378,6 +1396,7 @@ def _run_s3_transport(
     run_admin: bool,
     run_mcp: bool,
     timeout: float,
+    experiment_id: str = "",
 ) -> None:
     """Exercise all five metrics reads through real Admin and MCP transports."""
     session_id = _turn_session_id(db, turn_id)
@@ -1396,7 +1415,7 @@ def _run_s3_transport(
         ),
         "experiment": (
             "metrics_experiment",
-            {"experiment_id": "metrics-smoke-unassigned"},
+            {"experiment_id": experiment_id or "metrics-smoke-unassigned"},
         ),
     }
     admin_results: dict[str, dict[str, object]] = {}
@@ -1436,6 +1455,8 @@ def _run_s3_transport(
         if not hotspots["hotspots"] or hotspots["hotspots"][0]["scope"] != "tool":
             raise RuntimeError("Admin hotspot result does not contain a tool hotspot")
         experiment = admin_results["experiment"]
+        if experiment_id and experiment.get("status") != "done":
+            raise RuntimeError("Admin experiment query did not return live experiment data")
         if experiment["status"] == "error":
             if experiment.get("result", {}).get("code") != "unknown_experiment":
                 raise RuntimeError("Admin experiment query failed unexpectedly")
@@ -1494,6 +1515,8 @@ def _run_s3_transport(
             if mcp_results[name].get("status") != "done":
                 raise RuntimeError(f"MCP {name} query did not complete")
         experiment = mcp_results["experiment"]
+        if experiment_id and experiment.get("status") != "done":
+            raise RuntimeError("MCP experiment query did not return live experiment data")
         if experiment.get("status") == "error":
             if experiment.get("result", {}).get("code") != "unknown_experiment":
                 raise RuntimeError("MCP experiment query failed unexpectedly")
@@ -1688,6 +1711,7 @@ def installed_matrix(args: argparse.Namespace) -> None:
                     run_admin="admin" in checks,
                     run_mcp="mcp" in checks,
                     timeout=args.transport_timeout,
+                    experiment_id=getattr(args, "experiment_id", ""),
                 )
             if "process-kill" in checks:
                 _process_kill_smoke(
@@ -1722,6 +1746,214 @@ def installed_matrix(args: argparse.Namespace) -> None:
                     text=True,
                     timeout=30,
                 )
+
+
+def _experiment_config(
+    fixture: dict[str, object], provider: str, current_model: str
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    config = deepcopy(fixture["config"])
+    models = fixture["provider_models"][provider]
+    config["control_model"] = models["control"]
+    for variant in config["variants"]:
+        model = models[variant["variant_id"]]
+        variant["model"] = current_model if model == "CURRENT_MODEL" else model
+    if config["control_model"] == "CURRENT_MODEL":
+        config["control_model"] = current_model
+    vectors = {item["variant_id"]: item for item in fixture["vectors"]}
+    return config, vectors
+
+
+def _installed_smoke_model(
+    home: Path, agent: str, provider: str, explicit: str
+) -> str:
+    if explicit:
+        return explicit
+    package = home / "agents" / agent / "run" / "package" / "agent.yaml"
+    try:
+        brain = (yaml.safe_load(package.read_text()) or {}).get("brain") or {}
+        model = str(brain.get("model") or "")
+    except (OSError, TypeError, ValueError):
+        model = ""
+    if model:
+        return model
+    if provider == "codex":
+        try:
+            model = str(tomllib.loads(
+                (codex_home() / "config.toml").read_text()
+            ).get("model") or "")
+        except (OSError, TypeError, ValueError, tomllib.TOMLDecodeError):
+            model = ""
+    if not model:
+        raise SystemExit(
+            f"{provider} smoke model is unknown; set BOBI_{provider.upper()}_SMOKE_MODEL"
+        )
+    return model
+
+
+def _verify_experiment_database(
+    db: Path,
+    *,
+    experiment_id: str,
+    variant_id: str,
+    assignment_key_hash: str,
+    decisions_before: int,
+) -> dict[str, object]:
+    conn = connect(db, readonly=True)
+    try:
+        decisions = conn.execute(
+            "SELECT router_decision_id,turn_id,variant_id,assignment_key_hash,"
+            "model_selected,fallback_reason FROM router_decisions "
+            "WHERE experiment_id=? ORDER BY decided_at_us",
+            (experiment_id,),
+        ).fetchall()
+        new_decisions = decisions[decisions_before:]
+        if not new_decisions:
+            raise RuntimeError("experiment smoke produced no router decisions")
+        if any(row["variant_id"] != variant_id for row in new_decisions):
+            raise RuntimeError("experiment assignment changed within one smoke cohort")
+        if any(row["assignment_key_hash"] != assignment_key_hash for row in new_decisions):
+            raise RuntimeError("experiment assignment hash changed across process boundaries")
+        ordering = []
+        for decision in new_decisions:
+            router_event = conn.execute(
+                "SELECT producer_id,producer_sequence,emitted_at_us FROM raw_events "
+                "WHERE event_type='router_decision.recorded' AND turn_id=? "
+                "ORDER BY producer_sequence LIMIT 1",
+                (decision["turn_id"],),
+            ).fetchone()
+            invocation_event = conn.execute(
+                "SELECT producer_id,producer_sequence,emitted_at_us FROM raw_events "
+                "WHERE event_type='invocation.recorded' AND turn_id=? "
+                "ORDER BY producer_sequence LIMIT 1",
+                (decision["turn_id"],),
+            ).fetchone()
+            if invocation_event is not None:
+                ordered = router_event is not None and (
+                    (
+                        router_event["producer_id"] == invocation_event["producer_id"]
+                        and router_event["producer_sequence"]
+                        < invocation_event["producer_sequence"]
+                    )
+                    or (
+                        router_event["producer_id"] != invocation_event["producer_id"]
+                        and router_event["emitted_at_us"] <= invocation_event["emitted_at_us"]
+                    )
+                )
+                if not ordered:
+                    raise RuntimeError("router decision was not emitted before invocation")
+            ordering.append(invocation_event is None or router_event is not None)
+    finally:
+        conn.close()
+    report = MetricsQueries(db.parents[2]).experiment({"experiment_id": experiment_id})
+    return {
+        "decisions": len(new_decisions),
+        "variant_id": variant_id,
+        "stable": True,
+        "router_before_invocation": all(ordering),
+        "report": report,
+    }
+
+
+def experiment_matrix(args: argparse.Namespace) -> None:
+    fixture = json.loads(args.assignment_vectors.read_text())
+    if fixture.get("algorithm") != "hmac-sha256-u64-v1":
+        raise SystemExit("assignment vector algorithm is not supported")
+    if fixture.get("config", {}).get("experiment_id") != args.experiment_id:
+        raise SystemExit("--experiment-id must match the checked-in vector config")
+    providers = [value for value in args.providers.split(",") if value]
+    unsupported = set(providers) - PROVIDER_NAMES.keys()
+    if not providers or unsupported:
+        raise SystemExit(f"unsupported providers: {','.join(sorted(unsupported))}")
+    artifacts = args.artifacts.resolve()
+    artifacts.mkdir(parents=True, exist_ok=True)
+    summary = {"experiment_id": args.experiment_id, "providers": {}}
+    for provider in providers:
+        agent = args.claude_agent if provider == "claude" else args.codex_agent
+        explicit_model = (
+            args.claude_model if provider == "claude" else args.codex_model
+        )
+        configured_models = fixture["provider_models"][provider]
+        current_model = (
+            _installed_smoke_model(
+                args.bobi_home.resolve(), agent, provider, explicit_model
+            )
+            if "CURRENT_MODEL" in configured_models.values()
+            else explicit_model
+        )
+        config_raw, vectors = _experiment_config(
+            fixture, provider, current_model
+        )
+        config = ExperimentConfig.from_mapping(config_raw)
+        secret = str(fixture["secret"]).encode()
+        provider_summary = {}
+        db = (
+            args.bobi_home.resolve() / "agents" / agent / "run" /
+            "state" / "metrics" / "metrics.db"
+        )
+        for variant_id in ("control", "treatment"):
+            vector = vectors[variant_id]
+            selected, bucket, key_hash = assign_variant(
+                config,
+                secret,
+                assignment_unit=str(fixture["assignment_unit"]),
+                assignment_key=vector["assignment_key"],
+            )
+            if (
+                selected.variant_id != variant_id
+                or key_hash != vector["assignment_key_hash"]
+                or bucket != vector["bucket"]
+            ):
+                raise RuntimeError(f"golden assignment vector drifted for {variant_id}")
+            decisions_before = 0
+            if db.exists():
+                conn = connect(db, readonly=True)
+                try:
+                    decisions_before = int(conn.execute(
+                        "SELECT COUNT(*) FROM router_decisions WHERE experiment_id=?",
+                        (args.experiment_id,),
+                    ).fetchone()[0])
+                finally:
+                    conn.close()
+            variant_artifacts = artifacts / provider / variant_id
+            variant_args = argparse.Namespace(**vars(args))
+            variant_args.providers = provider
+            variant_args.artifacts = variant_artifacts
+            variant_args.experiment_id = args.experiment_id
+            with _temporary_environment({
+                "BOBI_METRICS_EXPERIMENT_JSON": json.dumps(
+                    config_raw, separators=(",", ":"), sort_keys=True
+                ),
+                "BOBI_METRICS_ASSIGNMENT_SECRET": str(fixture["secret"]),
+                "BOBI_METRICS_EXPERIMENT_SUBJECT": vector["assignment_key"],
+            }):
+                installed_matrix(variant_args)
+            result = _verify_experiment_database(
+                db,
+                experiment_id=args.experiment_id,
+                variant_id=variant_id,
+                assignment_key_hash=key_hash,
+                decisions_before=decisions_before,
+            )
+            _write_sanitized_json(
+                variant_artifacts / "assignment-verification.json", result
+            )
+            provider_summary[variant_id] = result
+            print(
+                f"PASS provider={provider} assignment={variant_id} stable=true "
+                "router_before_invocation=true"
+            )
+        report = provider_summary["treatment"]["report"]
+        variants = {row["variant_id"]: row for row in report["variants"]}
+        if set(variants) != {"control", "treatment"}:
+            raise RuntimeError(f"both experiment variants were not represented: {variants}")
+        if any(
+            int(row["coverage"].get("exact_measurement_turns") or 0) < 1
+            for row in variants.values()
+        ):
+            raise RuntimeError("one experiment variant has no exact provider coverage")
+        summary["providers"][provider] = provider_summary
+    _write_sanitized_json(artifacts / "experiment-matrix.json", summary)
+    print("PASS checks=S1,S2,S3,S4 providers=" + ",".join(providers))
 
 
 def provider_probe(args: argparse.Namespace) -> None:
@@ -1872,6 +2104,42 @@ def parser() -> argparse.ArgumentParser:
     # Secrets are environment-only so they never appear in process listings.
     matrix.set_defaults(operator_token=os.environ.get("FLEET_OPERATOR_TOKEN", ""))
     matrix.add_argument("--transport-timeout", type=float, default=30.0)
+    matrix.set_defaults(experiment_id="")
+    experiment = commands.add_parser("experiment-matrix")
+    experiment.add_argument(
+        "--bobi-home", type=Path,
+        default=Path(os.environ.get("BOBI_HOME", "")) if os.environ.get("BOBI_HOME") else None,
+        required=not bool(os.environ.get("BOBI_HOME")),
+    )
+    experiment.add_argument(
+        "--claude-agent", default=os.environ.get("BOBI_CLAUDE_AGENT", "metrics-smoke-claude")
+    )
+    experiment.add_argument(
+        "--codex-agent", default=os.environ.get("BOBI_CODEX_AGENT", "metrics-smoke-codex")
+    )
+    experiment.add_argument("--providers", default="claude,codex")
+    experiment.add_argument(
+        "--claude-model", default=os.environ.get("BOBI_CLAUDE_SMOKE_MODEL", "")
+    )
+    experiment.add_argument(
+        "--codex-model", default=os.environ.get("BOBI_CODEX_SMOKE_MODEL", "")
+    )
+    experiment.add_argument(
+        "--checks", default="single-turn,tool-loop,process-kill,admin,mcp"
+    )
+    experiment.add_argument("--experiment-id", required=True)
+    experiment.add_argument("--assignment-vectors", type=Path, required=True)
+    experiment.add_argument(
+        "--artifacts", "--artifact-dir", dest="artifacts", type=Path, required=True
+    )
+    experiment.add_argument(
+        "--admin-url", default=os.environ.get("BOBI_ADMIN_URL", "")
+    )
+    experiment.add_argument(
+        "--fleet", default=os.environ.get("BOBI_FLEET", "metrics-smoke")
+    )
+    experiment.set_defaults(operator_token=os.environ.get("FLEET_OPERATOR_TOKEN", ""))
+    experiment.add_argument("--transport-timeout", type=float, default=30.0)
     return root
 
 
@@ -1887,6 +2155,7 @@ def main() -> None:
         "wait-reconciliation": wait_reconciliation,
         "provision": provision,
         "installed-matrix": installed_matrix,
+        "experiment-matrix": experiment_matrix,
     }
     handlers[args.command](args)
 
