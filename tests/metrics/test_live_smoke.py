@@ -740,12 +740,22 @@ def test_phase4_database_verifier_proves_assignment_and_event_order(
         "BOBI_METRICS_EXPERIMENT_JSON", json.dumps(fixture["config"])
     )
     monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", fixture["secret"])
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn(
         "agent",
         provider="anthropic",
         model_requested="model-control",
         experiment_subject="subject-001",
+    )
+    assignment = json.loads(Path(
+        "tests/fixtures/metrics/historical-router-assignment.json"
+    ).read_text())
+    observation.router_decision_id = "historical-route"
+    assert runtime.emit(
+        "router_decision.recorded",
+        {**assignment, "router_decision_id": observation.router_decision_id,
+         "turn_id": observation.turn_id},
+        session_id=observation.session_id, turn_id=observation.turn_id,
     )
     usage = BrainUsage(model="model-control", input_tokens=3, output_tokens=1)
     observation.record_result(TurnResult(

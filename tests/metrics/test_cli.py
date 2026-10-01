@@ -14,13 +14,13 @@ def test_metrics_status_reports_database_and_reconciliation(monkeypatch, tmp_pat
     finally:
         conn.close()
     monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
-    monkeypatch.setenv("BOBI_METRICS_MODE", "shadow")
+    monkeypatch.setenv("BOBI_METRICS_MODE", "enabled")
 
     result = CliRunner().invoke(metrics, ["status", "--json"])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["mode"] == "shadow"
+    assert payload["mode"] == "enabled"
     assert payload["database"]["ready"] is True
     assert payload["database"]["integrity"] == "ok"
     assert payload["reconciliation"]["uncovered_turns"] == 0

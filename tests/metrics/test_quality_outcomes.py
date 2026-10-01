@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from bobi.metrics.collector import MetricsCollectorService
@@ -70,10 +73,20 @@ def test_quality_outcome_is_idempotent_and_contains_no_content_metadata(
         '{"variant_id":"treatment","weight":0.5,"model":"treatment"}]}',
     )
     monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "public-test-secret")
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn(
         "agent", provider="test", model_requested="control",
         experiment_subject="subject",
+    )
+    assignment = json.loads(Path(
+        "tests/fixtures/metrics/historical-router-assignment.json"
+    ).read_text())
+    observation.router_decision_id = "historical-route"
+    assert runtime.emit(
+        "router_decision.recorded",
+        {**assignment, "router_decision_id": observation.router_decision_id,
+         "turn_id": observation.turn_id},
+        session_id=observation.session_id, turn_id=observation.turn_id,
     )
     assert record_quality_outcome(
         runtime,

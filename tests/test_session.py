@@ -37,18 +37,10 @@ def _make_msg(wait=False):
     return Message(id="m1", sender="test", text="hello", wait=wait)
 
 
-def test_session_routes_model_before_brain_session_construction(
+def test_session_construction_preserves_configured_model(
     bobi_install, monkeypatch
 ):
-    captured = {}
-
-    def route_model(requested, **context):
-        captured.update(context)
-        return "treatment-model"
-
-    monkeypatch.setattr(
-        "bobi.metrics.runtime.resolve_experiment_model", route_model
-    )
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "invalid-legacy-config")
     routed = Session(
         name="experiment-session",
         cwd=str(bobi_install.repo_path),
@@ -57,12 +49,129 @@ def test_session_routes_model_before_brain_session_construction(
         experiment_subject="subject-1",
     )
 
-    assert routed._extra_options["model"] == "treatment-model"
-    assert captured == {
-        "experiment_subject": "subject-1",
-        "run_key": "run-1",
-        "session_name": "experiment-session",
-    }
+    assert routed._extra_options["model"] == "control-model"
+
+@pytest.mark.asyncio
+async def test_session_routes_before_resume_and_client_construction(bobi_install, monkeypatch):
+    from bobi.metrics.routing import RouteOutcome, RoutingContext
+
+    calls = []
+    context = RoutingContext("agent", "session_start", "codex", "control", False,
+                             "", "engineer", True)
+    session = Session("agent", str(bobi_install.repo_path), extra_options={"model": "control"},
+                      fresh=True, routing=context)
+    async def route(ctx):
+        assert ctx.prompt == "initial task" and ctx.fresh
+        calls.append("route")
+        return RouteOutcome("cheap")
+    class StopConstruction(Exception):
+        pass
+    def construct(**kwargs):
+        calls.append("construct")
+        assert session._extra_options["model"] == "cheap"
+        raise StopConstruction
+    monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+    monkeypatch.setattr(session, "_make_brain_session", construct)
+    with pytest.raises(StopConstruction):
+        await session._run("initial task")
+    assert calls == ["route", "construct"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_point", ["session_start", "subagent_phase", "subagent_persistent"])
+async def test_session_static_policy_reaches_construction_and_projection(bobi_install, monkeypatch, entry_point):
+    from dataclasses import replace
+    import json
+    from bobi.metrics.collector import MetricsCollectorService
+    from bobi.metrics.runtime import MetricsRuntime
+    from bobi.metrics.store import connect
+    from bobi.sdk import save_session_id
+    from tests.metrics.test_routing import configured, context
+
+    raw = configured()
+    raw["policy"]["mode"] = "enforce"
+    raw["policy"]["scope"]["entry_points"] = [entry_point]
+    routing_context = replace(context(raw, "treatment"), entry_point=entry_point)
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex-test")
+    runtime = MetricsRuntime(bobi_install.state_dir.parent, mode="enabled")
+    monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
+    session = Session("agent", str(bobi_install.repo_path), fresh=True,
+        extra_options={"model": "configured"}, routing=routing_context)
+    class StopConstruction(Exception):
+        pass
+    def construct(**kwargs):
+        assert session._extra_options["model"] == "cheap"
+        turn = runtime.begin_turn("agent", provider="openai", model_requested="cheap")
+        assert turn.router_decision_id
+        turn.finish(status="completed")
+        raise StopConstruction
+    monkeypatch.setattr(session, "_make_brain_session", construct)
+    with pytest.raises(StopConstruction):
+        await session._run("initial task")
+    assert runtime.close(timeout=2)
+    collector = MetricsCollectorService(bobi_install.state_dir.parent)
+    collector.collect_once()
+    with connect(collector.db_path, readonly=True) as connection:
+        row = connection.execute("SELECT model_selected,metadata_json FROM router_decisions").fetchone()
+        assert row["model_selected"] == "cheap"
+        assert json.loads(row["metadata_json"])["policy"]["status"] == "decided"
+    save_session_id("agent", "provider-session", model="cheap", root=runtime.root)
+    runtime = MetricsRuntime(bobi_install.state_dir.parent, mode="enabled")
+    def no_policy(*args):
+        raise AssertionError("resumed Session must not load policy")
+    monkeypatch.setattr("bobi.metrics.routing.load_policy", no_policy)
+    def resumable(name, model):
+        assert model == "cheap"
+        return "provider-session"
+    monkeypatch.setattr("bobi.session.load_resumable_session_id", resumable)
+    session = Session("agent", str(bobi_install.repo_path), fresh=False,
+        extra_options={"model": "configured"}, routing=routing_context)
+    def resumed_construct(**kwargs):
+        assert kwargs["resume"] == "provider-session"
+        return construct(**kwargs)
+    monkeypatch.setattr(session, "_make_brain_session", resumed_construct)
+    with pytest.raises(StopConstruction):
+        await session._run("follow-up task")
+    assert runtime.close(timeout=2)
+    collector.collect_once()
+    with connect(collector.db_path, readonly=True) as connection:
+        statuses = {json.loads(row[0])["policy"]["status"] for row in connection.execute(
+            "SELECT metadata_json FROM router_decisions")}
+        assert statuses == {"decided", "reused"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_point", ["session_start", "subagent_phase", "subagent_persistent"])
+async def test_session_explicit_model_bypasses_policy(bobi_install, monkeypatch, entry_point):
+    from dataclasses import replace
+    import json
+    from bobi.metrics.runtime import MetricsRuntime
+    from tests.metrics.test_routing import configured, context
+
+    raw = configured()
+    raw["policy"]["scope"]["entry_points"] = [entry_point]
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+    runtime = MetricsRuntime(bobi_install.state_dir.parent, mode="enabled")
+    monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
+    def no_policy(*args):
+        raise AssertionError("explicit model must not load policy")
+    monkeypatch.setattr("bobi.metrics.routing.load_policy", no_policy)
+    routing_context = replace(context(raw, "treatment"), entry_point=entry_point,
+        explicit_model=True, configured_model="operator-model")
+    session = Session("agent", str(bobi_install.repo_path), fresh=True,
+        extra_options={"model": "operator-model"}, routing=routing_context)
+    class StopConstruction(Exception):
+        pass
+    def construct(**kwargs):
+        assert session._extra_options["model"] == "operator-model"
+        raise StopConstruction
+    monkeypatch.setattr(session, "_make_brain_session", construct)
+    with pytest.raises(StopConstruction):
+        await session._run("initial task")
+    assert runtime.close(timeout=2)
 
 
 def _fake_client(session, drain_response="response text"):

@@ -22,6 +22,24 @@ from bobi.sdk import SessionEntry, get_registry
 from bobi.session import Session
 
 
+@pytest.mark.parametrize("value", [None, "", "disabled", "off", "0", "false", "shadow", "full", "invalid"])
+def test_metrics_mode_defaults_or_fails_closed(value):
+    env = {} if value is None else {"BOBI_METRICS_MODE": value}
+    assert metrics_runtime.resolve_mode(env) == "disabled"
+
+def test_metrics_mode_requires_explicit_enablement():
+    assert metrics_runtime.resolve_mode({"BOBI_METRICS_MODE": " ENABLED "}) == "enabled"
+
+def test_turn_observation_never_routes(monkeypatch, tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    def reject_routing(*args, **kwargs):
+        raise AssertionError("turn observation must not route")
+    monkeypatch.setattr("bobi.metrics.router.assign_variant", reject_routing)
+    observation = runtime.begin_turn("agent", provider="openai", model_requested="configured")
+    assert observation.router_decision is None
+    observation.finish(status="completed")
+    assert runtime.close(timeout=2)
+
 class _Observation:
     def __init__(self):
         self.first_output = 0
@@ -111,7 +129,7 @@ def test_every_spawn_style_drain_caller_uses_the_shared_primitive():
 
 
 def test_runtime_projects_turn_invocation_tool_usage_and_cost(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn(
         "agent",
         provider="anthropic",
@@ -210,7 +228,7 @@ def test_online_turn_aggregate_preserves_unreported_dimensions_as_null():
 
 
 def test_turn_aggregate_fills_missing_dimensions_from_exact_invocations(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn(
         "agent", provider="anthropic", model_requested="claude-test"
     )
@@ -250,7 +268,7 @@ def test_turn_aggregate_fills_missing_dimensions_from_exact_invocations(tmp_path
 
 
 def test_turn_aggregate_fills_alias_dimension_without_rewriting_model(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn(
         "agent", provider="anthropic", model_requested="claude-sonnet"
     )
@@ -293,7 +311,7 @@ def test_runtime_startup_failure_never_reaches_the_turn(tmp_path):
     def fail(*args, **kwargs):
         raise OSError("disk unavailable")
 
-    runtime = MetricsRuntime(tmp_path, mode="shadow", producer_factory=fail)
+    runtime = MetricsRuntime(tmp_path, mode="enabled", producer_factory=fail)
     observation = runtime.begin_turn("agent", provider="anthropic")
     observation.record_result(TurnResult(session_id="provider-session"))
     observation.finish(status="completed")
@@ -311,7 +329,7 @@ def test_turn_indexes_are_scoped_to_each_process_local_session(tmp_path):
 
 
 def test_turn_start_is_durable_before_terminal_result(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn(
         "agent",
         provider="anthropic",
@@ -338,7 +356,7 @@ def test_turn_start_is_durable_before_terminal_result(tmp_path):
 def test_session_row_emits_once_then_only_when_provider_correlation_changes(
     tmp_path,
 ):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     first = runtime.begin_turn("agent", provider="anthropic", brain="claude")
     first.record_result(TurnResult(session_id="provider-session"))
     first.finish(status="completed")
@@ -363,7 +381,7 @@ def test_session_row_emits_once_then_only_when_provider_correlation_changes(
 
 
 def test_session_finalization_is_terminal_and_evicts_runtime_state(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn("agent", provider="anthropic", brain="claude")
     observation.finish(status="completed")
 
@@ -390,7 +408,7 @@ def test_session_finalization_is_terminal_and_evicts_runtime_state(tmp_path):
 
 
 def test_rejected_session_finalization_keeps_state_for_retry(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn("agent", provider="anthropic")
     real_emit = runtime.emit
 
@@ -408,7 +426,7 @@ def test_rejected_session_finalization_keeps_state_for_retry(tmp_path):
 
 
 def test_restarting_a_finished_name_creates_a_new_metrics_session(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     first = runtime.begin_turn("agent", provider="anthropic")
     first.finish(status="completed")
     assert runtime.finish_session("agent", status="completed")
@@ -421,7 +439,7 @@ def test_restarting_a_finished_name_creates_a_new_metrics_session(tmp_path):
 
 
 def test_rejected_session_event_is_retried_on_the_next_turn(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     real_emit = runtime.emit
     rejected = False
 
@@ -473,7 +491,7 @@ def test_unbound_runtime_never_reuses_an_agent_runtime(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("step_type", ["route", "action", "notify", "await"])
 def test_deterministic_workflow_steps_project_without_a_turn(tmp_path, step_type):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_workflow_step(
         "workflow-session",
         workflow_name="workflow",
@@ -508,7 +526,7 @@ async def test_shadow_metrics_match_the_legacy_session_cost_writer(
     bobi_install, monkeypatch
 ):
     metrics_runtime.reset_runtime_for_tests()
-    monkeypatch.setenv("BOBI_METRICS_MODE", "shadow")
+    monkeypatch.setenv("BOBI_METRICS_MODE", "enabled")
     usage = BrainUsage(
         model="claude-test",
         provider_event_id="message-provider-1",

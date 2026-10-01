@@ -622,7 +622,7 @@ def get_registry() -> SessionRegistry:
 
 
 def save_session_id(name: str, session_id: str, model: str | None = None,
-                    *, root: Path | None = None) -> None:
+                    *, root: Path | None = None, preserve_route: bool = False) -> None:
     """Persist a session's resume id, plus the model and brain it runs under.
 
     ``model=None`` leaves any recorded model untouched (for callers that do
@@ -634,6 +634,9 @@ def save_session_id(name: str, session_id: str, model: str | None = None,
     labels so pre-#789 records still match and a native<->gateway endpoint
     switch reads as a mismatch. ``root=None`` means the process's bound root;
     multi-team hosts pass the target root explicitly.
+
+    Internal recovery and rotation use ``preserve_route=True`` to keep the
+    chosen model sticky while replacing an unusable provider token.
     """
     from bobi.brain import session_brain_label
 
@@ -644,12 +647,35 @@ def save_session_id(name: str, session_id: str, model: str | None = None,
     if not session_id:
         model_path.unlink(missing_ok=True)
         brain_path.unlink(missing_ok=True)
+        if not preserve_route:
+            (sd / f"{name}.route.json").unlink(missing_ok=True)
     else:
         if model is not None:
             model_path.write_text(model)
         brain_path.write_text(session_brain_label())
     registry = SessionRegistry(root)
     registry.update(name, session_id=session_id)
+
+def save_session_route(name: str, record: dict[str, object], *, root: Path | None = None) -> None:
+    """Atomically persist a prompt-free route before connecting a session."""
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise ValueError("invalid route session name")
+    atomic_write_json(_sessions_dir(root) / f"{name}.route.json", record)
+
+def load_session_route(name: str, *, root: Path | None = None) -> dict[str, object] | None:
+    """Read bounded optional route metadata; corrupt records never force routing."""
+    if not name or Path(name).name != name or name in {".", ".."}:
+        return None
+    path = _sessions_dir(root) / f"{name}.route.json"
+    try:
+        with path.open("rb") as source:
+            encoded = source.read(65537)
+        if len(encoded) > 65536:
+            return None
+        record = json.loads(encoded)
+        return record if isinstance(record, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 def load_session_id(name: str, *, root: Path | None = None) -> str:
@@ -669,6 +695,12 @@ def load_session_brain(name: str, *, root: Path | None = None) -> str:
     if path.exists():
         return path.read_text().strip()
     return ""
+
+
+def load_session_model(name: str, *, root: Path | None = None) -> str | None:
+    """Return the recorded model, preserving absent versus provider-default."""
+    path = _sessions_dir(root) / f"{name}.model"
+    return path.read_text().strip() if path.exists() else None
 
 
 def load_resumable_session_id(name: str, model: str) -> str:
@@ -698,10 +730,9 @@ def load_resumable_session_id(name: str, model: str) -> str:
             "starting fresh.", name, recorded_brain, active_label,
         )
         return ""
-    model_path = _sessions_dir() / f"{name}.model"
-    if not model_path.exists():
+    recorded = load_session_model(name)
+    if recorded is None:
         return saved_id
-    recorded = model_path.read_text().strip()
     if not recorded_brain and recorded != (model or ""):
         # No brain provenance (record predates #642) plus a model change:
         # the old guard would have started fresh here, and we cannot prove

@@ -711,13 +711,10 @@ class TestRunWorkflow:
         assert result is True
         assert calls[0]["options"]["model"] == "haiku"
 
-    def test_experiment_model_is_resolved_before_workflow_client(self, monkeypatch):
+    def test_workflow_preserves_configured_model_without_legacy_routing(self, monkeypatch):
         brain, calls, clients = _recording_brain()
         monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
-        monkeypatch.setattr(
-            "bobi.metrics.runtime.resolve_experiment_model",
-            lambda requested, **context: "treatment-model",
-        )
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "invalid-legacy-config")
         wf = Workflow(name="t", steps=[
             StepDef(name="discover", prompt="discover", model="control-model"),
         ])
@@ -727,7 +724,155 @@ class TestRunWorkflow:
         )
 
         assert result is True
-        assert calls[0]["options"]["model"] == "treatment-model"
+        assert calls[0]["options"]["model"] == "control-model"
+
+    def test_workflow_applies_unenrolled_control_fallback(self, monkeypatch):
+        from bobi.metrics.routing import RouteOutcome
+
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        async def route(ctx):
+            return RouteOutcome("fallback-control", reason="admission_rejected")
+        monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+        wf = Workflow(name="t", steps=[StepDef(name="discover", prompt="discover")])
+        assert self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="run-1")
+        assert calls[0]["options"]["model"] == "fallback-control"
+
+    def test_routed_workflow_keeps_model_across_same_agent_steps(self, monkeypatch):
+        from dataclasses import replace
+        from bobi.metrics.routing import RouteOutcome
+        from tests.metrics.test_route_admission import decision
+
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        route_calls = []
+        async def route(ctx):
+            route_calls.append(ctx)
+            return RouteOutcome("cheap", replace(decision(), model_selected="cheap"))
+        monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", agent="engineer"),
+            StepDef(name="build", prompt="build", agent="engineer"),
+        ])
+        assert self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="run-1")
+        assert len(route_calls) == 1
+        assert len(calls) == 1 and calls[0]["options"]["model"] == "cheap"
+
+    @pytest.mark.parametrize("explicit_model", ["", "operator-model"])
+    def test_static_policy_workflow_reaches_brain_with_routed_model(self, tmp_path, monkeypatch, explicit_model):
+        from bobi.metrics.runtime import MetricsRuntime
+        from tests.metrics.test_routing import configured, context
+
+        _bind_runtime_root(tmp_path, monkeypatch)
+        raw = configured()
+        raw["policy"]["mode"] = "enforce"
+        raw["policy"]["scope"]["entry_points"] = ["workflow_start"]
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+        monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+        runtime = MetricsRuntime(tmp_path, mode="enabled")
+        monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
+        brain, calls, clients = _recording_brain()
+        connect_checks = []
+        original_connect = FakeBrainClient.connect
+        async def checked_connect(client):
+            runs = WorkflowRun.list_runs(root=tmp_path)
+            assert len(runs) == 1
+            if explicit_model:
+                assert not runs[0].variable_scopes.get("_runtime", {}).get("route")
+                connect_checks.append(True)
+                await original_connect(client)
+                return
+            route = runs[0].variable_scopes["_runtime"]["route"]
+            assert route["decision"]["model_selected"] == "cheap"
+            assert route["decision"]["variant_id"] == "treatment"
+            assert json.loads(route["decision"]["policy_metadata_json"])["status"] == "decided"
+            connect_checks.append(True)
+            await original_connect(client)
+        monkeypatch.setattr(FakeBrainClient, "connect", checked_connect)
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", agent="engineer"),
+            StepDef(name="build", prompt="build", agent="engineer"),
+        ])
+        if explicit_model:
+            def no_policy(*args):
+                raise AssertionError("explicit model must bypass policy loading")
+            monkeypatch.setattr("bobi.metrics.routing.load_policy", no_policy)
+        assert self._mock_asyncio_run(wf, task="t", repo="r", cwd=str(tmp_path), run_key="run-1", model=explicit_model)
+        assert len(calls) == 1 and calls[0]["options"]["model"] == (explicit_model or "cheap")
+        assert connect_checks == [True]
+        assert runtime.close(timeout=2)
+
+    @pytest.mark.parametrize("retry", [False, True])
+    def test_static_routed_workflow_resume_does_not_load_policy(self, tmp_path, monkeypatch, retry):
+        from bobi.metrics.runtime import MetricsRuntime
+        from tests.metrics.test_routing import configured, context
+
+        _bind_runtime_root(tmp_path, monkeypatch)
+        raw = configured()
+        raw["policy"]["mode"] = "enforce"
+        raw["policy"]["scope"]["entry_points"] = ["workflow_start"]
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+        monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+        runtime = MetricsRuntime(tmp_path, mode="enabled")
+        monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        wf = Workflow(name="t", steps=[StepDef(name="discover", prompt="discover", agent="engineer"),
+            StepDef(name="wait", **({"prompt": "evaluate", "handoff": HandoffContract(required=["result"])}
+                                   if retry else {"await_event": "approval"})),
+            StepDef(name="build", prompt="build", agent="engineer")])
+        self._mock_asyncio_run(wf, task="t", repo="r", cwd=str(tmp_path), run_key="run-1")
+        run = WorkflowRun.list_runs(root=tmp_path)[0]
+        assert run.status == ("failed" if retry else "waiting")
+        assert runtime.close(timeout=2)
+        runtime = MetricsRuntime(tmp_path, mode="enabled")
+        def no_policy(*args):
+            raise AssertionError("workflow resume must reuse checkpoint")
+        monkeypatch.setattr("bobi.metrics.routing.load_policy", no_policy)
+        if retry:
+            wf.steps[1] = StepDef(name="wait", prompt="evaluate")
+            assert self._mock_asyncio_run(wf, task="t", repo="r", cwd=str(tmp_path), run_key="run-1")
+            assert len(calls) == 2 and all(call["options"]["model"] == "cheap" for call in calls)
+            assert runtime.close(timeout=2)
+            return
+        with patch("bobi.workflow.orchestrator.get_registry", return_value=MagicMock()), \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
+            assert resume_workflow(run, wf)
+        assert len(calls) == 2 and all(call["options"]["model"] == "cheap" for call in calls)
+        assert runtime.close(timeout=2)
+
+    def test_initial_route_checkpoint_failure_executes_control(self, monkeypatch):
+        from dataclasses import replace
+        from bobi.metrics.routing import RouteOutcome
+        from tests.metrics.test_route_admission import decision
+
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        async def route(ctx):
+            return RouteOutcome("cheap", replace(decision(), model_selected="cheap"))
+        monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+        original_save = WorkflowRun.save
+        failures = []
+        def save(run, *args, **kwargs):
+            if (run.variable_scopes.get("_runtime", {}) or {}).get("route") and not failures:
+                failures.append(1)
+                raise OSError("checkpoint unavailable")
+            return original_save(run, *args, **kwargs)
+        monkeypatch.setattr(WorkflowRun, "save", save)
+        wf = Workflow(name="t", steps=[StepDef(name="discover", prompt="discover", agent="engineer")])
+        assert self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="run-1")
+        assert failures == [1]
+        assert calls[0]["options"]["model"] == "model-control"
 
     def _run_with_scorer_role(self, tmp_path, monkeypatch, steps, **kwargs):
         """One workflow run against a root whose config maps scorer→haiku;

@@ -30,6 +30,12 @@ AGENT_YAML = ENG_TEAM / "agent.yaml"
 
 class TestTwoLayerPackageShape:
 
+    def test_slack_socket_mode_token_is_optional(self):
+        config = yaml.safe_load(AGENT_YAML.read_text())
+        slack = next(service for service in config["services"] if service["name"] == "slack")
+        assert slack["credentials"]["app_token"] == "${SLACK_APP_TOKEN:-}"
+        assert slack["channels"] == "${SLACK_CHANNELS}"
+
     def test_project_lead_role_removed(self):
         assert not (ENG_TEAM / "roles" / "project_lead").exists(), (
             "eng-team must not ship a persistent project_lead role"

@@ -1,4 +1,7 @@
-from bobi.metrics.collector import MetricsCollector
+import json
+from pathlib import Path
+
+from bobi.metrics.collector import MetricsCollector, rebuild_database
 from bobi.metrics.events import MetricsEvent
 from bobi.metrics.projection import ORPHAN_TTL_US, project_pending
 from bobi.metrics.spool import SpoolWriter
@@ -14,6 +17,38 @@ def _event(event_type, sequence, payload, **ids):
         payload=payload,
         **ids,
     )
+
+def test_historical_session_assignment_survives_projection_and_rebuild(tmp_path):
+    assignment = json.loads(Path(
+        "tests/fixtures/metrics/historical-router-assignment.json"
+    ).read_text())
+    segment = tmp_path / "historical.telemetry"
+    database = tmp_path / "metrics.db"
+    with SpoolWriter(segment) as writer:
+        writer.append(_event("session.recorded", 1, {
+            "session_id": "historical-session", "session_name": "agent",
+            "brain": "codex", "provider": "openai", "started_at_us": 1,
+            "status": "running",
+            "metadata_json": json.dumps({"router_assignment": assignment}),
+        }, session_id="historical-session"))
+        writer.append(_event("turn.recorded", 2, {
+            "turn_id": "historical-turn", "session_id": "historical-session",
+            "turn_index": 1, "trigger_kind": "user", "is_user_initiated": 1,
+            "started_at_us": 2, "status": "completed",
+        }, session_id="historical-session", turn_id="historical-turn"))
+    MetricsCollector(database).collect_segment(segment)
+    rebuilt = tmp_path / "rebuilt.db"
+    rebuild_database(database, rebuilt)
+    for path in (database, rebuilt):
+        conn = connect(path, readonly=True)
+        try:
+            decision = conn.execute("SELECT * FROM router_decisions").fetchone()
+            assert decision["variant_id"] == assignment["variant_id"]
+            assert decision["assignment_key_hash"] == assignment["assignment_key_hash"]
+            assert decision["model_selected"] == assignment["model_selected"]
+            assert decision["decided_at_us"] == 2
+        finally:
+            conn.close()
 
 
 def test_child_stages_before_parent_and_projects_after_parent_arrives(tmp_path):

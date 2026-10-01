@@ -27,6 +27,8 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
+from bobi.brain import normalize_brain_kind, session_brain_label
+from bobi.metrics.routing import RoutingContext, resolve_route
 from bobi.brain.turns import drain_turn, timeout_error, tool_crash_error
 from bobi.transient import is_transient_api_error
 from bobi.env import (
@@ -406,10 +408,13 @@ async def _run_agent_supervised(
     name = _session_name(run_key, role=role, phase=phase)
     _cfg = _load_team_config()
     model = _resolve_launch_model(role, cfg=_cfg)
-    from bobi.metrics.runtime import resolve_experiment_model
-    model = resolve_experiment_model(model, run_key=run_key, session_name=name)
     effort = _resolve_launch_effort(role, cfg=_cfg)
     max_turns = _resolve_launch_max_turns(role, explicit=max_turns, cfg=_cfg)
+    outcome = await resolve_route(RoutingContext(
+        name, "subagent_supervised", normalize_brain_kind(session_brain_label()),
+        model, False, prompt, role, fresh, repo_path=cwd, run_key=run_key, phase=phase,
+    ))
+    model = outcome.model
     saved_id = "" if fresh else load_resumable_session_id(name, model)
     registry = get_registry()
 
@@ -468,7 +473,7 @@ async def _run_agent_supervised(
                     "Resume failed for '%s' (stale session?), retrying fresh: %s",
                     name, e,
                 )
-                save_session_id(name, "")
+                save_session_id(name, "", preserve_route=True)
                 saved_id = ""
                 try:
                     await client.disconnect()
@@ -657,6 +662,10 @@ def run_phase_blocking(
             **({"effort": effort} if effort else {}),
         },
         run_key=run_key,
+        routing=RoutingContext(
+            name, "subagent_phase", normalize_brain_kind(session_brain_label()),
+            model, False, prompt, role, False, repo_path=cwd, run_key=run_key, phase=phase,
+        ),
     )
 
     ok = session.start(startup_prompt=prompt, timeout=effective_timeout)
@@ -884,9 +893,8 @@ def run_persistent_agent(
     _cfg = _load_team_config()
     merged_mcp = mcp_servers if mcp_servers is not None else (
         _cfg.mcp_servers if _cfg else None)
+    explicit_model = bool(model)
     model = _resolve_launch_model(role, explicit=model, cfg=_cfg)
-    from bobi.metrics.runtime import resolve_experiment_model
-    model = resolve_experiment_model(model, session_name=name)
     effort = _resolve_launch_effort(role, explicit=effort, cfg=_cfg)
 
     session = Session(
@@ -907,6 +915,10 @@ def run_persistent_agent(
         role=role,
         subscribe=subscribe,
         fresh=fresh,
+        routing=RoutingContext(
+            name, "subagent_persistent", normalize_brain_kind(session_brain_label()),
+            model, explicit_model, task, role, fresh, repo_path=cwd,
+        ),
     )
 
     ok = session.start(startup_prompt=task, timeout=timeout)

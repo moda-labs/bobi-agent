@@ -14,12 +14,8 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from bobi.metrics.events import MetricsEvent, deterministic_metric_id, uuid7
 from bobi.metrics.producer import MetricsProducer
-from bobi.metrics.router import (
-    RouterDecision,
-    load_experiment,
-    projection_fields,
-    route,
-)
+from bobi.metrics.policy import policy_health
+from bobi.metrics.router import RouterDecision, projection_fields
 
 if TYPE_CHECKING:
     from bobi.brain.base import BrainInvocation, BrainToolExecution, BrainUsage, TurnResult
@@ -28,11 +24,11 @@ log = logging.getLogger(__name__)
 
 METRICS_MODE_ENV = "BOBI_METRICS_MODE"
 DISABLED = "disabled"
-ENABLED_MODES = frozenset({"shadow", "full"})
+ENABLED_MODES = frozenset({"enabled"})
 
 
 def resolve_mode(env: Mapping[str, str] | None = None) -> str:
-    value = str((env or os.environ).get(METRICS_MODE_ENV, DISABLED)).strip().lower()
+    value = str((os.environ if env is None else env).get(METRICS_MODE_ENV, DISABLED)).strip().lower()
     if value in {"", "0", "off", "false", "disabled"}:
         return DISABLED
     if value in ENABLED_MODES:
@@ -75,13 +71,10 @@ class MetricsRuntime:
         self._emitted_sessions: set[str] = set()
         self._provider_sessions: dict[str, str] = {}
         self._session_contexts: dict[str, dict[str, object]] = {}
-        self._router_assignments: dict[str, RouterDecision] = {}
-        self._declined_router_models: dict[str, str] = {}
         self._fault_injection_enabled = False
         self._producer: MetricsProducer | None = None
         self._init_error = ""
         self.events_emitted = 0
-        self._experiment = None
 
         try:
             from bobi.metrics.faults import (
@@ -100,14 +93,6 @@ class MetricsRuntime:
         if self.mode not in ENABLED_MODES:
             self.mode = DISABLED
             return
-
-        try:
-            self._experiment = load_experiment()
-        except Exception as exc:
-            # Bad experiment configuration disables routing, never the turn or
-            # the metrics producer.  The warning intentionally contains no
-            # configuration value because it may include deployment metadata.
-            log.warning("metrics: experiment routing disabled: %s", exc)
 
         metrics_root = self.root / "state" / "metrics"
         segment = (
@@ -143,79 +128,43 @@ class MetricsRuntime:
             self._session_ids[session_name] = session_id
         return session_id
 
-    def resolve_model(
-        self,
-        requested_model: str,
-        *,
-        experiment_subject: str = "",
-        run_key: str = "",
-        session_name: str = "",
-    ) -> str:
-        """Admit one session assignment before selecting its treatment model."""
-        if not self.enabled or self._experiment is None:
-            return requested_model
-        if not session_name:
-            return requested_model
+    def admit_route(self, session_name: str, decision: RouterDecision, *,
+                    brain: str, role: str = "", run_key: str = "",
+                    workflow_name: str = "") -> bool:
+        """Admit a resolved decision, never select a model or call a policy."""
+        if not self.enabled:
+            return False
         session_id = self.session_id(session_name)
-        admitted = self._router_assignments.get(session_id)
-        if admitted is not None:
-            return admitted.model_selected or requested_model
-        if session_id in self._declined_router_models:
-            return self._declined_router_models[session_id]
-        try:
-            decision = route(
-                self._experiment,
-                requested_model="",
-                experiment_subject=(
-                    experiment_subject
-                    or os.environ.get("BOBI_METRICS_EXPERIMENT_SUBJECT", "")
-                ),
-                run_key=run_key,
-                session_id=session_name,
-            )
-        except Exception:
-            log.debug("metrics: model routing failed open", exc_info=True)
-            return requested_model
-        if decision is None or decision.assignment_status != "assigned":
-            return requested_model
-        started = time.time_ns() // 1000
-        self._session_starts.setdefault(session_id, started)
-        context = self._session_contexts.setdefault(session_id, {
-            "session_id": session_id,
-            "session_name": session_name,
-            "brain": "unknown",
-            "provider": "unknown",
-            "role": None,
-            "run_key": run_key or None,
-            "project": None,
-            "workflow_name": None,
-            "started_at_us": self._session_starts[session_id],
+        if self._turn_indexes.get(session_id):
+            return False
+        started = self._session_starts.get(session_id, time.time_ns() // 1000)
+        context = {
+            "session_id": session_id, "session_name": session_name,
+            "brain": brain, "provider": "unknown", "role": role or None,
+            "run_key": run_key or None, "project": None,
+            "workflow_name": workflow_name or None, "started_at_us": started,
             "parent_session_id": None,
-            "metadata_json": "{}",
-        })
-        context["metadata_json"] = _json({
-            "router_assignment": projection_fields(decision),
-        })
-        accepted = self.emit(
-            "session.recorded",
-            {
-                **context,
-                "provider_session_id": None,
-                "ended_at_us": None,
-                "status": "running",
-                "terminal_error_kind": None,
-            },
-            session_id=session_id,
-        )
-        if not accepted:
-            self._session_contexts.pop(session_id, None)
-            self._session_starts.pop(session_id, None)
-            fallback_model = decision.control_model or requested_model
-            self._declined_router_models[session_id] = fallback_model
-            return fallback_model
+            "metadata_json": _json({"router_assignment": projection_fields(decision)}),
+        }
+        if not self.emit("session.recorded", {
+            **context, "provider_session_id": None, "ended_at_us": None,
+            "status": "running", "terminal_error_kind": None,
+        }, session_id=session_id):
+            return False
+        self._session_contexts[session_id] = context
+        self._session_starts[session_id] = started
         self._emitted_sessions.add(session_id)
-        self._router_assignments[session_id] = decision
-        return decision.model_selected or requested_model
+        return True
+
+    def discard_route(self, session_name: str) -> None:
+        """Discard unexecuted routing metadata after a persistence failure."""
+        session_id = self._session_ids.get(session_name)
+        if session_id is None or self._turn_indexes.get(session_id):
+            return
+        context = self._session_contexts.get(session_id)
+        if context is not None:
+            context["metadata_json"] = "{}"
+        self._emitted_sessions.discard(session_id)
 
     def emit(
         self,
@@ -276,8 +225,6 @@ class MetricsRuntime:
         self._emitted_sessions.clear()
         self._provider_sessions.clear()
         self._session_contexts.clear()
-        self._router_assignments.clear()
-        self._declined_router_models.clear()
 
     def health(self) -> dict[str, object]:
         producer = self._producer
@@ -287,6 +234,7 @@ class MetricsRuntime:
             "producer_id": self.producer_id,
             "events_emitted": self.events_emitted,
             "init_error": self._init_error or None,
+            "router_policy": policy_health(),
         }
         if producer is not None:
             health.update(producer.health())
@@ -309,8 +257,6 @@ class MetricsRuntime:
             self._session_starts.pop(session_id, None)
             self._emitted_sessions.discard(session_id)
             self._provider_sessions.pop(session_id, None)
-            self._router_assignments.pop(session_id, None)
-            self._declined_router_models.pop(session_id, None)
             self._session_ids.pop(session_name, None)
             return True
         payload = {
@@ -327,8 +273,6 @@ class MetricsRuntime:
             self._emitted_sessions.discard(session_id)
             self._provider_sessions.pop(session_id, None)
             self._session_contexts.pop(session_id, None)
-            self._router_assignments.pop(session_id, None)
-            self._declined_router_models.pop(session_id, None)
             self._session_ids.pop(session_name, None)
         return accepted
 
@@ -496,26 +440,17 @@ class TurnObservation:
                 self,
                 self.runtime._provider_sessions.get(self.session_id, ""),
             )
+        context = self.runtime._session_contexts[self.session_id]
+        assignment = json.loads(str(context.get("metadata_json", "{}"))).get("router_assignment")
+        if isinstance(assignment, dict) and assignment.get("experiment_id"):
+            self.router_decision_id = _stable_id("route", self.turn_id, assignment["experiment_id"])
         _emit_turn_row(self, status="running", ended_at_us=None, error_kind="")
-        self.router_decision = self.runtime._router_assignments.get(self.session_id)
-        if (
-            self.router_decision is None
-            and self.session_id not in self.runtime._declined_router_models
-        ):
-            self.router_decision = route(
-                self.runtime._experiment,
-                requested_model=self.model_requested,
-                experiment_subject=self.experiment_subject,
-                run_key=self.run_key,
-                # The Bobi session name is stable across process restarts; the
-                # telemetry session UUID intentionally is not.
-                session_id=self.session_name,
-            )
-        if self.router_decision is not None:
-            self.router_decision_id = _stable_id(
-                "route", self.turn_id, self.router_decision.experiment_id
-            )
-            _emit_router_decision(self)
+        if self.router_decision_id:
+            self.runtime.emit("router_decision.recorded", {
+                **assignment, "router_decision_id": self.router_decision_id,
+                "turn_id": self.turn_id, "decided_at_us": self.started_at_us,
+            }, session_id=self.session_id, turn_id=self.turn_id)
+
 
     def mark_first_output(self) -> None:
         if self.first_output_at_us is None:
@@ -732,23 +667,6 @@ def _emit_turn_row(
             "status": status,
             "error_kind": error_kind or None,
             "provider_turn_id": provider_turn_id or None,
-        },
-        session_id=observation.session_id,
-        turn_id=observation.turn_id,
-    )
-
-
-def _emit_router_decision(observation: TurnObservation) -> None:
-    decision = observation.router_decision
-    decision_id = observation.router_decision_id
-    if decision is None or decision_id is None:
-        return
-    observation.runtime.emit(
-        "router_decision.recorded",
-        {
-            "router_decision_id": decision_id,
-            "turn_id": observation.turn_id,
-            **projection_fields(decision, decided_at_us=observation.started_at_us),
         },
         session_id=observation.session_id,
         turn_id=observation.turn_id,
@@ -1137,25 +1055,6 @@ def observe_turn(session_name: str, **kwargs: Any) -> TurnObservation:
         return MetricsRuntime(Path.cwd(), mode=DISABLED).begin_turn(
             session_name, **kwargs
         )
-
-
-def resolve_experiment_model(
-    requested_model: str,
-    *,
-    experiment_subject: str = "",
-    run_key: str = "",
-    session_name: str = "",
-) -> str:
-    try:
-        return get_runtime().resolve_model(
-            requested_model,
-            experiment_subject=experiment_subject,
-            run_key=run_key,
-            session_name=session_name,
-        )
-    except Exception:
-        log.debug("metrics: experiment model resolution failed open", exc_info=True)
-        return requested_model
 
 
 def finish_metrics_session(

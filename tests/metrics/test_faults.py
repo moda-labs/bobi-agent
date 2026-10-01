@@ -19,7 +19,7 @@ def _smoke_root(tmp_path):
 def test_fault_injection_is_refused_outside_disposable_home(monkeypatch, tmp_path):
     monkeypatch.setenv("BOBI_METRICS_FAULT_INJECTION", "1")
 
-    runtime = MetricsRuntime(tmp_path / "normal", mode="shadow")
+    runtime = MetricsRuntime(tmp_path / "normal", mode="enabled")
 
     assert runtime.enabled is False
     assert runtime.health()["init_error"] == "FaultInjectionRefused"
@@ -36,7 +36,7 @@ def test_drop_online_usage_is_one_shot_and_preserves_reconciliation_metadata(
     root = _smoke_root(tmp_path)
     monkeypatch.setenv("BOBI_METRICS_FAULT_INJECTION", "1")
     arm_fault(root, "drop-next-online-usage", hold_seconds=0)
-    runtime = MetricsRuntime(root, mode="shadow")
+    runtime = MetricsRuntime(root, mode="enabled")
     assert runtime._fault_injection_enabled is True
     observation = runtime.begin_turn(
         "agent",
@@ -90,7 +90,7 @@ def test_background_turn_cannot_consume_recovery_fault(monkeypatch, tmp_path):
     root = _smoke_root(tmp_path)
     monkeypatch.setenv("BOBI_METRICS_FAULT_INJECTION", "1")
     arm_fault(root, "drop-next-online-usage", hold_seconds=0)
-    runtime = MetricsRuntime(root, mode="shadow")
+    runtime = MetricsRuntime(root, mode="enabled")
     usage = BrainUsage(
         model="claude-test",
         provider_event_id="message-1",

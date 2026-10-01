@@ -14,7 +14,7 @@ from bobi.metrics.store import connect
 def test_service_imports_spools_and_exposes_health(tmp_path):
     service = MetricsCollectorService(tmp_path, poll_interval=0.01)
     service.start()
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn("agent", provider="openai", brain="codex")
     observation.record_result(TurnResult(
         session_id="thread-1",
@@ -270,7 +270,7 @@ def test_corrupt_segment_does_not_starve_later_segments(tmp_path):
 
 
 def test_active_collector_executes_queued_rebuild(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="shadow")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn("agent", provider="openai", brain="codex")
     observation.finish(status="completed")
     runtime.close()

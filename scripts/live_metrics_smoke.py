@@ -729,7 +729,7 @@ def _smoke_env(home: Path) -> dict[str, str]:
     ):
         env.pop(name, None)
     env["BOBI_HOME"] = str(home)
-    env["BOBI_METRICS_MODE"] = "shadow"
+    env["BOBI_METRICS_MODE"] = "enabled"
     env["BOBI_METRICS_FAULT_INJECTION"] = "1"
     env.setdefault("BOBI_EVENT_SERVER", "http://localhost:8080")
     existing = env.get("PYTHONPATH")

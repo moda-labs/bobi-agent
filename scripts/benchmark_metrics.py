@@ -29,7 +29,7 @@ from bobi.metrics.producer import MetricsProducer
 from bobi.metrics.spool import SpoolWriter
 from bobi.metrics.store import connect, integrity_check, logical_snapshot
 from bobi.metrics.query import MetricsQueries
-from bobi.metrics.router import ExperimentConfig, route
+from bobi.metrics.router import ExperimentConfig, assign_variant
 
 
 def percentile(values: list[int], quantile: float) -> float:
@@ -350,7 +350,7 @@ def _turn_replay_mode(
     turns: int,
     turn_work_ms: float,
 ) -> dict[str, object]:
-    runtime_mode = "disabled" if mode == "telemetry-off" else mode
+    runtime_mode = "disabled" if mode == "telemetry-off" else "enabled"
     collector = MetricsCollectorService(root, poll_interval=0.005) if mode == "full" else None
     if collector is not None:
         collector.start()
@@ -683,18 +683,17 @@ def benchmark_router(args: argparse.Namespace) -> dict[str, object]:
             {"variant_id": "treatment", "weight": 0.5, "model": "treatment"},
         ],
     })
-    configured = (config, b"public-router-benchmark-secret")
+    secret = b"public-router-benchmark-secret"
     samples_ns = []
     variants = {"control": 0, "treatment": 0}
     for index in range(args.samples):
         started = time.perf_counter_ns()
-        decision = route(
-            configured,
-            requested_model="",
-            experiment_subject=f"benchmark-{index}",
+        variant, _, _ = assign_variant(
+            config, secret, assignment_unit="experiment_subject",
+            assignment_key=f"benchmark-{index}",
         )
         samples_ns.append(time.perf_counter_ns() - started)
-        variants[decision.variant_id] += 1
+        variants[variant.variant_id] += 1
     latency = {
         "p50": percentile(samples_ns, 0.50) / 1000,
         "p95": percentile(samples_ns, 0.95) / 1000,

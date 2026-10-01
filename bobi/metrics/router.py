@@ -1,9 +1,4 @@
-"""Deterministic, privacy-safe experiment assignment for metrics telemetry.
-
-The router is deliberately independent from provider clients.  It describes
-the intended treatment and records it before a provider invocation; callers
-remain responsible for constructing a client for the selected model.
-"""
+"""Privacy-safe HMAC assignment and historical routing telemetry contracts."""
 
 from __future__ import annotations
 
@@ -11,9 +6,11 @@ import hashlib
 import hmac
 import json
 import os
-import time
+import re
 from dataclasses import dataclass
 from typing import Mapping
+
+from bobi.metrics.policy import PolicyConfig, policy_secret_names
 
 ASSIGNMENT_ALGORITHM = "hmac-sha256-u64-v1"
 EXPERIMENT_CONFIG_ENV = "BOBI_METRICS_EXPERIMENT_JSON"
@@ -31,7 +28,15 @@ def provider_subprocess_env(
 ) -> dict[str, str]:
     """Remove experiment assignment material from provider subprocesses."""
     env = dict(os.environ if base is None else base)
-    for name in ROUTING_ENV_NAMES:
+    try:
+        configured = json.loads(env.get(EXPERIMENT_CONFIG_ENV, "{}"))
+        policy = configured.get("policy") if isinstance(configured, dict) else None
+        credential = policy.get("credential_env") if isinstance(policy, dict) else None
+        if isinstance(credential, str) and re.fullmatch(r"[A-Z_][A-Z0-9_]*", credential.strip()):
+            env.pop(credential.strip(), None)
+    except (ValueError, TypeError):
+        pass
+    for name in (*ROUTING_ENV_NAMES, "TYPESAFE_API_KEY", *policy_secret_names()):
         env.pop(name, None)
     return env
 
@@ -40,7 +45,8 @@ def provider_subprocess_env(
 class ExperimentVariant:
     variant_id: str
     weight: float
-    model: str
+    model: str = ""
+    policy: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,13 +59,14 @@ class ExperimentConfig:
     feature_schema_version: str
     control_model: str
     cohort: str | None = None
+    policy: PolicyConfig | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> "ExperimentConfig":
         allowed = {
             "experiment_id", "variants", "router_name", "router_version",
             "policy_version", "feature_schema_version", "control_model",
-            "cohort",
+            "cohort", "policy",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -81,7 +88,7 @@ class ExperimentConfig:
         for item in source_variants:
             if not isinstance(item, dict):
                 raise ValueError("each experiment variant must be an object")
-            unknown_variant = sorted(set(item) - {"variant_id", "weight", "model"})
+            unknown_variant = sorted(set(item) - {"variant_id", "weight", "model", "policy"})
             if unknown_variant:
                 raise ValueError(
                     "unsupported experiment variant fields: "
@@ -89,22 +96,40 @@ class ExperimentConfig:
                 )
             variant_id = item.get("variant_id")
             model = item.get("model")
+            policy_name = item.get("policy")
             weight = item.get("weight")
             if not isinstance(variant_id, str) or not variant_id.strip():
                 raise ValueError("variant_id must be a non-empty string")
+            variant_id = variant_id.strip()
             if variant_id in seen:
                 raise ValueError(f"duplicate variant_id {variant_id}")
-            if not isinstance(model, str) or not model.strip():
-                raise ValueError(f"variant {variant_id} requires model")
+            if ("model" in item) == ("policy" in item):
+                raise ValueError("variant requires exactly one model or policy")
+            selected = model if "model" in item else policy_name
+            if not isinstance(selected, str) or not selected.strip():
+                raise ValueError("variant requires non-empty model or policy")
             if isinstance(weight, bool) or not isinstance(weight, (int, float)):
                 raise ValueError(f"variant {variant_id} requires numeric weight")
             if not 0 < float(weight) <= 1:
                 raise ValueError(f"variant {variant_id} weight must be in (0, 1]")
             seen.add(variant_id)
-            variants.append(ExperimentVariant(variant_id, float(weight), model.strip()))
+            variants.append(ExperimentVariant(
+                variant_id, float(weight),
+                model.strip() if isinstance(model, str) else "",
+                policy_name.strip() if isinstance(policy_name, str) else "",
+            ))
         if abs(sum(item.weight for item in variants) - 1.0) > 1e-9:
             raise ValueError("experiment variant weights must sum to 1")
         cohort = raw.get("cohort")
+        policy_raw = raw.get("policy")
+        if "policy" in raw and not isinstance(policy_raw, dict):
+            raise ValueError("experiment policy must be an object")
+        policy = PolicyConfig.from_mapping(policy_raw) if isinstance(policy_raw, dict) else None
+        policy_variants = [item for item in variants if item.policy]
+        if bool(policy_variants) != bool(policy):
+            raise ValueError("policy required exactly when a variant names a policy")
+        if policy and any(item.policy != policy.name for item in policy_variants):
+            raise ValueError("variant policy names must match configured policy")
         if cohort is not None and (not isinstance(cohort, str) or not cohort.strip()):
             raise ValueError("cohort must be a non-empty string when supplied")
         config = cls(
@@ -116,9 +141,15 @@ class ExperimentConfig:
             feature_schema_version=required("feature_schema_version"),
             control_model=required("control_model"),
             cohort=cohort.strip() if isinstance(cohort, str) else None,
+            policy=policy,
         )
         if config.control_model not in {item.model for item in config.variants}:
             raise ValueError("control_model must match one configured variant model")
+        if policy:
+            if sum(item.model == config.control_model for item in variants) != 1:
+                raise ValueError("policy experiment requires exactly one control variant")
+            if config.control_model not in policy.candidate_models:
+                raise ValueError("control_model must be a policy candidate")
         return config
 
 
@@ -146,6 +177,8 @@ class RouterDecision:
     expected_weight: float | None
     expected_weights: tuple[tuple[str, float], ...]
     config_fingerprint: str
+    entry_point: str = ""
+    policy_metadata_json: str = "{}"
 
 
 def load_experiment(
@@ -206,91 +239,13 @@ def assign_variant(
     return selected, bucket, key_hash
 
 
-def route(
-    configured: tuple[ExperimentConfig, bytes] | None,
-    *,
-    requested_model: str,
-    experiment_subject: str = "",
-    run_key: str = "",
-    session_id: str = "",
-) -> RouterDecision | None:
-    """Return an intent-to-treat decision, or None when routing is disabled."""
-    if configured is None:
-        return None
-    started = time.perf_counter_ns()
-    config, secret = configured
-    config_fingerprint = hashlib.sha256(
-        json.dumps(public_config(config), sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    expected_weights = tuple((item.variant_id, item.weight) for item in config.variants)
-    unit, key = choose_assignment_key(
-        experiment_subject=experiment_subject,
-        run_key=run_key,
-        session_id=session_id,
-    )
-    decided_at = time.time_ns() // 1000
-    candidates = tuple(dict.fromkeys(item.model for item in config.variants))
-    if unit is None or key is None:
-        return RouterDecision(
-            experiment_id=config.experiment_id,
-            variant_id=None,
-            assignment_unit=None,
-            assignment_status="unassigned",
-            assignment_key_hash=None,
-            assignment_algorithm=ASSIGNMENT_ALGORITHM,
-            cohort=config.cohort,
-            router_name=config.router_name,
-            router_version=config.router_version,
-            policy_version=config.policy_version,
-            feature_schema_version=config.feature_schema_version,
-            candidate_models=candidates,
-            model_selected=requested_model or config.control_model,
-            control_model=config.control_model,
-            router_score=None,
-            router_reason="missing_stable_assignment_key",
-            router_latency_ms=(time.perf_counter_ns() - started) / 1_000_000,
-            fallback_reason=None,
-            decided_at_us=decided_at,
-            expected_weight=None,
-            expected_weights=expected_weights,
-            config_fingerprint=config_fingerprint,
-        )
-    selected, bucket, key_hash = assign_variant(
-        config, secret, assignment_unit=unit, assignment_key=key
-    )
-    fallback = bool(requested_model and requested_model != selected.model)
-    return RouterDecision(
-        experiment_id=config.experiment_id,
-        variant_id=selected.variant_id,
-        assignment_unit=unit,
-        assignment_status="assigned",
-        assignment_key_hash=key_hash,
-        assignment_algorithm=ASSIGNMENT_ALGORITHM,
-        cohort=config.cohort,
-        router_name=config.router_name,
-        router_version=config.router_version,
-        policy_version=config.policy_version,
-        feature_schema_version=config.feature_schema_version,
-        candidate_models=candidates,
-        model_selected=requested_model if fallback else selected.model,
-        control_model=config.control_model,
-        router_score=bucket,
-        router_reason="deterministic_weighted_assignment",
-        router_latency_ms=(time.perf_counter_ns() - started) / 1_000_000,
-        fallback_reason="preconfigured_client_model" if fallback else None,
-        decided_at_us=decided_at,
-        expected_weight=selected.weight,
-        expected_weights=expected_weights,
-        config_fingerprint=config_fingerprint,
-    )
-
-
 def public_config(config: ExperimentConfig) -> dict[str, object]:
     """Return a secret-free representation suitable for test artifacts."""
-    return {
+    result = {
         "experiment_id": config.experiment_id,
         "variants": [
-            {"variant_id": item.variant_id, "weight": item.weight, "model": item.model}
+            {"variant_id": item.variant_id, "weight": item.weight,
+             **({"policy": item.policy} if item.policy else {"model": item.model})}
             for item in config.variants
         ],
         "router_name": config.router_name,
@@ -300,6 +255,9 @@ def public_config(config: ExperimentConfig) -> dict[str, object]:
         "control_model": config.control_model,
         "cohort": config.cohort,
     }
+    if config.policy:
+        result["policy"] = config.policy.public_config()
+    return result
 
 
 def projection_fields(
@@ -308,6 +266,17 @@ def projection_fields(
     decided_at_us: int | None = None,
 ) -> dict[str, object]:
     """Return the privacy-safe fields used by router decision projections."""
+    metadata: dict[str, object] = {
+        "config_fingerprint": decision.config_fingerprint,
+        "expected_weight": decision.expected_weight,
+        "expected_weights": dict(decision.expected_weights),
+    }
+    if decision.entry_point:
+        metadata["entry_point"] = decision.entry_point
+        policy = json.loads(decision.policy_metadata_json)
+        if not isinstance(policy, dict):
+            raise ValueError("policy metadata must be an object")
+        metadata["policy"] = policy
     return {
         "experiment_id": decision.experiment_id,
         "variant_id": decision.variant_id,
@@ -336,11 +305,7 @@ def projection_fields(
             decision.decided_at_us if decided_at_us is None else decided_at_us
         ),
         "metadata_json": json.dumps(
-            {
-                "config_fingerprint": decision.config_fingerprint,
-                "expected_weight": decision.expected_weight,
-                "expected_weights": dict(decision.expected_weights),
-            },
+            metadata,
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,

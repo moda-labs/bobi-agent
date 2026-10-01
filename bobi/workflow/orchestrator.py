@@ -16,7 +16,7 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import NamedTuple
 
@@ -659,10 +659,7 @@ async def _run_workflow_async(
         else:
             step_role = role or ((step.agent if step else "") or current_agent)
             requested = resolve_model(team_cfg, role=step_role)
-        from bobi.metrics.runtime import resolve_experiment_model
-        return resolve_experiment_model(
-            requested, run_key=run_key, session_name=session_name
-        )
+        return requested
 
     def _effective_step_effort(step: StepDef | None) -> str:
         # The reasoning-effort sibling of _effective_step_model (#778), same
@@ -810,6 +807,55 @@ async def _run_workflow_async(
     current_agent = first_agent
     first_prompt_step = _first_prompt_step()
     first_prompt_model = _effective_step_model(first_prompt_step)
+    routed_model = None
+    route_record = None
+    if first_prompt_step is not None:
+        from bobi.brain import normalize_brain_kind, session_brain_label
+        from bobi.metrics.routing import RoutingContext, resolve_route
+
+        prior_route = (ctx.scopes.get("_runtime", {}) or {}).get("route")
+        routing_context = RoutingContext(
+            session_name, "workflow_start", normalize_brain_kind(session_brain_label()),
+            first_prompt_model, bool(launch_model or first_prompt_step.model),
+            _build_step_prompt(first_prompt_step, ctx, session_name, first_prompt_step.name),
+            role or current_agent, fresh, repo_path=cwd, run_key=run_key,
+            workflow_name=workflow.name, step_name=first_prompt_step.name,
+            existing_transcript=bool(saved_id),
+        )
+        if isinstance(prior_route, dict) and not fresh:
+            outcome = await resolve_route(routing_context, sticky_record=prior_route)
+        else:
+            outcome = await resolve_route(routing_context)
+        if outcome.decision is not None or outcome.reason is not None:
+            routed_model = outcome.model
+            first_prompt_model = outcome.model
+        if outcome.decision is not None:
+            route_record = {"brain": session_brain_label(), "decision": asdict(outcome.decision)}
+            ctx.set_scope("_runtime", {
+                **(ctx.scopes.get("_runtime", {}) or {}),
+                "model": outcome.model, "route": route_record,
+            })
+            run.variable_scopes = ctx.scopes
+            try:
+                run.save()
+            except OSError:
+                from bobi.metrics.runtime import get_runtime
+
+                runtime = get_runtime()
+                routed_model = outcome.decision.control_model or first_prompt_model
+                corrected = replace(outcome.decision, model_selected=routed_model,
+                    fallback_reason="route_persistence_failed", router_reason="policy_fallback")
+                if not runtime.admit_route(session_name, corrected,
+                        brain=routing_context.brain, role=routing_context.role,
+                        run_key=run_key, workflow_name=workflow.name):
+                    runtime.discard_route(session_name)
+                first_prompt_model = routed_model
+                route_record = None
+                ctx.set_scope("_runtime", {
+                    **(ctx.scopes.get("_runtime", {}) or {}),
+                    "model": routed_model, "route": None,
+                })
+                log.warning("metrics: workflow route checkpoint unavailable")
     # Effort is exempt from the resume guard (#778): both brains accept a new
     # effort on a resumed session, so the effective dial is simply recomputed
     # for the next step - no saved-effort record, no continue-vs-fresh check.
@@ -960,6 +1006,7 @@ async def _run_workflow_async(
                 "launch_model": launch_model,
                 "launch_effort": launch_effort,
                 "visits": visit_counts,
+                "route": route_record,
             })
             run.checkpoint_step = next_idx
             run.checkpoint_fingerprint = workflow.steps_fingerprint()
@@ -1135,6 +1182,8 @@ async def _run_workflow_async(
                 )
 
             step_model = _effective_step_model(step)
+            if routed_model is not None and not launch_model and not step.model and (role or step.agent or current_agent) == first_agent:
+                step_model = routed_model
             step_effort = _effective_step_effort(step)
             # The cap is a construction-time CLI flag, so it can only change by
             # rebuilding the session - exactly like effort (#845 review). An
