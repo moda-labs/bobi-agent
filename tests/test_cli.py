@@ -114,6 +114,29 @@ def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
     assert os.environ.get("ANTHROPIC_AUTH_TOKEN") == "from-runtime-dotenv"
 
 
+def test_status_reports_active_inbox_backlog(bobi_install):
+    import os
+    import time
+
+    from bobi.sdk import SessionEntry, get_registry
+
+    get_registry().register(SessionEntry(
+        name="bobi-test-agent-director",
+        role="director",
+        cwd=str(bobi_install.repo_path),
+        pid=os.getpid(),
+        status="idle",
+        inbox_depth=4,
+        inbox_oldest_age_seconds=10.0,
+        inbox_oldest_enqueued_at=time.time() - 30.0,
+    ))
+
+    result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "inbox=4, oldest=30s" in result.output
+
+
 def test_agent_group_pins_gateway_openai_brain_for_cli_process(
     bobi_install, monkeypatch,
 ):
