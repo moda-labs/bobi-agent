@@ -393,7 +393,10 @@ class MetricsQueries:
         conn.execute("PRAGMA busy_timeout = 50")
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         try:
-            return _bounded(build(conn))
+            payload = _bounded(build(conn))
+            if time.monotonic() >= deadline:
+                raise MetricsQueryError("metrics query exceeded its deadline", "metrics_busy", retry_after_ms=250)
+            return payload
         except sqlite3.OperationalError as exc:
             message = str(exc).lower()
             if "interrupted" in message:
@@ -924,6 +927,32 @@ class MetricsQueries:
                 "FROM decisions d) WHERE assignment_rank=1 GROUP BY variant_id",
                 tuple(decision_params),
             ).fetchall()
+            arm_units = conn.execute(
+                decisions_cte
+                + "SELECT variant_id,COUNT(*) AS assignment_unit_count,"
+                "AVG(turn_count) AS turns_per_unit,AVG(completed) AS completion_rate,"
+                "AVG(errored) AS error_rate,AVG(latency_ms) AS latency_ms_per_unit,"
+                "AVG(retry_steps) AS observed_workflow_retry_steps_per_unit,"
+                "AVG(reported_cost_usd) AS known_reported_cost_usd_per_unit,"
+                "SUM(CASE WHEN reported_cost_usd IS NULL THEN 1 ELSE 0 END) AS units_without_reported_cost FROM ("
+                "SELECT d.variant_id,d.assignment_unit,d.assignment_key_hash,"
+                "COUNT(DISTINCT d.turn_id) AS turn_count,"
+                "MIN(CASE WHEN t.status='completed' THEN 1.0 ELSE 0.0 END) AS completed,"
+                "MAX(CASE WHEN t.error_kind IS NOT NULL OR t.status IN ('failed','error','crashed') "
+                "THEN 1.0 ELSE 0.0 END) AS errored,SUM(t.wall_duration_ms) AS latency_ms,"
+                "SUM((SELECT COUNT(*) FROM workflow_steps ws WHERE ws.turn_id=d.turn_id "
+                "AND ws.attempt>1)) AS retry_steps,"
+                "CASE WHEN COUNT((SELECT SUM(c.amount_usd) FROM cost_measurements c "
+                "WHERE c.turn_id=d.turn_id AND c.is_estimated=0 AND " + _chosen_cost("c") + "))=COUNT(*) "
+                "THEN SUM((SELECT SUM(c.amount_usd) FROM cost_measurements c "
+                "WHERE c.turn_id=d.turn_id AND c.is_estimated=0 AND " + _chosen_cost("c") + ")) END AS reported_cost_usd "
+                "FROM decisions d JOIN turns t ON t.turn_id=d.turn_id "
+                "WHERE d.assignment_status='assigned' AND d.assignment_unit IS NOT NULL "
+                "AND d.assignment_key_hash IS NOT NULL "
+                "GROUP BY d.variant_id,d.assignment_unit,d.assignment_key_hash) "
+                "GROUP BY variant_id ORDER BY variant_id",
+                tuple(decision_params),
+            ).fetchall()
             decision_metadata = conn.execute(
                 decisions_cte
                 + "SELECT variant_id,assignment_status,metadata_json FROM decisions",
@@ -992,6 +1021,24 @@ class MetricsQueries:
                 "o.outcome_source,o.evaluator_name,o.evaluator_version,o.is_estimated "
                 "ORDER BY r.variant_id,o.outcome_name,o.outcome_definition_version,"
                 "o.evaluator_name,o.evaluator_version,o.is_estimated",
+                tuple(outcome_values + (outcome_params if outcome_filters else [])),
+            ).fetchall()
+            unit_quality = conn.execute(
+                "SELECT variant_id,outcome_name,outcome_definition_version,outcome_source,"
+                "evaluator_name,evaluator_version,is_estimated,COUNT(*) AS assignment_unit_count,"
+                "AVG(unit_mean) AS mean_unit_value FROM ("
+                "SELECT r.variant_id,r.assignment_unit,r.assignment_key_hash,"
+                "o.outcome_name,o.outcome_definition_version,o.outcome_source,"
+                "o.evaluator_name,o.evaluator_version,o.is_estimated,AVG(o.outcome_value) AS unit_mean "
+                "FROM router_decisions r JOIN experiment_outcomes o ON o.router_decision_id=r.router_decision_id "
+                f"WHERE {outcome_where} AND r.assignment_status='assigned' "
+                "AND r.assignment_unit IS NOT NULL AND r.assignment_key_hash IS NOT NULL "
+                "AND o.outcome_source IN ('evaluator','human') "
+                + (" AND " + " AND ".join(outcome_filters) if outcome_filters else "") +
+                " GROUP BY r.variant_id,r.assignment_unit,r.assignment_key_hash,o.outcome_name,"
+                "o.outcome_definition_version,o.outcome_source,o.evaluator_name,o.evaluator_version,o.is_estimated) "
+                "GROUP BY variant_id,outcome_name,outcome_definition_version,outcome_source,"
+                "evaluator_name,evaluator_version,is_estimated",
                 tuple(outcome_values + (outcome_params if outcome_filters else [])),
             ).fetchall()
             usage_by_variant = {
@@ -1164,8 +1211,152 @@ class MetricsQueries:
                             if variant_sample_size else None
                         ),
                     })
+            policy_groups: dict[tuple[object, ...], dict[str, object]] = {}
+            policy_calls: dict[str, float | None] = {}
+            arm_policy_calls: dict[object, dict[str, float | None]] = {}
+            policy_truncated = False
+            policy_scan_limit = 10000
+            scanned = 0
+            high_confidence_units: set[tuple[object, object, object]] = set()
+            evaluator_failure_units = {
+                (row["variant_id"], row["assignment_unit"], row["assignment_key_hash"])
+                for row in conn.execute(
+                    decisions_cte + "SELECT DISTINCT d.variant_id,d.assignment_unit,d.assignment_key_hash "
+                    "FROM decisions d JOIN experiment_outcomes o ON o.router_decision_id=d.router_decision_id "
+                    "WHERE d.assignment_status='assigned' AND d.assignment_unit IS NOT NULL "
+                    "AND d.assignment_key_hash IS NOT NULL AND o.outcome_source IN ('evaluator','human') "
+                    "AND o.is_estimated=0 AND CASE WHEN json_valid(o.metadata_json) "
+                    "THEN json_type(o.metadata_json,'$.is_failure') END='true'"
+                    + (" AND " + " AND ".join(outcome_filters) if outcome_filters else ""),
+                    tuple(decision_params + outcome_params),
+                )
+            }
+            runtime_error_units = {
+                (row["variant_id"], row["assignment_unit"], row["assignment_key_hash"])
+                for row in conn.execute(
+                    decisions_cte + "SELECT DISTINCT d.variant_id,d.assignment_unit,d.assignment_key_hash "
+                    "FROM decisions d JOIN turns t ON t.turn_id=d.turn_id "
+                    "WHERE d.assignment_status='assigned' AND d.assignment_unit IS NOT NULL "
+                    "AND d.assignment_key_hash IS NOT NULL AND "
+                    "(t.error_kind IS NOT NULL OR t.status IN ('failed','error','crashed'))",
+                    tuple(decision_params),
+                )
+            }
+            for decision in conn.execute(
+                "SELECT r.*,t.status AS turn_status,t.error_kind AS turn_error_kind "
+                f"FROM router_decisions r JOIN turns t ON t.turn_id=r.turn_id WHERE {decision_where} "
+                "ORDER BY r.decided_at_us,r.router_decision_id LIMIT ?",
+                [*decision_params, policy_scan_limit + 1],
+            ):
+                scanned += 1
+                if scanned > policy_scan_limit:
+                    policy_truncated = True
+                    break
+                try:
+                    metadata = json.loads(decision["metadata_json"] or "{}")
+                    policy = metadata.get("policy", {})
+                    call_id = policy.get("call_id")
+                    if isinstance(call_id, str) and call_id:
+                        cost = policy.get("cost_usd")
+                        policy_calls.setdefault(call_id, cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0 else None)
+                        if decision["assignment_status"] == "assigned":
+                            arm_policy_calls.setdefault(decision["variant_id"], {}).setdefault(
+                                call_id, policy_calls[call_id],
+                            )
+                    recommendation = policy.get("recommended_model")
+                    if not recommendation:
+                        continue
+                    confidence = policy.get("confidence")
+                    bucket = "high" if (isinstance(confidence, (int, float))
+                        and not isinstance(confidence, bool) and math.isfinite(confidence)
+                        and 0.9 <= confidence <= 1) else "below_0_9"
+                    if bucket == "high" and decision["assignment_status"] == "assigned":
+                        high_confidence_units.add((decision["variant_id"], decision["assignment_unit"], decision["assignment_key_hash"]))
+                    if not isinstance(recommendation, str) or not isinstance(policy.get("mode"), str):
+                        continue
+                    tier = policy.get("tier")
+                    if tier is not None and not isinstance(tier, str):
+                        continue
+                    key = (decision["variant_id"], recommendation, bucket, tier, policy.get("mode"))
+                    if key not in policy_groups and len(policy_groups) >= MAX_ROWS:
+                        policy_truncated = True
+                        continue
+                    group = policy_groups.setdefault(key, {
+                        "variant_id": key[0], "recommended_model": key[1],
+                        "confidence_bucket": key[2], "tier": key[3], "mode": key[4],
+                        "turn_count": 0, "assignment_units": set(),
+                    })
+                    group["turn_count"] += 1
+                    group["assignment_units"].add((decision["assignment_unit"], decision["assignment_key_hash"]))
+                except (ValueError, TypeError, AttributeError):
+                    continue
+            policy_breakdown = []
+            for group in policy_groups.values():
+                units = group.pop("assignment_units")
+                group["assignment_unit_count"] = len(units)
+                policy_breakdown.append(group)
+            arm_views = []
+            for row in arm_units:
+                arm = dict(row)
+                calls = arm_policy_calls.get(arm["variant_id"], {})
+                known_cost = sum(cost for cost in calls.values() if cost is not None)
+                unknown_calls = sum(cost is None for cost in calls.values())
+                arm["known_policy_cost_usd"] = known_cost
+                arm["unknown_policy_cost_calls"] = unknown_calls
+                arm["cost_scan_truncated"] = policy_truncated
+                arm["reported_total_cost_usd_per_unit"] = (
+                    arm["known_reported_cost_usd_per_unit"]
+                    + known_cost / arm["assignment_unit_count"]
+                    if not policy_truncated and not unknown_calls
+                    and not arm["units_without_reported_cost"] else None
+                )
+                arm_views.append(arm)
+            quality_views = [dict(row) for row in unit_quality]
+            _enforce_row_count(variants, outcome_views, arm_views, quality_views, policy_breakdown)
+            quality_identities = {
+                tuple(row[field] for field in outcome_identity_fields)
+                for row in quality_views
+            }
+            quality_missingness = []
+            for arm in arm_views:
+                for identity in sorted(quality_identities, key=str):
+                    observed = next((row["assignment_unit_count"] for row in quality_views
+                        if row["variant_id"] == arm["variant_id"]
+                        and tuple(row[field] for field in outcome_identity_fields) == identity), 0)
+                    total = arm["assignment_unit_count"]
+                    quality_missingness.append({
+                        "variant_id": arm["variant_id"],
+                        **dict(zip(outcome_identity_fields, identity)),
+                        "assignment_unit_count": total,
+                        "units_with_outcome": observed,
+                        "units_without_outcome": total - observed,
+                        "missing_rate": (total - observed) / total if total else None,
+                    })
+                    _enforce_row_count(variants, outcome_views, arm_views, quality_views,
+                                       quality_missingness, policy_breakdown)
+            _enforce_row_count(variants, outcome_views, arm_views, quality_views,
+                               quality_missingness, policy_breakdown)
             return {
                 "experiment_id": experiment_id,
+                "intent_to_treat": {
+                    "unit": "assignment_unit",
+                    "completion_definition": "all_observed_turns_completed",
+                    "error_definition": "any_observed_turn_error",
+                    "arms": arm_views,
+                    "quality": quality_views,
+                    "quality_missingness": quality_missingness,
+                },
+                "policy_breakdown": {
+                    "interpretation": "descriptive_only_not_causal",
+                    "truncated": policy_truncated,
+                    "scan_limit": policy_scan_limit,
+                    "high_confidence_runtime_error_units": len(high_confidence_units & runtime_error_units),
+                    "high_confidence_evaluator_failure_units": len(high_confidence_units & evaluator_failure_units),
+                    "groups": policy_breakdown,
+                    "unique_policy_calls": len(policy_calls),
+                    "known_policy_cost_usd": sum(cost for cost in policy_calls.values() if cost is not None),
+                    "unknown_policy_cost_calls": sum(cost is None for cost in policy_calls.values()),
+                },
                 "variants": variants,
                 "outcomes": outcome_views,
                 "diagnostics": {

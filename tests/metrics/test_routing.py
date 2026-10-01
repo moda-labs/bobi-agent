@@ -79,6 +79,9 @@ def test_capacity_timeout_does_not_create_a_policy_call(monkeypatch, tmp_path):
         breaker.finish(None, probe=False)
         assert runtime.close(timeout=2)
     MetricsCollectorService(tmp_path).collect_once()
+    report = MetricsQueries(tmp_path).experiment({"experiment_id": raw["experiment_id"]})
+    assert report["policy_breakdown"]["unique_policy_calls"] == 0
+    assert report["policy_breakdown"]["unknown_policy_cost_calls"] == 0
 
 
 def test_workflow_uses_only_its_checkpoint_for_sticky_routes(monkeypatch, tmp_path):

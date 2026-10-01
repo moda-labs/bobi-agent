@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 import time
 from typing import Any
 
@@ -21,6 +22,7 @@ def record_quality_outcome(
     outcome_value: float | None = None,
     outcome_text: str | None = None,
     is_estimated: bool = False,
+    is_failure: bool | None = None,
     observed_at_us: int | None = None,
     idempotency_key: str,
     session_id: str | None = None,
@@ -40,6 +42,8 @@ def record_quality_outcome(
         raise ValueError(f"quality outcome requires {', '.join(missing)}")
     if outcome_source not in {"evaluator", "human"}:
         raise ValueError("quality outcome source must be evaluator or human")
+    if is_failure is not None and type(is_failure) is not bool:
+        raise ValueError("quality outcome failure flag must be boolean")
     if outcome_value is None and not (outcome_text or "").strip():
         raise ValueError("quality outcome requires outcome_value or outcome_text")
     if outcome_value is not None and (
@@ -65,7 +69,7 @@ def record_quality_outcome(
             "evaluator_version": evaluator_version,
             "is_estimated": int(is_estimated),
             "observed_at_us": observed,
-            "metadata_json": "{}",
+            "metadata_json": json.dumps({"is_failure": is_failure}) if is_failure is not None else "{}",
         },
         session_id=session_id,
         turn_id=turn_id,

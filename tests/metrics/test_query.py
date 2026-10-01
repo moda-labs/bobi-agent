@@ -1116,3 +1116,15 @@ def test_sqlite_progress_deadline_is_retryable_metrics_busy(metrics_root):
     assert error.value.code == "metrics_busy"
     assert "deadline" in str(error.value)
     assert error.value.detail == {"retry_after_ms": 250}
+
+
+def test_python_query_processing_respects_deadline(metrics_root, monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("bobi.metrics.query.time.monotonic", lambda: now[0])
+    def processing(conn):
+        now[0] = 2.0
+        return {"late": True}
+    with pytest.raises(MetricsQueryError) as error:
+        MetricsQueries(metrics_root, deadline_seconds=1)._run(processing)
+    assert error.value.code == "metrics_busy"
+    assert error.value.detail == {"retry_after_ms": 250}

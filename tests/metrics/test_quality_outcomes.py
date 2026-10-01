@@ -9,6 +9,16 @@ from bobi.metrics.runtime import MetricsRuntime
 from bobi.metrics.store import connect
 
 
+@pytest.mark.parametrize("failure", [0, 1, "true", [], {}])
+def test_quality_failure_flag_requires_boolean(tmp_path, failure):
+    runtime = MetricsRuntime(tmp_path, mode="disabled")
+    with pytest.raises(ValueError, match="failure flag must be boolean"):
+        record_quality_outcome(runtime, router_decision_id="route-1",
+            outcome_name="quality", outcome_definition_version="v1",
+            outcome_source="evaluator", evaluator_name="judge", evaluator_version="1",
+            outcome_value=0.5, idempotency_key="assessment", is_failure=failure)
+
+
 def test_quality_outcome_requires_external_versioned_evaluator(tmp_path):
     runtime = MetricsRuntime(tmp_path, mode="disabled")
     with pytest.raises(ValueError, match="evaluator or human"):
