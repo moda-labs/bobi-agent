@@ -17,6 +17,11 @@ For the wire protocol an external control plane speaks to the supervisor, see
 connects to, see [`EVENT_SERVER.md`](EVENT_SERVER.md) and
 [`SELF_HOSTED_EVENT_SERVER.md`](SELF_HOSTED_EVENT_SERVER.md).
 
+The public Terraform + Kubernetes consumer proof is documented in
+[`examples/self-host/README.md`](../examples/self-host/README.md). It uses this
+released image unchanged and verifies heartbeat plus remote restart through the
+Worker fleet API from outside the cluster.
+
 ## Pull it
 
 ```bash
