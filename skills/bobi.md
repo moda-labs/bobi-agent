@@ -84,8 +84,8 @@ events.
 
 ```bash
 bobi agent <name> start
-bobi agent <name> stop
-bobi agent <name> restart
+bobi agent <name> stop         # run from a shell outside the runtime
+bobi agent <name> restart      # run from a shell outside the runtime
 bobi agent <name> start --fresh
 bobi agent <name> status
 bobi agent <name> doctor
@@ -130,6 +130,10 @@ bobi read-conversation <conversation> [-n 50] [--json-output]
 
 Use `bobi reply` and `bobi read-conversation` for Slack and any other
 chat channel delivered through the channel gateway.
+
+Run `stop` and `restart` only from a shell outside the target runtime. Bobi
+refuses either command when the caller is a descendant of that runtime's
+manager, and prints the exact external command to run instead.
 
 ## Upgrading Bobi In Place
 
