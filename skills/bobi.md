@@ -90,6 +90,10 @@ bobi agent <name> start --fresh
 bobi agent <name> status
 bobi agent <name> doctor
 
+# Install or remove the user-level supervisor service (macOS/Linux).
+bobi agent <name> install-service
+bobi agent <name> uninstall-service
+
 # Supervise the manager as the terminal process (containers, pod specs).
 # Spawns + probes the manager, publishes heartbeat/lifecycle telemetry, and
 # listens on the admin topic so a wedged manager can still be restarted.

@@ -134,6 +134,39 @@ def _no_event_server_io(request, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_real_service_manager(request, monkeypatch, tmp_path):
+    """Unit tests never drive the developer's real launchd/systemd.
+
+    Every service-manager command goes through ``service_manager._run``;
+    unstubbed, it behaves as if launchctl/systemctl were not installed. Tests
+    outside test_service_manager.py also see no unit files, so a service the
+    developer really installed cannot turn webapp or CLI tests into real
+    ``launchctl kickstart`` calls. A leaked LaunchAgent from this suite once
+    crash-looped against the developer's ~/.bobi.
+    """
+    p = str(request.fspath)
+    if "/integration/" in p or "/e2e/" in p:
+        yield
+        return
+    from bobi import service_manager
+
+    def _no_service_manager(command, *, timeout=30):
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(service_manager, "_run", _no_service_manager)
+    gui_probe = service_manager._gui_available
+    gui_probe.cache_clear()
+    if not p.endswith("test_service_manager.py"):
+        units = tmp_path / "_no_service_units"
+        monkeypatch.setattr(service_manager, "systemd_path",
+                            lambda: units / service_manager.SYSTEMD_UNIT)
+        monkeypatch.setattr(service_manager, "launchd_path",
+                            lambda: units / service_manager.LAUNCHD_PLIST)
+    yield
+    gui_probe.cache_clear()
+
+
 # Identity vars the deployment resolver reads. `_isolate_environ` above
 # snapshots the environment but does NOT clear it, so on a developer box that
 # really exports these the otel suites would assert against the developer's
