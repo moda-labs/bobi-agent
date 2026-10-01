@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.59.0 - 2026-09-30
+
+Minor release: a crash loop on installed 0.58.0 fixed, a `bobi feedback` CLI,
+event-protocol negotiation between clients and event servers, replay safety
+across manager restarts and monitor auto-dispatch, and GHCR image tags now
+gated on a proven fleet canary.
+
+### Added
+
+- **`bobi feedback bug|feature` (#1062, MOD-306).** Files GitHub issues through
+  the REST API with configured credentials. The destination comes from the
+  CLI, env, config, or the Bobi upstream default, never the current git
+  remote. Supports `--body-file`, `--label`, `--json`, and `--dry-run`.
+- **Event protocol negotiation (#1091, MOD-302).** Registration, subscription
+  sync, and `/health` advertise a protocol range. Disjoint or malformed ranges
+  fail before any deployment or subscription change and are not retried.
+  Clients and servers without protocol metadata are treated as v1.
+
+### Fixed
+
+- **Startup crash loop on installed 0.58.0 (#1088, #1087).** The launch
+  integrity gate now fails closed only on `event-server/dist/`. Digest drift in
+  build inputs (such as an npm-rewritten `package-lock.json`) is reported by
+  `doctor` instead of blocking startup.
+- **Pending events survive manager restarts (#1081, MOD-289).** A failed
+  subscription update no longer falls through to a fresh registration that
+  discarded the saved deployment and replay cursor.
+- **Monitor auto-dispatch is replay-safe (#1095, MOD-395, MOD-397).**
+  `monitor/<type>` rules match only monitor-sourced events. Finding runs carry
+  replay identity and are refused once completed unless `fresh=True`. Launch
+  failures publish one `agent/auto_dispatch.failed` event. `bobi reply`
+  exposes the Slack message ts. Workflow prompts are scoped to the current
+  step.
+- **PR feedback workers target only fleet-authored PRs (#1103, MOD-398).**
+  Human-authored `changes_requested` reviews go to the director. Missing author
+  or fleet identity fails closed.
+- **Supervisor incident persisted before the budget alert (#1097, MOD-363).**
+  Exit code 70 can no longer race `supervisor-incident.json`.
+- **`bobi doctor` write-policy check is ownership-aware (#1086, MOD-299).** No
+  more false unsafe-runtime reports for root-owned files under a non-root UID.
+- **Shipped pack config defects (#1090, MOD-301).** Removed eng-team's phantom
+  `pr-comment-event-dedup` workflow route and the undeclared image-API
+  credential instructions.
+- **`websocket-client` pinned below the broken 1.9.1 (#1080, #1079).**
+
+### CI and release engineering
+
+- **Final GHCR tags require fleet canary proof (#1085, MOD-357).** The release
+  builds attempt-specific candidate images; the private canary consumes the
+  candidate digest and a proof callback promotes those exact bytes. A failed or
+  skipped canary leaves consumer tags unchanged.
+- DIY `pip install bobi` lane on Ubuntu and macOS, Python 3.11-3.13 (#1089,
+  MOD-358).
+- Public self-host consumer proof: a Terraform-deployed Worker plus the
+  reference image on Kubernetes, driven through the public fleet API (#1092,
+  MOD-356).
+- Regression test for cross-process launch admission atomicity (#1082,
+  MOD-303).
+- Removed two flaky integration races: ENOTEMPTY teardown and OTLP collector
+  readiness (#1076, #1084).
+
 ## 0.58.0 - 2026-08-21
 
 Minor release: fleet usage answers over MCP, a durable WorkflowRun ledger with
