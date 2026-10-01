@@ -52,6 +52,7 @@ Repository = "https://github.com/moda-labs/bobi-agent"
 Issues = "https://github.com/moda-labs/bobi-agent/issues"
 
 [project.optional-dependencies]
+jev = []
 kb = [
     "fastembed>=0.4",
     "sqlite-vec>=0.1.6",
