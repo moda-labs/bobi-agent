@@ -10,7 +10,9 @@ fine-grained token, latency, cost, and model-routing telemetry.
 > the commit-bound S1-S4 control/treatment matrix passes for both Claude and
 > Codex with exact provider coverage.
 > Metrics remain disabled by default; set
-> `BOBI_METRICS_MODE=shadow` or `full` to exercise the pipeline.
+> Set `BOBI_METRICS_MODE=enabled` to exercise the pipeline; the default is `disabled`.
+> The former `shadow` and `full` metrics values are no longer accepted and disable collection with a warning.
+> Update deployment configuration to `enabled` when upgrading; routing policy shadow mode is a separate setting.
 
 The 60-minute Phase 2 implementation gate uses eight producer processes at `0.1`
 turns/second/worker, rotates a `SIGKILL` every five minutes, and performs a
@@ -778,16 +780,24 @@ exact/estimated/unknown invocation evidence.
 
 ## 5. Developer and Operator Guide
 
-### Enable an experiment
+### Historical experiment configuration
 
-Routing is opt-in and fail-open. It is active only when metrics mode is
-`shadow` or `full`, the experiment configuration and secret are valid, and the
-process-local metrics producer starts successfully. With metrics disabled, an
-invalid config, or a spool startup failure, Bobi preserves the configured
-model.
+The legacy model-selection and session-admission implementation has been removed.
+Fresh eligible subagent and workflow sessions can now enroll through the new
+session-bound coordinator. Bare `Session` callers must explicitly pass a routing
+context. Explicit models and pre-existing transcripts without matching sticky
+records are not enrolled. Turn observation never assigns an arm or calls a policy;
+it materializes an admitted decision before the invocation.
+Token collection remains available with `BOBI_METRICS_MODE=enabled`.
+
+The configuration below documents historical experiment records and retained
+HMAC assignment primitives. Fixed-model experiments remain accepted by the new
+coordinator. For policy arms, privacy controls, shadow mode and sticky behavior,
+see `docs/JEV_ROUTER_DATA_FLOW.md`. Full acceptance is still in progress; do not
+enable production enforcement based only on these examples.
 
 ```bash
-export BOBI_METRICS_MODE=full
+export BOBI_METRICS_MODE=enabled
 export BOBI_METRICS_ASSIGNMENT_SECRET='<stable deployment secret>'
 export BOBI_METRICS_EXPERIMENT_JSON='{
   "experiment_id":"jev-router-v1",
@@ -814,15 +824,10 @@ variants, weights, model mapping, router/policy/feature versions, control model,
 or cohort quarantines the conflicting event. Create a new experiment ID for a
 new policy.
 
-Before constructing a treatment client, the runtime admits the deterministic
-session assignment through the same non-blocking producer queue. Rejected
-admission falls back to the configured control model and does not enroll the
-session. A producer with a known spool-writer failure also rejects later
-admissions. The accepted session event carries only privacy-safe assignment
-metadata; projection deterministically materializes each turn's router decision
-from that admission, so a later dropped per-turn decision event does not create
-an unmeasured treatment turn. This avoids reconnecting persistent clients and
-keeps admission to one `put_nowait()` operation.
+Historical session assignment metadata remains readable and rebuildable by the
+collector. The retired admission-cache events are no longer produced. The new
+coordinator admits resolved decisions through `session.recorded`; turn observation
+materializes them without performing assignment or calling a policy.
 
 Runtime completion, error, and latency outcomes are separate from versioned
 quality outcomes. If execution falls back after assignment, analysis keeps the

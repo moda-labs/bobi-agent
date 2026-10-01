@@ -1,7 +1,72 @@
 # JEV Model Router: Architecture and Data Flow
 
-Status: specification, not yet implemented. Branch `feat/fine-grained-metrics`.
+Status: core routing and synthetic live acceptance verified; operational shadow gates pending. Branch `feat/fine-grained-metrics`.
 Last revised 2026-10-01.
+
+### Implementation clarifications after legacy cleanup
+
+- The legacy `route()`, `resolve_model`, and admission cache were removed at
+  `461556e`. References below to retaining those functions describe the original
+  baseline, not code to restore. New routing uses `choose_assignment_key` and
+  `assign_variant` for arm assignment only.
+- In shadow mode, `model_selected` is the executed control model. The policy
+  recommendation belongs only in `metadata_json.policy.recommended_model`.
+- Inspect the raw saved session ID and brain/endpoint provenance before the
+  model-aware resume guard. Matching sticky decisions preserve the session model;
+  they do not make incompatible transcripts eligible. Explicit overrides win.
+  The recorded transcript model must match the sticky selected model; a later
+  explicit launch must not leave a stale route eligible for reenrollment.
+- Capacity limits must be thread-safe across independent event loops; an
+  `asyncio.Semaphore` shared across session threads is not sufficient. Capacity
+  waiting and HTTP execution share one monotonic deadline. Cancellation releases
+  both capacity and half-open probe ownership.
+- Queue acceptance is not a durability guarantee. Persistence failures must not
+  launch an untracked treatment session. Workflow decisions must be checkpointed
+  before first connect, and same-agent config comparisons must not undo routing.
+- Workflow checkpoints are the only sticky store for workflow routes. They do
+  not write or reuse the session route file, preventing a failed checkpoint
+  from leaving a conflicting treatment record in another store.
+- Internal rotation and stale-token recovery preserve the session route while
+  clearing the provider ID. Explicit session clearing still removes the route.
+- A policy call ID is created only when the adapter is invoked. Capacity-wait
+  timeouts and open-breaker skips retain their fallback reason but have no call
+  ID or unknown vendor cost. The built-in static policy reports zero call cost.
+- Count policy-call cost once per call, not once per projected turn or sticky
+  reuse. Unknown cost remains unknown. Unit-level causal summaries remain distinct
+  from descriptive recommendation slices.
+- The real TypeSafe API is `POST https://api.typesafe.ai/v1/systemone` with Bearer
+  authentication, `state`, `model`, and `questions`. A Choice answer contains
+  `choice`, `confidence`, and `probabilities`; response `model` is the answering
+  version. Pin a versioned model, not `jev-latest`. Illustrations below are not
+  the vendor wire contract. Account-specific retention approval is required
+  before live prompt egress; public ZDR availability is enterprise-specific.
+- Endpoint changes require a new experiment ID even though the public fingerprint
+  omits the endpoint. Candidate criteria/instructions remain fingerprinted.
+- Outside-repository paths are redacted, not fabricated as relative paths.
+  Memory removal covers nested headings; truncation preserves UTF-8 within the
+  byte cap. Missing/nonfinite confidence is invalid, never an accepted decision.
+
+Policy configuration, registry, breaker, privacy features, admission, sticky
+storage/reuse, and session/subagent/workflow-start wiring are implemented.
+Unit-level arm cost, external quality, missingness, and descriptive policy
+analysis and explicit evaluator-failure precision are implemented. Scripted
+turn execution covers all entrypoint contexts and loopback vendor faults; it
+does not prove a real provider or vendor request. An opt-in gateway test drives
+real Codex and Claude CLIs, checks the selected model, persists reported tokens,
+and verifies sticky reuse. A separate authenticated TypeSafe-to-Codex shadow
+test verifies metadata-only policy selection, fresh-turn tokens, runtime
+credential handoff, sticky reuse and absence of a prompt canary or credential
+in metrics artifacts. Neither synthetic test proves operational treatment
+sampling or the observation, SRM and quality gates. Precision covers observed unit turns
+and externally supplied, versioned failure flags rather than inferred scores.
+
+The TypeSafe adapter uses the existing `httpx` dependency with a per-call client,
+no automatic retries or redirects, and bounded response parsing. `bobi[jev]` is
+a compatibility installation extra without additional dependencies; the adapter
+is imported only when selected. Its options require `instructions` and a
+`criteria` mapping covering every candidate model. It does not infer model
+capabilities from model aliases. Per-call cost remains unknown because the public
+API reports usage, not invoiced cost.
 
 This document specifies how Bobi selects a model with a semantic routing
 policy (TypeSafe AI's System One model, "JEV") and how that choice is
@@ -14,7 +79,7 @@ earlier per-turn draft of this file.
 | ID | Decision |
 |---|---|
 | D1 | The model is chosen **once per fresh brain session**, before the session connects. There is no per-turn or mid-session model switching. Rotation, reconnect, and recovery reuse the session's model. |
-| D2 | Routing runs at exactly three entry points: session initiation (`bobi/session.py`), subagent launch (`bobi/subagent.py`), and workflow run start (`bobi/workflow/orchestrator.py`). A fourth point, a workflow step that starts a fresh session because its agent changes, is Phase 3. |
+| D2 | Routing runs at exactly three entry points: session initiation (`bobi/session.py`), subagent launch (`bobi/subagent.py`), and workflow run start (`bobi/workflow/orchestrator.py`). Workflow agent-change routing is a separately gated extension. |
 | D3 | Randomization and policy are separate levels. The existing HMAC assignment (`hmac-sha256-u64-v1`) assigns an **arm** (`control` or `treatment_jev`). Only inside the treatment arm does the policy pick a model. `variant_id` is always the arm. |
 | D4 | Eligibility is decided **before** assignment. Sessions with an explicit model, no routing input, an out-of-scope role or entry point, a non-matching brain, or a pre-existing transcript are not enrolled and produce no router decision. |
 | D5 | `router_score` keeps its meaning (the HMAC bucket). Everything the policy returns lives under `metadata_json.policy`. The schema needs no new columns. |
@@ -44,7 +109,7 @@ earlier per-turn draft of this file.
  │        │                                            no decision row        │
  │ 2. sticky lookup ─────── match ──────────────────► recorded model          │
  │        │                                                                    │
- │ 3. HMAC arm assignment (existing route())                                  │
+ │ 3. HMAC arm assignment (assign_variant)                                    │
  │        ├── control ───────────────────────────────► control_model          │
  │        └── treatment_jev                                                   │
  │               4. circuit breaker ── open ────────► control_model (fallback)│
@@ -150,7 +215,7 @@ subagent is its own fresh session.
   switch. The comparison uses the routed model as the session's model for
   steps that do not set their own.
 
-**Phase 3, E3b (agent-change boundary).** When `next_agent != current_agent`,
+**Deferred E3b (agent-change boundary).** When `next_agent != current_agent`,
 the switch branch already starts a fresh session with no continuation token.
 At that point Bobi may route again with `entry_point="workflow_agent_change"`
 and the step's rendered prompt, keeping the run's arm. This needs a per-segment
@@ -174,10 +239,9 @@ not bias the arm comparison.
 | 5 | `ctx.prompt` is empty after stripping | No routing input |
 | 6 | Not `fresh`, a saved session id exists, and no matching sticky record | A pre-existing transcript; routing it could force a fresh start |
 
-This fixes a current bug: `MetricsRuntime.resolve_model` calls
-`route(requested_model="")`, so an explicit `--model` is silently replaced by
-the treatment model today. After this change, explicit models are never
-enrolled.
+The removed implementation called `route(requested_model="")` from
+`MetricsRuntime.resolve_model`, replacing explicit launch models. Explicit
+models now bypass assignment and policy invocation.
 
 Ineligible sessions are recorded in `MetricsRuntime` so
 `TurnObservation.start` does not route them. `TurnObservation.start` no longer
@@ -187,7 +251,8 @@ calls `route()` at all; it only materializes an admitted decision.
 
 ### 5.1 Arm
 
-This is the unchanged `route()` in `bobi/metrics/router.py`. The key order is
+This uses `choose_assignment_key` and `assign_variant` in
+`bobi/metrics/router.py`. The key order is
 explicit `experiment_subject`, then `run_key`, then session name. The control
 arm executes `control_model` and never calls the policy. The treatment arm
 runs steps 4-7 below.
@@ -262,6 +327,9 @@ Example adapter request and response, illustrative only:
 
 Checks run in this order after `decide()` returns. Any failure executes
 `control_model` and sets `fallback_reason`.
+The result schema (including finite confidence and nonnegative finite cost)
+is validated first, before the semantic checks below. Malformed answers never
+contribute recommendation or cost metadata, including on version drift.
 
 1. `result.model` is in `policy.candidate_models`, else
    `policy_invalid_response`.
@@ -311,7 +379,10 @@ persisted, so a restart begins closed.
   `model_selected`, policy status and mode, and `decided_at_us`. It never holds
   the prompt or the raw assignment key.
 - `save_session_id(name, "")` deletes `route.json` together with `.model` and
-  `.brain`, so a fresh session never inherits a stale route.
+  `.brain`. Internal rotation and stale-token recovery pass
+  `preserve_route=True`; they retain the chosen model without routing again.
+  A fresh launch ignores prior decisions. After recovery, a new provider ID
+  must be saved before session-file sticky reuse is eligible on process restart.
 - On reuse, the admission `session.recorded` event is emitted again with the
   recorded decision and `metadata_json.policy.status = "reused"`. No policy
   call is made.
@@ -340,8 +411,10 @@ persisted, so a restart begins closed.
 - **Credentials.** The API key comes from `.env` or the environment, under the
   name in `policy.credential_env`. Config fields named like secrets
   (`api_key`, `token`) are rejected, because the config fingerprint is public.
-  `provider_subprocess_env` scrubs `ROUTING_ENV_NAMES` plus every loaded
-  policy's `secret_env_names`, so Claude and Codex children never see the key.
+  `provider_subprocess_env` scrubs `ROUTING_ENV_NAMES`, `TYPESAFE_API_KEY`,
+  the configured `credential_env` even before policy initialization, and every
+  loaded policy's `secret_env_names`. Out-of-scope and explicit-model Claude
+  and Codex children therefore never inherit the policy key.
 - **Security docs.** `docs/SECURITY.md` gains an entry listing the policy
   endpoint as an egress destination. It is covered by the egress-proxy work
   (epic #395).
@@ -367,7 +440,7 @@ fixed-model experiments stay valid.
   ],
   "policy": {
     "name": "typesafe-jev",
-    "version": "jev-2026-q3",
+    "version": "jev-1.13.0",
     "brain": "claude",
     "mode": "shadow",
     "candidate_models": ["haiku", "sonnet", "opus"],
@@ -378,10 +451,18 @@ fixed-model experiments stay valid.
       "entry_points": ["session_start", "subagent_phase", "subagent_persistent", "workflow_start"],
       "roles": ["engineer", "reviewer"]
     },
-    "egress": {"prompt": "redacted", "max_prompt_bytes": 8192},
+    "egress": {"prompt": "none", "max_prompt_bytes": 8192},
     "store_reason_text": false,
     "credential_env": "TYPESAFE_API_KEY",
-    "options": {"endpoint": "https://api.typesafe.example/v1/route"}
+    "options": {
+      "endpoint": "https://api.typesafe.ai/v1/systemone",
+      "instructions": "Choose the least costly candidate that can reliably complete the task. When task information is insufficient, choose sonnet.",
+      "criteria": {
+        "haiku": "Small, well-defined changes with low reasoning complexity.",
+        "sonnet": "General engineering work or insufficient task information.",
+        "opus": "Complex reasoning or cross-system architectural work."
+      }
+    }
   }
 }
 ```
@@ -472,6 +553,11 @@ arm under intent-to-treat.
   completion and error rate, actual cost per unit from `best_usage`, turns and
   retries per unit, latency, and evaluator or human quality outcomes from
   `experiment_outcomes`.
+  `completion_definition=all_observed_turns_completed` and
+  `error_definition=any_observed_turn_error` describe observed telemetry only.
+  A completed turn does not prove a workflow/task succeeded or closed. Use
+  externally evaluated, versioned outcomes for that claim, and report missing
+  outcomes instead of inferring success from cost or router confidence.
 - **SRM.** Run on arms only, using `expected_weights`. It is unaffected by
   what the policy chooses.
 - **Secondary comparison, descriptive only.** Inside the treatment arm, break
@@ -483,8 +569,19 @@ arm under intent-to-treat.
 - **Cost.** Actual cost only. Never price treatment tokens at control-model
   rates (`FINE_GRAINED_METRICS.md`, cost rules). The treatment arm's cost
   includes `policy.cost_usd` when the adapter reports it.
+  The query exposes `reported_total_cost_usd_per_unit` only when every
+  observed turn has reported execution cost and every scanned policy call
+  has reported cost. Calls are deduplicated by `call_id` within each arm.
+  Missing cost or a truncated policy scan makes the total null; the known
+  policy subtotal and unknown-call count remain available separately.
+  Capacity-wait timeouts and circuit-open skips are not vendor calls. The
+  built-in static policy's per-call cost is zero; TypeSafe cost remains unknown.
 - **Quality.** Quality outcomes come from an external evaluator or a human.
   The policy never grades itself.
+  Evaluators may supply a boolean `is_failure` to `record_quality_outcome`,
+  interpreted under their recorded rubric/version. Precision counts explicit,
+  non-estimated failure flags per assignment unit; arbitrary numeric scores
+  and outcomes without a failure flag are not inferred to be failures.
 
 `bobi/metrics/query.py`'s experiment summary gains an arm-level
 intent-to-treat block and a treatment-only policy breakdown.
@@ -493,11 +590,11 @@ intent-to-treat block and a treatment-only policy breakdown.
 
 | File | Change |
 |---|---|
-| `bobi/metrics/router.py` | `ExperimentConfig` gains `policy`, and variants accept `policy`. `provider_subprocess_env` also scrubs policy secret env names. `route()` is unchanged. |
+| `bobi/metrics/router.py` | Strict policy/model variants, HMAC arm helpers, public fingerprints, and policy-secret subprocess scrubbing. Legacy `route()` is removed. |
 | `bobi/metrics/policy.py` (new) | `ModelPolicy`, `PolicyRequest`, `PolicyResult`, registry, `CircuitBreaker`, guard, `static` policy |
 | `bobi/metrics/routing.py` (new) | `RoutingContext`, `RouteOutcome`, and the single `async resolve_route()` |
 | `bobi/metrics/policies/typesafe.py` (new, extra `jev`) | TypeSafe adapter |
-| `bobi/metrics/runtime.py` | `resolve_model` becomes an async admission used by `resolve_route`. Remove the `route()` call in `TurnObservation.start`. Add ineligible-session tracking and breaker health. |
+| `bobi/metrics/runtime.py` | Synchronous `admit_route` accepts a resolved decision. Turn observation only materializes admitted decisions; health includes the policy breaker. Legacy `resolve_model` is removed. |
 | `bobi/session.py` | Remove routing from `__init__`. Add the `routing` parameter. Route in `_run` before the resume lookup. |
 | `bobi/subagent.py` | Remove the `resolve_experiment_model` calls. Pass `RoutingContext` from all three launch paths. |
 | `bobi/workflow/orchestrator.py` | `_effective_step_model` returns the configured model only. Route at run start. Persist `_runtime.route`. |
@@ -507,6 +604,92 @@ intent-to-treat block and a treatment-only policy breakdown.
 | `docs/FINE_GRAINED_METRICS.md`, `docs/SECURITY.md` | Routing contract (explicit models, eligibility, policy arm), egress entry |
 
 ## 14. Verification
+
+### Build the repository engineering image
+
+Use the development Python environment and Node.js 20 from
+`docs/REFERENCE_IMAGE.md`. Build a wheel from the intended checkout and render
+the team's declared dependencies. Stage only build inputs, never `.env`,
+credentials, runtime state or private acceptance artifacts:
+
+```bash
+BUILD_CONTEXT=$(mktemp -d)
+mkdir -p "$BUILD_CONTEXT/dist/team-deps"
+cp Dockerfile pyproject.toml "$BUILD_CONTEXT/"
+cp -R docker "$BUILD_CONTEXT/"
+python -m build --wheel --outdir "$BUILD_CONTEXT/dist"
+python -m bobi.build_render agents/eng-team \
+  --out "$BUILD_CONTEXT/dist/team-deps/eng-team.sh"
+docker build --build-arg BOBI_BUILD=wheel \
+  --build-arg TEAM_DEPS=dist/team-deps/eng-team.sh \
+  -t bobi-framework:metrics "$BUILD_CONTEXT"
+```
+
+A deployment repository must use this image as its base and stage the
+repository team with its chosen brain overlay, rather than silently fetching
+a registry team. Rebuild and reinstall after package changes; a container
+restart alone does not update the installed package. Keep metrics and routing
+values in the ignored deployment `.env` and installed runtime `.env`; the
+acceptance procedure below defines the credential handoff. An in-memory local
+event-server restart can lose registrations even while container health passes.
+Do not reset registration state or remove the durable volume without approval.
+
+### Operator acceptance procedure
+
+1. Use an isolated `BOBI_HOME` and installation root. Do not reuse a live Slack
+   bot, production state directory, or subscription volume for fault tests.
+2. Set `BOBI_METRICS_MODE=enabled`, a private assignment secret, and the section 9
+   JSON in `BOBI_METRICS_EXPERIMENT_JSON`. Supply `TYPESAFE_API_KEY` privately;
+   never include its value in a committed config, command transcript, or report.
+   For provider tools that launch `bobi` CLI children, also configure these values
+   in the installed runtime's `.env` at mode 0600. Provider subprocesses deliberately
+   scrub routing configuration and credentials; root-bound Bobi child launches
+   rehydrate them from that file. Container environment alone does not cover this
+   launch path. Preserve existing runtime credentials when updating the file.
+3. Validate the config offline before enabling vendor calls. Start with shadow
+   mode and `egress.prompt=none`. Features are still external egress; obtain
+   account-specific retention approval before the live smoke.
+4. Launch an eligible engineer session without an explicit model override.
+   Verify the executed model stays on control in shadow mode and inspect the
+   experiment query through the existing admin/MCP `metrics_experiment` surface.
+   The physical database is `<runtime-root>/state/metrics/metrics.db`.
+5. Confirm arm, executed model, policy recommendation, fallback reason, latency,
+   call ID and breaker health. Resume the same session/run and confirm `reused`
+   metadata without another vendor call. Unknown vendor cost must remain null.
+6. Search isolated logs, spool and database for a unique task canary; no prompt
+   text may be retained by routing telemetry. Repeat with explicit override and
+   verify no experiment enrollment. Never use real secrets as canaries.
+7. The opt-in Claude proof is
+   `BOBI_JEV_LIVE_CLAUDE=1 .venv/bin/pytest tests/integration/test_jev_claude_routing.py -q`.
+   It makes a real provider request and requires authorized Claude authentication.
+   A skipped test is not acceptance evidence.
+   For an authorized gateway, provide `BOBI_GATEWAY_BASE_URL`,
+   `BOBI_GATEWAY_API_KEY` and `BOBI_BRAIN_MODEL` privately, then run
+   `BOBI_JEV_LIVE_GATEWAY=1 .venv/bin/pytest tests/integration/test_jev_gateway_routing.py -q -s`.
+   This runs the real Codex and Claude CLI paths using a static routing policy,
+   isolated provider homes, and the gateway's Responses and Messages APIs.
+   It checks persisted token totals and sticky reuse without TypeSafe egress.
+   The first turn of a newly constructed resumed adapter may have no usage:
+   without a trusted cumulative baseline it stays unknown, never zero. The
+   test uses reported invocation usage when the turn aggregate is absent and
+   reports measured and missing turn counts; passing it does not prove
+   complete resumed-token coverage or authenticated TypeSafe routing.
+   For approved TypeSafe plus Codex gateway acceptance, additionally supply
+   `TYPESAFE_API_KEY` and a supported alternative in `BOBI_JEV_CANDIDATE_MODEL`,
+   then run:
+
+   ```bash
+   BOBI_JEV_LIVE_TYPESAFE=1 .venv/bin/pytest \
+     tests/integration/test_jev_gateway_routing.py::test_typesafe_shadow_gateway_tokens_and_runtime_handoff -q -s
+   ```
+
+   This uses a separate synthetic cohort, verifies root-bound CLI credential
+   handoff, makes one authenticated policy call, executes the control model in
+   shadow mode, and checks token persistence and sticky reuse. It is not a
+   production treatment sample or evidence for SRM, quality, or elapsed observation.
+8. Do not enable enforcement before the shadow observation and quality/SRM gates
+   below pass. Changing endpoint, model version, mode or policy criteria requires
+   a new experiment ID; do not blend those cohorts as one causal comparison.
 
 - **Unit tests.**
   - Config validation matrix.
@@ -524,6 +707,13 @@ intent-to-treat block and a treatment-only policy breakdown.
   - the executed model reaches `make_session(options.model)`;
   - the decision row and `metadata_json.policy` are correct;
   - a resumed session or workflow does not call the policy.
+  `tests/metrics/test_routing_acceptance.py` runs scripted provider turns for
+  all five entrypoint contexts with static success and loopback TypeSafe
+  timeout, 5xx, invalid-model and version-drift faults. Session-backed paths
+  also exercise sticky resume, stale-token recovery, and rotation. Phase and
+  persistent launcher-context wiring and workflow retry/checkpoint reuse have
+  separate owning tests. Event-bus transport and real provider execution are
+  not simulated-provider evidence.
 - **Claude leg.** One `[claude]` parametrization proving the routed model is
   the model the real CLI session runs under. Routing is otherwise
   brain-agnostic, so this is the only place the real brain carries risk.
@@ -531,20 +721,29 @@ intent-to-treat block and a treatment-only policy breakdown.
   an isolated `BOBI_HOME`. Check the recorded latency, breaker health, and
   that no prompt text appears in the spool, logs, or database.
 
+### Grouped acceptance coverage
+
+| Category | Executable evidence | Remaining acceptance |
+|---|---|---|
+| Routing / lifecycle | Scripted turn matrix, owning session/subagent/workflow tests, sticky resume, recovery, rotation and checkpoint failures | Event-bus transport is not covered by the scripted matrix; E3b segments remain separately gated |
+| Analysis | Arm-unit cost, quality, missingness, precision and admin-query parity tests | Operational sample size, SRM and quality gates require real experiment data |
+| Privacy / fault handling | Config/guard/breaker tests, loopback vendor faults, redaction and log/spool/database canaries; opt-in authenticated TypeSafe check | Account-specific vendor retention approval is an operator prerequisite, not a unit-test result |
+| Provider execution | Opt-in real Claude/Codex gateway model test; authenticated TypeSafe-to-Codex shadow, runtime handoff, persisted tokens and sticky reuse | Unknown first-resume usage is reported explicitly; native-provider, synthetic gateway and operational cohort acceptance are distinct |
+
 ## 15. Rollout
 
-| Phase | Scope | Exit criteria |
+| Gate | Scope | Exit criteria |
 |---|---|---|
-| P0 | Move routing to the entry points. Remove per-turn routing. Add eligibility and explicit-model precedence. HMAC-only experiments. | Existing experiment tests pass. Explicit `--model` is never overridden. |
-| P1 | Policy protocol, breaker, redaction, TypeSafe adapter, `mode: shadow` | Two weeks of shadow data. Breaker never stuck open. p95 policy latency within the deadline. |
-| P2 | New `experiment_id` with `mode: enforce` | SRM passes. The arm comparison shows no quality regression at the planned sample size. |
-| P3 | E3b workflow agent-change boundary with `router_segment.recorded` | Projection tests for multi-segment runs |
+| Entry-point routing | Remove per-turn routing; add eligibility, explicit-model precedence and HMAC assignment | Explicit launch models remain unchanged; deterministic entrypoint tests pass |
+| Shadow observation | Policy protocol, breaker, redaction, TypeSafe adapter, `mode: shadow` | Two weeks of shadow data; breaker recovery; p95 policy latency within deadline |
+| Enforcement | New `experiment_id` with `mode: enforce` | SRM passes; no quality regression at the planned sample size |
+| Workflow segments | E3b agent-change boundary with `router_segment.recorded` | Projection tests for multi-segment runs; separately gated, not implemented |
 
 ## 16. Open questions
 
-- **Q1.** TypeSafe's API contract, data-processing and retention terms, and
-  whether it supports pinning a model version (section 5.4 depends on it).
-- **Q2.** Whether TypeSafe reports a per-call cost for `policy.cost_usd`, or
-  whether we price it from a contract rate.
+- **Q1.** Account-specific TypeSafe data-processing and retention approval is
+  still required. The implemented API contract supports a pinned model version.
+- **Q2.** The public API reports tokens, not invoiced per-call cost. Keep
+  `policy.cost_usd` null until a verified billing contract supplies actual cost.
 - **Q3.** Whether the manager role should ever be in scope. Its first prompt
   is a bootstrap brief, not user intent, so the default allowlist excludes it.

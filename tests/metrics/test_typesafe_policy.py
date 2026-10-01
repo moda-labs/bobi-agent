@@ -14,6 +14,16 @@ from bobi.metrics.policy import PolicyConfig, PolicyError, PolicyRequest
 from bobi.metrics.policy import CircuitBreaker, call_policy
 
 
+def test_documented_operator_configuration_validates_offline():
+    from bobi.metrics.router import ExperimentConfig
+
+    text = Path("docs/JEV_ROUTER_DATA_FLOW.md").read_text().split("## 9. Configuration", 1)[1]
+    raw = json.loads(text.split("```json", 1)[1].split("```", 1)[0])
+    documented = ExperimentConfig.from_mapping(raw)
+    TypeSafePolicy(documented.policy)
+    assert documented.policy.mode == "shadow"
+    assert documented.policy.prompt_egress == "none"
+
 def config():
     return PolicyConfig("typesafe-jev", "jev-1.13.0", "codex", "shadow",
         ("control", "cheap"), ("session_start",), ("engineer",), "none",
