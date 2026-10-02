@@ -20,17 +20,19 @@ sites don't change.
 
 from __future__ import annotations
 
-import itertools
 import logging
 import queue
 import secrets
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 log = logging.getLogger(__name__)
+
+BULK_MAX_DELAY = 120.0
 
 
 def _msg_id() -> str:
@@ -89,16 +91,17 @@ class Inbox:
 
     Two delivery classes (#688): priority (chat channel messages, where a
     human is waiting) and normal (everything else - bulk webhooks, agent
-    inbox messages). Priority messages are received first; ordering is FIFO
-    within each class, enforced by a monotonic tie-break counter so equal
-    priorities never compare ``Message`` objects.
+    inbox messages). Chat is received first unless the oldest normal message
+    has waited at least 120 seconds; that message takes the next receive
+    opportunity. FIFO holds within each class. This does not interrupt an
+    active turn or bound the time spent processing older normal messages.
     """
 
     def __init__(self, session_name: str) -> None:
         self.session_name = session_name
-        self._queue: queue.PriorityQueue[tuple[int, int, Message]] = (
-            queue.PriorityQueue())
-        self._counter = itertools.count()
+        self._chat: deque[Message] = deque()
+        self._bulk: deque[tuple[float, Message]] = deque()
+        self._condition = threading.Condition()
 
     def start(self) -> None:
         """Make the inbox addressable in-process for its drain loop."""
@@ -107,18 +110,30 @@ class Inbox:
 
     def push(self, msg: Message, priority: bool = False) -> None:
         """Enqueue a message for the session's run loop to pick up."""
-        self._queue.put((0 if priority else 1, next(self._counter), msg))
+        with self._condition:
+            if priority:
+                self._chat.append(msg)
+            else:
+                self._bulk.append((time.monotonic(), msg))
+            self._condition.notify()
 
     def recv(self, timeout: float = 2.0) -> Message | None:
         """Block until a message arrives. Returns None on timeout."""
-        try:
-            return self._queue.get(timeout=timeout)[2]
-        except queue.Empty:
-            return None
+        if timeout is not None and timeout < 0:
+            raise ValueError("'timeout' must be a non-negative number")
+        with self._condition:
+            if not self._condition.wait_for(
+                    lambda: self._chat or self._bulk, timeout=timeout):
+                return None
+            if self._bulk and (not self._chat or
+                              time.monotonic() - self._bulk[0][0] >= BULK_MAX_DELAY):
+                return self._bulk.popleft()[1]
+            return self._chat.popleft()
 
     def empty(self) -> bool:
         """Whether nothing is queued right now (racy, best-effort)."""
-        return self._queue.empty()
+        with self._condition:
+            return not (self._chat or self._bulk)
 
     def respond(self, msg: "Message", response: str) -> None:
         """Return a reply for a wait-mode message to its waiting sender.
