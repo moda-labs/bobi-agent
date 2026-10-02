@@ -78,8 +78,8 @@ def summarize(rows, *, group_by="requested_model"):
 
 def prepare_comparison(raw, models):
     config = ExperimentConfig.from_mapping(raw)
-    if config.policy is None or config.policy.name != "typesafe-jev" or config.policy.brain != "codex":
-        raise ValueError("A TypeSafe Codex configuration is required")
+    if config.policy is None or config.policy.name != "typesafe-jev":
+        raise ValueError("A TypeSafe configuration is required")
     TypeSafePolicy(config.policy)
     models = list(config.policy.candidate_models) if models is None else models
     if (not models or len(set(models)) != len(models)
@@ -108,22 +108,37 @@ async def measure(args):
     values = parse_env_file(args.env_file)
     raw = prepare_comparison(json.loads(values["BOBI_METRICS_EXPERIMENT_JSON"]), args.models)
     config = ExperimentConfig.from_mapping(raw)
+    brain = config.policy.brain
+    if values.get("BOBI_BRAIN", brain) != brain:
+        raise ValueError("BOBI_BRAIN must match the policy brain")
+    gateway_url = values.get("LLM_GATEWAY_URL") or values.get("BOBI_GATEWAY_BASE_URL", "")
+    if brain == "claude":
+        gateway_url = gateway_url.rstrip("/").removesuffix("/v1")
+    gateway_key = values.get("BOBI_GATEWAY_API_KEY") or (values.get("ANTHROPIC_AUTH_TOKEN", "") if brain == "claude" else "")
     models = list(config.policy.candidate_models)
+    model_aliases = json.loads(values.get("BOBI_MEASUREMENT_MODEL_ALIASES_JSON", "{}"))
+    if (not isinstance(model_aliases, dict) or not set(model_aliases).issubset(models)
+            or any(not isinstance(value, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,255}", value)
+                for value in model_aliases.values())
+            or any(value in models and value != model for model, value in model_aliases.items())
+            or len({model_aliases.get(model, model) for model in models}) != len(models)):
+        raise ValueError("Invalid explicit measurement model aliases")
     strategies = [(f"fixed:{model}", model) for model in models] + [("jev", config.control_model)]
     budget = len(cases) * len(strategies) * args.repeats
     if args.execute and budget > 40:
         raise ValueError("At most 40 provider turns per run; select a batch with --offset and --limit")
     credential = values.get(config.policy.credential_env, "")
-    if args.execute and (not credential or not values.get("BOBI_GATEWAY_API_KEY") or not values.get("LLM_GATEWAY_URL")):
+    if args.execute and (not credential or not gateway_key or not gateway_url):
         raise ValueError("Private policy and gateway credentials are required")
     artifact_root = args.artifacts.resolve()
     artifact_root.mkdir(mode=0o700, parents=True, exist_ok=False)
-    plan = {"benchmark": "bobi-qa-semantic-paired-v1", "execute": args.execute,
+    plan = {"benchmark": "bobi-qa-semantic-paired-v1", "execute": args.execute, "brain": brain,
+        "measurement_model_aliases": model_aliases,
         "case_ids": [case["id"] for case in cases], "strategies": [strategy for strategy, model in strategies],
         "provider_turns": budget, "policy_calls": len(cases) * args.repeats, "within_live_budget": budget <= 40,
         "experiment": raw, "production_modified": False, "policy_states": [
             {"case_id": case["id"], "state": build_features(prompt=case["prompt"], repo_path="",
-                entry_point="session_start", role="engineer", brain="codex", prompt_egress="redacted")[0]}
+                entry_point="session_start", role="engineer", brain=brain, prompt_egress="redacted")[0]}
             for case in cases]}
     atomic_write_json(artifact_root / "plan.json", plan)
     if not args.execute:
@@ -132,20 +147,30 @@ async def measure(args):
         return 0
     runtime_root = artifact_root / "runtime"
     runtime_root.mkdir(mode=0o700)
-    (artifact_root / "codex-home").mkdir(mode=0o700)
+    (artifact_root / f"{brain}-home").mkdir(mode=0o700)
     secret = b"synthetic-measurement-only"
     os.environ.update({"BOBI_ROOT": str(runtime_root), "BOBI_HOME": str(artifact_root / "bobi-home"),
-        "CODEX_HOME": str(artifact_root / "codex-home"), "BOBI_BRAIN": "codex", "BOBI_GATEWAY": "1",
-        "BOBI_GATEWAY_BASE_URL": values["LLM_GATEWAY_URL"], "BOBI_GATEWAY_WIRE_API": "responses",
-        "BOBI_GATEWAY_API_KEY": values["BOBI_GATEWAY_API_KEY"],
+        "BOBI_BRAIN": brain, "BOBI_GATEWAY": "1",
+        "BOBI_GATEWAY_BASE_URL": gateway_url, "BOBI_GATEWAY_WIRE_API": "responses",
+        "BOBI_GATEWAY_API_KEY": gateway_key,
         "BOBI_BRAIN_MODEL": config.control_model, "BOBI_BRAIN_EFFORT": values.get("LLM_EFFORT", "medium"),
         "BOBI_METRICS_EXPERIMENT_JSON": json.dumps(raw), "BOBI_METRICS_MODE": "enabled",
         "BOBI_METRICS_ASSIGNMENT_SECRET": secret.decode(), config.policy.credential_env: credential})
     os.environ.pop("OPENAI_API_KEY", None)
+    if brain == "claude":
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        os.environ.update({"CLAUDE_CONFIG_DIR": str(artifact_root / "claude-home"),
+            "ANTHROPIC_BASE_URL": gateway_url, "ANTHROPIC_AUTH_TOKEN": gateway_key,
+            "ANTHROPIC_API_KEY": "", "BOBI_GATEWAY_SMALL_MODEL": config.control_model,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_MAX_RETRIES": "0",
+            "BOBI_CLAUDE_CONNECT_ATTEMPTS": "1"})
+    else:
+        os.environ["CODEX_HOME"] = str(artifact_root / "codex-home")
     paths.bind_root(runtime_root)
     runtime = MetricsRuntime(runtime_root, mode="enabled")
     rows = []
-    report = {"experiment_id": config.experiment_id, "cohort": config.cohort, "mode": "enforce",
+    report = {"experiment_id": config.experiment_id, "cohort": config.cohort, "mode": "enforce", "brain": brain,
+        "measurement_model_aliases": model_aliases,
         "prompt_egress": "redacted", "quality_definition": "exact-bobi-json-v1", "rows": rows,
         "comparison": "Paired Bobi question-answer benchmark, not randomized production quality or cost savings"}
     try:
@@ -163,7 +188,7 @@ async def measure(args):
                             subject = next(f"{name}-{index}" for index in range(1000) if
                                 assign_variant(config, secret, assignment_unit="experiment_subject",
                                     assignment_key=f"{name}-{index}")[0].policy)
-                            context = RoutingContext(name, "session_start", "codex", model, False,
+                            context = RoutingContext(name, "session_start", brain, model, False,
                                 case["prompt"], "engineer", True, run_key=run_key, experiment_subject=subject)
                             outcome = await resolve_route(context, runtime=runtime)
                             if outcome.decision is None:
@@ -179,7 +204,7 @@ async def measure(args):
                             "recommended_model": policy.get("recommended_model"),
                             "confidence": policy.get("confidence"), "policy_latency_ms": policy.get("latency_ms"),
                             "fallback_reason": fallback, "error_kind": None, "quality_passed": False}
-                        turn = runtime.begin_turn(name, provider="gateway", brain="codex", role="engineer",
+                        turn = runtime.begin_turn(name, provider="gateway", brain=brain, role="engineer",
                             run_key=run_key, model_requested=selected_model,
                             prompt_bytes=len(case["prompt"].encode()), trigger_kind="synthetic")
                         row["turn_id"] = turn.turn_id
@@ -187,9 +212,13 @@ async def measure(args):
                         started = time.monotonic()
                         try:
                             async with asyncio.timeout(90):
-                                client = get_brain("codex").make_session(cwd=cwd,
+                                options = {"model": selected_model, "mcp_servers": {}, "max_turns": 1}
+                                if brain == "claude":
+                                    options.update(tools=[], permission_mode="default", setting_sources=[],
+                                        plugins=[], strict_mcp_config=True, include_partial_messages=True)
+                                client = get_brain(brain).make_session(cwd=cwd,
                                     system_prompt="Return only the requested JSON. Do not use tools or read files.",
-                                    options={"model": selected_model, "mcp_servers": {}, "max_turns": 1})
+                                    options=options)
                                 await client.connect()
                                 await client.query(case["prompt"])
                                 text, result = "", None
@@ -206,7 +235,7 @@ async def measure(args):
                                 row["error_kind"] = (result.error_kind or "provider_error") if result.is_error else None
                                 if result.is_error:
                                     detail = result.error_text().replace(credential, "[redacted]")
-                                    detail = detail.replace(values["BOBI_GATEWAY_API_KEY"], "[redacted]")
+                                    detail = detail.replace(gateway_key, "[redacted]")
                                     row["error_detail"] = redact_secrets(detail)[0][:1000]
                                 row["quality_passed"] = not result.is_error and quality_passed(text, case["expected"])
                                 row["response"] = text[:65536]
@@ -243,17 +272,23 @@ async def measure(args):
                     "FROM best_usage WHERE turn_id=? AND scope='turn'", (row["turn_id"],)).fetchone()
                 row.update(dict(usage) if usage else {"model": None, "input_tokens": None, "output_tokens": None,
                     "measurement_source": None, "is_estimated": None})
+                row["expected_usage_model"] = model_aliases.get(row["requested_model"], row["requested_model"])
+                row["usage_verified"] = (row["model"] in {row["requested_model"], row["expected_usage_model"]}
+                    and row["measurement_source"] == "provider_stream" and row["is_estimated"] == 0
+                    and row["input_tokens"] is not None and row["output_tokens"] is not None)
+        report["usage_verified"] = all(row["usage_verified"] for row in rows)
         report["summary"] = summarize(rows, group_by="strategy")
         atomic_write_json(artifact_root / "report.json", report)
         with (artifact_root / "measurements.csv").open("w", newline="") as stream:
-            fields = ["case_id", "tier", "strategy", "requested_model", "model", "policy_status", "recommended_model",
+            fields = ["case_id", "tier", "strategy", "requested_model", "model", "expected_usage_model", "policy_status", "recommended_model",
                 "confidence", "input_tokens", "output_tokens", "routing_wall_ms", "execution_wall_ms",
-                "wall_ms", "quality_passed", "error_kind"]
+                "wall_ms", "quality_passed", "error_kind", "measurement_source", "is_estimated", "usage_verified"]
             writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
     print(json.dumps({"artifacts": str(artifact_root), "summary": report["summary"]}, indent=2))
-    return int(not closed or any(row["error_kind"] or not row["quality_passed"] for row in rows))
+    return int(not closed or not report["usage_verified"]
+        or any(row["error_kind"] or not row["quality_passed"] for row in rows))
 
 
 if __name__ == "__main__":

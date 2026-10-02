@@ -52,11 +52,12 @@ def comparison_config():
         "variants": [{"variant_id": "control", "weight": 0.5, "model": "control"},
             {"variant_id": "treatment", "weight": 0.5, "policy": "typesafe-jev"}],
         "policy": {"name": "typesafe-jev", "version": "jev-1.13.0", "brain": "codex", "mode": "shadow",
-            "candidate_models": ["control", "alternative"], "min_confidence": 0.85,
+            "candidate_models": ["control", "alternative", "advanced"], "min_confidence": 0.85,
             "scope": {"entry_points": ["session_start"], "roles": ["engineer"]},
             "egress": {"prompt": "none"}, "credential_env": "TEST_TYPESAFE_KEY",
             "options": {"instructions": "Choose the adequate candidate", "criteria": {
-                "control": "Routine tasks", "alternative": "Demanding reasoning"}}}}
+                "control": "Routine tasks", "alternative": "Demanding reasoning",
+                "advanced": "Multi-constraint architectural reasoning"}}}}
 
 def test_comparison_config_is_isolated_and_keeps_criteria_without_difficulty_labels():
     original = comparison_config()
@@ -67,7 +68,7 @@ def test_comparison_config_is_isolated_and_keeps_criteria_without_difficulty_lab
     assert prepared["policy"]["mode"] == "enforce" and prepared["policy"]["egress"]["prompt"] == "redacted"
     assert set(prepared["policy"]["options"]["criteria"]) == {"control"}
     cases = load_cases(Path("tests/fixtures/metrics/jev-bobi-question-cases.json"))
-    assert len(cases) == 12 and all(sum(case["tier"] == tier for case in cases) == 4 for tier in ("simple", "medium", "complex"))
+    assert len(cases) == 30 and all(sum(case["tier"] == tier for case in cases) == 10 for tier in ("simple", "medium", "complex"))
     for case in cases:
         state, _ = build_features(prompt=case["prompt"], repo_path="", entry_point="session_start",
             role="engineer", brain="codex", prompt_egress="redacted")
@@ -75,9 +76,16 @@ def test_comparison_config_is_isolated_and_keeps_criteria_without_difficulty_lab
         assert not {"tier", "expected", "recommended_model"} & state.keys()
         assert quality_passed(json.dumps(case["expected"]), case["expected"])
 
-def test_default_preview_never_calls_provider_or_policy_or_changes_environment(monkeypatch, tmp_path):
+@pytest.mark.parametrize("brain,models,provider_turns", [
+    ("codex", ["control", "alternative", "advanced"], 120),
+    ("claude", ["control", "alternative"], 90),
+])
+def test_default_preview_never_calls_provider_or_policy_or_changes_environment(monkeypatch, tmp_path, brain, models, provider_turns):
     environment = tmp_path / "private.env"
-    environment.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(comparison_config()) + "\n")
+    raw = comparison_config()
+    raw["policy"].update(brain=brain, candidate_models=models)
+    raw["policy"]["options"]["criteria"] = {model: raw["policy"]["options"]["criteria"][model] for model in models}
+    environment.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\n")
     def forbidden(*args, **kwargs):
         raise AssertionError("Offline preview attempted live execution")
     monkeypatch.setattr("scripts.jev_measurement_matrix.get_brain", forbidden)
@@ -89,11 +97,49 @@ def test_default_preview_never_calls_provider_or_policy_or_changes_environment(m
     assert asyncio.run(measure(args)) == 0
     assert dict(os.environ) == before
     plan = json.loads((args.artifacts / "plan.json").read_text())
-    assert plan["provider_turns"] == 36 and plan["policy_calls"] == 12
+    assert plan["provider_turns"] == provider_turns and plan["policy_calls"] == 30
+    assert plan["brain"] == brain and all(state["state"]["brain"] == brain for state in plan["policy_states"])
     assert all(item["state"]["task"] for item in plan["policy_states"])
     assert len({item["state"]["prompt_bytes"] for item in plan["policy_states"]}) == 1
-    assert len({item["state"]["task"] for item in plan["policy_states"]}) == 12
+    assert len({item["state"]["task"] for item in plan["policy_states"]}) == 30
     assert not (args.artifacts / "runtime").exists()
+
+def test_mismatched_runtime_and_policy_brains_are_rejected_before_execution(tmp_path):
+    environment = tmp_path / "private.env"
+    environment.write_text("BOBI_BRAIN=claude\nBOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(comparison_config()) + "\n")
+    args = argparse.Namespace(cases=Path("tests/fixtures/metrics/jev-bobi-question-cases.json"),
+        repeats=1, limit=3, offset=0, env_file=environment, models=None, artifacts=tmp_path / "mismatch", execute=True)
+    with pytest.raises(ValueError, match="must match the policy brain"):
+        asyncio.run(measure(args))
+    assert not args.artifacts.exists()
+
+def test_two_candidate_claude_pilot_plans_nine_turns_and_three_policy_calls(tmp_path):
+    raw = comparison_config()
+    raw["control_model"] = raw["variants"][0]["model"] = "provider/control"
+    raw["policy"].update(brain="claude", candidate_models=["provider/control", "provider/reasoning"])
+    raw["policy"]["options"]["criteria"] = {
+        "provider/control": "Routine", "provider/reasoning": "Demanding reasoning"}
+    environment = tmp_path / "private.env"
+    environment.write_text("BOBI_BRAIN=claude\nBOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\n")
+    args = argparse.Namespace(cases=Path("tests/fixtures/metrics/jev-bobi-question-cases.json"),
+        repeats=1, limit=3, offset=6, env_file=environment, models=None, artifacts=tmp_path / "pilot", execute=False)
+    assert asyncio.run(measure(args)) == 0
+    plan = json.loads((args.artifacts / "plan.json").read_text())
+    assert plan["provider_turns"] == 9 and plan["policy_calls"] == 3 and plan["within_live_budget"]
+    assert plan["strategies"] == ["fixed:provider/control", "fixed:provider/reasoning", "jev"]
+    assert set(plan["experiment"]["policy"]["options"]["criteria"]) == {"provider/control", "provider/reasoning"}
+
+@pytest.mark.parametrize("aliases", [[], {"unknown": "model"}, {"control": ""}, {"control": 123},
+    {"control": "duplicate", "alternative": "duplicate"}, {"control": "alternative"}])
+def test_invalid_measurement_aliases_are_rejected_before_execution(tmp_path, aliases):
+    environment = tmp_path / "private.env"
+    environment.write_text("BOBI_MEASUREMENT_MODEL_ALIASES_JSON=" + json.dumps(aliases)
+        + "\nBOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(comparison_config()) + "\n")
+    args = argparse.Namespace(cases=Path("tests/fixtures/metrics/jev-bobi-question-cases.json"),
+        repeats=1, limit=1, offset=0, env_file=environment, models=None, artifacts=tmp_path / "invalid", execute=True)
+    with pytest.raises(ValueError, match="explicit measurement model aliases"):
+        asyncio.run(measure(args))
+    assert not args.artifacts.exists()
 
 def test_live_budget_is_checked_before_credentials_or_network(tmp_path):
     environment = tmp_path / "private.env"
@@ -107,26 +153,36 @@ def test_live_budget_is_checked_before_credentials_or_network(tmp_path):
 @pytest.mark.parametrize("selected,confidence,executed_model,fallback", [
     ("control", 0.99, "control", None),
     ("alternative", 0.99, "alternative", None),
+    ("advanced", 0.99, "advanced", None),
+    ("advanced", 0.85, "advanced", None),
+    ("advanced", 0.849999, "control", "policy_low_confidence"),
     ("alternative", 0.70, "control", "policy_low_confidence"),
 ])
+@pytest.mark.parametrize("measurement", ["exact", "aliased", "missing", "wrong_model"])
+@pytest.mark.parametrize("brain", ["codex", "claude"])
+@pytest.mark.parametrize("case_id", [case["id"] for case in
+    load_cases(Path("tests/fixtures/metrics/jev-bobi-question-cases.json"))])
 def test_mocked_comparison_executes_guarded_choice_and_reports_routing_overhead(
-        monkeypatch, tmp_path, selected, confidence, executed_model, fallback):
+        monkeypatch, tmp_path, selected, confidence, executed_model, fallback, measurement, brain, case_id):
     monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.setattr(paths, "_root", None)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "test-only-native-token")
     raw = comparison_config()
+    raw["policy"]["brain"] = brain
+    aliases = {model: "canonical-" + model for model in raw["policy"]["candidate_models"]} if measurement == "aliased" else {}
     environment = tmp_path / "private.env"
     environment.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw)
         + "\nTEST_TYPESAFE_KEY=test-only-policy-secret\nBOBI_GATEWAY_API_KEY=test-only-gateway-secret"
-        + "\nLLM_GATEWAY_URL=http://localhost:1/v1\n")
+        + "\nLLM_GATEWAY_URL=http://localhost:1/v1\nBOBI_MEASUREMENT_MODEL_ALIASES_JSON=" + json.dumps(aliases) + "\n")
     cases = load_cases(Path("tests/fixtures/metrics/jev-bobi-question-cases.json"))
-    case = cases[0]
+    case_index = next(index for index, case in enumerate(cases) if case["id"] == case_id)
+    case = cases[case_index]
     policy_requests = []
     def policy_handler(request):
         policy_requests.append(json.loads(request.content))
         return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
             "type": "choice", "choice": selected, "confidence": confidence,
-            "probabilities": {"control": 0.99 if selected == "control" else 0.01,
-                "alternative": 0.99 if selected == "alternative" else 0.01}}},
+            "probabilities": {model: float(model == selected) for model in raw["policy"]["candidate_models"]}}},
             "usage": {"input_tokens": 10, "output_tokens": 2}})
     client_class = httpx.AsyncClient
     monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
@@ -141,24 +197,45 @@ def test_mocked_comparison_executes_guarded_choice_and_reports_routing_overhead(
             assert prompt.rstrip() == case["prompt"]
         async def receive_response(self):
             yield AssistantText(json.dumps(case["expected"]))
-            yield TurnResult(session_id="synthetic-provider", usage=[BrainUsage(
-                model=self.model, input_tokens=10, output_tokens=2)])
+            yield TurnResult(session_id="synthetic-provider", usage=[] if measurement == "missing" else [BrainUsage(
+                model="not-requested" if measurement == "wrong_model" else aliases.get(self.model, self.model),
+                input_tokens=10, output_tokens=2)])
         async def disconnect(self):
             pass
     class FakeBrain:
         def make_session(self, *, cwd, system_prompt, options):
             assert not any(Path(cwd).iterdir())
+            assert os.environ["BOBI_BRAIN"] == brain
+            if brain == "claude":
+                assert "CLAUDE_CODE_OAUTH_TOKEN" not in os.environ
+                assert os.environ["ANTHROPIC_BASE_URL"] == "http://localhost:1"
+                assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "test-only-gateway-secret"
+                assert os.environ["ANTHROPIC_API_KEY"] == ""
+                assert Path(os.environ["CLAUDE_CONFIG_DIR"]).is_dir()
+                assert options["tools"] == [] and options["setting_sources"] == []
+                assert options["permission_mode"] == "default" and options["strict_mcp_config"]
             executed.append(options["model"])
             return FakeSession(options["model"])
-    monkeypatch.setattr("scripts.jev_measurement_matrix.get_brain", lambda kind: FakeBrain())
+    def fake_brain(kind):
+        assert kind == brain
+        return FakeBrain()
+    monkeypatch.setattr("scripts.jev_measurement_matrix.get_brain", fake_brain)
     args = argparse.Namespace(cases=Path("tests/fixtures/metrics/jev-bobi-question-cases.json"),
-        repeats=1, limit=1, offset=0, env_file=environment, models=None, artifacts=tmp_path / "live-mock", execute=True)
-    assert asyncio.run(measure(args)) == 0
-    assert executed == ["control", "alternative", executed_model]
+        repeats=1, limit=1, offset=case_index, env_file=environment, models=None, artifacts=tmp_path / "live-mock", execute=True)
+    verified = measurement in {"exact", "aliased"}
+    assert asyncio.run(measure(args)) == int(not verified)
+    assert executed == ["control", "alternative", "advanced", executed_model]
     assert len(policy_requests) == 1 and policy_requests[0]["state"]["task"].rstrip() == case["prompt"]
     report = json.loads((args.artifacts / "report.json").read_text())
-    assert set(report["summary"]) == {"fixed:control", "fixed:alternative", "jev"}
-    assert all(row["quality_passed"] and row["input_tokens"] == 10 for row in report["rows"])
+    assert report["brain"] == brain and policy_requests[0]["state"]["brain"] == brain
+    assert set(report["summary"]) == {"fixed:control", "fixed:alternative", "fixed:advanced", "jev"}
+    assert report["usage_verified"] == verified
+    assert all(row["usage_verified"] == verified for row in report["rows"])
+    assert report["measurement_model_aliases"] == aliases
+    assert all(row["quality_passed"] for row in report["rows"])
+    if verified:
+        assert all(row["input_tokens"] == 10 for row in report["rows"])
+        assert all(row["model"] == aliases.get(row["requested_model"], row["requested_model"]) for row in report["rows"])
     routed = report["rows"][-1]
     assert routed["requested_model"] == executed_model and routed["recommended_model"] == selected
     assert routed["fallback_reason"] == fallback

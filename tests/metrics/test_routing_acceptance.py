@@ -31,14 +31,19 @@ def fault_server():
             if state["fault"] == "timeout":
                 time.sleep(0.3)
                 return
-            self.send_response(503 if state["fault"] == "5xx" else 200)
+            status = {"5xx": 503, "401": 401, "403": 403, "429": 429}.get(state["fault"], 200)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
+            if state["fault"] == "malformed":
+                self.wfile.write(b"invalid JSON")
+                return
             self.wfile.write(json.dumps({
                 "model": "changed" if state["fault"] == "version" else "jev-1.13.0",
                 "answers": {"route": {"type": "choice",
                     "choice": "unknown" if state["fault"] == "invalid_model" else "cheap",
-                    "confidence": 1, "probabilities": {"cheap": 1, "control": 0}}},
+                    "confidence": 0.84 if state["fault"] == "low_confidence" else 1,
+                    "probabilities": {"cheap": 1, "control": 0}}},
                 "usage": {"input_tokens": 1, "output_tokens": 1},
             }).encode())
 
@@ -58,15 +63,20 @@ def fault_server():
 
 @pytest.mark.parametrize("entry_point", ["session_start", "subagent_phase",
     "subagent_persistent", "subagent_supervised", "workflow_start"])
-@pytest.mark.parametrize("fault,reason", [(None, None), ("timeout", "policy_timeout"),
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+@pytest.mark.parametrize("fault,reason", [(None, None), ("typesafe_ok", None), ("timeout", "policy_timeout"),
     ("5xx", "policy_unavailable"), ("invalid_model", "policy_invalid_response"),
-    ("version", "policy_version_drift")])
+    ("version", "policy_version_drift"), ("401", "policy_unavailable"),
+    ("403", "policy_unavailable"), ("429", "policy_unavailable"),
+    ("malformed", "policy_invalid_response"), ("low_confidence", "policy_low_confidence")])
 def test_route_executes_and_projects_a_scripted_turn(bobi_install, monkeypatch, entry_point,
-                                                    fault, reason, fault_server):
+                                                    mode, fault, reason, fault_server):
     monkeypatch.setattr("bobi.metrics.policy._breakers", {})
     raw = configured()
-    raw["policy"].update(mode="enforce", scope={
+    raw["policy"].update(mode=mode, scope={
         "roles": ["engineer"], "entry_points": [entry_point]})
+    failed_policy = reason is not None
+    executed_model = "control" if failed_policy or mode == "shadow" else "cheap"
     endpoint, server_state = fault_server
     if fault:
         raw["policy"].update(name="typesafe-jev", version="jev-1.13.0", deadline_ms=200,
@@ -114,8 +124,8 @@ def test_route_executes_and_projects_a_scripted_turn(bobi_install, monkeypatch, 
                 extra_options={"model": "configured"}, routing=ctx)
             assert session.start("__stub__:options", timeout=5)
             text = session._last_response
-        assert json.loads(text)["model"] == ("control" if fault else "cheap")
-        if session is not None and not fault:
+        assert json.loads(text)["model"] == executed_model
+        if session is not None and not failed_policy:
             session.stop()
             assert runtime.close(timeout=2)
             runtime = MetricsRuntime(root, mode="enabled")
@@ -143,9 +153,9 @@ def test_route_executes_and_projects_a_scripted_turn(bobi_install, monkeypatch, 
             session = Session("agent", str(root), fresh=False, role="engineer",
                 extra_options={"model": "configured"}, routing=ctx)
             assert session.start("__stub__:options", timeout=5)
-            assert json.loads(session._last_response)["model"] == "cheap"
+            assert json.loads(session._last_response)["model"] == executed_model
             assert resume_attempts == ["stub-session", None]
-            candidate = original_make_session(options={"model": "cheap"})
+            candidate = original_make_session(options={"model": executed_model})
             asyncio.run_coroutine_threadsafe(candidate.connect(), session._loop).result(timeout=5)
             asyncio.run_coroutine_threadsafe(session._commit_rotation(candidate, "test"),
                                             session._loop).result(timeout=5)
@@ -153,7 +163,7 @@ def test_route_executes_and_projects_a_scripted_turn(bobi_install, monkeypatch, 
             asyncio.run_coroutine_threadsafe(session._process_message(
                 Message(id="rotation", sender="test", text="__stub__:options")),
                 session._loop).result(timeout=5)
-            assert json.loads(session._last_response)["model"] == "cheap"
+            assert json.loads(session._last_response)["model"] == executed_model
     finally:
         if session is not None:
             session.stop()
@@ -161,20 +171,20 @@ def test_route_executes_and_projects_a_scripted_turn(bobi_install, monkeypatch, 
     MetricsCollectorService(root).collect_once()
     with connect(root / "state/metrics/metrics.db", readonly=True) as connection:
         row = connection.execute("SELECT * FROM router_decisions").fetchone()
-        assert row["model_selected"] == ("control" if fault else "cheap")
+        assert row["model_selected"] == executed_model
         assert row["variant_id"] == "treatment" and row["fallback_reason"] == reason
         metadata = json.loads(row["metadata_json"])
         assert metadata["entry_point"] == entry_point
-        assert metadata["policy"]["status"] == ("failed" if fault else "decided")
+        assert metadata["policy"]["status"] == ("failed" if failed_policy else "decided")
         assert metadata["policy"]["call_id"]
-        if not fault:
+        if fault is None:
             assert metadata["policy"]["cost_usd"] == 0.0
         assert connection.execute("SELECT status FROM turns").fetchone()[0] == "completed"
-        if session is not None and not fault:
+        if session is not None and not failed_policy:
             decisions = connection.execute("SELECT metadata_json FROM router_decisions ORDER BY decided_at_us").fetchall()
             assert [json.loads(row[0])["policy"]["status"] for row in decisions] == ["decided", "reused", "reused"]
     if entry_point != "workflow_start":
         name = session.name if session is not None else "engineer-routing-work"
-        assert load_session_route(name, root=root)["decision"]["model_selected"] == ("control" if fault else "cheap")
+        assert load_session_route(name, root=root)["decision"]["model_selected"] == executed_model
     assert len(server_state["calls"]) == (1 if fault else 0)
     assert all("task" not in call["state"] for call in server_state["calls"])
