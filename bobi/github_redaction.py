@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ def _without_shim(path: str) -> str:
     kept = []
     for part in path.split(os.pathsep):
         if not part:
+            kept.append(part)
             continue
         try:
             if Path(part).resolve() == wrapper:
@@ -55,6 +57,8 @@ def install_github_comment_redaction(
     if not real_gh:
         target.pop(REAL_GH_ENV, None)
         target.pop(PYTHON_EXECUTABLE_ENV, None)
+        if "PATH" in target:
+            target["PATH"] = _without_shim(target["PATH"])
         return
     target[REAL_GH_ENV] = real_gh
     target[PYTHON_EXECUTABLE_ENV] = sys.executable
@@ -66,11 +70,47 @@ def install_github_comment_redaction(
     )
 
 
+async def _protect_github_shell(input_data: dict, tool_use_id: str | None, context: dict) -> dict:
+    if input_data.get("tool_name") != "Bash":
+        return {}
+    tool_input = input_data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return {"continue": False, "stopReason": "bobi: Bash command must be inspectable"}
+    prefix = f'export PATH={shlex.quote(str(shim_dir()))}:"$PATH"; '
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "updatedInput": {**tool_input, "command": prefix + command},
+    }}
+
+
+def github_comment_hooks(hooks: dict | None) -> dict | None:
+    if not os.environ.get(REAL_GH_ENV):
+        return hooks
+    from claude_agent_sdk import HookMatcher
+
+    protected = dict(hooks or {})
+    protected["PreToolUse"] = [
+        *protected.get("PreToolUse", []),
+        HookMatcher(matcher="Bash", hooks=[_protect_github_shell]),
+    ]
+    return protected
+
+
 def _is_comment_command(argv: Sequence[str]) -> bool:
-    return any(
-        argv[index] in {"issue", "pr"} and argv[index + 1] == "comment"
-        for index in range(len(argv) - 1)
-    )
+    commands: list[str] = []
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg in (*_BODY_FLAGS, *_BODY_FILE_FLAGS, "-R", "--repo"):
+            index += 2
+            continue
+        if not arg.startswith("-"):
+            commands.append(arg)
+            if len(commands) == 2:
+                return commands[0] in {"issue", "pr"} and commands[1] == "comment"
+        index += 1
+    return False
 
 
 def _flag_value(argv: Sequence[str], index: int, flag: str) -> tuple[str, int]:
@@ -79,7 +119,7 @@ def _flag_value(argv: Sequence[str], index: int, flag: str) -> tuple[str, int]:
         if index + 1 >= len(argv):
             raise ValueError(f"{flag} requires a value")
         return argv[index + 1], 2
-    return arg[len(flag) + 1 :], 1
+    return arg[len(flag) :].removeprefix("="), 1
 
 
 def _redacted_comment(
@@ -90,12 +130,34 @@ def _redacted_comment(
     clean_args: list[str] = []
     body: str | None = None
     insert_at: int | None = None
+    read_only = {"--help": False, "--delete-last": False}
     index = 0
     while index < len(argv):
         arg = argv[index]
+        if arg == "--":
+            clean_args.extend(argv[index:])
+            break
+        if arg in ("-R", "--repo"):
+            if index + 1 >= len(argv):
+                raise ValueError(f"{arg} requires a value")
+            clean_args.extend(argv[index:index + 2])
+            index += 2
+            continue
+        boolean_flag, separator, value = arg.partition("=")
+        if boolean_flag == "-h":
+            boolean_flag = "--help"
+        if boolean_flag in read_only:
+            if separator and value not in {"1", "t", "T", "true", "TRUE", "True",
+                                           "0", "f", "F", "false", "FALSE", "False"}:
+                raise ValueError(f"{boolean_flag} requires a boolean")
+            read_only[boolean_flag] = not separator or value in {
+                "1", "t", "T", "true", "TRUE", "True",
+            }
         matched = False
         for flag in _BODY_FLAGS:
-            if arg == flag or arg.startswith(f"{flag}="):
+            if arg == flag or arg.startswith(f"{flag}=") or (
+                len(flag) == 2 and arg.startswith(flag)
+            ):
                 if body is not None:
                     raise ValueError("GitHub comment body was provided more than once")
                 value, consumed = _flag_value(argv, index, flag)
@@ -107,7 +169,9 @@ def _redacted_comment(
         if matched:
             continue
         for flag in _BODY_FILE_FLAGS:
-            if arg == flag or arg.startswith(f"{flag}="):
+            if arg == flag or arg.startswith(f"{flag}=") or (
+                len(flag) == 2 and arg.startswith(flag)
+            ):
                 if body is not None:
                     raise ValueError("GitHub comment body was provided more than once")
                 value, consumed = _flag_value(argv, index, flag)
@@ -122,7 +186,7 @@ def _redacted_comment(
         index += 1
 
     if body is None:
-        if any(flag in argv for flag in ("--delete-last", "--help", "-h")):
+        if any(read_only.values()):
             return list(argv), "", 0
         raise ValueError(
             "GitHub comments must use --body or --body-file so Bobi can redact secrets"

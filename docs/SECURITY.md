@@ -34,7 +34,13 @@ be served over TLS.
   gitignored. Treat them like any credential; never copy them off the host.
 - **GitHub comments are scrubbed.** Bobi redacts secret-shaped text from
   feedback recurrence comments and agent `gh issue comment` / `gh pr comment`
-  bodies before they are sent to GitHub.
+  bodies before they are sent to GitHub. Agent commands must supply `--body`/`-b`
+  or `--body-file`/`-F` (including `-` for stdin); missing, unreadable, or
+  ambiguous bodies fail closed. The wrapper preserves unrelated commands and
+  genuine help/delete-only modes. Claude's Bash hook restores the wrapper after
+  shell startup; Codex disables login shells and shell snapshots while the
+  wrapper is installed. It protects the standard runtime tool PATH,
+  not absolute-path CLI calls, custom HTTP clients, or shells that replace PATH.
 - **Deployed secrets** are stored as Fly secrets (the runtime store) and reconciled
   to the team's declared set on each deploy, so the store converges on exactly what
   `agent.yaml` declares (see the private deploy repo's

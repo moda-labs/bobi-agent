@@ -40,6 +40,7 @@ from bobi.brain.gateway import (
     gateway_base_url,
     with_gateway_env,
 )
+from bobi.github_redaction import github_comment_hooks
 
 log = logging.getLogger(__name__)
 
@@ -523,6 +524,7 @@ class ClaudeBrain(GatewayAwareEngine):
         extra = with_default_effort_option(with_default_model_option(options))
         if gateway_base_url():
             extra = with_gateway_env(extra)
+        extra["hooks"] = github_comment_hooks(extra.get("hooks"))
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
         # Never inherit the SDK's 1 MB max_buffer_size default — a single >1 MB
@@ -571,6 +573,7 @@ class ClaudeBrain(GatewayAwareEngine):
         extra = with_default_effort_option(options)
         if gateway_base_url():
             extra = with_gateway_env(extra)
+        extra["hooks"] = github_comment_hooks(extra.get("hooks"))
         model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)
