@@ -415,6 +415,15 @@ persisted, so a restart begins closed.
   the configured `credential_env` even before policy initialization, and every
   loaded policy's `secret_env_names`. Out-of-scope and explicit-model Claude
   and Codex children therefore never inherit the policy key.
+  Claude launch options explicitly blank filtered inherited variables because
+  the SDK merges them over the parent environment; omission alone is insufficient.
+  A non-secret internal marker identifies sanitizer-created routing blanks.
+  Root-bound Bobi CLI and child launches consume it before loading the installed
+  runtime's `.env`, restoring routing configuration and policy credentials only
+  inside Bobi. Unmarked empty overrides and non-empty overrides remain unchanged;
+  subsequent provider launches scrub the restored values again.
+  Control and policy arms record the same experiment-wide candidate model list,
+  so mixed-arm decisions satisfy immutable experiment projection checks.
 - **Security docs.** `docs/SECURITY.md` gains an entry listing the policy
   endpoint as an egress destination. It is covered by the egress-proxy work
   (epic #395).

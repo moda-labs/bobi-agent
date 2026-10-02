@@ -12,6 +12,94 @@ from bobi.metrics.policy import (
 )
 from bobi.metrics.router import provider_subprocess_env
 
+@pytest.mark.parametrize("loader", ["cli", "child"])
+@pytest.mark.parametrize("override", [None, "", "operator-value"])
+def test_sdk_blanked_routing_environment_restores_at_runtime_boundary(tmp_path, monkeypatch, loader, override):
+    import os
+
+    from bobi.config import load_dotenv
+    from bobi.env import _load_dotenv_into
+    from bobi.metrics.router import load_experiment
+    from tests.metrics.test_routing import configured
+
+    values = {"BOBI_METRICS_EXPERIMENT_JSON": json.dumps(configured()),
+              "BOBI_METRICS_ASSIGNMENT_SECRET": "synthetic-assignment-secret",
+              "ROUTING_TEST_KEY": "synthetic-policy-secret"}
+    (tmp_path / "package").mkdir()
+    (tmp_path / ".env").write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+    environment = provider_subprocess_env(values, blank_inherited=True)
+    assert all(not environment.get(key) for key in values)
+    if override is not None:
+        environment["BOBI_METRICS_ASSIGNMENT_SECRET"] = override
+        if not override:
+            environment.pop("BOBI_INTERNAL_PROVIDER_CLEARED_ENV", None)
+    if loader == "cli":
+        for key in values:
+            monkeypatch.delenv(key, raising=False)
+        for key, value in environment.items():
+            monkeypatch.setenv(key, value)
+        load_dotenv(tmp_path)
+        environment = dict(os.environ)
+    else:
+        _load_dotenv_into(environment, tmp_path)
+    expected_secret = values["BOBI_METRICS_ASSIGNMENT_SECRET"] if override is None else override
+    assert environment["BOBI_METRICS_ASSIGNMENT_SECRET"] == expected_secret
+    assert "BOBI_INTERNAL_PROVIDER_CLEARED_ENV" not in environment
+    if override != "":
+        assert environment["ROUTING_TEST_KEY"] == values["ROUTING_TEST_KEY"]
+        assert load_experiment(environment) is not None
+
+def test_restored_claude_route_projects_decision_and_invocation(tmp_path, monkeypatch):
+    import os
+
+    from bobi.brain.base import BrainInvocation, TurnResult
+    from bobi.config import load_dotenv
+    from bobi.metrics.collector import MetricsCollectorService
+    from bobi.metrics.routing import resolve_route
+    from bobi.metrics.runtime import MetricsRuntime
+    from bobi.metrics.store import connect
+    from tests.metrics.test_routing import configured, context
+
+    raw = configured()
+    raw["control_model"] = "provider/control"
+    raw["variants"][0]["model"] = "provider/control"
+    raw["policy"].update(brain="claude", mode="enforce",
+        candidate_models=["provider/control", "provider/reasoning"],
+        options={"model": "provider/reasoning"},
+        scope={"roles": ["engineer"], "entry_points": ["workflow_start"]})
+    values = {"BOBI_METRICS_EXPERIMENT_JSON": json.dumps(raw),
+              "BOBI_METRICS_ASSIGNMENT_SECRET": "test-secret"}
+    (tmp_path / "package").mkdir()
+    (tmp_path / ".env").write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+    for key, value in provider_subprocess_env(values, blank_inherited=True).items():
+        monkeypatch.setenv(key, value)
+    load_dotenv(tmp_path)
+    assert os.environ["BOBI_METRICS_EXPERIMENT_JSON"] == values["BOBI_METRICS_EXPERIMENT_JSON"]
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        for arm, expected in [("control", "provider/control"), ("treatment", "provider/reasoning")]:
+            ctx = replace(context(raw, arm), session_name=f"agent-{arm}",
+                brain="claude", entry_point="workflow_start")
+            outcome = asyncio.run(resolve_route(ctx, runtime=runtime))
+            assert outcome.decision is not None and outcome.model == expected
+            turn = runtime.begin_turn(ctx.session_name, provider="claude", model_requested=outcome.model)
+            turn.record_result(TurnResult(invocations=[BrainInvocation(model=expected.removeprefix("provider/"))]))
+            turn.finish(status="completed")
+    finally:
+        assert runtime.close(timeout=2)
+    collector = MetricsCollectorService(tmp_path)
+    collector.collect_once()
+    with connect(collector.db_path, readonly=True) as connection:
+        rows = connection.execute("SELECT d.model_selected, d.candidate_models_json, "
+            "i.model_selected AS provider_model FROM router_decisions d "
+            "JOIN llm_invocations i USING (router_decision_id) ORDER BY d.decided_at_us").fetchall()
+        assert len(rows) == 2
+        assert [row["model_selected"] for row in rows] == raw["policy"]["candidate_models"]
+        assert [row["provider_model"] for row in rows] == ["control", "reasoning"]
+        assert all(json.loads(row["candidate_models_json"]) == raw["policy"]["candidate_models"] for row in rows)
+        assert connection.execute("SELECT COUNT(*) FROM raw_events "
+            "WHERE projection_state != 'projected'").fetchone()[0] == 0
+
 @pytest.mark.parametrize("assignment_secret", [True, False])
 def test_cold_provider_environment_scrubs_configured_policy_credential(monkeypatch, assignment_secret):
     from tests.metrics.test_routing import configured

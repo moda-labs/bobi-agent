@@ -93,7 +93,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
                     if decision.model_selected not in models or decision.variant_id not in {item.variant_id for item in config.variants}:
                         return fallback
                     variant = next(item for item in config.variants if item.variant_id == decision.variant_id)
-                    expected_candidates = policy_config.candidate_models if variant.policy and policy_config else tuple(
+                    expected_candidates = policy_config.candidate_models if policy_config else tuple(
                         dict.fromkeys(item.model for item in config.variants if item.model))
                     if (decision.assignment_status != "assigned"
                             or decision.candidate_models != expected_candidates
@@ -213,7 +213,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             config.experiment_id, variant.variant_id, unit, "assigned", key_hash,
             ASSIGNMENT_ALGORITHM, config.cohort, config.router_name, config.router_version,
             config.policy_version, config.feature_schema_version,
-            policy_config.candidate_models if variant.policy and policy_config else tuple(
+            policy_config.candidate_models if policy_config else tuple(
                 dict.fromkeys(item.model for item in config.variants if item.model)),
             model, config.control_model, bucket, reason, (time.monotonic() - started) * 1000,
             failure, time.time_ns() // 1000, variant.weight,

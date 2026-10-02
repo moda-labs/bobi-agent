@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import Mapping
 
+from bobi.config import _PROVIDER_CLEARED_ENV
 from bobi.metrics.policy import PolicyConfig, policy_secret_names
 
 ASSIGNMENT_ALGORITHM = "hmac-sha256-u64-v1"
@@ -25,19 +26,26 @@ ROUTING_ENV_NAMES = (
 
 def provider_subprocess_env(
     base: Mapping[str, str] | None = None,
+    *, blank_inherited: bool = False,
 ) -> dict[str, str]:
     """Remove experiment assignment material from provider subprocesses."""
     env = dict(os.environ if base is None else base)
+    env.pop(_PROVIDER_CLEARED_ENV, None)
+    removed = set(ROUTING_ENV_NAMES) | {"TYPESAFE_API_KEY"} | set(policy_secret_names())
     try:
         configured = json.loads(env.get(EXPERIMENT_CONFIG_ENV, "{}"))
         policy = configured.get("policy") if isinstance(configured, dict) else None
         credential = policy.get("credential_env") if isinstance(policy, dict) else None
         if isinstance(credential, str) and re.fullmatch(r"[A-Z_][A-Z0-9_]*", credential.strip()):
-            env.pop(credential.strip(), None)
+            removed.add(credential.strip())
     except (ValueError, TypeError):
         pass
-    for name in (*ROUTING_ENV_NAMES, "TYPESAFE_API_KEY", *policy_secret_names()):
+    for name in removed:
         env.pop(name, None)
+    if blank_inherited:
+        env.update(dict.fromkeys(os.environ.keys() - env.keys(), ""))
+        env.update(dict.fromkeys(removed, ""))
+        env[_PROVIDER_CLEARED_ENV] = ",".join(sorted(removed))
     return env
 
 

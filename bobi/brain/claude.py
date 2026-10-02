@@ -847,7 +847,7 @@ class ClaudeBrain(GatewayAwareEngine):
         extra["env"] = provider_subprocess_env({
             **agent_spawn_env(),
             **(extra.get("env") or {}),
-        })
+        }, blank_inherited=True)
         # Defaults every call site shared; an explicit value in ``options`` wins.
         extra.setdefault("permission_mode", "bypassPermissions")
         # Never inherit the SDK's 1 MB max_buffer_size default — a single >1 MB
@@ -902,7 +902,7 @@ class ClaudeBrain(GatewayAwareEngine):
         extra["env"] = provider_subprocess_env({
             **agent_spawn_env(),
             **(extra.get("env") or {}),
-        })
+        }, blank_inherited=True)
         model = resolve_model_option(model)
         extra.setdefault("permission_mode", "bypassPermissions")
         extra.setdefault("include_partial_messages", True)
