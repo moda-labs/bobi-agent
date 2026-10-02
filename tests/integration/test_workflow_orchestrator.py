@@ -245,6 +245,49 @@ class TestNotifyAwaitDeliveryGuard:
         assert "notify_checkin" in state["error"]
 
 
+class TestContractlessCompletion:
+    @pytest.fixture
+    def bobi_env(self, dual_brain_env):
+        return dual_brain_env
+
+    @pytest.mark.timeout(300)
+    def test_adhoc_completes_once_without_handoff(self, bobi_env):
+        from bobi.sdk import SessionRegistry, session_handoff_path
+        from bobi.workflow.orchestrator import make_session_name, run_workflow
+        from bobi.workflow.schema import load_workflow
+        from bobi.workflow.state import WorkflowRun
+
+        workflow = load_workflow(bobi_env.workflows_dir / "adhoc.yaml")
+        run_key = "1018-no-contract"
+        session_name = make_session_name(workflow.name, "test-repo", run_key)
+        handoff_path = session_handoff_path(session_name, "task")
+        collected = {}
+
+        assert run_workflow(
+            workflow,
+            task="Reply exactly REVIEW_DONE. Do not use tools or create files.",
+            repo="test-repo",
+            cwd=str(bobi_env.project_path),
+            run_key=run_key,
+            timeout=120,
+            interactive=False,
+            collect=collected,
+        ) is True
+
+        assert collected["final_text"]
+        assert not handoff_path.exists()
+        registry = SessionRegistry()
+        assert registry.get(session_name).status == "completed"
+        run = WorkflowRun.find_by_run_key(workflow.name, run_key, repo="test-repo")
+        assert run.status == "completed"
+        assert run.variable_scopes["task"] == {}
+        events = [
+            json.loads(line)
+            for line in (registry.session_dir(session_name) / "log.jsonl")
+            .read_text().splitlines()
+        ]
+        assert len([event for event in events if event.get("event") == "stop"]) == 1
+
 class TestConnectIsNeverATurn:
     """#1016 end-to-end on the stub brain: one dispatch of a publish-shaped
     workflow drains exactly one turn per prompt step. On the old engine the
