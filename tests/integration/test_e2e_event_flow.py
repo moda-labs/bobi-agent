@@ -17,6 +17,8 @@ import urllib.request
 
 import pytest
 
+from tests.integration.conftest import _cleanup_bobi_env
+
 
 # Bind this file's ``bobi_env`` / ``cli_run`` to the dual-brain (stub + claude)
 # variants (see test_manager_lifecycle for the pattern) so the stack runs once
@@ -35,10 +37,15 @@ def cli_run(dual_brain_cli_run):
 class TestEndToEndEventFlow:
 
     @pytest.fixture(autouse=True)
-    def _start_stack(self, bobi_env, cli_run):
+    def _start_stack(self, request, bobi_env, cli_run):
         """Start bobi (manager + event server) and wait for ready."""
         log_file = bobi_env.state_dir / "manager.log"
         pid_file = bobi_env.state_dir / "manager.pid"
+        request.addfinalizer(
+            lambda: _cleanup_bobi_env(
+                bobi_env, include_event_server=False
+            )
+        )
         log_pos = log_file.stat().st_size if log_file.exists() else 0
 
         cli_run("start", timeout=15)

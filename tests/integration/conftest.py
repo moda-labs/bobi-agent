@@ -209,6 +209,7 @@ def claude_bobi_env(tmp_path_factory):
     try:
         yield env
     finally:
+        _cleanup_bobi_env(env)
         if old_home is None:
             os.environ.pop("BOBI_HOME", None)
         else:
@@ -256,6 +257,7 @@ def stub_bobi_env(tmp_path_factory):
     try:
         yield env
     finally:
+        _cleanup_bobi_env(env)
         if old_home is None:
             os.environ.pop("BOBI_HOME", None)
         else:
@@ -462,6 +464,53 @@ def _reap_process_group(pid: int, grace: float = 5.0) -> None:
                 return
             time.sleep(0.02)
 
+
+def _process_command(pid: int) -> str:
+    """Best-effort full command line for PID identity checks."""
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        raw = b""
+    if raw:
+        return raw.replace(b"\0", b" ").decode(errors="replace")
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+def _cleanup_bobi_env(
+    env: BobiEnv, *, include_event_server: bool = True
+) -> None:
+    """Reap every detached daemon owned by an isolated integration env."""
+    identities = {
+        "manager.pid": (
+            f"-m bobi.cli agent {env.agent_name} start --foreground"
+        ),
+    }
+    if include_event_server:
+        identities["event-server.pid"] = "dist/local.js"
+    for name, identity in identities.items():
+        pid_file = env.state_dir / name
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (FileNotFoundError, OSError, ValueError):
+            pid = 0
+        command = _process_command(pid) if pid > 0 else ""
+        if identity in command:
+            _reap_process_group(pid)
+        pid_file.unlink(missing_ok=True)
+
+    stale_files = ["manager-health.port", "manager.launch.json"]
+    if include_event_server:
+        stale_files.extend(("event-server.port", "event-server.launch.json"))
+    for name in stale_files:
+        (env.state_dir / name).unlink(missing_ok=True)
 
 def _drop_session(name):
     """Retire *name* from whichever install this process is bound to.
