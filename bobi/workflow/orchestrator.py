@@ -1287,7 +1287,10 @@ async def _run_workflow_async(
                 collect["final_text"] = drain.final_text
 
             # Validate handoff
-            handoff = _read_handoff(session_name, step.name)
+            handoff = (
+                _read_handoff(session_name, step.name)
+                if step.handoff.required or step.handoff.optional else {}
+            )
             missing = _validate_handoff(step, handoff)
 
             for retry in range(MAX_HANDOFF_RETRIES):
@@ -1295,8 +1298,12 @@ async def _run_workflow_async(
                     break
                 log.warning(f"Step {step.name}: handoff missing {missing}, re-prompting")
                 fix_prompt = (
+                    f"This is a handoff-repair retry for step '{step.name}', "
+                    "not a new task. Inspect your existing results first. "
+                    "Do not repeat completed work or side effects. "
                     f"Your handoff is missing required fields: {', '.join(missing)}. "
-                    f"Please update your handoff file with these fields and confirm."
+                    f"Please update `{session_handoff_path(session_name, step.name)}` "
+                    "with these fields and confirm."
                 )
                 await client.query(fix_prompt)
                 await _drain_response(client, session_name,

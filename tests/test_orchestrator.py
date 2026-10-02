@@ -523,6 +523,90 @@ class TestRunWorkflow:
         result = self._mock_asyncio_run(wf, task="Say hello", repo="test", cwd="/tmp", run_key="1")
         assert result is True
 
+    def test_contractless_step_never_reads_handoff_or_reprompts(self, monkeypatch):
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        workflow = Workflow(name="adhoc", steps=[
+            StepDef(name="task", prompt="Review the committed revision"),
+        ])
+
+        with patch("bobi.workflow.orchestrator._read_handoff",
+                   wraps=_read_handoff) as read_handoff:
+            assert self._mock_asyncio_run(
+                workflow, task="Review the committed revision", repo="test",
+                cwd="/tmp", run_key="no-contract",
+            ) is True
+
+        read_handoff.assert_not_called()
+        assert len(calls) == 1
+        assert len(clients[0].queries) == 1
+
+    @pytest.mark.parametrize("supplied", [False, True])
+    def test_optional_only_handoff_never_reprompts(self, monkeypatch, supplied):
+        from bobi.sdk import session_handoff_path
+
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        handoff_path = session_handoff_path("wf-adhoc-test-optional", "task")
+        if supplied:
+            handoff_path.parent.mkdir(parents=True, exist_ok=True)
+            handoff_path.write_text("summary: reviewed\n")
+        workflow = Workflow(name="adhoc", steps=[
+            StepDef(name="task", prompt="Review the committed revision",
+                    handoff=HandoffContract(optional=["summary"])),
+            StepDef(name="capture", action="capture"),
+        ])
+
+        with patch("bobi.workflow.orchestrator._execute_native_action",
+                   return_value={}) as capture:
+            assert self._mock_asyncio_run(
+                workflow, task="Review the committed revision", repo="test",
+                cwd="/tmp", run_key="optional",
+            ) is True
+
+        outputs = capture.call_args.args[1].scopes["task"]
+        assert outputs == ({"summary": "reviewed"} if supplied else {})
+        assert len(calls) == 1
+        assert len(clients[0].queries) == 1
+
+    @pytest.mark.parametrize("repaired", [False, True])
+    def test_handoff_retries_are_repair_only(self, monkeypatch, repaired):
+        from bobi.sdk import session_handoff_path
+        from bobi.workflow.orchestrator import MAX_HANDOFF_RETRIES
+
+        client = FakeBrainClient()
+        handoff_path = session_handoff_path("wf-adhoc-test-repair", "task")
+
+        async def query(prompt):
+            client.queries.append(prompt)
+            if repaired and len(client.queries) > 1:
+                handoff_path.parent.mkdir(parents=True, exist_ok=True)
+                handoff_path.write_text("summary: already reviewed\n")
+
+        client.query = query
+        brain = MagicMock()
+        brain.make_session.return_value = client
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        dispatch = "Fix the findings and publish the verdict"
+        workflow = Workflow(name="adhoc", steps=[
+            StepDef(name="task", prompt=dispatch,
+                    handoff=HandoffContract(required=["summary"])),
+        ])
+
+        assert self._mock_asyncio_run(
+            workflow, task=dispatch, repo="test", cwd="/tmp", run_key="repair",
+        ) is repaired
+        retries = client.queries[1:]
+        assert len(retries) == (1 if repaired else MAX_HANDOFF_RETRIES)
+        for prompt in retries:
+            assert "handoff-repair retry" in prompt
+            assert "step 'task'" in prompt
+            assert "not a new task" in prompt
+            assert "Do not repeat completed work or side effects" in prompt
+            assert str(handoff_path) in prompt
+            assert "summary" in prompt
+            assert dispatch not in prompt
+
     def test_multi_step_completes(self):
         wf = Workflow(name="t", steps=[
             StepDef(name="setup", prompt="set up"),
