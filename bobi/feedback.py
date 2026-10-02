@@ -472,7 +472,10 @@ def comment_on_issue(
     api_url: str | None = None,
 ) -> str:
     """Add one comment to an existing issue, returning its URL."""
+    from bobi.setup.actions import redact_secrets
+
     repo = validate_repo(repo)
+    body = redact_secrets(body)[0]
     response = _request(
         "POST",
         f"{api_url or github_api_url()}/repos/{repo}/issues/{number}/comments",
