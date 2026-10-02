@@ -3377,6 +3377,11 @@ def _parse_workflow_inputs(input_values, input_json):
                 f"--input must use KEY=VALUE syntax (got {raw!r})"
             )
         parsed[key] = value
+    for key in ("task", "run_key"):
+        if key in parsed:
+            raise click.UsageError(
+                f"Cannot override built-in workflow input {key!r}"
+            )
     return parsed
 
 

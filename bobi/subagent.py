@@ -733,7 +733,7 @@ def derive_run_key(workflow_name: str, task: str, *, project: str = "",
     if input_fields:
         dials.append(json.dumps(
             input_fields, sort_keys=True, separators=(",", ":"),
-            ensure_ascii=True,
+            ensure_ascii=True, default=str,
         ))
     dials.append(" ".join(task.split()))
     encoded = "\n".join(dials)
@@ -1247,7 +1247,8 @@ def launch_agent(
     finding_replay = finding_derived and not period_key
     fresh = fresh or derived_key
 
-    validate_workflow_inputs(workflow_name, input_fields)
+    if not persistent:
+        validate_workflow_inputs(workflow_name, input_fields)
 
     if persistent:
         session_name = run_key

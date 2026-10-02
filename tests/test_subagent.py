@@ -611,6 +611,21 @@ class TestLaunchAgent:
                     "pr-closed", {"repo": "org/repo", "pr_number": 123}
                 )
 
+    @patch("bobi.subagent.check_requires", return_value=[])
+    @patch("bobi.subagent.get_registry")
+    @patch("bobi.subagent._launch_detached")
+    def test_persistent_launch_skips_workflow_input_validation(
+            self, mock_launch, mock_reg, mock_check):
+        """A persistent session never runs workflow steps, so a workflow's
+        native-action inputs must not gate it."""
+        mock_reg.return_value = MagicMock(get=MagicMock(return_value=None))
+        from bobi.subagent import launch_agent
+
+        with patch("bobi.subagent.validate_workflow_inputs") as mock_validate:
+            launch_agent(task="Stay up", cwd="/tmp/test",
+                         workflow_name="pr-closed", persistent=True)
+        mock_validate.assert_not_called()
+
     @patch("bobi.subagent._alert_requires_failure")
     @patch("bobi.subagent.get_registry")
     @patch("bobi.subagent._launch_detached")
@@ -855,6 +870,16 @@ class TestDeriveRunKey:
 
         assert first == reordered
         assert first != different
+
+    def test_non_json_workflow_inputs_do_not_raise(self):
+        """Programmatic callers may pass values json cannot encode natively."""
+        from datetime import date
+        from bobi.subagent import derive_run_key
+
+        key = derive_run_key("pr-closed", "recover",
+                             input_fields={"since": date(2026, 1, 1)})
+        assert key == derive_run_key("pr-closed", "recover",
+                                     input_fields={"since": date(2026, 1, 1)})
 
     def test_empty_workflow_inputs_preserve_the_existing_key(self):
         from bobi.subagent import derive_run_key

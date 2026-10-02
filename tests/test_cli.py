@@ -433,6 +433,21 @@ class TestSubagents:
         assert "KEY=VALUE" in result.output
         mock.assert_not_called()
 
+    @pytest.mark.parametrize("args", [
+        ["--input", "task=other"],
+        ["--input-json", '{"run_key":"other"}'],
+    ])
+    def test_builtin_workflow_inputs_cannot_be_overridden(self, bobi_install,
+                                                          args):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", *args, "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert "Cannot override built-in workflow input" in result.output
+        mock.assert_not_called()
+
     def test_missing_native_action_inputs_refuse_the_launch(self, bobi_install):
         workflows = bobi_install.repo_path / "package" / "workflows"
         workflows.mkdir(exist_ok=True)

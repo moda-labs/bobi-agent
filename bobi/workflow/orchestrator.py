@@ -1594,8 +1594,8 @@ def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
         # is not equivalent to a verified unmerged PR.
         result["status"] = "error"
         result["merge_state_error"] = merge_state["error"]
-        # `reason` is what reaches a human in the notify message. "not merged"
-        # would be a claim we cannot make: we could not read the PR at all.
+        # `reason` is preserved in the failure event and the run state. "not
+        # merged" would be a claim we cannot make: we could not read the PR.
         result["reason"] = (
             "could not read the PR's merge state, so nothing was deleted: "
             f"{merge_state['error']}"
