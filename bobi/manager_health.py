@@ -149,10 +149,19 @@ def _session_status_from_registry():
         from bobi.sdk import get_registry
         registry = get_registry()
         active = registry.list_active()
-        return [
-            {"name": e.name, "role": e.role, "status": e.status}
-            for e in active
-        ]
+        sessions = []
+        for entry in active:
+            session = {"name": entry.name, "role": entry.role, "status": entry.status}
+            if isinstance(entry.ack_watermark, dict) and entry.ack_watermark:
+                watermark = dict(entry.ack_watermark)
+                pending_at = watermark.pop("oldest_pending_at", 0.0)
+                watermark["oldest_age_seconds"] = (
+                    max(0.0, time.time() - pending_at)
+                    if watermark.get("pending_batches") and
+                    isinstance(pending_at, (int, float)) else 0.0)
+                session["ack_watermark"] = watermark
+            sessions.append(session)
+        return sessions
     except Exception:
         return []
 

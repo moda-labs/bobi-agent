@@ -9,11 +9,18 @@ Chat priority (#688) means messages complete out of push order, so the ack
 must be a watermark: never ack past an older, still-unprocessed batch.
 """
 
+import asyncio
 import queue
+import logging
+import threading
+import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from bobi.events.drain import drain_loop
-from bobi.inbox import register_local_inbox, unregister_local_inbox
+from bobi.inbox import Message, register_local_inbox, unregister_local_inbox
 
 
 class _ScriptedQueue:
@@ -84,6 +91,63 @@ def _chat(seq, text="chat message"):
     # An unknown source has no channel handler - passes through prepare.
     return {"type": "chat.message", "text": text, "delivery": "chat",
             "source": "testchan", "seq": seq}
+
+
+@pytest.mark.asyncio
+async def test_real_stub_session_processes_aged_bulk_before_remaining_chat(
+        bobi_install, monkeypatch, tmp_path):
+    from bobi.brain.stub import StubBrain
+    from bobi.events.client import _load_cursor, _save_cursor
+    from bobi.sdk import SessionEntry, get_registry
+    from bobi.session import Session
+
+    monkeypatch.setenv("BOBI_STUB_BRAIN", "1")
+    now = [0.0]
+    monkeypatch.setattr("bobi.inbox.time", SimpleNamespace(
+        time=time.time, monotonic=lambda: now[0]))
+    client = StubBrain().make_session()
+    original_query = client.query
+    processed = []
+
+    async def query(text):
+        processed.append(text)
+        now[0] = 120.0
+        await original_query(text)
+
+    client.query = query
+    session = Session(name="aging-session", cwd=str(bobi_install.repo_path))
+    session._make_brain_session = lambda resume=None: client
+    original_recv = session.inbox.recv
+    session.inbox.recv = lambda timeout=2.0: original_recv(timeout=0.01)
+    get_registry().register(SessionEntry(name=session.name, status="running"))
+    session.inbox.start()
+    cursor_path = tmp_path / "cursor.json"
+    _save_cursor(9, cursor_path)
+    with patch("bobi.events.drain.time.sleep"):
+        try:
+            drain_loop(
+                session.name,
+                queue=_ScriptedQueue([[_bulk(10)], [_chat(11, "first chat")],
+                                      [_chat(12, "second chat")]]),
+                formatter=lambda event: event["text"],
+                cursor_ack=lambda seq: _save_cursor(seq, cursor_path))
+        except KeyboardInterrupt:
+            pass
+    assert _load_cursor(cursor_path) == 9
+    run_task = asyncio.create_task(session._run())
+
+    async def wait_for_completion():
+        while _load_cursor(cursor_path) != 12:
+            await asyncio.sleep(0.01)
+
+    try:
+        await asyncio.wait_for(wait_for_completion(), timeout=5)
+        assert processed == ["first chat", "bulk event", "second chat"]
+    finally:
+        if session._keep_alive is not None:
+            session._keep_alive.set()
+        await asyncio.wait_for(run_task, timeout=2)
+        session.inbox.close()
 
 
 class TestAckAfterProcessing:
@@ -269,3 +333,159 @@ class TestCursorReplaySimulation:
             "permanently lose the queued message")
         inbox.messages[0].on_done()
         assert _load_cursor(cursor_path) == 8
+
+    def test_aged_bulk_unpins_real_cursor_without_ack_at_dequeue(self,
+                                                               tmp_path,
+                                                               monkeypatch):
+        from bobi.events.client import _load_cursor, _save_cursor
+        from bobi.inbox import Inbox
+
+        now = [0.0]
+        monkeypatch.setattr("bobi.inbox.time.monotonic", lambda: now[0])
+        cursor_path = tmp_path / "cursor.json"
+        _save_cursor(9, cursor_path)
+        inbox = Inbox("aging-cursor-test")
+        inbox.start()
+        try:
+            with patch("bobi.events.drain.time.sleep"):
+                try:
+                    drain_loop(
+                        inbox.session_name,
+                        queue=_ScriptedQueue([[_bulk(10)], [_chat(11)]]),
+                        formatter=lambda event: event["text"],
+                        cursor_ack=lambda seq: _save_cursor(seq, cursor_path))
+                except KeyboardInterrupt:
+                    pass
+            chat = inbox.recv(timeout=0)
+            assert chat.text == "chat message"
+            chat.on_done()
+            assert _load_cursor(cursor_path) == 9
+            inbox.push(Message(id="new-chat", sender="human", text="new-chat"),
+                       priority=True)
+            now[0] = 120.0
+            bulk = inbox.recv(timeout=0)
+            assert bulk.text == "bulk event"
+            assert _load_cursor(cursor_path) == 9
+            bulk.on_done()
+            assert _load_cursor(cursor_path) == 11
+        finally:
+            inbox.close()
+
+
+class TestWatermarkDiagnostics:
+    def test_real_drain_persists_pin_and_clears_it_after_processing(self,
+                                                                bobi_install):
+        from bobi.sdk import SessionEntry, get_registry
+
+        registry = get_registry()
+        registry.register(SessionEntry(name="ack-test", last_activity=10.0))
+        inbox, acks = _run_drain([[_bulk(10)], [_chat(20)]])
+        snapshot = registry.get("ack-test").ack_watermark
+        assert snapshot["pinned_seq"] == 10
+        assert snapshot["pending_batches"] == 2
+        assert snapshot["oldest_event_type"] == "ci.check_run"
+        assert snapshot["oldest_pending_at"] > 0
+        inbox.messages[1].on_done()
+        assert registry.get("ack-test").ack_watermark == snapshot
+        assert acks == []
+        inbox.messages[0].on_done()
+        assert registry.get("ack-test").ack_watermark == {
+            "pinned_seq": None, "pending_batches": 0,
+            "oldest_pending_at": 0.0, "oldest_event_type": ""}
+        assert registry.get("ack-test").last_activity == 10.0
+        assert acks == [20]
+
+    def test_diagnostic_write_failure_does_not_prevent_delivery_or_ack(self,
+                                                                   monkeypatch,
+                                                                   caplog):
+        from bobi.sdk import SessionRegistry
+
+        def fail_write(*args):
+            raise OSError("read-only diagnostic state")
+
+        monkeypatch.setattr(SessionRegistry, "update_ack_watermark", fail_write)
+        inbox, acks = _run_drain([[_bulk(1)]])
+        inbox.messages[0].on_done()
+        assert acks == [1]
+        assert "Could not persist ACK watermark" in caplog.text
+
+    def test_concurrent_completion_never_acks_past_an_outstanding_batch(self):
+        from bobi.events.drain import _AckWatermark
+
+        acks = []
+        tracker = _AckWatermark(acks.append)
+        oldest = tracker.open_batch(1)
+        callbacks = []
+        for seq in range(2, 20):
+            batch = tracker.open_batch(seq)
+            callbacks.append(batch.attach())
+            batch.close()
+        workers = [threading.Thread(target=callback) for callback in callbacks]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=2)
+            assert not worker.is_alive()
+        assert acks == []
+        oldest.close()
+        assert acks == [19]
+
+    def test_oldest_batch_warns_on_age_and_repeats_with_backoff(self,
+                                                              monkeypatch,
+                                                              caplog):
+        from bobi.events.drain import _AckWatermark
+
+        now = [0.0]
+        monkeypatch.setattr("bobi.events.drain.time.monotonic", lambda: now[0])
+        acks = []
+        tracker = _AckWatermark(acks.append)
+        tracker.open_batch(10, "agent/session.completed")
+        with caplog.at_level(logging.WARNING):
+            for seq, elapsed in ((11, 299), (12, 300), (13, 359),
+                                 (14, 360), (15, 479), (16, 480),
+                                 (17, 719), (18, 720), (19, 1019),
+                                 (20, 1020), (21, 1319), (22, 1320)):
+                now[0] = float(elapsed)
+                tracker.open_batch(seq, "chat.message").close()
+        assert len(caplog.records) == 6
+        assert all("seq 10" in record.message for record in caplog.records)
+        assert all("agent/session.completed" in record.message
+                   for record in caplog.records)
+        assert "300" in caplog.records[0].message
+        assert acks == []
+
+    def test_batch_count_warns_at_64_and_repeats_above_threshold(self,
+                                                              monkeypatch,
+                                                              caplog):
+        from bobi.events.drain import _AckWatermark
+
+        now = [0.0]
+        monkeypatch.setattr("bobi.events.drain.time.monotonic", lambda: now[0])
+        tracker = _AckWatermark(lambda seq: None)
+        with caplog.at_level(logging.WARNING):
+            for seq in range(1, 66):
+                tracker.open_batch(seq)
+            assert len(caplog.records) == 1
+            assert "64" in caplog.records[0].message
+            now[0] = 60.0
+            tracker.open_batch(66)
+        assert len(caplog.records) == 2
+
+    def test_warning_backoff_resets_when_pinning_batch_completes(self,
+                                                              monkeypatch,
+                                                              caplog):
+        from bobi.events.drain import _AckWatermark
+
+        now = [0.0]
+        monkeypatch.setattr("bobi.events.drain.time.monotonic", lambda: now[0])
+        tracker = _AckWatermark(lambda seq: None)
+        oldest = tracker.open_batch(1)
+        tracker.open_batch(2)
+        with caplog.at_level(logging.WARNING):
+            now[0] = 300.0
+            tracker.open_batch(3)
+            oldest.close()
+            tracker.open_batch(4)
+        assert ["seq 1" in record.message for record in caplog.records] == [
+            True, False]
+        assert "seq 2" in caplog.records[-1].message

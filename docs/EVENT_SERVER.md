@@ -433,6 +433,19 @@ sessions must not share a cursor):
   delivered inbox message. Queued messages, provider-error turns, and turns
   interrupted before their terminal result remain unacknowledged and replay
   after a process restart.
+- The session inbox normally serves chat before normal/bulk messages, FIFO
+  within each class. Once the oldest normal message has waited 120 seconds,
+  it takes the next receive opportunity ahead of chat. Active turns are not
+  interrupted, and older normal work can extend the wall-clock delivery time.
+- A pinned ACK watermark warns when its oldest batch reaches 300 seconds or
+  64 batches accumulate. Warnings include the session, pinning batch sequence,
+  event types, age and pending count, and repeat after 60, 120, 240, then every
+  300 seconds while activity continues; the backoff resets when the floor moves.
+- Manager `GET /health` exposes persisted per-session `ack_watermark` diagnostics
+  under `sessions`: `pinned_seq`, `pending_batches`, `oldest_event_type`, and
+  server-derived `oldest_age_seconds`. Old state omits the block until a drain
+  reports it; an empty watermark has a null sequence and zero count/age.
+  Diagnostic writes do not refresh session activity or acknowledge events.
 - The local server treats `last_seen = 0` as a real cursor and replays every
   buffered event with `seq > 0`. This preserves the first unacknowledged event
   (`seq = 1`) across a manager restart.
