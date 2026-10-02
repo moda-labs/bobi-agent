@@ -299,6 +299,11 @@ nothing unless that live read says merged - never the `input.merged` the run
 was launched with, which is the webhook's snapshot and stale by arrival. It
 publishes the verdict it acted on as `merged_live`, and downstream routes key
 off that, so the branch taken cannot disagree with what happened on disk.
+An action result with `status: error` is a fatal step failure: the engine emits
+`agent/step.failed`, preserves the error for retry, and records the workflow as
+failed. A verified unmerged PR returns `status: preserved` and completes; an
+unreadable merge-state response preserves the worktree but returns `status:
+error` so it cannot masquerade as a successful no-op.
 
 ## Variables and templating
 
@@ -309,7 +314,8 @@ through a small recursive-descent parser.
 **Scopes** are named dictionaries on the run's `VariableContext`:
 
 - `input` — `task`, `repo`, `run_key`, plus any `input_fields` from the trigger
-  (for example `input.pr_number`, `input.head_branch`).
+  or manual `subagents launch --input KEY=VALUE` / `--input-json` options (for
+  example `input.pr_number`, `input.head_branch`).
 - `requested_by` — who triggered the run (channel, thread) for notify routing.
 - `worktree` — `worktree.path` when the run uses an isolated git worktree.
 - `event` — the payload of the event that resumed a suspended run.
@@ -317,8 +323,10 @@ through a small recursive-descent parser.
   finishes, `${{pr.pr_url}}` holds its handoff `pr_url` field.
 
 **Filters**: `${{scope.key | lower}}` and `${{scope.key | upper}}`. A reference
-to a missing scope or key resolves to an empty string and logs a warning rather
-than failing the run.
+to a missing scope or key resolves to an empty string and logs a warning. Native
+actions declare their required inputs and reject the launch before execution
+when one is absent, so a deterministic action cannot silently complete as a
+no-op.
 
 **Conditions** in route steps use bare names (resolved from a flat namespace of
 all step outputs) and support `==`, `!=`, `in`, `not in`, `and`, `or`, `not`,
