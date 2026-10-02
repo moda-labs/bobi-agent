@@ -721,6 +721,74 @@ Do not reset registration state or remove the durable volume without approval.
   an isolated `BOBI_HOME`. Check the recorded latency, breaker health, and
   that no prompt text appears in the spool, logs, or database.
 
+### Synthetic Bobi question comparisons
+
+The default dataset is `tests/fixtures/metrics/jev-bobi-question-cases.json`:
+12 self-contained English questions, four each at simple, medium and complex
+levels. They cover token storage/semantics, shadow execution, confidence,
+Docker env refresh, fallback, sticky/explicit-model precedence, admission,
+cost deduplication, assignment units, privacy and launch ordering. Context is
+synthetic or paraphrased public Bobi contracts, not captured Slack/repo content.
+
+Preview the exact redacted policy states without credentials or network calls
+(the private env must contain a valid experiment configuration):
+
+```bash
+.venv/bin/python scripts/jev_measurement_matrix.py \
+  --env-file /path/to/private.env \
+  --artifacts /path/to/new/private-preview
+```
+
+Preview writes `plan.json` only. It creates a new isolated experiment ID with
+`enforce` and redacted synthetic task egress in memory; it never changes the
+provided env file, production shadow mode or Slack. Neither expected answers
+nor difficulty labels are sent to the policy. Candidate criteria remain the
+operator's hypotheses, not measured prices or capabilities. Inspect the preview
+before authorizing any paid execution or synthetic task egress.
+Questions are padded with trailing spaces to the same UTF-8 byte length across
+the full fixture, including when selecting batches. This controls the previous
+prompt-length shortcut; the policy must distinguish content rather than use
+the `prompt_bytes` feature alone. No difficulty-to-model assignment is assumed.
+
+For each question, live comparison would execute all selected fixed models
+and a separate JEV strategy that runs its guarded selected model (or control
+on fallback). Choosing control is permitted; model variety is not a success
+criterion. Synthetic treatment subjects are isolated and forced for policy
+measurement, not natural production HMAC sampling. With three candidates,
+`--limit 3` plans 12 provider turns and three policy calls. All 12 questions
+would require 48 provider turns and 12 policy calls, exceeding the 40-turn cap
+per invocation: use two batches, `--limit 6` and `--offset 6 --limit 6`.
+
+Only after approval, add `--execute` and supply gateway/TypeSafe credentials:
+
+```bash
+.venv/bin/python scripts/jev_measurement_matrix.py \
+  --env-file /path/to/private.env \
+  --artifacts /path/to/new/private-live-run \
+  --limit 3 --execute
+```
+
+`--models` selects allowed candidates including control; `--repeats` accepts one
+to three repetitions within the cap. Every invocation needs a new output path.
+Provider execution uses an empty temporary workspace and a separate Codex home.
+Reports distinguish fixed strategies from JEV even when they execute the same
+model; they retain recommendation, actual model, confidence, fallback, exact
+answer checks, usage and separate routing/execution latency. `wall_ms` includes
+routing through provider completion, not a complete engineering workflow.
+A wrong answer or provider failure returns nonzero while retaining reports.
+
+This is a paired question-answer benchmark, not a full coding/task-completion
+benchmark or randomized production experiment. Difficulty annotations are not
+gold model assignments; judge selected-model adequacy against measured answers
+and independent baseline results. Strategies run in fixed order; latency is
+descriptive, not a causal estimate of routing benefit.
+Cost remains null without actual billing;
+token counts alone do not prove savings. Production benefits still require
+representative workflow outcomes, total costs and the operational gates.
+The old arithmetic fixture remains only to interpret historical receipts and
+is no longer the default. Never supply real Slack, private repo content or
+credentials as question prompts.
+
 ### Grouped acceptance coverage
 
 | Category | Executable evidence | Remaining acceptance |

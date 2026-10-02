@@ -1,0 +1,74 @@
+[
+  {
+    "id": "metrics-location",
+    "tier": "simple",
+    "prompt": "Bobi operator question. Context: the installed agent runtime is called run; its exact-token SQLite read model is run/state/metrics/metrics.db. Where should an operator look for measured token records relative to run? Return only JSON with exactly one string field named relative_path.",
+    "expected": {"relative_path": "state/metrics/metrics.db"}
+  },
+  {
+    "id": "container-env-refresh",
+    "tier": "medium",
+    "prompt": "Bobi troubleshooting question. A Docker Compose service uses env_file. The operator edits that file, runs docker compose restart, and still sees old values. Context: restart retains the container environment; up -d --force-recreate reads env_file again. Slack authentication already works. Choose the minimal correction, not credential rotation. Return only JSON with action equal to recreate_container or rotate_credentials and rotate_slack_token as a boolean.",
+    "expected": {"action": "recreate_container", "rotate_slack_token": false}
+  },
+  {
+    "id": "deduplicated-cost",
+    "tier": "complex",
+    "prompt": "Bobi experiment-analysis question. One workflow has three turns with reported execution costs 2, 3 and 5 synthetic credits. Its projected policy rows repeat call p1 three times, with cost 0.5 each time, because the route is sticky; call p2 appears once with unknown cost. Rules: count each call_id once, never infer unknown cost as zero, and report total only if every execution and policy cost is known. Return only JSON: known_execution_cost is the sum of known execution costs in credits, represented as an integer, not the number of turns; unknown_policy_calls is an integer count of distinct calls with unknown costs; known_policy_cost is the summed known policy cost as a number; reported_total_cost is a number or null. These are fictional credits, not real model prices.",
+    "expected": {"known_execution_cost": 10, "known_policy_cost": 0.5, "unknown_policy_calls": 1, "reported_total_cost": null}
+  },
+  {
+    "id": "shadow-execution",
+    "tier": "simple",
+    "prompt": "Bobi routing question. Context: in shadow mode a treatment policy recommendation is recorded but the control model executes. A healthy policy recommends an alternative. Return only JSON with executed equal to control or alternative and recommendation_recorded as a boolean.",
+    "expected": {"executed": "control", "recommendation_recorded": true}
+  },
+  {
+    "id": "confidence-fallback",
+    "tier": "medium",
+    "prompt": "Bobi admission question. A fresh eligible session is assigned to treatment_jev. The policy returns an allowed alternative, the pinned version matches, confidence is 0.70, and min_confidence is 0.85. Mode is enforce and telemetry admission succeeds. Context: low confidence falls back to control without changing the originally assigned arm. Return only JSON with variant_id and executed as strings, plus fallback_reason. Use the exact reason policy_low_confidence when applicable.",
+    "expected": {"variant_id": "treatment_jev", "executed": "control", "fallback_reason": "policy_low_confidence"}
+  },
+  {
+    "id": "assignment-unit-analysis",
+    "tier": "complex",
+    "prompt": "Bobi measurement-design question. Run u1 is control and has three completed turns. Run u2 is treatment_jev and has five turns across two subagent sessions; run u3 is treatment_jev and has two turns. Assignment is by run_key, not session or turn. All shadow recommendations name a cheaper alternative, but control still executes and there are no independently evaluated task outcomes or actual billing receipts. Return only JSON with control_units, treatment_units, control_turns and treatment_turns as integer counts, and can_claim_savings_from_recommendations as a boolean. Do not count subagents as additional assignment units.",
+    "expected": {"control_units": 1, "treatment_units": 2, "control_turns": 3, "treatment_turns": 7, "can_claim_savings_from_recommendations": false}
+  },
+  {
+    "id": "confidence-meaning",
+    "tier": "simple",
+    "prompt": "Bobi operator question. A routing decision reports confidence 0.95. Context: this is confidence over the supplied model choices, not an independently measured probability that generated code passes tests. Does it guarantee a 95 percent coding-task success rate? Return only JSON with guaranteed_success as a boolean and required_evidence equal to independent_task_outcomes.",
+    "expected": {"guaranteed_success": false, "required_evidence": "independent_task_outcomes"}
+  },
+  {
+    "id": "sticky-and-explicit-model",
+    "tier": "medium",
+    "prompt": "Bobi lifecycle question. A valid matching sticky record selects model B for a saved session. A normal reconnect has no explicit override and must reuse B without calling the policy. Later the caller explicitly requests model C; explicit model precedence makes that launch unenrolled and it must not call the policy. Return only JSON with reconnect_model and explicit_launch_model as strings and total_new_policy_calls as an integer count.",
+    "expected": {"reconnect_model": "B", "explicit_launch_model": "C", "total_new_policy_calls": 0}
+  },
+  {
+    "id": "privacy-and-experiment-boundary",
+    "tier": "complex",
+    "prompt": "Bobi architecture-review question. Production approval permits metadata-only egress, with prompt=none. A developer wants semantic JEV routing by sending a real Slack request after redaction, changing the feature schema, and switching shadow to enforce under the existing experiment ID. A separate synthetic-only fixture contains no customer data and can be evaluated offline without network calls. Context: real prompt egress needs separate approval; redaction does not replace approval; schema or mode changes require a new experiment ID; offline synthetic preview is permitted. Return only JSON with production_prompt_egress_allowed, reuse_existing_experiment_id and offline_synthetic_preview_allowed as booleans.",
+    "expected": {"production_prompt_egress_allowed": false, "reuse_existing_experiment_id": false, "offline_synthetic_preview_allowed": true}
+  },
+  {
+    "id": "token-subfields",
+    "tier": "simple",
+    "prompt": "Bobi Codex accounting question. A provider reports input_tokens=100 and output_tokens=30; cache-read input=40 is already included in input, and reasoning output=20 is already included in output. How many input-plus-output tokens should be counted? Return only JSON with total_tokens as an integer and count_cache_separately and count_reasoning_separately as booleans. Do not add included subfields again.",
+    "expected": {"total_tokens": 130, "count_cache_separately": false, "count_reasoning_separately": false}
+  },
+  {
+    "id": "admission-failure",
+    "tier": "medium",
+    "prompt": "Bobi fault-handling question. For a fresh eligible treatment session, a valid high-confidence policy recommends an alternative in enforce mode. Before connection, the bounded telemetry admission queue refuses the route. Context: rejected admission leaves the session unenrolled and executes control; the bot must not execute an unadmitted alternative. Return only JSON with executed equal to control or alternative and enrolled as a boolean.",
+    "expected": {"executed": "control", "enrolled": false}
+  },
+  {
+    "id": "fresh-session-order",
+    "tier": "complex",
+    "prompt": "Bobi routing design question. For a fresh eligible treatment session with valid policy output and successful writes, order these shuffled operations before the provider connects: connect, policy_guard, model_aware_resume, admission, arm_assignment, sticky_persistence, eligibility. Constraints: eligibility precedes arm assignment; arm assignment precedes a treatment policy decision; its result is guarded before admission; admission precedes sticky persistence; persisted model choice must exist before model-aware resume lookup; connection is last. Return only JSON with order as an array of those seven strings, each appearing exactly once. Do not propose per-turn or mid-session rerouting.",
+    "expected": {"order": ["eligibility", "arm_assignment", "policy_guard", "admission", "sticky_persistence", "model_aware_resume", "connect"]}
+  }
+]
