@@ -39,7 +39,9 @@ be served over TLS.
   ambiguous bodies fail closed. The wrapper preserves unrelated commands and
   genuine help/delete-only modes. Claude's Bash hook restores the wrapper after
   shell startup; Codex disables login shells and shell snapshots while the
-  wrapper is installed. It protects the standard runtime tool PATH,
+  wrapper is installed. The wrapper loads its own Bobi package in isolated
+  Python mode, ignoring project modules and inherited `PYTHONPATH`.
+  It protects the standard runtime tool PATH,
   not absolute-path CLI calls, custom HTTP clients, or shells that replace PATH.
 - **Deployed secrets** are stored as Fly secrets (the runtime store) and reconciled
   to the team's declared set on each deploy, so the store converges on exactly what

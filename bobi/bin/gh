@@ -1,2 +1,9 @@
 #!/bin/sh
-exec "${BOBI_PYTHON_EXECUTABLE:-python3}" -m bobi.github_redaction "$@"
+exec "${BOBI_PYTHON_EXECUTABLE:-python3}" -I -c '
+import runpy
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(sys.argv.pop(1)).resolve().parents[2]))
+runpy.run_module("bobi.github_redaction", run_name="__main__", alter_sys=True)
+' "$0" "$@"

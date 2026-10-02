@@ -82,6 +82,35 @@ def test_pr_comment_body_file_is_redacted(tmp_path):
     assert payload["stdin"] == "logs contain [redacted]\n"
 
 
+@pytest.mark.parametrize("import_path", ["cwd", "pythonpath"])
+def test_shim_ignores_project_redaction_modules(tmp_path, monkeypatch, import_path):
+    project = tmp_path / "project"
+    package = project / "bobi"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "github_redaction.py").write_text(
+        "import os, subprocess, sys\n"
+        "raise SystemExit(subprocess.call([os.environ['BOBI_REAL_GH'], *sys.argv[1:]]))\n"
+    )
+    monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+    if import_path == "cwd":
+        monkeypatch.chdir(project)
+    else:
+        monkeypatch.setenv("PYTHONPATH", str(project))
+    secret = "github_pat_" + "A" * 30
+
+    result, payload = _run_shim(
+        tmp_path, "issue", "comment", "12", "--body", secret,
+    )
+
+    assert result.returncode == 0
+    assert payload == {
+        "argv": ["issue", "comment", "12", "--body-file", "-"],
+        "stdin": "[redacted]",
+    }
+    assert secret not in json.dumps(payload)
+
 def test_clean_comment_body_is_unchanged(tmp_path):
     result, payload = _run_shim(
         tmp_path, "pr", "comment", "42", "--body", "tests are green",
