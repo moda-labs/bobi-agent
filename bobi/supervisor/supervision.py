@@ -313,10 +313,13 @@ class Supervisor:
         return manager_health.health(f"http://127.0.0.1:{port}")
 
     def _default_load_fn(self, manager_pid, previous):
-        from .load import load_evidence
-        return load_evidence(manager_pid, previous,
-                             pegged_ratio=self.config.load_pegged_ratio,
-                             tree_cpu_ratio=self.config.load_tree_cpu_ratio)
+        from .load import default_load_evidence
+        return default_load_evidence(
+            manager_pid,
+            previous,
+            pegged_ratio=self.config.load_pegged_ratio,
+            tree_cpu_ratio=self.config.load_tree_cpu_ratio,
+        )
 
     # --- child lifecycle --------------------------------------------------
 
@@ -507,7 +510,7 @@ class Supervisor:
 
         The busy-descendant check diffs cpu ticks across two samples, so the
         FIRST verdict of a heavy period already needs a baseline from the
-        previous poll. Cheap (one /proc walk per poll interval) and fail-open:
+        previous poll. Cheap (one process-table read per poll) and fail-open:
         a read failure just leaves the baseline stale for this poll. The
         evidence is cached for the verdict path so a same-poll verdict uses
         this full-interval delta instead of re-reading /proc moments later (a
@@ -695,7 +698,7 @@ class Supervisor:
             return self._handle_child_exit(rc)
         self._child_alive = True
 
-        # Per-poll load baseline: one /proc walk so a verdict that fires THIS
+        # Per-poll load baseline: one process-table read so a verdict firing THIS
         # poll already has a full-interval CPU delta to judge against.
         self._refresh_load_baseline()
 

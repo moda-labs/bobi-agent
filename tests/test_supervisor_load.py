@@ -9,6 +9,7 @@ test_supervision_restart.py.
 
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from bobi.supervisor.config import SupervisorConfig
@@ -16,7 +17,10 @@ from bobi.supervisor.load import (
     _cpu_capacity,
     _descendant_cpu,
     _host_load,
+    _parse_ps_time,
     _parse_stat,
+    darwin_load_evidence,
+    default_load_evidence,
     load_evidence,
 )
 
@@ -65,6 +69,15 @@ class TestParseStat:
     def test_non_numeric_fields_rejected(self):
         line = _stat_line(100, 1, 5, 7).replace(" 5 7", " x 7")
         assert _parse_stat(line) is None
+
+
+class TestParsePsTime:
+
+    def test_parses_real_ps_shapes_and_rejects_malformed_time(self):
+        assert _parse_ps_time("12:34.56") == 75456
+        assert _parse_ps_time("1:02:03.45") == 372345
+        assert _parse_ps_time("123:45.67") == 742567
+        assert _parse_ps_time("not-a-time") is None
 
 
 # --- the descendant cpu walk ----------------------------------------------
@@ -241,6 +254,49 @@ class TestLoadEvidence:
         ev = load_evidence(100, baseline, proc_root=tmp_path,
                            host_load=(0.5, 2), now_fn=lambda: 11.0,
                            clock_ticks=10, tree_cpu_ratio=0.25)
+        assert ev["pegged"] is False
+        assert ev["active"] is False
+
+
+class TestDarwinLoadEvidence:
+
+    def test_default_reader_selects_darwin(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setattr(
+            "bobi.supervisor.load.darwin_load_evidence",
+            lambda manager_pid, previous, **kwargs: {
+                "manager_pid": manager_pid,
+                "previous": previous,
+                "kwargs": kwargs,
+            },
+        )
+
+        assert default_load_evidence(42, "baseline", pegged_ratio=0.7) == {
+            "manager_pid": 42,
+            "previous": "baseline",
+            "kwargs": {"pegged_ratio": 0.7},
+        }
+
+    def test_unreadable_ps_fails_closed(self):
+        def fail(*_args, **_kwargs):
+            raise OSError("ps unavailable")
+
+        ev = darwin_load_evidence(
+            100, None, host_load=(8.0, 2), ps_run=fail)
+
+        assert ev["pegged"] is True
+        assert ev["busy_descendants"] == 0
+        assert ev["active"] is False
+
+    def test_unreadable_load_average_fails_closed(self, monkeypatch):
+        monkeypatch.setattr(os, "getloadavg", lambda: (_ for _ in ()).throw(
+            OSError("load unavailable")))
+        ps_output = "100 1 0:00.01\n101 100 0:00.05\n"
+
+        ev = darwin_load_evidence(
+            100, None, ps_run=lambda: ps_output)
+
+        assert ev["load1"] is None
         assert ev["pegged"] is False
         assert ev["active"] is False
 

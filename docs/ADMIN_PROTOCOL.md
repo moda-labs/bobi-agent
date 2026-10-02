@@ -397,13 +397,13 @@ restart budget three ways (probe misses, a stalled-turn wedge, a load-induced
 
 Load grace defers those ambiguous verdicts while BOTH hold:
 
-- the host is pegged: `load1 >= ratio * ncpu`, from `/proc/loadavg`
-  (`WATCHDOG_LOAD_PEGGED_RATIO`, default `1.0`), where `ncpu` is constrained
-  by process affinity and cgroup v1/v2 CPU quota rather than blindly using the
-  host's logical CPU count; and
+- the host is pegged: `load1 >= ratio * ncpu`, from `/proc/loadavg` on Linux
+  or `os.getloadavg()` on macOS (`WATCHDOG_LOAD_PEGGED_RATIO`, default `1.0`),
+  where `ncpu` is constrained by process affinity and, on Linux, cgroup v1/v2
+  CPU quota rather than blindly using the host's logical CPU count; and
 - the manager's own worker tree materially consumed that capacity: aggregate
-  descendant `utime + stime` delta from `/proc/<pid>/stat`, normalized by the
-  monotonic poll interval and kernel clock tick rate, is at least
+  descendant cumulative CPU-time delta from `/proc/<pid>/stat` on Linux or
+  `ps` on macOS, normalized by the monotonic poll interval, is at least
   `WATCHDOG_LOAD_TREE_CPU_RATIO` (default `0.8`). A descendant that merely woke
   for one tick while unrelated node work pegged the host does not qualify.
 
@@ -436,17 +436,13 @@ a single spell so a genuinely dead manager still escalates; set it to `0` to
 let deferral continue as long as the evidence holds. Unreadable evidence fails
 closed: uncertainty never defers a restart.
 
-Platform scope. The evidence sources are Linux procfs. On hosts without
-`/proc` (macOS, Windows) both reads fail closed, so the gate never defers and
-the supervisor behaves exactly as it did before this feature: no new crash
-surface, no new dependency, and the pre-existing #903 shape (a false restart
-under saturation) remains possible there. The production fleet runs the Linux
-reference image, which is where that shape occurs; dev machines get the
-unchanged behavior rather than the exemption. A Darwin reader
-(`os.getloadavg()` plus `ps -axo pid,ppid,time` behind the same supervisor
-seam) is planned as follow-up work, gated on a real dev-machine false-kill
-report; until it lands, macOS keeps the pre-feature behavior. Windows stays
-out of scope (no load-average concept).
+Platform scope. Linux reads `/proc/loadavg` and `/proc/<pid>/stat`. macOS reads
+`os.getloadavg()` and cumulative CPU time from `ps -axo pid=,ppid=,time=`
+behind the same supervisor seam; a dedicated macOS CI leg exercises the real
+process-table command. Either reader fails closed when its evidence is
+unreadable, so uncertainty never creates a restart exemption. Windows stays
+out of scope: it has no compatible load-average concept, and the gate remains
+inert there.
 
 Knobs (`WATCHDOG_*`, read at supervisor start):
 
