@@ -434,6 +434,12 @@ persisted, so a restart begins closed.
 carries either `model` (fixed arm) or `policy` (policy arm). Existing
 fixed-model experiments stay valid.
 
+Variant weights may be zero and must sum to one. For a full policy rollout,
+retain the control variant at weight `0` and set the policy variant to weight
+`1`, using a new experiment ID. Assignment never selects a zero-weight arm;
+the control model remains the safety fallback. A single active arm is not an
+A/B comparison, and existing scope, explicit-model and sticky-session rules apply.
+
 ```json
 {
   "experiment_id": "jev-router-2026-10",

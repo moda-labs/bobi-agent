@@ -118,8 +118,8 @@ class ExperimentConfig:
                 raise ValueError("variant requires non-empty model or policy")
             if isinstance(weight, bool) or not isinstance(weight, (int, float)):
                 raise ValueError(f"variant {variant_id} requires numeric weight")
-            if not 0 < float(weight) <= 1:
-                raise ValueError(f"variant {variant_id} weight must be in (0, 1]")
+            if not 0 <= float(weight) <= 1:
+                raise ValueError(f"variant {variant_id} weight must be in [0, 1]")
             seen.add(variant_id)
             variants.append(ExperimentVariant(
                 variant_id, float(weight),
@@ -237,7 +237,7 @@ def assign_variant(
     digest = hmac.new(secret, material, hashlib.sha256).digest()
     bucket = int.from_bytes(digest[:8], "big") / 2**64
     cumulative = 0.0
-    selected = config.variants[-1]
+    selected = next(variant for variant in reversed(config.variants) if variant.weight > 0)
     for variant in config.variants:
         cumulative += variant.weight
         if bucket < cumulative:

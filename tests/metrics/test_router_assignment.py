@@ -44,6 +44,40 @@ def test_assignment_key_precedence_and_unassigned_state():
     assert choose_assignment_key() == (None, None)
 
 
+@pytest.mark.parametrize("selected_index", [0, 1])
+def test_full_allocation_never_assigns_zero_weight_arm(selected_index, monkeypatch):
+    fixture = json.loads(FIXTURE.read_text())
+    raw = fixture["config"]
+    for index, variant in enumerate(raw["variants"]):
+        variant["weight"] = int(index == selected_index)
+    config = ExperimentConfig.from_mapping(raw)
+    for index in range(1000):
+        selected, _, _ = assign_variant(config, fixture["secret"].encode(),
+            assignment_unit="run_key", assignment_key=f"synthetic-{index}")
+        assert selected.variant_id == config.variants[selected_index].variant_id
+
+    class BoundaryDigest:
+        def digest(self):
+            return b"\xff" * 32
+
+        def hexdigest(self):
+            return self.digest().hex()
+
+    monkeypatch.setattr("bobi.metrics.router.hmac.new", lambda *args, **kwargs: BoundaryDigest())
+    selected, _, _ = assign_variant(config, b"synthetic-secret",
+        assignment_unit="run_key", assignment_key="boundary")
+    assert selected.variant_id == config.variants[selected_index].variant_id
+
+
+@pytest.mark.parametrize("weights", [(-0.1, 1.1), (0, 0), (1, 1)])
+def test_invalid_allocation_weights_are_rejected(weights):
+    raw = json.loads(FIXTURE.read_text())["config"]
+    for variant, weight in zip(raw["variants"], weights):
+        variant["weight"] = weight
+    with pytest.raises(ValueError, match="weight"):
+        ExperimentConfig.from_mapping(raw)
+
+
 def test_config_is_strict_and_requires_runtime_secret():
     fixture = json.loads(FIXTURE.read_text())
     encoded = json.dumps(fixture["config"])
