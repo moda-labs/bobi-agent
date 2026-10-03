@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from bobi.brain.base import BrainInvocation, BrainUsage, TurnResult
-from bobi.metrics.collector import MetricsCollectorService, rebuild_database
+from bobi.metrics.collector import MetricsCollectorService
 from bobi.metrics.router import RouterDecision
 from bobi.metrics.runtime import MetricsRuntime
 from bobi.metrics.store import connect
@@ -29,20 +29,18 @@ def test_admission_materializes_policy_decisions_before_invocations(tmp_path):
     assert runtime.close(timeout=2)
     MetricsCollectorService(tmp_path).collect_once()
     database = tmp_path / "state/metrics/metrics.db"
-    rebuilt = tmp_path / "rebuilt.db"
-    rebuild_database(database, rebuilt)
-    for path in (database, rebuilt):
-        conn = connect(path, readonly=True)
-        try:
-            row = conn.execute("SELECT * FROM router_decisions").fetchone()
-            assert json.loads(row["metadata_json"])["policy"]["status"] == "not_called"
-            invocation = conn.execute("SELECT router_decision_id FROM llm_invocations").fetchone()
-            assert invocation[0] == row["router_decision_id"]
-            events = conn.execute("SELECT event_type FROM raw_events ORDER BY producer_sequence").fetchall()
-            names = [event[0] for event in events]
-            assert names.index("router_decision.recorded") < names.index("invocation.recorded")
-        finally:
-            conn.close()
+    conn = connect(database, readonly=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM experiment_outcomes").fetchone()[0] == 0
+        row = conn.execute("SELECT * FROM router_decisions").fetchone()
+        assert json.loads(row["metadata_json"])["policy"]["status"] == "not_called"
+        invocation = conn.execute("SELECT router_decision_id FROM llm_invocations").fetchone()
+        assert invocation[0] == row["router_decision_id"]
+        events = conn.execute("SELECT event_type FROM raw_events ORDER BY producer_sequence").fetchall()
+        names = [event[0] for event in events]
+        assert names.index("router_decision.recorded") < names.index("invocation.recorded")
+    finally:
+        conn.close()
 
 def test_rejected_admission_does_not_enroll(tmp_path, monkeypatch):
     runtime = MetricsRuntime(tmp_path, mode="enabled")

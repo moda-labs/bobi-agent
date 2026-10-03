@@ -24,9 +24,7 @@ def test_metrics_status_reports_database_and_reconciliation(monkeypatch, tmp_pat
     assert payload["database"]["ready"] is True
     assert payload["database"]["integrity"] == "ok"
     assert payload["reconciliation"]["uncovered_turns"] == 0
-    assert payload["maintenance"]["pending_requests"] == 0
-    assert payload["retention"]["status"] == "ready"
-    assert payload["backup"] is None
+    assert {"maintenance", "retention", "backup"}.isdisjoint(payload)
 
 
 def test_metrics_reconcile_invokes_one_turn(monkeypatch, tmp_path):
@@ -53,38 +51,6 @@ def test_metrics_reconcile_invokes_one_turn(monkeypatch, tmp_path):
     assert json.loads(result.output)["turn_id"] == "turn-1"
 
 
-def test_metrics_rebuild_reports_maintenance_envelope(monkeypatch, tmp_path):
-    monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
-    monkeypatch.setattr(
-        "bobi.metrics.maintenance.run_maintenance",
-        lambda *args, **kwargs: {
-            "status": "done",
-            "operation": "rebuild",
-            "result": {
-                "status": "done",
-                "source": "raw_events",
-                "rebuild_latency_ms": 1.5,
-            },
-        },
-    )
-
-    result = CliRunner().invoke(metrics, ["rebuild", "--wait", "--json"])
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["result"]["source"] == "raw_events"
-
-
-def test_metrics_prune_requires_exactly_one_mode(monkeypatch, tmp_path):
-    monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
-
-    neither = CliRunner().invoke(metrics, ["prune"])
-    both = CliRunner().invoke(metrics, ["prune", "--dry-run", "--apply"])
-
-    assert neither.exit_code != 0
-    assert both.exit_code != 0
-    assert "exactly one" in neither.output
-
-
 def test_metrics_calibrate_reports_qualified_groups(monkeypatch, tmp_path):
     monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
     monkeypatch.setattr(
@@ -100,3 +66,7 @@ def test_metrics_calibrate_reports_qualified_groups(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["qualified_model_groups"] == 1
+
+
+def test_metrics_commands_are_operational_only():
+    assert set(metrics.commands) == {"status", "reconcile", "calibrate"}

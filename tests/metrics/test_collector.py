@@ -5,7 +5,6 @@ import json
 from bobi.brain.base import BrainUsage, TurnResult
 from bobi.metrics.collector import MetricsCollectorService
 from bobi.metrics.events import MetricsEvent
-from bobi.metrics.maintenance import run_maintenance
 from bobi.metrics.runtime import MetricsRuntime
 from bobi.metrics.spool import HEADER, SpoolWriter
 from bobi.metrics.store import connect
@@ -267,27 +266,3 @@ def test_corrupt_segment_does_not_starve_later_segments(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
     finally:
         conn.close()
-
-
-def test_active_collector_executes_queued_rebuild(tmp_path):
-    runtime = MetricsRuntime(tmp_path, mode="enabled")
-    observation = runtime.begin_turn("agent", provider="openai", brain="codex")
-    observation.finish(status="completed")
-    runtime.close()
-    service = MetricsCollectorService(tmp_path, poll_interval=0.01)
-    service.start()
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline:
-        if service.health()["role"] == "active" and service.db_path.exists():
-            break
-        time.sleep(0.01)
-    else:
-        raise AssertionError("collector did not become active")
-
-    result = run_maintenance(
-        tmp_path, "rebuild", wait=True, timeout=5
-    )
-
-    assert result["status"] == "done"
-    assert result["result"]["status"] == "done"
-    assert service.stop(timeout=2)

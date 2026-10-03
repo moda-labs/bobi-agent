@@ -454,7 +454,6 @@ def agent(ctx, name):
 @main.command("admin")
 @click.argument("metrics_command", type=click.Choice([
     "metrics_summary", "metrics_session", "metrics_turn",
-    "metrics_hotspots", "metrics_experiment",
 ]))
 @click.option("--url", envvar="BOBI_ADMIN_URL", required=True,
               help="Worker base URL.")
@@ -1998,14 +1997,14 @@ def subagents_cancel(ref):
 
 @agent.group("metrics")
 def metrics():
-    """Inspect and repair the selected agent's local metrics state."""
+    """Inspect and reconcile the selected agent's local metrics state."""
     pass
 
 
 @metrics.command("status")
 @click.option("--json", "json_output", is_flag=True, help="Print JSON output.")
 def metrics_status(json_output):
-    """Show collector, storage, reconciliation, and maintenance health."""
+    """Show collector, storage, and reconciliation health."""
     root = _detect_project_root()
     metrics_root = root / "state" / "metrics"
     db_path = metrics_root / "metrics.db"
@@ -2027,23 +2026,6 @@ def metrics_status(json_output):
             "role": "standby",
             "db_ready": db_path.exists(),
         },
-    }
-    maintenance_root = metrics_root / "maintenance"
-    result_files = sorted(
-        maintenance_root.glob("*.result.json"),
-        key=lambda path: path.stat().st_mtime_ns,
-        reverse=True,
-    )
-    last_maintenance = None
-    if result_files:
-        try:
-            last_maintenance = json.loads(result_files[0].read_text())
-        except (OSError, ValueError, TypeError):
-            pass
-    result["maintenance"] = {
-        "pending_requests": len(list(maintenance_root.glob("*.request.json"))),
-        "retained_results": len(result_files),
-        "last_result": last_maintenance,
     }
     try:
         calibration = json.loads(
@@ -2084,17 +2066,6 @@ def metrics_status(json_output):
             }
         finally:
             conn.close()
-        from bobi.metrics.rebuild import latest_verified_backup
-        from bobi.metrics.retention import plan_retention
-
-        result["backup"] = latest_verified_backup(metrics_root)
-        try:
-            result["retention"] = plan_retention(root)
-        except (OSError, RuntimeError, ValueError) as exc:
-            result["retention"] = {
-                "status": "error",
-                "error": type(exc).__name__,
-            }
     if json_output:
         click.echo(json.dumps(result, sort_keys=True))
         return
@@ -2106,12 +2077,6 @@ def metrics_status(json_output):
             "uncovered:  "
             f"{result['reconciliation']['uncovered_turns']} turn(s)"
         )
-    if result.get("retention"):
-        click.echo(f"retention:  {result['retention']['status']}")
-    click.echo(
-        "maintenance: "
-        f"{result['maintenance']['pending_requests']} pending request(s)"
-    )
 
 
 @metrics.command("calibrate")
@@ -2163,74 +2128,6 @@ def metrics_reconcile(turn_id, wait, timeout, json_output):
         click.echo(
             f"{result['status']}: recovered "
             f"{result.get('exact_measurements_recovered', 0)} exact measurement(s)"
-        )
-
-
-@metrics.command("rebuild")
-@click.option("--wait", is_flag=True, help="Wait for the collector lock.")
-@click.option("--timeout", default=60.0, type=float, show_default=True)
-@click.option("--json", "json_output", is_flag=True, help="Print JSON output.")
-def metrics_rebuild(wait, timeout, json_output):
-    """Rebuild and atomically activate the local metrics read model."""
-    from bobi.metrics.maintenance import MaintenanceError, run_maintenance
-
-    root = _detect_project_root()
-    try:
-        envelope = run_maintenance(
-            root, "rebuild", wait=wait, timeout=timeout
-        )
-    except (MaintenanceError, FileNotFoundError, RuntimeError) as exc:
-        raise click.ClickException(str(exc)) from None
-    result = envelope.get("result", envelope)
-    if json_output:
-        click.echo(json.dumps(envelope, sort_keys=True))
-    else:
-        if envelope["status"] == "pending":
-            click.echo(f"pending: request_id={envelope['request_id']}")
-            return
-        click.echo(
-            f"done: rebuilt from {result['source']} in "
-            f"{result['rebuild_latency_ms']} ms"
-        )
-
-
-@metrics.command("prune")
-@click.option("--dry-run", is_flag=True, help="Preview the retention action.")
-@click.option("--apply", "apply_changes", is_flag=True, help="Apply retention.")
-@click.option("--retention-days", default=30, type=click.IntRange(min=1))
-@click.option("--json", "json_output", is_flag=True, help="Print JSON output.")
-def metrics_prune(dry_run, apply_changes, retention_days, json_output):
-    """Preview or apply safe local metrics retention."""
-    from bobi.metrics.maintenance import MaintenanceError, run_maintenance
-    from bobi.metrics.retention import plan_retention
-
-    if dry_run == apply_changes:
-        raise click.UsageError("Pass exactly one of --dry-run or --apply.")
-    root = _detect_project_root()
-    try:
-        envelope = (
-            run_maintenance(
-                root,
-                "prune",
-                options={"retention_days": retention_days},
-                wait=True,
-                timeout=60.0,
-            )
-            if apply_changes
-            else {"status": "done", "result": plan_retention(
-                root, retention_days=retention_days
-            )}
-        )
-    except (MaintenanceError, FileNotFoundError, RuntimeError) as exc:
-        raise click.ClickException(str(exc)) from None
-    result = envelope["result"]
-    if json_output:
-        click.echo(json.dumps(envelope if apply_changes else result, sort_keys=True))
-    else:
-        action = "applied" if apply_changes else "planned"
-        click.echo(
-            f"{action}: {len(result['archive_segments'])} segment(s), "
-            f"{result['projected_raw_events_to_prune']} raw event(s)"
         )
 
 

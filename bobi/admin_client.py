@@ -13,8 +13,6 @@ ALIASES = {
     "metrics_summary": "usage",
     "metrics_session": "usage_session",
     "metrics_turn": "usage_turn",
-    "metrics_hotspots": "usage_hotspots",
-    "metrics_experiment": "usage_experiment",
 }
 
 DRILLDOWN_ALIASES = frozenset(ALIASES) - {"metrics_summary"}

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from bobi.metrics.collector import MetricsCollector, rebuild_database
+from bobi.metrics.collector import MetricsCollector
 from bobi.metrics.events import MetricsEvent
 from bobi.metrics.projection import ORPHAN_TTL_US, project_pending
 from bobi.metrics.spool import SpoolWriter
@@ -18,7 +18,7 @@ def _event(event_type, sequence, payload, **ids):
         **ids,
     )
 
-def test_historical_session_assignment_survives_projection_and_rebuild(tmp_path):
+def test_historical_session_assignment_survives_projection(tmp_path):
     assignment = json.loads(Path(
         "tests/fixtures/metrics/historical-router-assignment.json"
     ).read_text())
@@ -37,18 +37,33 @@ def test_historical_session_assignment_survives_projection_and_rebuild(tmp_path)
             "started_at_us": 2, "status": "completed",
         }, session_id="historical-session", turn_id="historical-turn"))
     MetricsCollector(database).collect_segment(segment)
-    rebuilt = tmp_path / "rebuilt.db"
-    rebuild_database(database, rebuilt)
-    for path in (database, rebuilt):
-        conn = connect(path, readonly=True)
-        try:
-            decision = conn.execute("SELECT * FROM router_decisions").fetchone()
-            assert decision["variant_id"] == assignment["variant_id"]
-            assert decision["assignment_key_hash"] == assignment["assignment_key_hash"]
-            assert decision["model_selected"] == assignment["model_selected"]
-            assert decision["decided_at_us"] == 2
-        finally:
-            conn.close()
+    conn = connect(database, readonly=True)
+    try:
+        decision = conn.execute("SELECT * FROM router_decisions").fetchone()
+        assert decision["variant_id"] == assignment["variant_id"]
+        assert decision["assignment_key_hash"] == assignment["assignment_key_hash"]
+        assert decision["model_selected"] == assignment["model_selected"]
+        assert decision["decided_at_us"] == 2
+    finally:
+        conn.close()
+
+    with SpoolWriter(segment) as writer:
+        writer.append(_event("experiment_outcome.recorded", 3, {
+            "outcome_id": "historical-outcome",
+            "router_decision_id": decision["router_decision_id"],
+            "outcome_name": "completion", "outcome_value": 1,
+            "outcome_definition_version": "bobi-runtime-v1",
+            "outcome_source": "runtime", "evaluator_name": "bobi-runtime",
+            "evaluator_version": "1", "is_estimated": 0, "observed_at_us": 3,
+        }, session_id="historical-session", turn_id="historical-turn"))
+    assert MetricsCollector(database).collect_segment(segment)["projected"] == 1
+    assert MetricsCollector(database).collect_segment(segment)["staged"] == 0
+    conn = connect(database, readonly=True)
+    try:
+        assert conn.execute("SELECT outcome_value FROM experiment_outcomes").fetchone()[0] == 1
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
 
 
 def test_child_stages_before_parent_and_projects_after_parent_arrives(tmp_path):

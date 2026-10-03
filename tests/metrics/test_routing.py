@@ -120,7 +120,6 @@ def context(raw, arm):
 def test_capacity_timeout_does_not_create_a_policy_call(monkeypatch, tmp_path):
     from bobi.metrics.collector import MetricsCollectorService
     from bobi.metrics.policy import CircuitBreaker
-    from bobi.metrics.query import MetricsQueries
 
     raw = configured()
     raw["policy"].update(mode="enforce", max_in_flight=1, deadline_ms=50)
@@ -142,9 +141,14 @@ def test_capacity_timeout_does_not_create_a_policy_call(monkeypatch, tmp_path):
         breaker.finish(None, probe=False)
         assert runtime.close(timeout=2)
     MetricsCollectorService(tmp_path).collect_once()
-    report = MetricsQueries(tmp_path).experiment({"experiment_id": raw["experiment_id"]})
-    assert report["policy_breakdown"]["unique_policy_calls"] == 0
-    assert report["policy_breakdown"]["unknown_policy_cost_calls"] == 0
+    from bobi.metrics.store import connect
+
+    with connect(tmp_path / "state" / "metrics" / "metrics.db", readonly=True) as conn:
+        policy = json.loads(conn.execute(
+            "SELECT metadata_json FROM router_decisions"
+        ).fetchone()[0])["policy"]
+    assert policy["status"] == "skipped"
+    assert policy["call_id"] is None
 
 
 def test_workflow_uses_only_its_checkpoint_for_sticky_routes(monkeypatch, tmp_path):

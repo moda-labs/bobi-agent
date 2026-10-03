@@ -177,8 +177,8 @@ describe("admin command view", () => {
 		expect(isAdminCommand("usage")).toBe(true);
 		expect(isAdminCommand("usage_session")).toBe(true);
 		expect(isAdminCommand("usage_turn")).toBe(true);
-		expect(isAdminCommand("usage_hotspots")).toBe(true);
-		expect(isAdminCommand("usage_experiment")).toBe(true);
+		expect(isAdminCommand("usage_hotspots")).toBe(false);
+		expect(isAdminCommand("usage_experiment")).toBe(false);
 		expect(isAdminCommand("session_log")).toBe(true);
 		// The single-agent view: three reads and three run-scoped writes. This
 		// list is an ALLOWLIST — a verb the supervisor implements but this

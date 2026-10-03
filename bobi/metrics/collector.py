@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -15,10 +14,7 @@ from bobi.metrics.projection import project_pending
 from bobi.metrics.spool import SpoolCorruptionError, iter_frames
 from bobi.metrics.store import (
     connect,
-    copy_raw_events,
     cursor_offset,
-    integrity_check,
-    logical_snapshot,
     migrate,
     stage_frames,
 )
@@ -168,8 +164,6 @@ class MetricsCollectorService:
             "telemetry_events_dropped": 0,
             "producer_writer_errors": 0,
             "producer_count": 0,
-            "maintenance_queue_depth": 0,
-            "last_maintenance": None,
             "last_reconciliation_at_us": None,
             "reconciliation_errors": 0,
             "reconciliation_attempts": dict(self._reconciliation_attempts),
@@ -270,12 +264,6 @@ class MetricsCollectorService:
     def _cycle_locked(self) -> None:
         try:
             result = self._collect_once_locked()
-            from bobi.metrics.maintenance import process_pending_requests
-
-            maintenance = process_pending_requests(self.root)
-            if maintenance:
-                result = self._collect_once_locked()
-                self._set_health(last_maintenance=maintenance[-1])
             if time.monotonic() - self._last_reconcile >= self.reconcile_interval:
                 result = self._reconcile_locked(result)
             self._refresh_health(result)
@@ -413,9 +401,6 @@ class MetricsCollectorService:
             telemetry_events_dropped=drops,
             producer_writer_errors=writer_errors,
             producer_count=producers,
-            maintenance_queue_depth=len(list(
-                (self.metrics_root / "maintenance").glob("*.request.json")
-            )),
         )
         self._publish_health()
 
@@ -439,40 +424,3 @@ class MetricsCollectorService:
             self._last_health_write = now
         except Exception:
             log.debug("metrics: collector health write failed", exc_info=True)
-
-
-def rebuild_database(
-    source_path: Path | str,
-    target_path: Path | str,
-) -> dict[str, object]:
-    """Recreate normalized projections from retained immutable raw events."""
-    source_path = Path(source_path)
-    target_path = Path(target_path)
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        prefix=f".{target_path.name}.", suffix=".tmp", dir=target_path.parent,
-        delete=False,
-    ) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        source = connect(source_path, readonly=True)
-        target = connect(tmp_path)
-        try:
-            migrate(target)
-            copy_raw_events(source, target)
-            while True:
-                result = project_pending(target, limit=500)
-                if result["selected"] == 0:
-                    break
-            if integrity_check(target) != "ok":
-                raise RuntimeError("rebuilt metrics database failed integrity_check")
-            snapshot = logical_snapshot(target)
-            target.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            target.execute("PRAGMA journal_mode = DELETE")
-        finally:
-            source.close()
-            target.close()
-        tmp_path.replace(target_path)
-        return snapshot
-    finally:
-        tmp_path.unlink(missing_ok=True)

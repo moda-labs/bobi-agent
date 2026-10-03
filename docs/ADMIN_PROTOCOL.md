@@ -213,8 +213,6 @@ an incident.
 | `usage` | `{"window_seconds"?: number, "end_at"?: epoch}`; window defaults to 24 hours | `{"usage": {"window", "jobs", "tokens", "cost_usd", "estimated_cost_usd"}}` |
 | `usage_session` | `{"session_id": string, "cursor"?, "limit"?, "include_turns"?}` | `{"usage_session": {"session", "turns", "next_cursor", "coverage"}}` |
 | `usage_turn` | `{"turn_id": string}` | `{"usage_turn": {"turn", "workflow_steps", "invocations", "tool_executions", "usage_measurements", "cost_measurements", "router_decisions", "coverage"}}` |
-| `usage_hotspots` | time range, `scope`, `metric`, optional `session`, `cursor`, `top_n` | `{"usage_hotspots": {"hotspots", "next_cursor", "coverage"}}` |
-| `usage_experiment` | `{"experiment_id": string}` plus optional filters | `{"usage_experiment": {"experiment_id", "variants", "outcomes", "coverage"}}` |
 | `session_log` | — | `{"sessions": [...], "counts": {...}, "truncated": bool}` |
 | `runs` | `{"status", "query", "offset", "limit"}` (all optional) | `{"runs": [...], "counts": {...}, "total", "offset", "limit", "query", "truncated"}` |
 | `overview` | — | `{"overview": {...}}` |
@@ -247,14 +245,14 @@ than failing the command.
 not zero. It accepts the legacy `window_seconds`/`end_at` pair or an explicit
 `from`/`to` range, but never both.
 
-Fine-grained token totals choose one granularity per turn in this order:
-complete exact invocation coverage, exact turn aggregate, complete effective
-invocation coverage, then estimated turn fallback. Exactness therefore outranks
-granularity. `coverage.usage_granularity` is `invocation`, `turn`, `mixed`, or
+Fine-grained token totals use exact terminal turn aggregates per model when
+available, filling missing dimensions only from complete exact invocation facts.
+Otherwise complete effective invocation coverage wins over estimated turn fallback.
+Sole-model provider aliases count once; additional models remain additive. `coverage.usage_granularity` is `invocation`, `turn`, `mixed`, or
 `none`; `coverage.invocation_granularity_turns` and
 `coverage.turn_granularity_turns` report the selected-turn counts.
 
-The four `usage_*` drill-downs require supervisor `0.4.0`. They run on a
+The two `usage_*` drill-downs require supervisor `0.4.0`. They run on a
 dedicated four-worker read-only executor with eight queued requests, for 12
 total admitted requests. Saturation returns
 `result.code=metrics_busy` without waiting behind SQLite work. Each accepted
@@ -274,15 +272,13 @@ issuing a drill-down and reject old, missing, or malformed versions without
 recording a command. The legacy `usage` summary remains available to older
 supervisors and does not require this preflight.
 
-Session turns and hotspots use opaque, filter-bound keyset cursors. A cursor is
-valid only with the same filters and page size, and inserts ahead of its last
-row do not duplicate or skip the next retained row. Turn detail and experiment
-aggregation are bounded atomic views rather than paged fragments: if their
-combined rows exceed 200, they fail with `query_too_large`. Experiment variants
-include sample size, completion/error/fallback rates, router and turn latency,
-token dimensions, separate reported/estimated cost, and per-variant
-exact/estimated/unknown invocation coverage; quality outcomes remain grouped by
-their definition, source, evaluator, version, and estimation status.
+Session turns use opaque, filter-bound keyset cursors. A cursor is valid only
+with the same filters and page size, and inserts ahead of its last row do not
+duplicate or skip the next retained row. Turn detail is a bounded atomic view:
+if its combined rows exceed 200, it fails with `query_too_large`.
+
+The approved 2026-10-03 production cleanup removes hotspot and experiment
+analytics commands/tools. Summary, session, and turn inspection remain supported.
 
 The legacy part of `usage` folds the same de-duplicated rows as `runs`. It includes terminal jobs
 whose completion time falls in `[end_at - window_seconds, end_at]`; running and
@@ -557,8 +553,6 @@ state read from KV. Browser clients are not supported and CORS is off.
 | `bobi_usage_summary` | `days`, `fleet?` | Rolling job/token/cost totals per fleet with per-instance detail and explicit partial failures |
 | `bobi_usage_session` | `fleet`, `instance`, `session_id`, optional cursor/limit | One session and a bounded page of turns |
 | `bobi_usage_turn` | `fleet`, `instance`, `turn_id` | Turn, invocation, tool, usage/cost provenance, and coverage |
-| `bobi_usage_hotspots` | `fleet`, `instance`, range/scope/metric filters, optional cursor | Bounded ranked hotspots |
-| `bobi_usage_experiment` | `fleet`, `instance`, `experiment_id`, optional filters | Per-variant routing outcomes and coverage |
 | `bobi_command_result` | `fleet`, `instance`, `command_id` | One command's folded view (`pending` / `done` / `error`) |
 | `bobi_read_transcript` | `fleet`, `instance`, `session?` | One session's recent messages, framed as untrusted content |
 | `bobi_send_message` | `fleet`, `instance`, `message`, `session?` | A `command_id`. **Never the reply** |

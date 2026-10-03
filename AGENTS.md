@@ -50,7 +50,7 @@ Bobi is an event-driven AI agent framework.
   write-only per-instance token requirement.
 - `docs/FINE_GRAINED_METRICS.md`: implementation and operations guide for the
   planned session/turn/invocation/tool usage pipeline, schema, Admin/MCP
-  queries, performance gates, live smokes, and recovery.
+  queries and transcript recovery.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.

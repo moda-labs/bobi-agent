@@ -677,38 +677,6 @@ def _emit_turn_row(
     )
 
 
-def _emit_runtime_outcome(
-    observation: TurnObservation,
-    *,
-    name: str,
-    value: float | None = None,
-    text: str | None = None,
-    observed_at_us: int,
-) -> None:
-    decision_id = observation.router_decision_id
-    if decision_id is None:
-        return
-    observation.runtime.emit(
-        "experiment_outcome.recorded",
-        {
-            "outcome_id": _stable_id("outcome", decision_id, name),
-            "router_decision_id": decision_id,
-            "outcome_name": name,
-            "outcome_value": value,
-            "outcome_text": text,
-            "outcome_definition_version": "bobi-runtime-v1",
-            "outcome_source": "runtime",
-            "evaluator_name": "bobi-runtime",
-            "evaluator_version": "1",
-            "is_estimated": 0,
-            "observed_at_us": observed_at_us,
-            "metadata_json": "{}",
-        },
-        session_id=observation.session_id,
-        turn_id=observation.turn_id,
-    )
-
-
 def _invocation_rows(
     observation: TurnObservation,
     ended_at_us: int,
@@ -929,25 +897,6 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             session_id=observation.session_id,
             turn_id=observation.turn_id,
         )
-    _emit_runtime_outcome(
-        observation,
-        name="completion",
-        value=1.0 if status == "completed" else 0.0,
-        observed_at_us=ended_at_us,
-    )
-    _emit_runtime_outcome(
-        observation,
-        name="error",
-        value=0.0 if status == "completed" and not error_kind else 1.0,
-        text=error_kind or None,
-        observed_at_us=ended_at_us,
-    )
-    _emit_runtime_outcome(
-        observation,
-        name="turn_latency_ms",
-        value=max(0, ended_at_us - observation.started_at_us) / 1000,
-        observed_at_us=ended_at_us,
-    )
     if fault_action is not None:
         time.sleep(fault_action.hold_seconds)
         _emit_turn_row(

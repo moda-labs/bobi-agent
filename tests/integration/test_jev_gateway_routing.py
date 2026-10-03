@@ -12,7 +12,6 @@ import pytest
 from bobi import paths
 from bobi.brain import get_brain
 from bobi.metrics.collector import MetricsCollectorService
-from bobi.metrics.query import MetricsQueries
 from bobi.metrics.routing import resolve_route
 from bobi.metrics.router import provider_subprocess_env
 from bobi.metrics.runtime import MetricsRuntime
@@ -122,9 +121,8 @@ async def test_typesafe_shadow_gateway_tokens_and_runtime_handoff(tmp_path, monk
         tokens = connection.execute("SELECT SUM(input_tokens),SUM(output_tokens) FROM best_usage WHERE scope='turn'").fetchone()
         assert tuple(tokens) == tuple(sum(receipt[name] for receipt in receipts if receipt[name] is not None)
                                       for name in ("input_tokens", "output_tokens"))
-    report = MetricsQueries(root).experiment({"experiment_id": raw["experiment_id"]})
-    assert report["policy_breakdown"]["unique_policy_calls"] == 1
-    assert report["policy_breakdown"]["unknown_policy_cost_calls"] == 1
+    policy = [json.loads(row["metadata_json"])["policy"] for row in decisions]
+    assert len({item["call_id"] for item in policy if item.get("call_id")}) == 1
     for artifact in (root / "state/metrics").rglob("*"):
         if artifact.is_file():
             contents = artifact.read_bytes()
@@ -228,12 +226,5 @@ async def test_routed_gateway_model_persists_tokens_and_reuses_decision(tmp_path
         assert usage[1] == sum(receipt["output_tokens"] for receipt in receipts if receipt["scope"] == "turn")
         measured = connection.execute("SELECT COUNT(DISTINCT turn_id) FROM best_usage").fetchone()[0]
         assert measured == sum(receipt["input_tokens"] is not None for receipt in receipts)
-    report = MetricsQueries(root).experiment({"experiment_id": raw["experiment_id"]})
-    assert report["policy_breakdown"]["unique_policy_calls"] == 1
-    assert report["policy_breakdown"]["known_policy_cost_usd"] == 0.0
-    assert report["variants"][0]["tokens"]["input_tokens"] == sum(receipt["input_tokens"] for receipt in receipts if receipt["input_tokens"] is not None)
-    assert report["variants"][0]["tokens"]["output_tokens"] == sum(receipt["output_tokens"] for receipt in receipts if receipt["output_tokens"] is not None)
-    assert report["variants"][0]["coverage"]["exact_measurement_turns"] == measured
-    assert report["variants"][0]["coverage"]["unknown_measurement_turns"] == len(receipts) - measured
     print(json.dumps({"engine": engine, "model": model, "turns": receipts, "tokens_persisted": True,
                       "turns_with_exact_usage": measured, "turns_without_usage": len(receipts) - measured}))

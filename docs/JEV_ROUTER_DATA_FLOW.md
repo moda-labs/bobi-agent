@@ -3,6 +3,15 @@
 Status: core routing and synthetic live acceptance verified; operational shadow gates pending. Branch `feat/fine-grained-metrics`.
 Last revised 2026-10-01.
 
+### Cleanup amendment (2026-10-03)
+
+The approved production cleanup removes aggregate experiment analytics, runtime outcome
+emission, external outcome helpers, and research harnesses. References to those surfaces
+below describe the original design, not shipped interfaces. Historical outcome schemas
+and projection remain readable; routing, sticky lifecycle, privacy, and fallback
+contracts are unchanged. Use per-turn decisions and exact usage for operational audits;
+no statistical effectiveness claim is made.
+
 ### Implementation clarifications after legacy cleanup
 
 - The legacy `route()`, `resolve_model`, and admission cache were removed at
@@ -736,133 +745,11 @@ Do not reset registration state or remove the durable volume without approval.
   an isolated `BOBI_HOME`. Check the recorded latency, breaker health, and
   that no prompt text appears in the spool, logs, or database.
 
-### Synthetic Bobi question comparisons
+### Routing regression coverage
 
-The default dataset is `tests/fixtures/metrics/jev-bobi-question-cases.json`:
-30 self-contained English scenarios, ten each at simple, medium and complex
-levels. They cover token storage/semantics, shadow execution, confidence,
-Docker env refresh, fallback, sticky/explicit-model precedence, admission,
-cost deduplication, assignment units, privacy and launch ordering, plus Slack
-access/deduplication, checkpoint races, retry safety, cohort migration and
-evaluator regressions. Context is
-synthetic or paraphrased public Bobi contracts, not captured Slack/repo content.
-
-Preview the exact redacted policy states without credentials or network calls
-(the private env must contain a valid experiment configuration):
-
-```bash
-.venv/bin/python scripts/jev_measurement_matrix.py \
-  --env-file /path/to/private.env \
-  --artifacts /path/to/new/private-preview
-```
-
-Preview writes `plan.json` only. It creates a new isolated experiment ID with
-`enforce` and redacted synthetic task egress in memory; it never changes the
-provided env file, production shadow mode or Slack. Neither expected answers
-nor difficulty labels are sent to the policy. Candidate criteria remain the
-operator's hypotheses, not measured prices or capabilities. Inspect the preview
-before authorizing any paid execution or synthetic task egress.
-Questions are padded with trailing spaces to the same UTF-8 byte length across
-the full fixture, including when selecting batches. This controls the previous
-prompt-length shortcut; the policy must distinguish content rather than use
-the `prompt_bytes` feature alone. No difficulty-to-model assignment is assumed.
-
-For each question, live comparison would execute all selected fixed models
-and a separate JEV strategy that runs its guarded selected model (or control
-on fallback). Choosing control is permitted; model variety is not a success
-criterion. Synthetic treatment subjects are isolated and forced for policy
-measurement, not natural production HMAC sampling. With three candidates,
-`--limit 3` plans 12 provider turns and three policy calls. All 30 scenarios
-would require 120 provider turns and 30 policy calls, exceeding the 40-turn cap
-per invocation: use five batches with `--limit 6` and offsets 0, 6, 12, 18, 24.
-This is a proposed live budget, not authorization to execute every batch.
-
-Only after approval, add `--execute` and supply gateway/TypeSafe credentials:
-
-```bash
-.venv/bin/python scripts/jev_measurement_matrix.py \
-  --env-file /path/to/private.env \
-  --artifacts /path/to/new/private-live-run \
-  --limit 3 --execute
-```
-
-`--models` selects allowed candidates including control; `--repeats` accepts one
-to three repetitions within the cap. Every invocation needs a new output path.
-Provider execution uses an empty temporary workspace and a separate provider
-home. The experiment's `policy.brain` selects `codex` or `claude`; an explicit
-`BOBI_BRAIN` must match it. Claude uses Anthropic-compatible gateway mode:
-`LLM_GATEWAY_URL` (or `BOBI_GATEWAY_BASE_URL`) maps to `ANTHROPIC_BASE_URL`
-with a trailing `/v1` removed because the Claude client adds `/v1/messages`, and
-`BOBI_GATEWAY_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) supplies gateway authentication.
-Claude comparisons disable tools, inherited settings, plugins and nonessential
-traffic, and use an isolated `CLAUDE_CONFIG_DIR`. Credentials belong in an
-ignored, mode-0600 `private.env`, never in plans or reports. Production env files
-are not modified.
-
-With exactly two candidates, such as control `provider/control` and alternative
-`provider/reasoning`, each scenario executes two fixed baselines plus one guarded
-JEV strategy. A `--limit 3` pilot therefore uses nine provider turns and three
-JEV calls. Configure only those two candidate IDs and matching criteria in the
-private experiment configuration. Stop on connectivity, authentication or
-usage-integrity failures before starting further batches; do not silently retry
-or reset previously consumed budgets.
-
-Some gateways return canonical model IDs different from their request aliases.
-Set `BOBI_MEASUREMENT_MODEL_ALIASES_JSON` in the private env to an explicit
-one-to-one mapping, for example `{"provider/control":"control",`
-`"provider/reasoning":"reasoning"}`. Unknown candidates, malformed IDs
-and ambiguous mappings are rejected before execution. Reports preserve both
-the requested and provider-reported IDs; token counts are never relabeled.
-Without this opt-in mapping, unexpected reported models still fail verification.
-
-Reports distinguish fixed strategies from JEV even when they execute the same
-model; they retain recommendation, actual model, confidence, fallback, exact
-answer checks, usage and separate routing/execution latency. `wall_ms` includes
-routing through provider completion, not a complete engineering workflow.
-A wrong answer, provider failure, missing/non-exact usage or model-attribution
-mismatch returns nonzero while retaining reports. JSON and CSV expose
-`usage_verified`; this checks read-model provenance and model consistency,
-not independent transcript parity or billing verification.
-
-This is a paired question-answer benchmark, not a full coding/task-completion
-benchmark or randomized production experiment. Difficulty annotations are not
-gold model assignments; judge selected-model adequacy against measured answers
-and independent baseline results. Strategies run in fixed order; latency is
-descriptive, not a causal estimate of routing benefit.
-Cost remains null without actual billing;
-token counts alone do not prove savings. Production benefits still require
-representative workflow outcomes, total costs and the operational gates.
-The old arithmetic fixture remains only to interpret historical receipts and
-is no longer the default. Never supply real Slack, private repo content or
-credentials as question prompts.
-
-### Offline scenario and fault coverage
-
-The comparison tests cross all 30 scenarios with six recommendation/confidence
-outcomes and four usage conditions: exact usage, explicitly aliased usage,
-missing usage and a mismatched provider model, on both Codex and Claude brains.
-That is 1,440 deterministic comparisons of three fixed baselines and a guarded
-JEV strategy. Recommendations and provider answers are simulated:
-these tests prove protocol/execution/accounting behavior, not model capability.
-
-The owning scripted acceptance matrix covers five launch entrypoints in both
-shadow and enforce modes, with static success, TypeSafe protocol success,
-timeout, 5xx, 401, 403, 429, invalid model, malformed JSON, version drift and
-low confidence. Healthy session cases also verify restart/sticky recovery and
-rotation without a new policy call. TypeSafe traffic stays on loopback and the
-model brain is scripted; no external service or paid inference is used.
-
-Run those matrices and the existing metrics tests together:
-
-```bash
-.venv/bin/python -m pytest tests/metrics/ -q --timeout=30
-```
-
-Existing analysis/privacy tests remain authoritative for assignment-unit costs,
-quality weighting, unknown billing, HMAC/SRM, admission/persistence failures,
-egress redaction and circuit-breaker behavior. No finite test matrix guarantees
-every possible production use case; event-bus and provider-specific operational
-acceptance still require separately authorized live tests.
+Use `tests/metrics/test_routing.py`, `test_routing_acceptance.py`, `test_reconcile.py`, and the provider-contract tests to verify policy evaluation, explicit fallbacks, sticky model selection, and exact token accounting.
+The research measurement matrix and scenario datasets have been removed from the production PR.
+Live acceptance remains a fresh routine and demanding Slack request followed by the deployment wrapper's read-only `scripts/metrics_summary.py` inspection.
 
 ### Grouped acceptance coverage
 

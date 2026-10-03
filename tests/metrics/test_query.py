@@ -207,20 +207,10 @@ def test_exact_turn_usage_wins_over_exact_invocation_usage(metrics_root):
 
     queries = MetricsQueries(metrics_root)
     summary = queries.summary({"window_seconds": 10, "end_at": 4})
-    experiment = queries.experiment({"experiment_id": "exp1"})
-    hotspots = queries.hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "turn",
-        "metric": "output_tokens",
-    })
 
     assert summary["totals"]["input_tokens"] == 100
     assert summary["totals"]["output_tokens"] == 30
     assert summary["coverage"]["usage_granularity"] == "turn"
-    assert experiment["variants"][0]["tokens"]["output_tokens"] == 30
-    assert experiment["variants"][0]["coverage"]["usage_granularity"] == "turn"
-    assert hotspots["hotspots"][0]["value"] == 30
 
 
 def test_exact_turn_usage_remains_canonical_when_invocation_totals_match(metrics_root):
@@ -334,19 +324,6 @@ def test_exact_turn_usage_precedes_complete_estimated_invocation_usage(metrics_r
 
     queries = MetricsQueries(metrics_root)
     summary = queries.summary({"window_seconds": 10, "end_at": 4})
-    experiment = queries.experiment({"experiment_id": "exp1"})
-    turn_hotspots = queries.hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "turn",
-        "metric": "input_tokens",
-    })
-    invocation_hotspots = queries.hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "invocation",
-        "metric": "input_tokens",
-    })
 
     assert summary["totals"]["input_tokens"] == 1000
     assert summary["totals"]["output_tokens"] == 100
@@ -354,14 +331,6 @@ def test_exact_turn_usage_precedes_complete_estimated_invocation_usage(metrics_r
     assert summary["coverage"]["usage_granularity"] == "turn"
     assert summary["coverage"]["invocation_granularity_turns"] == 0
     assert summary["coverage"]["turn_granularity_turns"] == 1
-    assert experiment["variants"][0]["tokens"]["input_tokens"] == 1000
-    assert experiment["variants"][0]["coverage"]["usage_granularity"] == "turn"
-    assert experiment["variants"][0]["coverage"]["exact_measurement_turns"] == 1
-    assert experiment["diagnostics"]["coverage_rates"]["control"]["exact_rate"] == 1
-    assert turn_hotspots["hotspots"][0]["value"] == 1000
-    assert turn_hotspots["hotspots"][0]["is_estimated"] == 0
-    assert [row["value"] for row in invocation_hotspots["hotspots"]] == [400, 300]
-    assert all(row["is_estimated"] == 1 for row in invocation_hotspots["hotspots"])
 
 
 def test_summary_counts_equal_sized_turn_fallbacks_independently(metrics_root):
@@ -536,16 +505,9 @@ def test_exact_cost_suppresses_estimate_for_same_invocation(metrics_root):
 
     queries = MetricsQueries(metrics_root)
     result = queries.summary({"window_seconds": 10, "end_at": 4})
-    estimated = queries.hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "invocation",
-        "metric": "estimated_cost",
-    })
 
     assert result["totals"]["reported_cost_usd"] == pytest.approx(0.25)
     assert result["totals"]["estimated_cost_usd"] is None
-    assert estimated["hotspots"] == []
 
 
 def test_mixed_exact_and_estimated_invocation_costs_keep_one_granularity(metrics_root):
@@ -600,27 +562,9 @@ def test_exact_turn_cost_precedes_complete_estimated_invocation_costs(metrics_ro
 
     queries = MetricsQueries(metrics_root)
     summary = queries.summary({"window_seconds": 10, "end_at": 4})
-    experiment = queries.experiment({"experiment_id": "exp1"})
-    turn_hotspots = queries.hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "turn",
-        "metric": "reported_cost",
-    })
-    estimated_turn_hotspots = queries.hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "turn",
-        "metric": "estimated_cost",
-    })
 
     assert summary["totals"]["reported_cost_usd"] == pytest.approx(1.00)
     assert summary["totals"]["estimated_cost_usd"] is None
-    assert experiment["variants"][0]["reported_cost_usd"] == pytest.approx(1.00)
-    assert experiment["variants"][0]["estimated_cost_usd"] is None
-    assert turn_hotspots["hotspots"][0]["value"] == pytest.approx(1.00)
-    assert turn_hotspots["hotspots"][0]["is_estimated"] == 0
-    assert estimated_turn_hotspots["hotspots"] == []
 
 
 def test_exact_coverage_supersedes_estimate_for_same_invocation(metrics_root):
@@ -641,15 +585,6 @@ def test_exact_coverage_supersedes_estimate_for_same_invocation(metrics_root):
 
     summary = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
     assert summary["totals"]["input_tokens"] == 100
-    hotspots = MetricsQueries(metrics_root).hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "invocation",
-        "metric": "input_tokens",
-    })
-    assert [row["id"] for row in hotspots["hotspots"]] == ["i1"]
-    assert hotspots["hotspots"][0]["value"] == 100
-    assert hotspots["hotspots"][0]["is_estimated"] == 0
 
 
 def test_session_cursor_is_filter_bound(metrics_root):
@@ -687,250 +622,6 @@ def test_session_keyset_cursor_is_stable_when_an_earlier_turn_is_inserted(metric
     assert [row["turn_id"] for row in second["turns"]] == ["t2"]
 
 
-def test_hotspots_and_experiment(metrics_root):
-    queries = MetricsQueries(metrics_root)
-    hotspots = queries.hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "tool",
-        "metric": "tool_result_bytes",
-        "top_n": 10,
-    })
-    assert hotspots["hotspots"][0] == pytest.approx({
-        "rank": 1,
-        "scope": "tool",
-        "id": "x1",
-        "label": "view_file",
-        "value": 50,
-        "attribution_method": "local_tokenizer",
-        "attribution_confidence": None,
-    })
-    experiment = queries.experiment({"experiment_id": "exp1"})
-    variant = experiment["variants"][0]
-    assert variant["sample_size"] == 1
-    assert variant["completion_rate"] == 1
-    assert variant["error_rate"] == 0
-    assert variant["fallback_rate"] == 0
-    assert variant["turn_latency_ms"] == 1000
-    assert variant["tokens"]["input_tokens"] == 100
-    assert variant["tokens"]["cache_write_5m_input_tokens"] == 10
-    assert variant["tokens"]["cache_write_1h_input_tokens"] is None
-    assert variant["reported_cost_usd"] == 0.25
-    assert variant["estimated_cost_usd"] is None
-    assert variant["coverage"] == {
-        "exact_invocations": 1,
-        "estimated_invocations": 0,
-        "unknown_invocations": 0,
-        "exact_measurement_turns": 1,
-        "estimated_measurement_turns": 0,
-        "unknown_measurement_turns": 0,
-        "usage_granularity": "invocation",
-        "invocation_granularity_turns": 1,
-        "turn_granularity_turns": 0,
-    }
-
-
-def test_experiment_applies_filters_and_keeps_versions_separate(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute("UPDATE router_decisions SET cohort='alpha' WHERE router_decision_id='r1'")
-    conn.executemany(
-        "INSERT INTO experiment_outcomes(outcome_id,router_decision_id,outcome_name,"
-        "outcome_value,outcome_text,outcome_definition_version,outcome_source,evaluator_name,"
-        "evaluator_version,is_estimated,observed_at_us,metadata_json) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        [
-            ("o1", "r1", "quality", 0.8, "private", "v1", "evaluator", "judge", "1", 0, 3000000, '{"secret":1}'),
-            ("o2", "r1", "quality", 0.6, "private", "v2", "evaluator", "judge", "2", 0, 3000000, '{"secret":2}'),
-        ],
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).experiment({
-        "experiment_id": "exp1",
-        "from": "1970-01-01T00:00:02Z",
-        "to": "1970-01-01T00:00:03Z",
-        "cohort": "alpha",
-        "outcome": "quality",
-        "outcome_definition_version": "v1",
-        "evaluator_name": "judge",
-        "evaluator_version": "1",
-    })
-
-    assert result["variants"][0]["sample_size"] == 1
-    assert result["outcomes"] == [pytest.approx({
-        "variant_id": "control",
-        "outcome_name": "quality",
-        "outcome_definition_version": "v1",
-        "outcome_source": "evaluator",
-        "evaluator_name": "judge",
-        "evaluator_version": "1",
-        "is_estimated": 0,
-        "sample_size": 1,
-        "mean_value": 0.8,
-    })]
-    assert "private" not in json.dumps(result)
-    assert "secret" not in json.dumps(result)
-
-    no_match = MetricsQueries(metrics_root).experiment({
-        "experiment_id": "exp1",
-        "cohort": "other",
-    })
-    assert no_match["variants"] == []
-    assert no_match["outcomes"] == []
-
-
-@pytest.mark.parametrize(
-    ("scope", "metric", "expected_id", "expected_label", "expected_value"),
-    [
-        ("session", "input_tokens", "s1", "manager", 100),
-        ("turn", "output_tokens", "t1", "t1", 30),
-        ("invocation", "input_tokens", "i1", "sonnet", 100),
-        ("session", "reported_cost", "s1", "manager", 0.25),
-        ("turn", "reported_cost", "t1", "t1", 0.25),
-        ("invocation", "reported_cost", "i1", "sonnet", 0.25),
-        ("turn", "latency", "t1", "t1", 1000),
-        ("invocation", "latency", "i1", "sonnet", 800),
-        ("tool", "latency", "x1", "view_file", 100),
-    ],
-)
-def test_hotspot_scope_metric_matrix(
-    metrics_root, scope, metric, expected_id, expected_label, expected_value,
-):
-    result = MetricsQueries(metrics_root).hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": scope,
-        "metric": metric,
-    })
-
-    assert result["hotspots"][0]["id"] == expected_id
-    assert result["hotspots"][0]["label"] == expected_label
-    assert result["hotspots"][0]["value"] == pytest.approx(expected_value)
-
-
-def test_invocation_hotspot_combines_exact_multi_model_usage(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
-        "model,measurement_source,is_estimated,token_semantics_version,input_tokens,"
-        "output_tokens,observed_at_us) VALUES"
-        "('u2','invocation','t1','i1','anthropic','haiku','provider_stream',0,1,40,10,3000000)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "invocation",
-        "metric": "input_tokens",
-    })
-
-    assert len(result["hotspots"]) == 1
-    assert result["hotspots"][0]["id"] == "i1"
-    assert result["hotspots"][0]["label"] == "mixed"
-    assert result["hotspots"][0]["value"] == 140
-
-    summary = MetricsQueries(metrics_root).summary({
-        "window_seconds": 10,
-        "end_at": 4,
-    })
-    assert summary["totals"]["invocations"] == 1
-
-
-def test_invocation_cost_hotspot_combines_multi_model_partitions(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,invocation_id,"
-        "provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) "
-        "VALUES('c2','invocation','s1','t1','i1','anthropic','haiku',0.10,"
-        "'provider_stream',0,3000000)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).hotspots({
-        "window_seconds": 10,
-        "end_at": 4,
-        "scope": "invocation",
-        "metric": "reported_cost",
-    })
-
-    assert len(result["hotspots"]) == 1
-    assert result["hotspots"][0]["id"] == "i1"
-    assert result["hotspots"][0]["label"] == "mixed"
-    assert result["hotspots"][0]["value"] == pytest.approx(0.35)
-
-
-def test_prompt_template_hotspots_aggregate_and_keep_unknown_out(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute("UPDATE turns SET prompt_template_id='review',prompt_template_version='1' WHERE turn_id='t1'")
-    conn.commit()
-    conn.close()
-
-    queries = MetricsQueries(metrics_root)
-    tokens = queries.hotspots({
-        "window_seconds": 10, "end_at": 4, "scope": "prompt_template",
-        "metric": "input_tokens",
-    })
-    latency = queries.hotspots({
-        "window_seconds": 10, "end_at": 4, "scope": "prompt_template",
-        "metric": "latency",
-    })
-
-    assert tokens["hotspots"][0]["id"] == "review"
-    assert tokens["hotspots"][0]["label"] == "review"
-    assert tokens["hotspots"][0]["value"] == 100
-    assert latency["hotspots"][0]["id"] == "review"
-    assert latency["hotspots"][0]["value"] == 1000
-
-
-@pytest.mark.parametrize(
-    ("scope", "metric"),
-    [("tool", "input_tokens"), ("turn", "tool_result_bytes")],
-)
-def test_hotspots_reject_unsupported_scope_metric_pairs(metrics_root, scope, metric):
-    with pytest.raises(MetricsQueryError) as error:
-        MetricsQueries(metrics_root).hotspots({
-            "window_seconds": 10,
-            "end_at": 4,
-            "scope": scope,
-            "metric": metric,
-        })
-    assert error.value.code == "bad_request"
-
-
-def test_hotspot_cursor_is_bound_to_filters(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO tool_executions(tool_execution_id,turn_id,triggering_invocation_id,tool_name,"
-        "tool_kind,output_bytes,started_at_us,ended_at_us,status,attribution_method) "
-        "VALUES('x2','t1','i1','edit_file','file_edit',40,2400000,2500000,'completed','local_tokenizer')"
-    )
-    conn.commit()
-    conn.close()
-    queries = MetricsQueries(metrics_root)
-    first = queries.hotspots({
-        "window_seconds": 10, "end_at": 4, "scope": "tool",
-        "metric": "tool_result_bytes", "top_n": 1, "session": "s1",
-    })
-    assert first["next_cursor"]
-    second = queries.hotspots({
-        "window_seconds": 10, "end_at": 4, "scope": "tool",
-        "metric": "tool_result_bytes", "top_n": 1, "session": "s1",
-        "cursor": first["next_cursor"],
-    })
-    assert second["hotspots"][0]["rank"] == 2
-    with pytest.raises(MetricsQueryError) as mismatch:
-        queries.hotspots({
-            "window_seconds": 10, "end_at": 4, "scope": "tool",
-            "metric": "latency", "top_n": 1, "session": "s1",
-            "cursor": first["next_cursor"],
-        })
-    assert mismatch.value.code == "invalid_cursor"
-
-
 @pytest.mark.parametrize("cursor", [False, 0, [], {}])
 def test_cursor_rejects_falsy_non_string_values(metrics_root, cursor):
     with pytest.raises(MetricsQueryError) as session_error:
@@ -939,51 +630,6 @@ def test_cursor_rejects_falsy_non_string_values(metrics_root, cursor):
             "cursor": cursor,
         })
     assert session_error.value.code == "invalid_cursor"
-
-    with pytest.raises(MetricsQueryError) as hotspot_error:
-        MetricsQueries(metrics_root).hotspots({
-            "window_seconds": 10,
-            "end_at": 4,
-            "scope": "tool",
-            "metric": "latency",
-            "cursor": cursor,
-        })
-    assert hotspot_error.value.code == "invalid_cursor"
-
-
-def test_hotspot_keyset_cursor_is_stable_when_a_higher_rank_is_inserted(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO tool_executions(tool_execution_id,turn_id,triggering_invocation_id,tool_name,"
-        "tool_kind,output_bytes,started_at_us,ended_at_us,status,attribution_method) "
-        "VALUES('x2','t1','i1','edit_file','file_edit',40,2400000,2500000,'completed','local_tokenizer')"
-    )
-    conn.commit()
-    conn.close()
-
-    queries = MetricsQueries(metrics_root)
-    first = queries.hotspots({
-        "window_seconds": 10, "end_at": 4, "scope": "tool",
-        "metric": "tool_result_bytes", "top_n": 1,
-    })
-    assert [row["id"] for row in first["hotspots"]] == ["x1"]
-
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO tool_executions(tool_execution_id,turn_id,triggering_invocation_id,tool_name,"
-        "tool_kind,output_bytes,started_at_us,ended_at_us,status,attribution_method) "
-        "VALUES('x0','t1','i1','read_large','file_read',60,2600000,2700000,'completed','local_tokenizer')"
-    )
-    conn.commit()
-    conn.close()
-
-    second = queries.hotspots({
-        "window_seconds": 10, "end_at": 4, "scope": "tool",
-        "metric": "tool_result_bytes", "top_n": 1,
-        "cursor": first["next_cursor"],
-    })
-    assert [row["id"] for row in second["hotspots"]] == ["x2"]
-    assert second["hotspots"][0]["rank"] == 2
 
 
 def test_turn_rejects_more_than_200_combined_child_rows(metrics_root):
@@ -1001,25 +647,6 @@ def test_turn_rejects_more_than_200_combined_child_rows(metrics_root):
 
     with pytest.raises(MetricsQueryError) as error:
         MetricsQueries(metrics_root).turn({"turn_id": "t1"})
-    assert error.value.code == "query_too_large"
-
-
-def test_experiment_rejects_more_than_200_combined_rows(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.executemany(
-        "INSERT INTO experiment_outcomes(outcome_id,router_decision_id,outcome_name,"
-        "outcome_value,outcome_definition_version,outcome_source,evaluator_name,"
-        "evaluator_version,is_estimated,observed_at_us) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        [
-            (f"o{index}", "r1", f"quality-{index}", 1, "v1", "runtime", "runtime", "1", 0, 3000000)
-            for index in range(MAX_ROWS)
-        ],
-    )
-    conn.commit()
-    conn.close()
-
-    with pytest.raises(MetricsQueryError) as error:
-        MetricsQueries(metrics_root).experiment({"experiment_id": "exp1"})
     assert error.value.code == "query_too_large"
 
 
@@ -1078,9 +705,6 @@ def test_required_ids_reject_non_string_values(metrics_root, invalid_id):
         MetricsQueries(metrics_root).turn({"turn_id": invalid_id})
     assert turn_error.value.code == "bad_request"
 
-    with pytest.raises(MetricsQueryError) as experiment_error:
-        MetricsQueries(metrics_root).experiment({"experiment_id": invalid_id})
-    assert experiment_error.value.code == "bad_request"
 
     with pytest.raises(MetricsQueryError) as naive_time:
         MetricsQueries(metrics_root).summary({

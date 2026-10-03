@@ -2069,7 +2069,7 @@ def test_mcp_tool_call_against_real_workerd(event_server):
     assert names == [
         "bobi_command_result", "bobi_fleet_status", "bobi_instance_detail",
         "bobi_lifecycle", "bobi_read_transcript", "bobi_send_message",
-        "bobi_usage_experiment", "bobi_usage_hotspots", "bobi_usage_session",
+        "bobi_usage_session",
         "bobi_usage_summary", "bobi_usage_turn",
     ], names
 
@@ -2095,9 +2095,9 @@ def test_metrics_summary_default_round_trip_against_real_workerd(
 
     This is deliberately a real transport test: a production ``AdminListener``
     subscribes over WebSocket, the operator CLI issues through the Worker's
-    authenticated REST route, and all five metrics MCP tools issue independent
+    authenticated REST route, and all three metrics MCP tools issue independent
     commands through the Worker's MCP route. The disposable database contains
-    metadata only; provider accuracy remains the live-provider smoke's job.
+    metadata only; provider accuracy is verified separately with opt-in provider tests.
     """
     base_url = _require_worker_backend(event_server)
 
@@ -2277,22 +2277,9 @@ def test_metrics_summary_default_round_trip_against_real_workerd(
         assert instance_usage["fine_grained"]["totals"] == admin_usage["totals"]
         assert instance_usage["fine_grained"]["coverage"] == admin_usage["coverage"]
 
-        range_start = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600),
-        )
-        range_end = time.strftime(
-            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600),
-        )
         cases = [
             ("metrics_session", "bobi_usage_session", {"session_id": "s-live"}),
             ("metrics_turn", "bobi_usage_turn", {"turn_id": "t-live"}),
-            ("metrics_hotspots", "bobi_usage_hotspots", {
-                "from": range_start, "to": range_end, "scope": "tool",
-                "metric": "latency", "session": "s-live", "top_n": 10,
-            }),
-            ("metrics_experiment", "bobi_usage_experiment", {
-                "experiment_id": "exp-live",
-            }),
         ]
         drilldowns = {}
         for request_id, (alias, tool, args) in enumerate(cases, 10):
@@ -2332,15 +2319,6 @@ def test_metrics_summary_default_round_trip_against_real_workerd(
         turn = drilldowns["metrics_turn"]["result"]["usage_turn"]
         assert turn["turn"]["turn_id"] == "t-live"
         assert turn["tool_executions"][0]["tool_name"] == "view_file"
-        hotspot = drilldowns["metrics_hotspots"]["result"]["usage_hotspots"]
-        assert hotspot["hotspots"][0]["id"] == "x-live"
-        experiment = drilldowns["metrics_experiment"]["result"]["usage_experiment"]
-        variant = experiment["variants"][0]
-        assert variant["tokens"]["input_tokens"] == 101
-        assert variant["reported_cost_usd"] == 0.01
-        assert variant["coverage"]["exact_invocations"] == 1
-        assert experiment["outcomes"][0]["outcome_name"] == "success"
-
         public = json.dumps({
             "admin": admin_view, "mcp": mcp_usage, "drilldowns": drilldowns,
         })

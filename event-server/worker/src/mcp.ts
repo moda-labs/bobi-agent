@@ -264,9 +264,7 @@ async function runCommand(
 			| "start"
 			| "usage"
 			| "usage_session"
-			| "usage_turn"
-			| "usage_hotspots"
-			| "usage_experiment";
+			| "usage_turn";
 		args?: Record<string, unknown>;
 		wait?: boolean;
 	},
@@ -615,7 +613,7 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 		name: string,
 		title: string,
 		description: string,
-		command: "usage_session" | "usage_turn" | "usage_hotspots" | "usage_experiment",
+		command: "usage_session" | "usage_turn",
 		inputSchema: z.ZodObject<z.ZodRawShape>,
 		mapArgs: (args: Record<string, unknown>) => Record<string, unknown>,
 	) => {
@@ -668,41 +666,6 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 		"Read one conversational turn with its LLM invocations, tool timings, exact or estimated token provenance, costs, and coverage.",
 		"usage_turn",
 		z.object({ ...metricsTargetSchema, turn_id: z.string().min(1) }),
-		({ fleet: _fleet, instance: _instance, ...args }) => args,
-	);
-
-	registerMetricsQuery(
-		"bobi_usage_hotspots",
-		"Usage hotspots",
-		"Rank bounded token, cost, latency, or tool-result-size hotspots. Tool token attribution remains explicitly estimated.",
-		"usage_hotspots",
-		z.object({
-			...metricsTargetSchema,
-			...metricsTimeArgs,
-			scope: z.enum(["session", "turn", "invocation", "tool", "prompt_template"]),
-			metric: z.enum(["reported_cost", "estimated_cost", "input_tokens", "output_tokens", "latency", "tool_result_bytes"]),
-			session: z.string().min(1).optional(),
-			top_n: z.number().int().min(1).max(200).optional(),
-			cursor: z.string().min(1).optional(),
-		}),
-		({ fleet: _fleet, instance: _instance, ...args }) => args,
-	);
-
-	registerMetricsQuery(
-		"bobi_usage_experiment",
-		"Experiment usage",
-		"Read per-variant JEV routing outcomes and coverage without asserting statistical significance.",
-		"usage_experiment",
-		z.object({
-			...metricsTargetSchema,
-			...metricsTimeArgs,
-			experiment_id: z.string().min(1),
-			cohort: z.string().min(1).optional(),
-			outcome: z.string().min(1).optional(),
-			outcome_definition_version: z.string().min(1).optional(),
-			evaluator_name: z.string().min(1).optional(),
-			evaluator_version: z.string().min(1).optional(),
-		}),
 		({ fleet: _fleet, instance: _instance, ...args }) => args,
 	);
 

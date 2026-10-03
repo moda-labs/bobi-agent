@@ -1,13 +1,12 @@
 import pytest
 
 from bobi.fsutil import try_file_lock
-from bobi.metrics.collector import MetricsCollector, rebuild_database
+from bobi.metrics.collector import MetricsCollector
 from bobi.metrics.events import MetricsEvent
 from bobi.metrics.spool import HEADER, SpoolCorruptionError, SpoolWriter, iter_frames
 from bobi.metrics.store import (
     connect,
     integrity_check,
-    logical_snapshot,
     migrate,
     stage_frames,
 )
@@ -82,10 +81,9 @@ def _write_complete_segment(path):
             writer.append(item)
 
 
-def test_collector_replay_is_idempotent_and_rebuild_is_deterministic(tmp_path):
+def test_collector_replay_is_idempotent(tmp_path):
     segment = tmp_path / "segment.telemetry"
     db = tmp_path / "metrics.db"
-    rebuilt = tmp_path / "rebuilt.db"
     _write_complete_segment(segment)
     collector = MetricsCollector(db)
     first = collector.collect_segment(segment)
@@ -93,12 +91,12 @@ def test_collector_replay_is_idempotent_and_rebuild_is_deterministic(tmp_path):
     assert first["staged"] == 3
     assert first["projected"] == 3
     assert second["staged"] == 0
+    assert second["projected"] == 0
     conn = connect(db, readonly=True)
-    before = logical_snapshot(conn)
+    assert conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM best_usage").fetchone()[0] == 1
     assert integrity_check(conn) == "ok"
     conn.close()
-    after = rebuild_database(db, rebuilt)
-    assert after == before
 
 
 def test_collector_election_is_non_blocking(tmp_path):
@@ -289,6 +287,7 @@ def test_identical_event_id_replay_from_another_segment_is_a_noop(tmp_path):
     second = MetricsCollector(db).collect_segment(second_segment)
     assert first["staged"] == 1
     assert second["staged"] == 0
+    assert second["projected"] == 0
     conn = connect(db, readonly=True)
     assert conn.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0] == 1
     conn.close()

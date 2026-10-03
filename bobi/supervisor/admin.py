@@ -59,8 +59,7 @@ log = logging.getLogger(__name__)
 COMMAND_RESULT_TOPIC = "fleet/command_result"
 ADMIN_COMMANDS = frozenset({"restart", "stop", "start", "status",
                             "chat", "transcript", "roster", "spend", "usage",
-                            "usage_session", "usage_turn", "usage_hotspots",
-                            "usage_experiment",
+                            "usage_session", "usage_turn",
                             "session_log",
                             # The single-agent view's read model + the three
                             # operator writes it offers on a waiting run.
@@ -80,7 +79,7 @@ _STOP = object()
 # only in which shared action they call.
 _RUN_ACTIONS = frozenset({"resume_run", "remind_run", "close_run"})
 _METRICS_COMMANDS = frozenset({
-    "usage", "usage_session", "usage_turn", "usage_hotspots", "usage_experiment",
+    "usage", "usage_session", "usage_turn",
 })
 METRICS_QUERY_WORKERS = 4
 METRICS_QUERY_QUEUE_CAPACITY = 8
@@ -443,8 +442,6 @@ class AdminListener:
         method = {
             "usage_session": queries.session,
             "usage_turn": queries.turn,
-            "usage_hotspots": queries.hotspots,
-            "usage_experiment": queries.experiment,
         }[command]
         return {command: method(args)}
 

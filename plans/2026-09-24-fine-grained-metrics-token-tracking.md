@@ -12,6 +12,15 @@
 > **Audited snapshot:** `origin/main` at `de81de3c4060363acdf8936c8ca24d66a006ba55` in worktree `worktrees/fine-grained-metrics`
 > **Scope:** ingestion, schema, local storage, Admin API, MCP tools, and JEV-router experimentation; no Web UI
 
+## Cleanup amendment (2026-10-03)
+
+The approved cleanup supersedes the analytics and bespoke maintenance scope below.
+SRM, causal/intent-to-treat analysis, benchmark harnesses, external outcome ingestion,
+hotspot/experiment Admin and MCP queries, and rebuild/prune commands are not shipped.
+Historical schemas and projections remain compatible. Standard SQLite backups and WAL
+checkpointing replace custom maintenance; token accounting and JEV routing remain intact.
+See `docs/FINE_GRAINED_METRICS.md` for the current operational contract.
+
 ## Executive decision
 
 - Reject the claim that Bobi only receives plain text and must estimate all token usage. Both current brain adapters already receive provider-reported usage metadata.

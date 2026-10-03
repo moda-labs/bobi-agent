@@ -266,8 +266,6 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 			"bobi_lifecycle",
 			"bobi_read_transcript",
 			"bobi_send_message",
-			"bobi_usage_experiment",
-			"bobi_usage_hotspots",
 			"bobi_usage_session",
 			"bobi_usage_summary",
 			"bobi_usage_turn",
@@ -304,17 +302,8 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 		expect((usageTurn.inputSchema as { required?: string[] }).required?.sort()).toEqual([
 			"fleet", "instance", "turn_id",
 		]);
-		const usageHotspots = tools.find((t) => t.name === "bobi_usage_hotspots")!;
-		expect(
-			((usageHotspots.inputSchema as { properties?: Record<string, { enum?: string[] }> })
-				.properties?.scope.enum ?? []).sort(),
-		).toEqual(["invocation", "prompt_template", "session", "tool", "turn"]);
-		expect(
-			Object.keys((usageHotspots.inputSchema as { properties?: Record<string, unknown> }).properties ?? {}),
-		).toContain("cursor");
 		for (const name of [
 			"bobi_usage_summary", "bobi_usage_session", "bobi_usage_turn",
-			"bobi_usage_hotspots", "bobi_usage_experiment",
 		]) {
 			expect(tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint).toBe(true);
 		}

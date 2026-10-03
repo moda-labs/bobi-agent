@@ -1,4 +1,4 @@
-"""Single-writer SQLite staging and deterministic read-model rebuild."""
+"""Single-writer SQLite staging for durable metrics projection."""
 
 from __future__ import annotations
 
@@ -12,20 +12,6 @@ from typing import Iterable
 from bobi.metrics.events import MetricsEvent, canonical_json
 from bobi.metrics.schema import SCHEMA_SQL, SCHEMA_VERSION
 from bobi.metrics.spool import FrameRecord
-
-NORMALIZED_TABLES = (
-    "sessions",
-    "turns",
-    "workflow_steps",
-    "router_decisions",
-    "llm_invocations",
-    "tool_executions",
-    "usage_measurements",
-    "price_snapshots",
-    "cost_measurements",
-    "experiment_outcomes",
-)
-
 
 def connect(path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
     db_path = Path(path)
@@ -181,46 +167,6 @@ def cursor_offset(conn: sqlite3.Connection, segment_path: Path | str) -> int:
 
 def integrity_check(conn: sqlite3.Connection) -> str:
     return str(conn.execute("PRAGMA integrity_check").fetchone()[0])
-
-
-def logical_snapshot(conn: sqlite3.Connection) -> dict[str, object]:
-    counts = {
-        table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-        for table in ("raw_events",) + NORMALIZED_TABLES
-    }
-    table_checksums = {}
-    for table in NORMALIZED_TABLES:
-        rows = [dict(row) for row in conn.execute(f"SELECT * FROM {table}")]
-        rows.sort(key=lambda row: canonical_json(row))
-        table_checksums[table] = hashlib.sha256(canonical_json(rows)).hexdigest()
-    best_rows = [
-        dict(row)
-        for row in conn.execute("SELECT * FROM best_usage ORDER BY measurement_id")
-    ]
-    return {
-        "counts": counts,
-        "table_sha256": table_checksums,
-        "best_usage_sha256": hashlib.sha256(canonical_json(best_rows)).hexdigest(),
-    }
-
-
-def copy_raw_events(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
-    columns = [row[1] for row in source.execute("PRAGMA table_info(raw_events)")]
-    reset = {
-        "projection_state": "pending",
-        "projection_attempts": 0,
-        "projection_not_before_us": None,
-        "projected_at_us": None,
-        "projection_error": None,
-    }
-    insert = (
-        f"INSERT INTO raw_events({','.join(columns)}) VALUES "
-        f"({','.join('?' for _ in columns)})"
-    )
-    for row in source.execute("SELECT * FROM raw_events ORDER BY received_at_us, event_id"):
-        values = [reset.get(column, row[column]) for column in columns]
-        target.execute(insert, values)
-    target.commit()
 
 
 def raw_payload(row: sqlite3.Row) -> dict[str, object]:
