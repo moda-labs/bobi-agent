@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,7 @@ from bobi.metrics.providers import (
     parse_claude_transcript_records,
     parse_codex_rollout_records,
 )
-from bobi.metrics.reconcile import _aggregate, reconcile_missing, reconcile_turn
+from bobi.metrics.reconcile import ReconciliationError, _aggregate, reconcile_missing, reconcile_turn
 from bobi.metrics.spool import SpoolWriter
 from bobi.metrics.store import connect
 
@@ -93,6 +94,18 @@ def _seed_turn(root, *, provider, brain, provider_session_id, turn_id, estimate)
     )
 
 
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_gateway_reconciliation_rejects_unknown_transcript_format(monkeypatch, tmp_path, ambiguous):
+    _seed_turn(tmp_path, provider="gateway", brain="gateway",
+               provider_session_id="fixture-gateway", turn_id="turn-gateway", estimate=None)
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda session_id:
+                        FIXTURES / "claude-transcript.jsonl" if ambiguous else None)
+    monkeypatch.setattr("bobi.metrics.reconcile.find_codex_rollout", lambda session_id:
+                        FIXTURES / "codex-rollout.jsonl" if ambiguous else None)
+    with pytest.raises(ReconciliationError, match="missing or ambiguous"):
+        reconcile_turn(tmp_path, "turn-gateway", wait=True)
+
+
 def test_provider_record_parsers_preserve_correlation_and_deduplicate():
     claude = parse_claude_transcript_records(FIXTURES / "claude-transcript.jsonl")
     codex = parse_codex_rollout_records(FIXTURES / "codex-rollout.jsonl")
@@ -106,6 +119,70 @@ def test_provider_record_parsers_preserve_correlation_and_deduplicate():
     assert codex[0].provider_session_id == "fixture-codex-thread"
     assert codex[0].provider_turn_id == "fixture-codex-turn"
     assert codex[0].usage.input_tokens == 4096
+
+
+@pytest.mark.parametrize("error", [ReconciliationError, ProviderContractError, OSError])
+def test_background_reconciliation_retries_are_bounded_and_persisted(monkeypatch, tmp_path, error):
+    from bobi.metrics.collector import MetricsCollectorService
+    from bobi.metrics.reconcile import ReconciliationError
+
+    _seed_turn(tmp_path, provider="gateway", brain="claude", provider_session_id="missing-session",
+               turn_id="missing-turn", estimate=None)
+    calls = []
+
+    def unavailable(root, turn_id, **kwargs):
+        calls.append(turn_id)
+        raise error("transcript not available")
+
+    monkeypatch.setattr("bobi.metrics.reconcile.reconcile_turn", unavailable)
+    monkeypatch.setattr("bobi.metrics.estimate.estimate_missing", lambda *args, **kwargs: {})
+    for index in range(5):
+        service = MetricsCollectorService(tmp_path, reconcile_interval=0)
+        service._cycle_locked()
+        service._publish_health(force=True)
+    assert calls == ["missing-turn"] * 3
+    assert service.health()["reconciliation_retry_exhausted_turns"] == 1
+    assert service.health()["reconciliation_attempts"] == {"missing-turn": 3}
+    assert reconcile_missing(tmp_path)["errors"] == 1
+    assert len(calls) == 4
+
+
+def test_standby_collector_preserves_retry_limit_on_takeover(monkeypatch, tmp_path):
+    from bobi.metrics.collector import MetricsCollectorService
+
+    _seed_turn(tmp_path, provider="gateway", brain="claude", provider_session_id="missing-session",
+               turn_id="missing-turn", estimate=None)
+    calls = []
+    def unavailable(root, turn_id, **kwargs):
+        calls.append(turn_id)
+        raise ReconciliationError("transcript not available")
+    monkeypatch.setattr("bobi.metrics.reconcile.reconcile_turn", unavailable)
+    monkeypatch.setattr("bobi.metrics.estimate.estimate_missing", lambda *args, **kwargs: {})
+    first = MetricsCollectorService(tmp_path, poll_interval=0.01, reconcile_interval=0)
+    second = MetricsCollectorService(tmp_path, poll_interval=0.01, reconcile_interval=0)
+    try:
+        first.start()
+        deadline = time.monotonic() + 2
+        while first.health()["reconciliation_attempts"].get("missing-turn", 0) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(calls) == 3
+        first._publish_health(force=True)
+        second.start()
+        deadline = time.monotonic() + 2
+        while second.health()["status"] == "starting" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert second.health()["role"] == "standby"
+        assert json.loads(first.health_path.read_text())["reconciliation_attempts"] == {"missing-turn": 3}
+        assert first.stop(timeout=2)
+        deadline = time.monotonic() + 2
+        while second.health()["role"] != "active" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert second.health()["role"] == "active"
+        assert second.health()["reconciliation_attempts"] == {"missing-turn": 3}
+        assert len(calls) == 3
+    finally:
+        assert first.stop(timeout=2)
+        assert second.stop(timeout=2)
 
 
 def test_codex_v0159_rollout_parser_converts_cumulative_usage_to_turn_deltas():
@@ -222,8 +299,9 @@ def test_scheduled_reconciliation_skips_active_turns(monkeypatch, tmp_path):
     assert result["turns_considered"] == 1
 
 
+@pytest.mark.parametrize("provider,brain", [("anthropic", "claude"), ("gateway", "claude"), ("gateway", "gateway")])
 def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, provider, brain
 ):
     root = tmp_path / "agent"
     turn_id = "turn-claude"
@@ -232,7 +310,7 @@ def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(
         "scope": "turn",
         "turn_id": turn_id,
         "invocation_id": None,
-        "provider": "anthropic",
+        "provider": provider,
         "model": "claude-opus-4-8",
         "provider_event_id": None,
         "measurement_source": "calibrated_estimator",
@@ -246,8 +324,8 @@ def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(
     }
     _seed_turn(
         root,
-        provider="anthropic",
-        brain="claude",
+        provider=provider,
+        brain=brain,
         provider_session_id="fixture-claude-session",
         turn_id=turn_id,
         estimate=estimate,
@@ -256,6 +334,7 @@ def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(
         "bobi.metrics.reconcile.find_claude_transcript",
         lambda _session_id: FIXTURES / "claude-transcript.jsonl",
     )
+    monkeypatch.setattr("bobi.metrics.reconcile.find_codex_rollout", lambda _session_id: None)
 
     first = reconcile_turn(root, turn_id, wait=True)
     second = reconcile_turn(root, turn_id, wait=True)
@@ -275,6 +354,9 @@ def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(
             (turn_id,),
         ).fetchone()
         assert exact["is_estimated"] == 0
+        assert exact["provider"] == provider
+        assert first["measurement_source"] == "claude_transcript"
+        assert second["exact_measurements_recovered"] == 0
         assert exact["measurement_source"] == "claude_transcript"
         assert exact["supersedes_measurement_id"] == "estimate-claude"
         assert exact["cache_write_1h_input_tokens"] == 8192
@@ -282,7 +364,8 @@ def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(
         conn.close()
 
 
-def test_codex_reconciliation_uses_final_turn_usage(monkeypatch, tmp_path):
+@pytest.mark.parametrize("provider,brain", [("openai", "codex"), ("gateway", "codex"), ("gateway", "gateway")])
+def test_codex_reconciliation_uses_final_turn_usage(monkeypatch, tmp_path, provider, brain):
     root = tmp_path / "agent"
     turn_id = "turn-codex"
     estimate = {
@@ -290,7 +373,7 @@ def test_codex_reconciliation_uses_final_turn_usage(monkeypatch, tmp_path):
         "scope": "turn",
         "turn_id": turn_id,
         "invocation_id": None,
-        "provider": "openai",
+        "provider": provider,
         "model": "gpt-test",
         "provider_event_id": None,
         "measurement_source": "local_tokenizer",
@@ -304,8 +387,8 @@ def test_codex_reconciliation_uses_final_turn_usage(monkeypatch, tmp_path):
     }
     _seed_turn(
         root,
-        provider="openai",
-        brain="codex",
+        provider=provider,
+        brain=brain,
         provider_session_id="fixture-codex-thread",
         turn_id=turn_id,
         estimate=estimate,
@@ -314,6 +397,7 @@ def test_codex_reconciliation_uses_final_turn_usage(monkeypatch, tmp_path):
         "bobi.metrics.reconcile.find_codex_rollout",
         lambda _session_id: FIXTURES / "codex-rollout.jsonl",
     )
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: None)
 
     result = reconcile_turn(root, turn_id, wait=True)
 
@@ -325,6 +409,7 @@ def test_codex_reconciliation_uses_final_turn_usage(monkeypatch, tmp_path):
             (turn_id,),
         ).fetchone()
         assert exact["measurement_source"] == "codex_rollout"
+        assert exact["provider"] == provider
         assert exact["input_tokens"] == 4096
         assert exact["cache_read_input_tokens"] == 1024
         assert exact["reasoning_output_tokens"] == 12

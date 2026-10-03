@@ -7,7 +7,7 @@ import json
 import os
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -15,6 +15,7 @@ from bobi.chat_history import find_claude_transcript, find_codex_rollout
 from bobi.metrics.collector import MetricsCollector
 from bobi.metrics.events import MetricsEvent, deterministic_event_id, uuid7
 from bobi.metrics.providers import (
+    ProviderContractError,
     ProviderUsage,
     ProviderUsageRecord,
     parse_claude_transcript_records,
@@ -142,22 +143,36 @@ def _select_records(
     provider_session_id: str,
 ) -> tuple[Path, list[ProviderUsageRecord]]:
     provider = str(row["provider"])
-    if provider == "anthropic":
-        source = find_claude_transcript(provider_session_id)
+    brain = str(row["brain"])
+    if provider not in {"anthropic", "openai", "gateway"}:
+        raise ReconciliationError(f"unsupported provider: {provider}")
+    claude_source = find_claude_transcript(provider_session_id) if (
+        provider == "anthropic" or provider == "gateway" and brain != "codex"
+    ) else None
+    codex_source = find_codex_rollout(provider_session_id) if (
+        provider == "openai" or provider == "gateway" and brain != "claude"
+    ) else None
+    if provider == "gateway" and brain not in {"claude", "codex"}:
+        if bool(claude_source) == bool(codex_source):
+            raise ReconciliationError("gateway transcript format is missing or ambiguous")
+    claude_format = provider == "anthropic" or provider == "gateway" and (
+        brain == "claude" or brain not in {"claude", "codex"} and bool(claude_source)
+    )
+    if claude_format:
+        source = claude_source
         if source is None:
             raise ReconciliationError(
                 f"Claude transcript not found for {provider_session_id}"
             )
         records = parse_claude_transcript_records(source)
-    elif provider == "openai":
-        source = find_codex_rollout(provider_session_id)
+    else:
+        source = codex_source
         if source is None:
             raise ReconciliationError(
                 f"Codex rollout not found for {provider_session_id}"
             )
         records = parse_codex_rollout_records(source)
-    else:
-        raise ReconciliationError(f"unsupported provider: {provider}")
+    records = [replace(record, usage=replace(record.usage, provider=provider)) for record in records]
 
     used_elsewhere = {
         str(item[0])
@@ -177,11 +192,11 @@ def _select_records(
         and record.usage.provider_event_id not in used_elsewhere
         and (
             not provider_turn_id
-            or provider == "anthropic"
+            or claude_format
             or record.provider_turn_id == provider_turn_id
         )
     ]
-    if provider == "openai" and len(selected) > 1:
+    if not claude_format and len(selected) > 1:
         selected = [max(selected, key=lambda item: item.observed_at_us)]
     if not selected:
         raise ReconciliationError(
@@ -230,6 +245,7 @@ def build_reconcile_plan(
         source_path, records = _select_records(
             conn, row, upper_us, provider_session_id
         )
+        claude_format = records[0].usage.measurement_source == "claude_transcript"
         invocation_rows = conn.execute(
             "SELECT invocation_id,invocation_index,provider_event_id,model_selected "
             "FROM llm_invocations WHERE turn_id=? ORDER BY invocation_index",
@@ -291,7 +307,7 @@ def build_reconcile_plan(
                 str(existing["invocation_id"])
                 if existing is not None
                 else (
-                    None if provider == "openai"
+                    None if not claude_format
                     else _stable_id("inv", turn_id, provider_event_id)
                 )
             )
@@ -348,7 +364,7 @@ def build_reconcile_plan(
                 ))
             sequence += 1
 
-            if provider == "anthropic":
+            if claude_format:
                 assert invocation_id is not None
                 measurement_id = _stable_id(
                     "use", turn_id, invocation_id, provider_event_id,
@@ -384,7 +400,7 @@ def build_reconcile_plan(
                 sequence += 1
                 measurement_ids.append(measurement_id)
 
-        aggregates = _aggregate(records) if provider == "anthropic" else records
+        aggregates = _aggregate(records) if claude_format else records
         for record in aggregates:
             measurement_id = _stable_id(
                 "use", turn_id, "turn", record.usage.model,
@@ -495,7 +511,7 @@ def reconcile_turn(
         "turn_id": turn_id,
         "provider": plan.provider,
         "measurement_source": (
-            "claude_transcript" if plan.provider == "anthropic" else "codex_rollout"
+            next(event.payload["measurement_source"] for event in plan.events if event.event_type == "usage.recorded")
         ),
         "events_emitted": len(plan.events),
         "exact_measurements_recovered": len(after - before),
@@ -513,6 +529,7 @@ def reconcile_missing(
     timeout: float = 60.0,
     collect: bool = True,
     terminal_only: bool = False,
+    retry_attempts: dict[str, int] | None = None,
 ) -> dict[str, object]:
     """Reconcile turns that currently have no exact turn measurement."""
     root = Path(root).resolve()
@@ -532,9 +549,17 @@ def reconcile_missing(
         ]
     finally:
         conn.close()
+    if retry_attempts is not None:
+        for turn_id in set(retry_attempts) - set(turn_ids):
+            del retry_attempts[turn_id]
     results = []
     failures = []
+    exhausted = 0
     for turn_id in turn_ids:
+        # ponytail: three background retries; manual reconciliation handles late transcripts.
+        if retry_attempts is not None and retry_attempts.get(turn_id, 0) >= 3:
+            exhausted += 1
+            continue
         try:
             results.append(
                 reconcile_turn(
@@ -545,16 +570,19 @@ def reconcile_missing(
                     collect=collect,
                 )
             )
-        except ReconciliationError as exc:
+        except (ReconciliationError, ProviderContractError, OSError) as exc:
+            if retry_attempts is not None:
+                retry_attempts[turn_id] = retry_attempts.get(turn_id, 0) + 1
             failures.append({"turn_id": turn_id, "error": str(exc)})
     return {
-        "status": "done" if not failures else "partial",
+        "status": "done" if not failures and not exhausted else "partial",
         "turns_scanned": len(turn_ids),
         "turns_repaired": sum(
             int(bool(result["exact_measurements_recovered"]))
             for result in results
         ),
         "errors": len(failures),
+        "retry_exhausted_turns": exhausted,
         "turns_considered": len(turn_ids),
         "turns_reconciled": len(results),
         "exact_measurements_recovered": sum(

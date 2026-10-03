@@ -3,6 +3,21 @@
 This document is the implementation and operations guide for Bobi's
 fine-grained token, latency, cost, and model-routing telemetry.
 
+### Gateway recovery and routing diagnostics
+
+Gateway sessions retain `provider=gateway` for both online and recovered measurements.
+Reconciliation selects the Claude transcript or Codex rollout parser using the stored brain.
+Historical gateway sessions without a specific brain require one unambiguous transcript format; recovery never guesses between two available formats.
+The collector makes at most three failed scheduled reconciliation attempts per turn, persists the counts in `collector.state.json`, and reports `reconciliation_retry_exhausted_turns`.
+Exhausted turns remain visible in the retry-exhaustion health counter; use `bobi agent <name> metrics reconcile --turn-id <turn-id> --wait --json` after restoring a missing transcript.
+Manual reconciliation is not subject to the background retry limit, and recovered turns leave the retry queue on its next scan.
+
+Invalid experiment JSON/schema, missing assignment secrets, unavailable policies, and configured routing with unavailable telemetry emit a structured `jev_routing_fallback` warning.
+`RouteOutcome.reason` contains the failure code.
+When telemetry is available, the same `fallback_reason` and exception type are stored under `sessions.metadata_json.router_fallback`; invalid configurations do not fabricate experiment assignments or `router_decisions`.
+Warnings and metadata omit raw configuration, credentials, and exception messages.
+These changes require no schema migration and do not rewrite historical usage.
+
 > [!IMPORTANT]
 > **Implementation status:** Phase 0-3 are accepted. Phase 4 deterministic
 > routing, experiment outcomes, aggregation diagnostics, benchmarks, and live

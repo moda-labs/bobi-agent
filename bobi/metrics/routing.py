@@ -13,7 +13,7 @@ from bobi.metrics.events import uuid7
 from bobi.metrics.features import build_features, prepare_task
 from bobi.metrics.policy import PolicyRequest, call_policy, load_policy, policy_breaker
 from bobi.metrics.router import (
-    ASSIGNMENT_ALGORITHM, RouterDecision, assign_variant, choose_assignment_key,
+    ASSIGNMENT_ALGORITHM, ASSIGNMENT_SECRET_ENV, EXPERIMENT_CONFIG_ENV, RouterDecision, assign_variant, choose_assignment_key,
     load_experiment, public_config,
 )
 from bobi.metrics.runtime import MetricsRuntime, get_runtime
@@ -48,12 +48,22 @@ class RouteOutcome:
 async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None = None,
                         sticky_record: dict[str, object] | None = None) -> RouteOutcome:
     fallback = RouteOutcome(ctx.configured_model)
+    stage = "runtime"
     try:
         runtime = runtime or get_runtime()
-        if not runtime.enabled or ctx.explicit_model:
+        if ctx.explicit_model:
             return fallback
+        if not runtime.enabled:
+            if os.environ.get(EXPERIMENT_CONFIG_ENV):
+                stage = "metrics"
+                raise RuntimeError("routing requires available telemetry")
+            return fallback
+        stage = "config"
         configured = load_experiment()
         if configured is None:
+            if os.environ.get(ASSIGNMENT_SECRET_ENV):
+                stage = "missing_config"
+                raise ValueError("experiment secret supplied without configuration")
             return fallback
         config, secret = configured
         fingerprint = hashlib.sha256(json.dumps(public_config(config), sort_keys=True,
@@ -165,7 +175,9 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             return fallback
         if not ctx.prompt.strip() or (not ctx.fresh and ctx.existing_transcript):
             return fallback
+        stage = "policy"
         policy = load_policy(policy_config) if policy_config else None
+        stage = "routing"
         unit, key = choose_assignment_key(
             experiment_subject=ctx.experiment_subject or os.environ.get("BOBI_METRICS_EXPERIMENT_SUBJECT", ""),
             run_key=ctx.run_key, session_id=ctx.session_name,
@@ -240,5 +252,22 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             return RouteOutcome(config.control_model, reason="route_persistence_failed")
         return RouteOutcome(model, decision)
     except Exception as exc:
-        log.warning("metrics: routing unavailable (%s)", type(exc).__name__)
-        return fallback
+        reason = "routing_unavailable"
+        if stage == "config":
+            reason = "routing_config_invalid" if os.environ.get(ASSIGNMENT_SECRET_ENV) else "routing_assignment_secret_missing"
+        elif stage == "policy":
+            reason = "routing_policy_unavailable"
+        elif stage == "missing_config":
+            reason = "routing_config_missing"
+        elif stage == "metrics":
+            reason = "routing_metrics_unavailable"
+        metadata = {"event": "jev_routing_fallback", "fallback_reason": reason, "error_kind": type(exc).__name__}
+        log.warning("metrics: %s", json.dumps(metadata, sort_keys=True), extra=metadata)
+        if runtime is not None:
+            try:
+                runtime.admit_route(ctx.session_name, None, brain=ctx.brain,
+                    role=ctx.role, run_key=ctx.run_key, workflow_name=ctx.workflow_name,
+                    fallback_reason=reason, error_kind=type(exc).__name__)
+            except Exception as recording_error:
+                log.warning("metrics: routing fallback recording failed (%s)", type(recording_error).__name__)
+        return RouteOutcome(ctx.configured_model, reason=reason)

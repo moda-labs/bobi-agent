@@ -139,6 +139,8 @@ class MetricsCollectorService:
         self.spool_root = self.metrics_root / "spool"
         self.db_path = self.metrics_root / "metrics.db"
         self.health_path = self.metrics_root / "collector.state.json"
+        self._reconciliation_attempts: dict[str, int] = {}
+        self._load_reconciliation_attempts()
         self.collector = MetricsCollector(self.db_path)
         self.poll_interval = poll_interval
         self.reconcile_interval = reconcile_interval
@@ -170,8 +172,21 @@ class MetricsCollectorService:
             "last_maintenance": None,
             "last_reconciliation_at_us": None,
             "reconciliation_errors": 0,
+            "reconciliation_attempts": dict(self._reconciliation_attempts),
+            "reconciliation_retry_exhausted_turns": 0,
             "uncovered_turns": 0,
         }
+
+    def _load_reconciliation_attempts(self) -> None:
+        try:
+            saved = json.loads(self.health_path.read_text()).get("reconciliation_attempts", {})
+            if isinstance(saved, dict):
+                self._reconciliation_attempts = {
+                    turn_id: count for turn_id, count in saved.items()
+                    if isinstance(turn_id, str) and type(count) is int and 0 < count <= 3
+                }
+        except (OSError, ValueError, AttributeError):
+            pass
 
     def start(self) -> None:
         if not self._started:
@@ -240,14 +255,17 @@ class MetricsCollectorService:
                     self._refresh_health(self._empty_result("standby"))
                     self._stop.wait(self.poll_interval)
                     continue
+                self._load_reconciliation_attempts()
+                self._set_health(role="active", reconciliation_attempts=dict(self._reconciliation_attempts))
                 while not self._stop.is_set():
                     self._cycle_locked()
                     self._stop.wait(self.poll_interval)
                 # Import anything producers flushed while shutdown propagated.
                 self._cycle_locked()
+                self._set_health(status="stopped")
+                self._publish_health(force=True)
                 break
         self._set_health(status="stopped")
-        self._publish_health(force=True)
 
     def _cycle_locked(self) -> None:
         try:
@@ -279,9 +297,11 @@ class MetricsCollectorService:
         errors = int(self.health()["reconciliation_errors"])
         try:
             reconciliation = reconcile_missing(
-                self.root, collect=False, terminal_only=True
+                self.root, collect=False, terminal_only=True,
+                retry_attempts=self._reconciliation_attempts,
             )
             errors += int(reconciliation["errors"])
+            self._set_health(reconciliation_retry_exhausted_turns=reconciliation.get("retry_exhausted_turns", 0))
         except Exception:
             log.debug("metrics: scheduled reconciliation failed", exc_info=True)
             errors += 1
@@ -307,6 +327,7 @@ class MetricsCollectorService:
         self._set_health(
             last_reconciliation_at_us=time.time_ns() // 1000,
             reconciliation_errors=errors,
+            reconciliation_attempts=dict(self._reconciliation_attempts),
             uncovered_turns=uncovered,
         )
         return result
@@ -403,6 +424,8 @@ class MetricsCollectorService:
             self._health.update(updates)
 
     def _publish_health(self, *, force: bool = False) -> None:
+        if self.health()["role"] != "active":
+            return
         now = time.monotonic()
         if not force and now - self._last_health_write < 1.0:
             return

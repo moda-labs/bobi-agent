@@ -46,6 +46,69 @@ def configured():
             "entry_points": ["session_start"]}, "egress": {"prompt": "none"},
             "credential_env": "ROUTING_TEST_KEY", "options": {"model": "cheap"}}}
 
+
+@pytest.mark.parametrize("fault,reason", [
+    ("secret", "routing_assignment_secret_missing"),
+    ("json", "routing_config_invalid"),
+    ("schema", "routing_config_invalid"),
+    ("adapter", "routing_policy_unavailable"),
+    ("missing_config", "routing_config_missing"),
+    ("metrics", "routing_metrics_unavailable"),
+])
+def test_routing_misconfiguration_records_safe_fallback(monkeypatch, tmp_path, caplog, fault, reason):
+    from bobi.metrics.collector import MetricsCollectorService
+    from bobi.metrics.store import connect
+
+    raw = configured()
+    ctx = context(raw, "treatment")
+    if fault == "schema":
+        raw["policy"]["mode"] = "secret-schema-canary"
+    if fault == "adapter":
+        monkeypatch.setattr("bobi.metrics.routing.load_policy", lambda config: (
+            _ for _ in ()).throw(ValueError("secret-adapter-canary")))
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "" if fault == "missing_config" else "secret-json-canary" if fault == "json" else json.dumps(raw))
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "" if fault == "secret" else "test-secret")
+    runtime = MetricsRuntime(tmp_path, mode="disabled" if fault == "metrics" else "enabled")
+    try:
+        outcome = asyncio.run(resolve_route(ctx, runtime=runtime))
+        assert outcome.model == "configured" and outcome.decision is None
+        assert outcome.reason == reason
+        if fault == "metrics":
+            assert any(getattr(record, "fallback_reason", None) == reason for record in caplog.records)
+            return
+        turn = runtime.begin_turn(ctx.session_name, provider="openai")
+        turn.finish(status="completed")
+    finally:
+        assert runtime.close(timeout=2)
+    collector = MetricsCollectorService(tmp_path)
+    collector.collect_once()
+    with connect(collector.db_path, readonly=True) as connection:
+        metadata = json.loads(connection.execute("SELECT metadata_json FROM sessions").fetchone()[0])
+        assert metadata["router_fallback"]["fallback_reason"] == reason
+        assert connection.execute("SELECT COUNT(*) FROM router_decisions").fetchone()[0] == 0
+    warning = next(record for record in caplog.records if getattr(record, "fallback_reason", None) == reason)
+    assert json.loads(warning.message.split(" ", 1)[1])["fallback_reason"] == reason
+    assert "secret-schema-canary" not in caplog.text
+    assert "secret-json-canary" not in caplog.text
+    assert "secret-adapter-canary" not in caplog.text
+
+def test_routing_fallback_survives_telemetry_failure(monkeypatch, tmp_path, caplog):
+    raw = configured()
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+    monkeypatch.delenv("BOBI_METRICS_ASSIGNMENT_SECRET", raising=False)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    def fail_recording(*args, **kwargs):
+        raise OSError("secret-recording-canary")
+    monkeypatch.setattr(runtime, "admit_route", fail_recording)
+    try:
+        outcome = asyncio.run(resolve_route(context(raw, "treatment"), runtime=runtime))
+        assert outcome.model == "configured"
+        assert outcome.reason == "routing_assignment_secret_missing"
+        assert "fallback recording failed (OSError)" in caplog.text
+        assert "secret-recording-canary" not in caplog.text
+    finally:
+        assert runtime.close(timeout=2)
+
 def context(raw, arm):
     config = ExperimentConfig.from_mapping(raw)
     subject = next(str(index) for index in range(100) if assign_variant(config, b"test-secret",

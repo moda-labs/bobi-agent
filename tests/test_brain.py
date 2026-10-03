@@ -496,9 +496,9 @@ def test_make_session_scrubs_metrics_routing_secrets(monkeypatch):
     )}):
         ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
 
-    assert "BOBI_METRICS_EXPERIMENT_JSON" not in captured["env"]
-    assert "BOBI_METRICS_ASSIGNMENT_SECRET" not in captured["env"]
-    assert "BOBI_METRICS_EXPERIMENT_SUBJECT" not in captured["env"]
+    for name in ("BOBI_METRICS_EXPERIMENT_JSON", "BOBI_METRICS_ASSIGNMENT_SECRET", "BOBI_METRICS_EXPERIMENT_SUBJECT"):
+        assert captured["env"][name] == ""
+        assert name in captured["env"]["BOBI_INTERNAL_PROVIDER_CLEARED_ENV"].split(",")
 
 
 def test_make_session_max_buffer_size_env_override(monkeypatch):

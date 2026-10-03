@@ -128,10 +128,11 @@ class MetricsRuntime:
             self._session_ids[session_name] = session_id
         return session_id
 
-    def admit_route(self, session_name: str, decision: RouterDecision, *,
+    def admit_route(self, session_name: str, decision: RouterDecision | None, *,
                     brain: str, role: str = "", run_key: str = "",
-                    workflow_name: str = "") -> bool:
-        """Admit a resolved decision, never select a model or call a policy."""
+                    workflow_name: str = "", fallback_reason: str = "",
+                    error_kind: str = "") -> bool:
+        """Admit a resolved decision or explicit routing-failure metadata."""
         if not self.enabled:
             return False
         session_id = self.session_id(session_name)
@@ -144,7 +145,10 @@ class MetricsRuntime:
             "run_key": run_key or None, "project": None,
             "workflow_name": workflow_name or None, "started_at_us": started,
             "parent_session_id": None,
-            "metadata_json": _json({"router_assignment": projection_fields(decision)}),
+            "metadata_json": _json(
+                {"router_assignment": projection_fields(decision)} if decision is not None
+                else {"router_fallback": {"fallback_reason": fallback_reason, "error_kind": error_kind}}
+            ),
         }
         if not self.emit("session.recorded", {
             **context, "provider_session_id": None, "ended_at_us": None,

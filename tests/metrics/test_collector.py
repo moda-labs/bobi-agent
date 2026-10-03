@@ -144,7 +144,7 @@ def test_scheduled_reconciliation_collects_exact_before_estimation(
     monkeypatch.setattr(
         reconcile_module,
         "reconcile_missing",
-        lambda root, collect, terminal_only: (
+        lambda root, collect, terminal_only, retry_attempts: (
             order.append(("reconcile", terminal_only)) or {"errors": 0}
         ),
     )
@@ -182,7 +182,7 @@ def test_scheduled_reconciliation_failures_are_health_only(monkeypatch, tmp_path
     monkeypatch.setattr(
         reconcile_module,
         "reconcile_missing",
-        lambda root, collect, terminal_only: (
+        lambda root, collect, terminal_only, retry_attempts: (
             _ for _ in ()
         ).throw(RuntimeError("reconcile")),
     )
