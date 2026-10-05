@@ -27,6 +27,7 @@ from bobi.brain.base import (
 )
 from bobi.brain_availability import observe_brain_turn
 from bobi.inbox import Inbox, Message
+from bobi.metrics.runtime import observe_turn
 from bobi.sdk import (
     save_session_id,
     load_session_id,
@@ -319,10 +320,16 @@ class Session:
         role: str = "engineer",
         subscribe: list[str] | None = None,
         fresh: bool = False,
+        run_key: str = "",
+        experiment_subject: str = "",
+        routing=None,
     ) -> None:
         self.name = name
         self.cwd = cwd
         self.role = role
+        self.run_key = run_key
+        self.experiment_subject = experiment_subject
+        self._routing = routing
         # ``fresh`` skips resuming this name's saved transcript. Session names
         # are deliberately stable — they name the worktree branch
         # (orchestrator._setup_worktree) and are what the launch admission
@@ -384,6 +391,7 @@ class Session:
         self._total_cost_usd = 0.0
         self._total_duration_ms = 0
         self._total_turns = 0
+        self._metrics_observation = None
 
         # Context rotation state (Steps 1-4, #273). Rotation now cycles the
         # client directly (no decision-log flush — #456 removed it); the only
@@ -636,7 +644,7 @@ class Session:
         # Clear resumability only once the replacement is ready. Clearing this
         # before background preparation would make a failed rotation destroy a
         # still-usable old session on process restart.
-        save_session_id(self.name, "")
+        save_session_id(self.name, "", preserve_route=True)
         self._client = candidate
         self._set_state("waiting_input")
         self._rotate_pending = False
@@ -895,6 +903,18 @@ class Session:
         # and fires a perpetual false "rotation pending". One call's usage is
         # the actual window fill.
         last_assistant_usage: dict | None = None
+        observation = self._metrics_observation
+        owns_observation = observation is None
+        if observation is None:
+            observation = observe_turn(
+                self.name,
+                provider=getattr(self._client, "provider", "anthropic"),
+                role=self.role,
+                run_key=self.run_key,
+                experiment_subject=self.experiment_subject,
+                trigger_kind="direct",
+                model_requested=self._session_model(),
+            )
 
         # Heartbeat last_activity for the duration of the turn so a director
         # blocked on a live child (e.g. a Task subagent) is not mistaken for a
@@ -904,6 +924,8 @@ class Session:
         try:
             async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantText):
+                    if msg.text:
+                        observation.mark_first_output()
                     if msg.usage is not None:
                         last_assistant_usage = msg.usage
                     if msg.text:
@@ -919,6 +941,7 @@ class Session:
                             except Exception:
                                 pass
                 elif isinstance(msg, TurnResult):
+                    observation.record_result(msg)
                     turn_completed = True
                     save_session_id(self.name, msg.session_id,
                                     model=self._session_model())
@@ -1085,6 +1108,21 @@ class Session:
                 log.debug(
                     "keepalive: teardown for '%s' raised", self.name, exc_info=True
                 )
+
+        if owns_observation:
+            latest = observation.results[-1] if observation.results else None
+            observation.finish(
+                status=(
+                    "completed"
+                    if turn_completed and latest is not None and not latest.is_error
+                    else "failed"
+                ),
+                error_kind=(
+                    latest.error_kind
+                    if latest is not None
+                    else ("drain_error" if not turn_completed else "")
+                ),
+            )
 
         # Turn complete — clear any "is thinking…" indicators the drain loop
         # started for this turn. The gateway clears the indicator when a
@@ -1256,6 +1294,19 @@ class Session:
             return
 
         try:
+            observation = observe_turn(
+                self.name,
+                provider=getattr(self._client, "provider", "anthropic"),
+                role=self.role,
+                run_key=self.run_key,
+                experiment_subject=self.experiment_subject,
+                trigger_kind="startup" if msg.sender == "launch" else "inbox",
+                trigger_id=msg.id,
+                is_user_initiated=msg.sender != "launch",
+                model_requested=self._session_model(),
+                prompt_bytes=len(msg.text.encode("utf-8")),
+            )
+            self._metrics_observation = observation
             log_activity(
                 "inbox",
                 {"sender": msg.sender, "text": msg.text[:200]},
@@ -1336,6 +1387,23 @@ class Session:
             if msg.wait:
                 self.inbox.respond(msg, f"error: {e}")
             self._set_state("error")
+        finally:
+            observation = self._metrics_observation
+            self._metrics_observation = None
+            if observation is not None:
+                latest = observation.results[-1] if observation.results else None
+                observation.finish(
+                    status=(
+                        "completed"
+                        if latest is not None and not latest.is_error
+                        else "failed"
+                    ),
+                    error_kind=(
+                        latest.error_kind
+                        if latest is not None
+                        else "drain_error"
+                    ),
+                )
 
     def _start_pending_rotation(self) -> None:
         """Start one coalesced background candidate preparation."""
@@ -1498,6 +1566,18 @@ class Session:
                     return
 
     async def _run(self, startup_prompt: str | None = None) -> None:
+        if self._routing is not None:
+            from dataclasses import replace
+            from bobi.metrics.routing import resolve_route
+
+            outcome = await resolve_route(replace(
+                self._routing, session_name=self.name, prompt=startup_prompt or "",
+                fresh=self._fresh, repo_path=self.cwd,
+            ))
+            if outcome.model:
+                self._extra_options["model"] = outcome.model
+            else:
+                self._extra_options.pop("model", None)
         saved_id = (
             "" if self._fresh
             else load_resumable_session_id(self.name, self._session_model())
@@ -1511,7 +1591,7 @@ class Session:
         except Exception as e:
             if resume_id:
                 log.warning(f"Resume failed for '{self.name}', retrying fresh: {e}")
-                save_session_id(self.name, "")
+                save_session_id(self.name, "", preserve_route=True)
                 self._client = self._make_brain_session(resume=None)
                 await self._client.connect()
             else:
@@ -1592,6 +1672,13 @@ class Session:
         finally:
             self._main_task = None
             self._shutdown_client()
+            from bobi.metrics.runtime import finish_metrics_session
+
+            finish_metrics_session(
+                self.name,
+                status="failed" if self._state == "error" else "stopped",
+                error_kind=self._last_error_kind if self._state == "error" else "",
+            )
             self._loop.close()
             self._loop = None
 
