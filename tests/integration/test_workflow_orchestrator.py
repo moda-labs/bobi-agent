@@ -288,6 +288,7 @@ class TestContractlessCompletion:
         ]
         assert len([event for event in events if event.get("event") == "stop"]) == 1
 
+
 class TestConnectIsNeverATurn:
     """#1016 end-to-end on the stub brain: one dispatch of a publish-shaped
     workflow drains exactly one turn per prompt step. On the old engine the

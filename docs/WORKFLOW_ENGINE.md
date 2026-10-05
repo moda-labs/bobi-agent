@@ -365,6 +365,9 @@ without reading a handoff file or requesting a repair. An optional-only
 contract reads supplied outputs but does not require a file to complete.
 Brain errors remain failures regardless of the handoff contract.
 
+A handoff file written for a contractless step is ignored; use the session
+registry and workflow ledger status, not file presence, to determine completion.
+
 ## Execution model
 
 `run_workflow()` (`orchestrator.py`) is the entry point. End to end:
