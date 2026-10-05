@@ -1571,7 +1571,7 @@ def test_scheduled_reconciliation_skips_active_turns(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("provider,brain", [("anthropic", "claude"), ("gateway", "claude"), ("gateway", "gateway")])
-def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(metrics_fixtures, 
+def test_claude_reconciliation_is_idempotent_and_supersedes_estimate(metrics_fixtures,
     monkeypatch, tmp_path, provider, brain
 ):
     root = tmp_path / "agent"
@@ -1693,7 +1693,7 @@ def test_codex_reconciliation_uses_final_turn_usage(metrics_fixtures, monkeypatc
         conn.close()
 
 
-def test_codex_reconciliation_backfills_uncorrelated_online_invocation(metrics_fixtures, 
+def test_codex_reconciliation_backfills_uncorrelated_online_invocation(metrics_fixtures,
     monkeypatch, tmp_path
 ):
     root = tmp_path / "agent"
@@ -1754,7 +1754,7 @@ def test_codex_reconciliation_backfills_uncorrelated_online_invocation(metrics_f
         conn.close()
 
 
-def test_reconciliation_recovers_provider_session_id_from_runtime_state(metrics_fixtures, 
+def test_reconciliation_recovers_provider_session_id_from_runtime_state(metrics_fixtures,
     monkeypatch, tmp_path
 ):
     root = tmp_path / "agent"
@@ -1787,7 +1787,7 @@ def test_reconciliation_recovers_provider_session_id_from_runtime_state(metrics_
         conn.close()
 
 
-def test_reconciliation_reserves_stable_sequences_with_partial_invocations(metrics_fixtures, 
+def test_reconciliation_reserves_stable_sequences_with_partial_invocations(metrics_fixtures,
     monkeypatch, tmp_path
 ):
     root = tmp_path / "agent"
