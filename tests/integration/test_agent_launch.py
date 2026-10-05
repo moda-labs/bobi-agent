@@ -328,6 +328,26 @@ while True:
 """
 
     @staticmethod
+    def _isolated_paths(tmp_path, name="home"):
+        home_dir = tmp_path / name
+        state_dir = home_dir / "agents" / "test-repo" / "run" / "state"
+        state_dir.mkdir(parents=True)
+        return home_dir, state_dir
+
+    @classmethod
+    def _start_stub_daemon(cls, tmp_path, session_dir, identity, environment):
+        session_dir.mkdir()
+        script = tmp_path / f"{session_dir.name}_daemon.py"
+        script.write_text(cls.STUB_AGENT)
+        subprocess.run(
+            [sys.executable, str(script), str(session_dir), "launcher", *identity],
+            check=True,
+            env={**os.environ, **environment},
+            timeout=30,
+        )
+        return cls._await_writers(session_dir)["leader"]
+
+    @staticmethod
     def _await_writers(session_dir, timeout=30.0):
         """Block until leader AND child are both writing into *session_dir*.
 
@@ -410,7 +430,6 @@ while True:
         # left our own group intact rather than merely failing to reach us.
         os.killpg(os.getpgid(0), 0)
 
-
     def test_isolated_env_cleanup_reaps_both_daemons_on_skip(
         self, tmp_path
     ):
@@ -418,32 +437,20 @@ while True:
 
         from .conftest import _cleanup_bobi_env
 
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
+        home_dir, state_dir = self._isolated_paths(tmp_path)
+        daemon_env = {"BOBI_HOME": str(home_dir)}
         groups = {}
-        script = tmp_path / "stub_daemon.py"
-        script.write_text(self.STUB_AGENT)
         try:
             for component in ("manager", "event-server"):
                 session_dir = tmp_path / component
-                session_dir.mkdir()
                 identity = (
                     ["-m", "bobi.cli", "agent", "test-repo", "start", "--foreground"]
                     if component == "manager"
                     else [str(tmp_path / "dist" / "local.js")]
                 )
-                subprocess.run(
-                    [
-                        sys.executable,
-                        str(script),
-                        str(session_dir),
-                        "launcher",
-                        *identity,
-                    ],
-                    check=True,
-                    timeout=30,
+                pid = self._start_stub_daemon(
+                    tmp_path, session_dir, identity, daemon_env
                 )
-                pid = self._await_writers(session_dir)["leader"]
                 groups[component] = pid
                 (state_dir / f"{component}.pid").write_text(str(pid))
 
@@ -452,6 +459,7 @@ while True:
                     pytest.skip("readiness failed before fixture yield")
                 finally:
                     _cleanup_bobi_env(SimpleNamespace(
+                        home_dir=home_dir,
                         state_dir=state_dir,
                         agent_name="test-repo",
                     ))
@@ -466,20 +474,103 @@ while True:
         assert not (state_dir / "manager.pid").exists()
         assert not (state_dir / "event-server.pid").exists()
 
+    @pytest.mark.parametrize("component", ["manager", "event-server"])
+    def test_isolated_env_cleanup_does_not_signal_another_bobi_environment(
+        self, tmp_path, component
+    ):
+        from types import SimpleNamespace
+
+        from .conftest import _cleanup_bobi_env
+
+        home_dir, state_dir = self._isolated_paths(tmp_path, "ours")
+        identity = (
+            ["-m", "bobi.cli", "agent", "test-repo", "start", "--foreground"]
+            if component == "manager"
+            else [str(tmp_path / "dist" / "local.js")]
+        )
+        victim = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)", *identity],
+            env={
+                **os.environ,
+                "BOBI_HOME": str(tmp_path / "other-home"),
+            },
+            start_new_session=True,
+        )
+        try:
+            (state_dir / f"{component}.pid").write_text(str(victim.pid))
+            _cleanup_bobi_env(SimpleNamespace(
+                home_dir=home_dir,
+                state_dir=state_dir,
+                agent_name="test-repo",
+            ))
+            assert victim.poll() is None
+            assert not (state_dir / f"{component}.pid").exists()
+        finally:
+            with contextlib.suppress(OSError):
+                os.killpg(victim.pid, signal.SIGKILL)
+
+    def test_isolated_env_cleanup_preserves_live_pid_when_identity_is_unknown(
+        self, tmp_path, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        from . import conftest
+
+        home_dir, state_dir = self._isolated_paths(tmp_path)
+        victim = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(600)",
+                "-m",
+                "bobi.cli",
+                "agent",
+                "test-repo",
+                "start",
+                "--foreground",
+            ],
+            env={
+                **os.environ,
+                "BOBI_HOME": str(home_dir),
+            },
+            start_new_session=True,
+        )
+        pid_file = state_dir / "manager.pid"
+        launch_file = state_dir / "manager.launch.json"
+        pid_file.write_text(str(victim.pid))
+        launch_file.write_text("{}")
+        monkeypatch.setattr(conftest, "_process_command", lambda pid: "")
+        try:
+            conftest._cleanup_bobi_env(SimpleNamespace(
+                home_dir=home_dir,
+                state_dir=state_dir,
+                agent_name="test-repo",
+            ))
+            assert victim.poll() is None
+            assert pid_file.read_text() == str(victim.pid)
+            assert launch_file.exists()
+        finally:
+            with contextlib.suppress(OSError):
+                os.killpg(victim.pid, signal.SIGKILL)
+
     def test_isolated_env_cleanup_does_not_signal_a_reused_pid(self, tmp_path):
         from types import SimpleNamespace
 
         from .conftest import _cleanup_bobi_env
 
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
+        home_dir, state_dir = self._isolated_paths(tmp_path)
         victim = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(600)"],
+            env={
+                **os.environ,
+                "BOBI_HOME": str(home_dir),
+            },
             start_new_session=True,
         )
         try:
             (state_dir / "manager.pid").write_text(str(victim.pid))
             _cleanup_bobi_env(SimpleNamespace(
+                home_dir=home_dir,
                 state_dir=state_dir,
                 agent_name="test-repo",
             ))
@@ -488,6 +579,7 @@ while True:
         finally:
             with contextlib.suppress(OSError):
                 os.killpg(victim.pid, signal.SIGKILL)
+
 
 @pytest.mark.timeout(240)
 class TestWaitRunsThroughTheExecutor:

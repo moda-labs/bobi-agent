@@ -5,6 +5,7 @@ real ~/.bobi directory or any production state.
 """
 
 import os
+import re
 import shutil
 import signal
 import socket
@@ -484,6 +485,48 @@ def _process_command(pid: int) -> str:
         return ""
     return result.stdout.strip() if result.returncode == 0 else ""
 
+
+def _process_matches_home(pid: int, home_dir: Path) -> bool | None:
+    """Whether PID belongs to this isolated BOBI_HOME, or unknown."""
+    try:
+        raw = (Path("/proc") / str(pid) / "environ").read_bytes()
+    except OSError:
+        raw = None
+    if raw is not None:
+        prefix = b"BOBI_HOME="
+        value = next((entry[len(prefix):] for entry in raw.split(b"\0")
+                      if entry.startswith(prefix)), None)
+        return value == os.fsencode(home_dir) if value is not None else None
+
+    try:
+        result = subprocess.run(
+            ["ps", "eww", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+
+    prefix = r"(?:^| )BOBI_HOME="
+    if re.search(prefix, result.stdout) is None:
+        return None
+    exact = prefix + re.escape(str(home_dir)) + r"(?= [A-Za-z_][A-Za-z0-9_]*=|$)"
+    return re.search(exact, result.stdout) is not None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return pid > 0
+
+
 def _cleanup_bobi_env(
     env: BobiEnv, *, include_event_server: bool = True
 ) -> None:
@@ -495,22 +538,29 @@ def _cleanup_bobi_env(
     }
     if include_event_server:
         identities["event-server.pid"] = "dist/local.js"
+    lifecycle_files = {
+        "manager.pid": ("manager-health.port", "manager.launch.json"),
+        "event-server.pid": ("event-server.port", "event-server.launch.json"),
+    }
     for name, identity in identities.items():
         pid_file = env.state_dir / name
         try:
             pid = int(pid_file.read_text().strip())
-        except (FileNotFoundError, OSError, ValueError):
+        except (OSError, ValueError):
             pid = 0
         command = _process_command(pid) if pid > 0 else ""
+        if pid > 0 and _pid_alive(pid) and not command:
+            continue
         if identity in command:
-            _reap_process_group(pid)
+            matches_home = _process_matches_home(pid, env.home_dir)
+            if matches_home is None:
+                continue
+            if matches_home:
+                _reap_process_group(pid)
         pid_file.unlink(missing_ok=True)
+        for stale_name in lifecycle_files[name]:
+            (env.state_dir / stale_name).unlink(missing_ok=True)
 
-    stale_files = ["manager-health.port", "manager.launch.json"]
-    if include_event_server:
-        stale_files.extend(("event-server.port", "event-server.launch.json"))
-    for name in stale_files:
-        (env.state_dir / name).unlink(missing_ok=True)
 
 def _drop_session(name):
     """Retire *name* from whichever install this process is bound to.
