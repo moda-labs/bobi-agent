@@ -7,9 +7,18 @@ driven through injected register/client seams so the subscription wiring is
 covered too.
 """
 
+import threading
 import time
 
-from bobi.supervisor.admin import AdminListener, admin_topic
+import pytest
+
+from bobi.supervisor.admin import (
+    METRICS_QUERY_CAPACITY,
+    METRICS_QUERY_QUEUE_CAPACITY,
+    METRICS_QUERY_WORKERS,
+    AdminListener,
+    admin_topic,
+)
 
 
 def _wait(predicate, timeout=5.0):
@@ -158,18 +167,208 @@ def test_usage_command_returns_the_rolling_summary(monkeypatch):
     monkeypatch.setattr(listener, "_read_usage", lambda args: usage)
     listener._dispatch(_event("usage", command_id="u1",
                               args={"window_seconds": 259200}))
+    assert _wait(lambda: listener._published)
     _topic, _source, data = listener._published[0]
     assert data["status"] == "done"
     assert data["result"] == {"usage": usage}
 
 
-def test_usage_command_requires_a_positive_window():
+def test_usage_command_defaults_to_a_24_hour_window(monkeypatch):
     listener = _listener()
+    seen = []
+    monkeypatch.setattr(
+        "bobi.webapp.runs.build_usage_summary",
+        lambda root, **kwargs: seen.append(kwargs) or {"window": kwargs},
+    )
+    monkeypatch.setattr(
+        "bobi.service.manager_session_name",
+        lambda _root: "manager",
+    )
+
     listener._dispatch(_event("usage", command_id="u1", args={}))
+    assert _wait(lambda: listener._published)
+
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert seen[0]["window_seconds"] == 24 * 60 * 60
+
+
+@pytest.mark.parametrize("window", [0, -1, "invalid", True])
+def test_usage_command_rejects_an_explicit_invalid_window(window):
+    listener = _listener()
+    listener._dispatch(_event(
+        "usage", command_id="u1", args={"window_seconds": window},
+    ))
+    assert _wait(lambda: listener._published)
     data = listener._published[0][2]
     assert data["status"] == "error"
     assert data["result"]["code"] == "bad_request"
     assert "window_seconds" in data["error"]
+
+def test_metrics_turn_runs_on_dedicated_executor(monkeypatch):
+    listener = _listener()
+    called_on = []
+
+    def execute(command, args):
+        called_on.append(threading.current_thread().name)
+        return {command: {"turn": {"turn_id": args["turn_id"]}}}
+
+    monkeypatch.setattr(listener, "_execute_metrics_query", execute)
+    listener._dispatch(_event("usage_turn", command_id="mt1",
+                              args={"turn_id": "turn-1"}))
+
+    assert _wait(lambda: listener._published)
+    assert called_on[0].startswith("admin-metrics-query")
+    assert listener._published[0][2] == {
+        "command_id": "mt1",
+        "deployment": {"fleet": "acme", "instance": "prod-1"},
+        "status": "done",
+        "result": {"usage_turn": {"turn": {"turn_id": "turn-1"}}},
+    }
+
+def test_metrics_saturation_fails_fast_without_delaying_status(monkeypatch):
+    listener = _listener(telemetry=FakeTelemetry(snapshot={"status": "ready"}))
+    monkeypatch.setattr(listener._metrics_slots, "acquire", lambda blocking=False: False)
+
+    listener._dispatch(_event("usage_turn", command_id="busy",
+                              args={"turn_id": "turn-1"}))
+    listener._dispatch(_event("status", command_id="status"))
+
+    busy, status = [item[2] for item in listener._published]
+    assert busy["status"] == "error"
+    assert busy["result"] == {"code": "metrics_busy", "retry_after_ms": 250}
+    assert status["status"] == "done"
+    assert status["result"] == {"status": "ready"}
+
+
+def test_metrics_executor_capacity_matches_documented_workers_and_queue():
+    assert METRICS_QUERY_WORKERS == 4
+    assert METRICS_QUERY_QUEUE_CAPACITY == 8
+    assert METRICS_QUERY_CAPACITY == 12
+
+
+def test_metrics_dispatch_rejects_after_shutdown_begins(monkeypatch):
+    listener = _listener()
+    listener._metrics_shutdown_grace_seconds = 0.01
+    listener.stop()
+
+    listener._dispatch(_event("usage_turn", command_id="after-stop",
+                              args={"turn_id": "turn-1"}))
+
+    payload = listener._published[-1][2]
+    assert payload["status"] == "error"
+    assert payload["result"] == {"code": "metrics_busy", "retry_after_ms": 250}
+    health = listener.metrics_query_health()
+    assert health["accepting"] is False
+    assert health["rejected_queries"] == 1
+
+
+def test_metrics_shutdown_cancels_queue_and_releases_each_permit_once(monkeypatch):
+    listener = _listener()
+    listener._metrics_shutdown_grace_seconds = 0.01
+    release = threading.Event()
+    started = threading.Event()
+    release_calls = 0
+    original_release = listener._metrics_slots.release
+
+    def counted_release():
+        nonlocal release_calls
+        release_calls += 1
+        original_release()
+
+    def blocked_query(_command, _args):
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    monkeypatch.setattr(listener._metrics_slots, "release", counted_release)
+    monkeypatch.setattr(listener, "_execute_metrics_query", blocked_query)
+    for index in range(METRICS_QUERY_CAPACITY):
+        listener._dispatch(_event(
+            "usage_turn", command_id=f"query-{index}",
+            args={"turn_id": f"turn-{index}"},
+        ))
+    assert started.wait(timeout=1)
+
+    listener.stop()
+    release.set()
+    assert _wait(lambda: release_calls == METRICS_QUERY_CAPACITY)
+
+    health = listener.metrics_query_health()
+    assert health["active_workers"] == 0
+    assert health["queue_depth"] == 0
+    assert release_calls == METRICS_QUERY_CAPACITY
+
+
+def test_metrics_shutdown_wait_is_bounded(monkeypatch):
+    listener = _listener()
+    listener._metrics_shutdown_grace_seconds = 0.05
+    release = threading.Event()
+    started = threading.Event()
+
+    def blocked_query(_command, _args):
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    monkeypatch.setattr(listener, "_execute_metrics_query", blocked_query)
+    listener._dispatch(_event("usage_turn", command_id="blocked",
+                              args={"turn_id": "turn-1"}))
+    assert started.wait(timeout=1)
+
+    before = time.monotonic()
+    listener.stop()
+    elapsed = time.monotonic() - before
+    release.set()
+
+    assert elapsed < 0.25
+    assert listener.metrics_query_health()["accepting"] is False
+
+
+def test_metrics_query_health_reports_activity_rejections_deadlines_and_latency(monkeypatch):
+    from bobi.metrics.query import MetricsQueryError
+
+    listener = _listener()
+    release = threading.Event()
+    started = threading.Event()
+    outcomes = iter(("ok", "deadline", "blocked"))
+
+    def execute(_command, _args):
+        outcome = next(outcomes)
+        if outcome == "deadline":
+            raise MetricsQueryError(
+                "metrics query exceeded its one-second deadline",
+                "metrics_busy", retry_after_ms=250,
+            )
+        if outcome == "blocked":
+            started.set()
+            release.wait(timeout=5)
+        return {"outcome": outcome}
+
+    monkeypatch.setattr(listener, "_execute_metrics_query", execute)
+    listener._dispatch(_event("usage_turn", command_id="ok",
+                              args={"turn_id": "turn-ok"}))
+    assert _wait(lambda: listener.metrics_query_health()["completed_queries"] == 1)
+    listener._dispatch(_event("usage_turn", command_id="deadline",
+                              args={"turn_id": "turn-deadline"}))
+    assert _wait(lambda: listener.metrics_query_health()["deadline_cancellations"] == 1)
+    listener._dispatch(_event("usage_turn", command_id="blocked",
+                              args={"turn_id": "turn-blocked"}))
+    assert started.wait(timeout=1)
+
+    health = listener.metrics_query_health()
+    assert health["active_workers"] == 1
+    assert health["queue_depth"] == 0
+    assert health["deadline_cancellations"] == 1
+    assert health["completed_queries"] == 2
+    assert set(health["query_latency_ms"]) == {"p50", "p95", "p99"}
+    assert all(value is not None for value in health["query_latency_ms"].values())
+
+    monkeypatch.setattr(listener._metrics_slots, "acquire", lambda blocking=False: False)
+    listener._dispatch(_event("usage_turn", command_id="rejected",
+                              args={"turn_id": "turn-rejected"}))
+    assert listener.metrics_query_health()["rejected_queries"] == 1
+    release.set()
 
 
 def test_session_log_command_returns_history(monkeypatch):

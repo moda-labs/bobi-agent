@@ -162,6 +162,37 @@ class TestMakeDeferHook:
 
 class TestRunAgentSupervisedNormal:
     @pytest.mark.asyncio
+    async def test_static_policy_model_reaches_supervised_brain(self, tmp_path, monkeypatch):
+        import json
+        from bobi.metrics.runtime import MetricsRuntime
+        from tests.metrics.test_routing import configured, context
+
+        raw = configured()
+        raw["policy"]["mode"] = "enforce"
+        raw["policy"]["scope"]["entry_points"] = ["subagent_supervised"]
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        monkeypatch.setattr("bobi.subagent.session_brain_label", lambda: "codex")
+        runtime = MetricsRuntime(tmp_path, mode="enabled")
+        monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
+        captured = []
+        class FakeBrain:
+            def make_session(self, **kwargs):
+                captured.append(kwargs)
+                return _CapturingBrainSession()
+        with patch("bobi.brain.get_brain", lambda kind=None: FakeBrain()), \
+             patch(f"{SDK_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.save_session_id"), \
+             patch(f"{TURNS_PATCH}.log_activity"), \
+             patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
+            result = await _run_agent_supervised("initial task", str(tmp_path), "run-1",
+                "check", 60, role="engineer", fresh=True)
+        assert result.success
+        assert captured[0]["options"]["model"] == "cheap"
+        assert runtime.close(timeout=2)
+
+    @pytest.mark.asyncio
     async def test_scheduled_auth_incident_alerts_once(self, monkeypatch):
         posts = []
         monkeypatch.setenv("BOBI_BRAIN", "stub")
@@ -1664,6 +1695,52 @@ class _CapturingBrainSession:
 
 
 class TestLaunchModelResolution:
+    @pytest.mark.parametrize("launcher,explicit", [("phase", False), ("persistent", False),
+                                                  ("persistent", True)])
+    def test_launcher_static_routing_contract(self, tmp_path, monkeypatch, launcher, explicit):
+        from dataclasses import replace
+        import json
+        from bobi.metrics.collector import MetricsCollectorService
+        from bobi.metrics.routing import resolve_route
+        from bobi.metrics.runtime import MetricsRuntime
+        from bobi.metrics.store import connect
+        from tests.metrics.test_routing import configured, context
+
+        raw = configured()
+        raw["policy"]["mode"] = "enforce"
+        raw["policy"]["scope"]["entry_points"] = ["subagent_phase", "subagent_persistent"]
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        monkeypatch.setattr("bobi.subagent.session_brain_label", lambda: "codex")
+        runtime = MetricsRuntime(tmp_path, mode="enabled")
+        outcomes = []
+        class RoutingSession(FakeSession):
+            def __init__(self, **kwargs):
+                super().__init__()
+                self.routing = kwargs["routing"]
+                self.name = kwargs["name"]
+            def start(self, startup_prompt=None, **kwargs):
+                outcome = asyncio.run(resolve_route(replace(self.routing,
+                    prompt=startup_prompt or ""), runtime=runtime))
+                outcomes.append(outcome)
+                turn = runtime.begin_turn(self.name, provider="openai", model_requested=outcome.model)
+                turn.finish(status="completed")
+                return True
+        with patch(SESSION_PATCH, RoutingSession), patch(f"{SDK_PATCH}._emit_lifecycle_event"):
+            if launcher == "phase":
+                run_phase_blocking(run_key="1", phase="implement", cwd=str(tmp_path), role="engineer")
+            else:
+                run_persistent_agent(cwd=str(tmp_path), task="initial task", name="agent",
+                    role="engineer", model="operator-model" if explicit else "")
+        assert outcomes[0].model == ("operator-model" if explicit else "cheap")
+        assert (outcomes[0].decision is None) == explicit
+        assert runtime.close(timeout=2)
+        collector = MetricsCollectorService(tmp_path)
+        collector.collect_once()
+        with connect(collector.db_path, readonly=True) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM router_decisions").fetchone()[0] == (0 if explicit else 1)
+
     @pytest.fixture(autouse=True)
     def no_ambient_model(self, monkeypatch):
         monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
