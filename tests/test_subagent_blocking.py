@@ -165,7 +165,7 @@ class TestRunAgentSupervisedNormal:
     async def test_static_policy_model_reaches_supervised_brain(self, tmp_path, monkeypatch):
         import json
         from bobi.metrics.runtime import MetricsRuntime
-        from tests.metrics.test_routing import configured, context
+        from tests.metrics.helpers import configured, context
 
         raw = configured()
         raw["policy"]["mode"] = "enforce"
@@ -1704,7 +1704,7 @@ class TestLaunchModelResolution:
         from bobi.metrics.routing import resolve_route
         from bobi.metrics.runtime import MetricsRuntime
         from bobi.metrics.store import connect
-        from tests.metrics.test_routing import configured, context
+        from tests.metrics.helpers import configured, context
 
         raw = configured()
         raw["policy"]["mode"] = "enforce"

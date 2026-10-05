@@ -1,4 +1,0 @@
-{"thread_id":"fixture-codex-thread","type":"thread.started"}
-{"type":"turn.started"}
-{"type":"token_count","usage":{"cached_input_tokens":1024,"input_tokens":2048,"output_tokens":20}}
-{"turn_id":"fixture-codex-turn","type":"turn.completed","usage":{"cache_write_input_tokens":128,"cached_input_tokens":1024,"input_tokens":4096,"output_tokens":30,"reasoning_output_tokens":12,"total_tokens":4126}}

@@ -17,7 +17,7 @@ from bobi.metrics.router import provider_subprocess_env
 from bobi.metrics.runtime import MetricsRuntime
 from bobi.metrics.store import connect
 from bobi.sdk import save_session_id
-from tests.metrics.test_routing import configured, context
+from tests.metrics.helpers import configured, context
 from .conftest import _drain
 
 

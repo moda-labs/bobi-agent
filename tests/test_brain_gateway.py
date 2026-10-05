@@ -223,7 +223,7 @@ async def test_sdk_spawn_does_not_restore_routing_credentials(tmp_path, monkeypa
 
     from claude_agent_sdk._internal.transport import subprocess_cli
 
-    from tests.metrics.test_routing import configured as experiment_config
+    from tests.metrics.helpers import configured as experiment_config
 
     monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
     monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-policy-secret")

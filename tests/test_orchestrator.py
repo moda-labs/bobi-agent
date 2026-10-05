@@ -741,7 +741,7 @@ class TestRunWorkflow:
     def test_routed_workflow_keeps_model_across_same_agent_steps(self, monkeypatch):
         from dataclasses import replace
         from bobi.metrics.routing import RouteOutcome
-        from tests.metrics.test_route_admission import decision
+        from tests.metrics.helpers import decision
 
         brain, calls, clients = _recording_brain()
         monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
@@ -761,7 +761,7 @@ class TestRunWorkflow:
     @pytest.mark.parametrize("explicit_model", ["", "operator-model"])
     def test_static_policy_workflow_reaches_brain_with_routed_model(self, tmp_path, monkeypatch, explicit_model):
         from bobi.metrics.runtime import MetricsRuntime
-        from tests.metrics.test_routing import configured, context
+        from tests.metrics.helpers import configured, context
 
         _bind_runtime_root(tmp_path, monkeypatch)
         raw = configured()
@@ -808,7 +808,7 @@ class TestRunWorkflow:
     @pytest.mark.parametrize("retry", [False, True])
     def test_static_routed_workflow_resume_does_not_load_policy(self, tmp_path, monkeypatch, retry):
         from bobi.metrics.runtime import MetricsRuntime
-        from tests.metrics.test_routing import configured, context
+        from tests.metrics.helpers import configured, context
 
         _bind_runtime_root(tmp_path, monkeypatch)
         raw = configured()
@@ -854,7 +854,7 @@ class TestRunWorkflow:
     def test_initial_route_checkpoint_failure_executes_control(self, monkeypatch):
         from dataclasses import replace
         from bobi.metrics.routing import RouteOutcome
-        from tests.metrics.test_route_admission import decision
+        from tests.metrics.helpers import decision
 
         brain, calls, clients = _recording_brain()
         monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)

@@ -17,7 +17,7 @@ async def test_static_routed_model_runs_in_real_claude_cli(tmp_path, monkeypatch
     from bobi.brain import get_brain
     from bobi.metrics.routing import resolve_route
     from bobi.metrics.runtime import MetricsRuntime
-    from tests.metrics.test_routing import configured, context
+    from tests.metrics.helpers import configured, context
     from dataclasses import replace
     from bobi import paths
     from bobi.brain import GATEWAY_BASE_URL_ENV
