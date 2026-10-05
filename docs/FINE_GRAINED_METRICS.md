@@ -69,6 +69,50 @@ not produced.
 
 ## Inspection
 
+### Local web view
+
+Start `bobi app start`, open the installed agent, and select **metrics & routing**
+(`#/agents/<name>/metrics`). The existing run panel also has **transcript**,
+**usage**, and **routing** sections; these do not change chat or resume behavior.
+
+- Filter by a 24-hour, 7-day, or 31-day window, recorded provider model, and
+  session name. Model filtering selects turns with a matching invocation,
+  including canonical terminal usage whose model uses a provider alias.
+- Tiles and UTC buckets use canonical usage, not the sum of provenance rows.
+  Missing dimensions read **not recorded**; estimated usage is labeled and
+  invocation coverage separates exact, estimated, and unknown measurements.
+- Routing shows assignment, recommendation, policy confidence, selected and
+  recorded provider models, latency, and fallbacks. Confidence is the policy
+  value, not the assignment bucket. Distinct call IDs count policy calls;
+  subsequent turns can reuse a session route without another policy request.
+- Reported and estimated costs remain separate. No savings claim or pricing
+  inference is made. Collector health is global, not limited by view filters.
+- Run drilldowns match the session **name** across telemetry lifecycles in the
+  last 31 days. Names are not unique telemetry IDs; each turn shows its actual
+  session and turn IDs. Provenance and superseded rows are explicitly nonadditive.
+
+Authenticated, read-only endpoints under `/api/agents/{name}/metrics`:
+
+| Endpoint | Parameters | Response |
+|---|---|---|
+| `summary` | Required ISO `from`, `to`; optional `model`, `session_name` | Canonical totals, coverage, UTC buckets, routing counts/models, collector health |
+| `turns` | Same range/filters; optional `session_id`, `limit`, `cursor` | Newest-first turns, usage, invocations, allowlisted policy fields, `next_cursor` |
+| `sessions/{id}` | Optional `limit`, `cursor` | Existing session detail and bounded turn page |
+| `turns/{id}` | None | Existing turn detail plus allowlisted policy fields |
+
+These use the app's existing token and loopback Host guard, `Cache-Control:
+no-store`, and filter-bound keyset cursors. Reads use short SQLite read-only WAL
+snapshots, a one-second query deadline, 200-row/512-KiB bounds, and at most four
+concurrent local readers. Invalid queries return 400/422; unknown records 404;
+busy/unavailable storage 503 with `Retry-After`. The view refreshes every ten
+seconds on the latest page, pauses in hidden tabs, and cancels reads on navigation.
+It does not run migrations, checkpoints, models, or routing policies.
+
+Local and Docker-hosted `LocalRuntime` are supported. Hosted `EventBusRuntime`
+returns an explicit `metrics_unsupported` response; it does not show false zeros
+or fetch a host's unrelated local database. No new dependencies or frontend build
+step are required.
+
 ```bash
 bobi agent "$BOBI_AGENT_NAME" metrics status --json
 bobi agent "$BOBI_AGENT_NAME" metrics reconcile --turn-id "<turn-id>" --wait --json

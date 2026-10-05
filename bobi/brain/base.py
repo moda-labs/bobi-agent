@@ -100,6 +100,9 @@ class BrainToolExecution:
     ended_at_us: int | None = None
     status: str = "completed"
     is_error: bool = False
+    input_bytes: int | None = None
+    output_bytes: int | None = None
+    metadata_json: str = "{}"
 
 
 @dataclass

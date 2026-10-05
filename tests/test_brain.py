@@ -724,6 +724,15 @@ def test_result_to_turn_handles_error_and_status():
     assert turn.result_text == "API Error: 529 Overloaded"
 
 
+def test_result_to_turn_classifies_5xx_api_error_without_error_flag():
+    msg = _result(is_error=False, result='API Error: 521 {"title":"Error 521: Web server is down"}')
+    turn = _result_to_turn(msg)
+    assert turn.is_error is True
+    assert turn.error_kind == "api_error"
+    assert "Error 521" in turn.error_message
+
+
+
 def test_result_to_turn_normalizes_max_turns_error():
     msg = _result(
         is_error=True,

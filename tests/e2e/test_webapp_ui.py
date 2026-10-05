@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import time
 
 import pytest
 
@@ -35,6 +36,7 @@ pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import expect  # noqa: E402
 
 from tests.test_webapp_runs import NOW, _monitor, _session, _workflow  # noqa: E402
+from tests.metrics.helpers import seed_dashboard  # noqa: E402
 
 RUNS_URL = re.compile(r"/api/agents/[^/]+/runs\?")
 DETAILS_URL = re.compile(r"/api/agents/[^/]+/runs/[^/]+/details")
@@ -45,6 +47,123 @@ RESUME_URL = re.compile(r"/resume")
 
 # The runs table pages at 100. One row past it is the whole pager contract.
 PAGE_SIZE = 100
+
+
+class TestMetricsView:
+    def test_metrics_navigation_filters_drilldown_and_refresh(self, webapp, page):
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        _agent(page, webapp)
+        page.get_by_role("link", name="metrics & routing", exact=True).click()
+        expect(page.locator(".metrics-tile strong").first).to_have_text("720")
+        expect(page.locator(".metrics-page")).to_contain_text("2 / 1")
+        rows = page.locator(".metrics-page .runs tbody tr")
+        expect(rows.filter(has_text="treatment_jev")).to_have_count(3)
+        expect(rows.filter(has_text="invalid_config")).to_contain_text("not recorded / not recorded")
+        page.screenshot(path="/tmp/bobi-metrics-overview.png", full_page=True)
+        routine = rows.filter(has_text="confidence 0.720")
+        expect(routine).to_contain_text("100 / 0")
+        routine.get_by_role("button").click()
+        expect(page.locator(".metrics-detail")).to_contain_text("provider_stream")
+        expect(page.locator(".metrics-detail")).to_contain_text("ds/deepseek-flash")
+        expect(page.locator(".metrics-detail")).to_contain_text("deepseek-flash")
+        page.locator(".metrics-detail").screenshot(path="/tmp/turn-detail-tables.png")
+        page.locator(".detail-nav-tabs .tab", has_text="Token Usage").click()
+        expect(page.locator(".panel-routing")).to_be_hidden()
+        expect(page.locator(".panel-usage")).to_be_visible()
+        page.locator(".metrics-detail").screenshot(path="/tmp/turn-detail-usage-tab.png")
+        page.locator(".detail-nav-tabs .tab", has_text="Routing & Calls").click()
+        expect(page.locator(".panel-routing")).to_be_visible()
+        expect(page.locator(".panel-usage")).to_be_hidden()
+        page.locator(".metrics-detail").screenshot(path="/tmp/turn-detail-routing-tab.png")
+        page.locator(".detail-nav-tabs [data-tab=all]").click()
+        expect(page.locator(".panel-routing")).to_be_visible()
+        expect(page.locator(".panel-usage")).to_be_visible()
+        page.screenshot(path="/tmp/bobi-metrics-dashboard.png", full_page=True)
+        with page.expect_response(re.compile(r"/metrics/summary\?")):
+            page.wait_for_timeout(10500)
+        expect(page.locator(".metrics-detail")).to_be_visible()
+        page.get_by_role("textbox", name="Provider model filter").fill("deepseek-v4-pro")
+        page.get_by_role("textbox", name="Provider model filter").press("Tab")
+        expect(page.locator(".metrics-tile strong").first).to_have_text("620")
+        expect(rows.filter(has_text="confidence 0.720")).to_have_count(0)
+        rows.filter(has_text="Reused session route").get_by_role("button").click()
+        expect(page.locator(".metrics-detail")).to_contain_text("0.96")
+        expect(page.locator(".metrics-detail")).not_to_contain_text("private-task")
+        page.get_by_role("link", name=webapp.agent, exact=False).first.click()
+        expect(page.locator(".metrics-page")).to_have_count(0)
+        page.wait_for_timeout(500)
+        assert errors == []
+
+    def test_filter_change_during_read_and_navigation_abort(self, webapp, page):
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        held = []
+
+        def hold_first(route):
+            if not held:
+                held.append(route)
+            else:
+                route.continue_()
+
+        page.route(re.compile(r"/metrics/summary\?"), hold_first)
+        page.goto(webapp.agent_url() + "/metrics")
+        expect(page.get_by_role("textbox", name="Provider model filter")).to_be_visible()
+        page.get_by_role("textbox", name="Provider model filter").fill("deepseek-v4-pro")
+        page.get_by_role("textbox", name="Provider model filter").press("Tab")
+        assert held
+        held[0].continue_()
+        expect(page.locator(".metrics-tile strong").first).to_have_text("620")
+        held.clear()
+        page.get_by_role("button", name="refresh", exact=True).click()
+        expect(page.get_by_role("button", name="refresh", exact=True)).to_be_disabled()
+        page.get_by_role("link", name=webapp.agent, exact=False).first.click()
+        expect(page.locator(".metrics-page")).to_have_count(0)
+        expect(page.locator("#health")).not_to_have_class("dot stale")
+
+    def test_metrics_run_slab_preserves_transcript_and_composer(self, webapp, page, monkeypatch):
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        _seed_runs(webapp.install)
+        _seed_transcript(webapp, monkeypatch, "worker-a", [
+            _entry("assistant", "Original transcript stays available", "2026-08-01T09:15:00Z"),
+        ])
+        _agent(page, webapp)
+        page.locator(".runs tbody tr", has_text="Fix the flaky test").click()
+        tabs = page.locator("[data-el=slabTabs]")
+        tabs.get_by_role("button", name="usage", exact=True).click()
+        expect(page.locator(".transcript")).to_contain_text("across lifecycles")
+        page.locator(".transcript .runs tbody tr", has_text="confidence 0.960").first.get_by_role("button").click()
+        expect(page.locator(".transcript")).to_contain_text("Usage measurements")
+        expect(page.locator("[data-el=slabComposer]")).to_be_hidden()
+        tabs.get_by_role("button", name="routing", exact=True).click()
+        page.locator(".transcript .runs tbody tr", has_text="confidence 0.720").get_by_role("button").click()
+        expect(page.locator(".transcript")).to_contain_text("ds/deepseek-flash")
+        tabs.get_by_role("button", name="transcript", exact=True).click()
+        expect(page.locator(".transcript")).to_contain_text("Original transcript stays available")
+        page.locator("[data-el=slabClose]").click()
+        expect(page.locator(".modal-backdrop")).not_to_have_class("modal-backdrop open")
+
+    def test_metrics_unavailable_empty_and_untrusted_model_text(self, webapp, page):
+        page.goto(webapp.agent_url() + "/metrics")
+        expect(page.get_by_role("status")).to_contain_text("metrics database is not ready")
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        page.get_by_role("button", name="refresh", exact=True).click()
+        expect(page.locator(".metrics-tile strong").first).to_have_text("720")
+        from bobi.metrics.store import connect
+
+        connection = connect(webapp.install.repo_path / "state/metrics/metrics.db")
+        payload = '<img src=x onerror="window.metricsInjected=true">'
+        connection.execute("UPDATE router_decisions SET model_selected=?", (payload,))
+        connection.commit()
+        connection.close()
+        page.get_by_role("button", name="refresh", exact=True).click()
+        expect(page.locator(".metrics-page")).to_contain_text(payload)
+        assert page.locator(".metrics-page img").count() == 0
+        assert page.evaluate("window.metricsInjected") is None
+        page.get_by_role("textbox", name="Session name", exact=True).fill("absent")
+        page.get_by_role("textbox", name="Session name", exact=True).press("Tab")
+        expect(page.locator(".metrics-page")).to_contain_text("No recorded turns in this window.")
+        expect(page.locator(".metrics-tile strong").first).to_have_text("not recorded")
 
 
 # --- opening a route --------------------------------------------------------

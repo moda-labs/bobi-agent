@@ -62,6 +62,16 @@ INVOCATION_PUBLIC_COLUMNS = (
     "error_kind",
 )
 
+ROUTING_PUBLIC_SQL = (
+    "d.router_decision_id,d.variant_id,d.model_selected,d.fallback_reason,"
+    "d.router_latency_ms,json_extract(d.metadata_json,'$.policy.mode') AS policy_mode,"
+    "json_extract(d.metadata_json,'$.policy.status') AS policy_status,"
+    "json_extract(d.metadata_json,'$.policy.recommended_model') AS recommended_model,"
+    "json_extract(d.metadata_json,'$.policy.confidence') AS confidence,"
+    "json_extract(d.metadata_json,'$.policy.latency_ms') AS policy_latency_ms,"
+    "json_extract(d.metadata_json,'$.policy.call_id') AS policy_call_id"
+)
+
 
 def _columns(columns: tuple[str, ...]) -> str:
     return ",".join(columns)
@@ -379,6 +389,7 @@ class MetricsQueries:
         conn.execute("PRAGMA busy_timeout = 50")
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         try:
+            conn.execute("BEGIN")
             payload = _bounded(build(conn))
             if time.monotonic() >= deadline:
                 raise MetricsQueryError("metrics query exceeded its deadline", "metrics_busy", retry_after_ms=250)
@@ -396,10 +407,14 @@ class MetricsQueries:
     def summary(self, args: dict[str, Any]) -> dict[str, object]:
         start, end = _time_range(args)
         session_id = str(args.get("session_id") or args.get("session") or "").strip() or None
+        session_name = str(args.get("session_name") or "").strip() or None
         model = str(args.get("model") or "").strip() or None
         run_key = str(args.get("run_key") or "").strip() or None
         experiment_id = str(args.get("experiment_id") or "").strip() or None
         variant_id = str(args.get("variant_id") or "").strip() or None
+        dashboard = args.get("include_dashboard", False)
+        if not isinstance(dashboard, bool):
+            raise MetricsQueryError("include_dashboard must be a boolean", "bad_request")
         raw_group_by = args.get("group_by") or []
         if not isinstance(raw_group_by, list):
             raise MetricsQueryError("group_by must be a list", "bad_request")
@@ -421,8 +436,11 @@ class MetricsQueries:
             if session_id:
                 filters.append("t.session_id=?")
                 params.append(session_id)
+            if session_name:
+                filters.append("s.session_name=?")
+                params.append(session_name)
             if model:
-                filters.append("b.model=?")
+                filters.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND i.model_selected=?)" if dashboard else "b.model=?")
                 params.append(model)
             if run_key:
                 filters.append("s.run_key=?")
@@ -560,6 +578,9 @@ class MetricsQueries:
             if session_id:
                 coverage_filters.append("i.turn_id IN (SELECT turn_id FROM turns WHERE session_id=?)")
                 coverage_values.append(session_id)
+            if session_name:
+                coverage_filters.append("i.turn_id IN (SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id=t.session_id WHERE s.session_name=?)")
+                coverage_values.append(session_name)
             if model:
                 coverage_filters.append("i.model_selected=?")
                 coverage_values.append(model)
@@ -577,12 +598,119 @@ class MetricsQueries:
                 usage["invocation_granularity_turns"],
                 usage["turn_granularity_turns"],
             )
-            return {
+            payload = {
                 "metrics_schema_version": SCHEMA_VERSION,
                 "totals": totals,
                 "groups": groups,
                 "coverage": coverage,
             }
+            if dashboard:
+                bucket_us = 3_600_000_000 if end - start <= 2 * 86_400_000_000 else 86_400_000_000
+                buckets = conn.execute(
+                    "SELECT (t.started_at_us / ?) * ? AS started_at_us," +
+                    ",".join(_strict_sum(column) for column in TOKEN_COLUMNS) +
+                    ",MAX(b.is_estimated) AS is_estimated FROM best_usage b "
+                    "JOIN turns t ON t.turn_id=b.turn_id JOIN sessions s ON s.session_id=t.session_id "
+                    f"WHERE {where} AND ({chosen_usage}) GROUP BY 1 ORDER BY 1",
+                    (bucket_us, bucket_us, *params),
+                ).fetchall()
+                routing_filters = [item.replace("b.model=?", "EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND i.model_selected=?)") for item in filters]
+                decision_where = " AND ".join(routing_filters)
+                routing = conn.execute(
+                    "SELECT COUNT(*) AS turns,COUNT(d.router_decision_id) AS routed_turns,"
+                    "COUNT(DISTINCT json_extract(d.metadata_json,'$.policy.call_id')) AS policy_calls,"
+                    "SUM(CASE WHEN d.fallback_reason IS NOT NULL OR "
+                    "json_extract(s.metadata_json,'$.router_fallback.fallback_reason') IS NOT NULL "
+                    "THEN 1 ELSE 0 END) AS fallback_turns,"
+                    "AVG(d.router_latency_ms) AS mean_router_latency_ms "
+                    "FROM turns t JOIN sessions s ON s.session_id=t.session_id "
+                    "LEFT JOIN router_decisions d ON d.router_decision_id=(SELECT latest.router_decision_id "
+                    "FROM router_decisions latest WHERE latest.turn_id=t.turn_id "
+                    "ORDER BY latest.decided_at_us DESC,latest.router_decision_id DESC LIMIT 1) "
+                    f"WHERE {decision_where}", tuple(params),
+                ).fetchone()
+                models = conn.execute(
+                    "SELECT d.model_selected,COUNT(*) AS turns FROM turns t "
+                    "JOIN sessions s ON s.session_id=t.session_id JOIN router_decisions d "
+                    "ON d.router_decision_id=(SELECT latest.router_decision_id FROM router_decisions latest "
+                    "WHERE latest.turn_id=t.turn_id ORDER BY latest.decided_at_us DESC,"
+                    f"latest.router_decision_id DESC LIMIT 1) WHERE {decision_where} "
+                    "GROUP BY d.model_selected ORDER BY turns DESC LIMIT ?",
+                    (*params, MAX_ROWS + 1),
+                ).fetchall()
+                _enforce_row_count(list(buckets), list(models))
+                payload.update(
+                    range={"from_us": start, "to_us": end, "bucket_seconds": bucket_us // 1_000_000},
+                    buckets=[_row(row) for row in buckets],
+                    routing={**(_row(routing) or {}), "models": [_row(row) for row in models]},
+                )
+            return payload
+
+        return self._run(build)
+
+    def turns(self, args: dict[str, Any]) -> dict[str, object]:
+        start, end = _time_range(args)
+        limit = _limit(args)
+        filters = {"from_us": start, "to_us": end, "limit": limit}
+        conditions = ["t.started_at_us>=?", "t.started_at_us<?"]
+        params: list[object] = [start, end]
+        for key, column in (("session_id", "t.session_id"), ("session_name", "s.session_name"),
+                            ("run_key", "s.run_key")):
+            if args.get(key):
+                value = _required_id(args, key)
+                filters[key] = value
+                conditions.append(f"{column}=?")
+                params.append(value)
+        if args.get("model"):
+            model = _required_id(args, "model")
+            filters["model"] = model
+            conditions.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND i.model_selected=?)")
+            params.append(model)
+        position = _decode_cursor(args.get("cursor"), filters, ("started_at_us", "turn_id"))
+        if position is not None:
+            if type(position["started_at_us"]) is not int or not isinstance(position["turn_id"], str):
+                raise MetricsQueryError("invalid cursor position", "invalid_cursor")
+            conditions.append("(t.started_at_us,t.turn_id)<(?,?)")
+            params.extend((position["started_at_us"], position["turn_id"]))
+
+        def build(conn: sqlite3.Connection) -> dict[str, object]:
+            selected = conn.execute(
+                "SELECT t.turn_id,t.session_id,t.turn_index,t.started_at_us,t.status,t.wall_duration_ms,"
+                "s.session_name,s.role," + ROUTING_PUBLIC_SQL + ","
+                "json_extract(s.metadata_json,'$.router_fallback.fallback_reason') AS session_fallback_reason,"
+                "CASE WHEN json_extract(d.metadata_json,'$.policy.call_id') IS NOT NULL THEN EXISTS ("
+                "SELECT 1 FROM router_decisions prior JOIN turns previous ON previous.turn_id=prior.turn_id "
+                "WHERE json_extract(prior.metadata_json,'$.policy.call_id')="
+                "json_extract(d.metadata_json,'$.policy.call_id') AND "
+                "(previous.started_at_us,previous.turn_id)<(t.started_at_us,t.turn_id)) ELSE NULL END AS route_reused "
+                "FROM turns t JOIN sessions s ON s.session_id=t.session_id "
+                "LEFT JOIN router_decisions d ON d.router_decision_id=(SELECT latest.router_decision_id "
+                "FROM router_decisions latest WHERE latest.turn_id=t.turn_id "
+                "ORDER BY latest.decided_at_us DESC,latest.router_decision_id DESC LIMIT 1) "
+                "WHERE " + " AND ".join(conditions) + " ORDER BY t.started_at_us DESC,t.turn_id DESC LIMIT ?",
+                (*params, limit + 1),
+            ).fetchall()
+            rows = [_row(row) or {} for row in selected[:limit]]
+            for row in rows:
+                usage = conn.execute(
+                    "SELECT " + ",".join(_strict_sum(column) for column in TOKEN_COLUMNS) +
+                    ",MAX(b.is_estimated) AS is_estimated,GROUP_CONCAT(DISTINCT b.measurement_source) AS sources "
+                    f"FROM best_usage b WHERE b.turn_id=? AND ({_chosen_usage()})", (row["turn_id"],),
+                ).fetchone()
+                row["usage"] = _row(usage)
+                row["invocations"] = [_row(invocation) for invocation in conn.execute(
+                    "SELECT provider,model_requested,model_selected,status FROM llm_invocations "
+                    "WHERE turn_id=? ORDER BY invocation_index LIMIT ?", (row["turn_id"], MAX_ROWS + 1),
+                )]
+                _enforce_row_count(row["invocations"])
+            next_cursor = None
+            if len(selected) > limit:
+                last = rows[-1]
+                next_cursor = _encode_cursor(
+                    {"started_at_us": last["started_at_us"], "turn_id": last["turn_id"]}, filters,
+                )
+            return {"turns": rows, "next_cursor": next_cursor,
+                    "range": {"from_us": start, "to_us": end}}
 
         return self._run(build)
 
@@ -642,6 +770,9 @@ class MetricsQueries:
 
     def turn(self, args: dict[str, Any]) -> dict[str, object]:
         turn_id = _required_id(args, "turn_id")
+        include_policy = args.get("include_policy", False)
+        if not isinstance(include_policy, bool):
+            raise MetricsQueryError("include_policy must be a boolean", "bad_request")
 
         def build(conn: sqlite3.Connection) -> dict[str, object]:
             turn = conn.execute(
@@ -663,6 +794,12 @@ class MetricsQueries:
             usage = rows("SELECT measurement_id,scope,turn_id,invocation_id,provider,model,provider_event_id,measurement_source,is_estimated,estimator_name,estimator_version,token_semantics_version,input_tokens,uncached_input_tokens,cache_read_input_tokens,cache_write_input_tokens,cache_write_5m_input_tokens,cache_write_1h_input_tokens,cache_write_unknown_ttl_input_tokens,cache_write_breakdown_complete,output_tokens,reasoning_output_tokens,observed_at_us,supersedes_measurement_id FROM usage_measurements WHERE turn_id=? ORDER BY observed_at_us,measurement_id")
             costs = rows("SELECT cost_measurement_id,scope,session_id,turn_id,invocation_id,provider,model,amount_usd,measurement_source,is_estimated,price_snapshot_id,provider_event_id,observed_at_us FROM cost_measurements WHERE turn_id=? ORDER BY observed_at_us,cost_measurement_id")
             decisions = rows("SELECT router_decision_id,turn_id,experiment_id,variant_id,assignment_unit,assignment_status,assignment_algorithm,cohort,router_name,router_version,policy_version,feature_schema_version,candidate_models_json,model_selected,control_model,router_score,router_latency_ms,fallback_reason,decided_at_us FROM router_decisions WHERE turn_id=? ORDER BY decided_at_us")
+            if include_policy:
+                public_policy = {row["router_decision_id"]: row for row in rows(
+                    "SELECT " + ROUTING_PUBLIC_SQL + " FROM router_decisions d WHERE d.turn_id=?"
+                )}
+                for decision in decisions:
+                    decision.update(public_policy[decision["router_decision_id"]])
             _enforce_row_count(steps, invocations, tools, usage, costs, decisions)
             return {
                 "turn": _row(turn),

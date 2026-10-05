@@ -17,6 +17,7 @@
 
 import { fmtUsd, fmtEst, fmtTok, EST_NOTE } from "../shell.js";
 import { composerMode, resumeBody } from "./composer.js";
+import { renderRunMetrics } from "./metrics.js";
 
 /* --- formatting ------------------------------------------------------ */
 
@@ -100,6 +101,8 @@ export function mountAgent(el, { api, name }) {
           <p class="desc" data-el="desc"></p>
         </div>
         <div class="ah-right">
+          <a class="btn bobi-btn quiet small" data-el="metricsLink">metrics & routing</a>
+          <button class="btn bobi-btn quiet small" data-el="logsBtn" type="button">system logs</button>
           <div class="agent-header-state" data-el="band"></div>
           <span class="stat-popover" data-el="savedWrap">
             <span class="chip" data-el="savedChip" tabindex="0"
@@ -166,8 +169,25 @@ export function mountAgent(el, { api, name }) {
           <span class="meta" data-el="slabMeta"></span>
           <button class="btn bobi-btn small" data-el="slabClose" type="button">Close</button>
         </div>
+        <div class="metrics-toolbar slab-tabs" data-el="slabTabs" role="group"
+             aria-label="Run detail sections" hidden></div>
         <div class="transcript" data-el="slabBody"></div>
         <div class="composer" data-el="slabComposer" hidden></div>
+      </div>
+    </div>
+
+    <div class="logs-backdrop system-logs-backdrop" data-el="logsBackdrop" hidden>
+      <div class="modal system-logs-modal" role="dialog" aria-modal="true" aria-label="System Logs">
+        <div class="modal-head">
+          <span class="eyebrow">Daemon Logs</span>
+          <span class="path">manager.log</span>
+          <span class="meta" data-el="logsMeta"></span>
+          <div class="logs-head-actions">
+            <button class="btn bobi-btn quiet small" data-el="logsRefresh" type="button">↻ Refresh</button>
+            <button class="btn bobi-btn small" data-el="logsClose" type="button">Close</button>
+          </div>
+        </div>
+        <div class="system-logs-viewer" data-el="logsViewer"></div>
       </div>
     </div>`;
   el.appendChild(page);
@@ -178,6 +198,7 @@ export function mountAgent(el, { api, name }) {
   });
 
   els.title.textContent = name;
+  els.metricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics`;
 
   let timers = [];
   let health = null;
@@ -191,6 +212,52 @@ export function mountAgent(el, { api, name }) {
   let runsRequest = 0;
   let busyVerb = null;
   let runsError = "";       // why the table is empty, when it is not "no runs"
+
+  /* --- system logs modal -------------------------------------------- */
+  async function fetchAndRenderLogs() {
+    els.logsViewer.innerHTML = '<div class="logs-loading">Loading daemon logs…</div>';
+    const { ok, data } = await api(base + "/logs?lines=300");
+    if (!ok || !data) {
+      els.logsViewer.innerHTML = '<div class="log-line log-error">Failed to fetch logs from server.</div>';
+      return;
+    }
+    els.logsMeta.textContent = `${data.logs ? data.logs.length : 0} lines (${data.total_lines || 0} total)`;
+    els.logsViewer.innerHTML = "";
+    if (!data.logs || !data.logs.length) {
+      els.logsViewer.innerHTML = '<div class="log-line">No logs recorded yet.</div>';
+      return;
+    }
+    data.logs.forEach(line => {
+      const div = document.createElement("div");
+      div.className = "log-line";
+      if (line.includes("[ERROR]") || line.includes(" 521") || line.includes("Error 521") || line.includes("terminal model error")) {
+        div.classList.add("log-error");
+      } else if (line.includes("[WARNING]")) {
+        div.classList.add("log-warning");
+      } else if (line.includes("[INFO]")) {
+        div.classList.add("log-info");
+      }
+      div.textContent = line;
+      els.logsViewer.appendChild(div);
+    });
+    els.logsViewer.scrollTop = els.logsViewer.scrollHeight;
+  }
+
+  function openLogsModal() {
+    els.logsBackdrop.hidden = false;
+    fetchAndRenderLogs();
+  }
+
+  function closeLogsModal() {
+    els.logsBackdrop.hidden = true;
+  }
+
+  els.logsBtn.addEventListener("click", openLogsModal);
+  els.logsClose.addEventListener("click", closeLogsModal);
+  els.logsRefresh.addEventListener("click", fetchAndRenderLogs);
+  els.logsBackdrop.addEventListener("click", (e) => {
+    if (e.target === els.logsBackdrop) closeLogsModal();
+  });
 
   /* --- the agent that isn't there ----------------------------------- */
 
@@ -681,8 +748,10 @@ export function mountAgent(el, { api, name }) {
   // if the operator has moved on. Without it a reply lands in a slab now
   // showing a different run.
   let slabToken = 0;
+  let slabAbort;
 
   function closeSlab() {
+    slabAbort?.abort();
     slabToken += 1;
     els.backdrop.classList.remove("open");
     els.slabComposer.hidden = true;
@@ -695,7 +764,9 @@ export function mountAgent(el, { api, name }) {
   const onKey = (e) => { if (e.key === "Escape") closeSlab(); };
   document.addEventListener("keydown", onKey);
 
-  async function openSlab(row) {
+  async function openSlab(row, section = "transcript") {
+    slabAbort?.abort();
+    slabAbort = new AbortController();
     const token = ++slabToken;
     els.backdrop.classList.add("open");
     els.slabTitle.textContent = row.title || "";
@@ -704,6 +775,22 @@ export function mountAgent(el, { api, name }) {
     els.slabBody.appendChild(mk("div", "tr-empty", "Loading…"));
     els.slabComposer.hidden = true;
     els.slabComposer.innerHTML = "";
+    els.slabTabs.replaceChildren();
+    els.slabTabs.hidden = !row.session_id;
+    if (row.session_id) {
+      for (const key of ["transcript", "usage", "routing"]) {
+        const button = mk("button", "btn bobi-btn small", key);
+        button.type = "button";
+        button.setAttribute("aria-pressed", String(section === key));
+        button.addEventListener("click", () => openSlab(row, key));
+        els.slabTabs.append(button);
+      }
+      if (section !== "transcript") {
+        els.slabKind.textContent = section;
+        await renderRunMetrics(els.slabBody, { api, name, row, section, signal: slabAbort.signal });
+        return;
+      }
+    }
 
     // Rows with a session get a transcript; rows without get details.
     // That is the rule, and it is decided by data rather than by kind.
@@ -1103,6 +1190,8 @@ export function mountAgent(el, { api, name }) {
     setInterval(pollOverview, 30000),
   ];
   return () => {
+    slabAbort?.abort();
+    slabToken += 1;
     timers.forEach(clearInterval);
     clearTimeout(searchTimer);
     document.removeEventListener("keydown", onKey);

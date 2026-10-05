@@ -10,7 +10,7 @@ event_server: ${BOBI_EVENT_SERVER:-}
 
 services:
   - name: github
-    events: true
+    events: false
     required: true          # core service — block startup if unconfigured
     credentials:
       # The gh CLI auths via GH_TOKEN. Declared here (not just consumed at
@@ -22,14 +22,14 @@ services:
     required: true          # core service — block startup if unconfigured
     # Optional: comma-separated channel IDs to scope this team to specific
     # channels (so multiple teams can share one bot). Empty = whole workspace.
-    channels: ${SLACK_CHANNELS}
+    channels: ${SLACK_CHANNELS:-}
     credentials:
       bot_token: ${SLACK_BOT_TOKEN}
       app_token: ${SLACK_APP_TOKEN:-}
       # App signing secret. Registered with the event server so it can verify
       # THIS app's inbound events by api_app_id — required for several bots to
       # share one workspace (each app signs with its own secret).
-      signing_secret: ${SLACK_SIGNING_SECRET}
+      signing_secret: ${SLACK_SIGNING_SECRET:-}
 
 # Host-level dependencies. Checked by `bobi agent <name> doctor` and enforced
 # at dispatch time — agents cannot launch if a required dep is broken.
@@ -147,3 +147,10 @@ auto_dispatch:
     workflow: pr-closed
     cooldown: 60
     allow_self_authored: true
+
+agent: eng-team
+brain:
+  kind: claude
+  base_url: ${ANTHROPIC_BASE_URL}
+  model: ${LLM_MODEL}
+  effort: ${LLM_EFFORT:-medium}

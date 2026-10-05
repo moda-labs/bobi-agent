@@ -107,6 +107,12 @@ class TeamRuntime(ABC):
     runtimes must emit it identically, it is rendered once.
     """
 
+    def metrics(self, name: str, view: str, args: dict) -> dict:
+        """Bounded metrics reads; runtimes without local telemetry explicitly refuse."""
+        from bobi.metrics.query import MetricsQueryError
+
+        raise MetricsQueryError("metrics are unavailable for this runtime", "metrics_unsupported")
+
     @abstractmethod
     def dashboard(self) -> dict:
         """Every team slot this runtime can see."""
@@ -162,6 +168,10 @@ class TeamRuntime(ABC):
         timestamp (Codex rollouts), rather than synthesized. ``usage`` feeds
         the slab header.
         """
+
+    def system_logs(self, name: str, lines: int = 200) -> dict:
+        """Recent daemon system log lines (from manager.log) and health error detection."""
+        return {"ok": True, "logs": [], "total_lines": 0}
 
     @abstractmethod
     def run_details(self, name: str, run_id: str) -> dict:
@@ -561,6 +571,7 @@ class LocalRuntime(TeamRuntime):
     calls, chat delivered by a background thread per submit."""
 
     def __init__(self) -> None:
+        self._metrics_reads = threading.BoundedSemaphore(4)
         # Submit-then-poll job store. Carries only status and errors; the
         # reply itself reaches the transcript via the messages poll. Guarded
         # by a lock: submits and finishing worker threads share it.
@@ -577,6 +588,38 @@ class LocalRuntime(TeamRuntime):
             return paths.resolve_root_for_agent(name)
         except RuntimeError:
             raise UnknownTeam(name) from None
+
+    def metrics(self, name: str, view: str, args: dict) -> dict:
+        import json
+
+        from bobi.chat_history import safe_name
+        from bobi.metrics.query import MetricsQueries, MetricsQueryError
+
+        if not safe_name(name):
+            raise UnknownTeam(name)
+        root = self._resolve(name)
+        if not root.is_relative_to(paths.agents_root().resolve()):
+            raise UnknownTeam(name)
+        if not self._metrics_reads.acquire(blocking=False):
+            raise MetricsQueryError("metrics readers are busy", "metrics_busy", retry_after_ms=250)
+        try:
+            queries = MetricsQueries(root)
+            data = {"summary": queries.summary, "turns": queries.turns,
+                    "session": queries.session, "turn": queries.turn}[view](args)
+            if view == "summary":
+                try:
+                    health = json.loads((root / "state/metrics/collector.state.json").read_text())
+                except (OSError, ValueError):
+                    health = {}
+                if not isinstance(health, dict):
+                    health = {}
+                data["collector"] = {key: health.get(key) for key in (
+                    "status", "db_ready", "import_lag_ms", "last_success_at_us",
+                    "reconciliation_errors", "uncovered_turns", "telemetry_events_dropped",
+                )}
+            return data
+        finally:
+            self._metrics_reads.release()
 
     def dashboard(self) -> dict:
         """Every agent slot on this machine: installed (with run state)
@@ -683,6 +726,29 @@ class LocalRuntime(TeamRuntime):
             return build_details(root, run_id)
         except DetailsUnknownRun:
             raise UnknownRun(run_id) from None
+
+    def system_logs(self, name: str, lines: int = 200) -> dict:
+        """Recent daemon system log lines (from manager.log) and health error detection."""
+        root = self._resolve(name)
+        log_file = paths.manager_log_path(root)
+        if not log_file.exists():
+            return {"ok": True, "logs": [], "total_lines": 0, "path": str(log_file)}
+        try:
+            content = log_file.read_text(errors="replace").splitlines()
+            tail = content[-lines:] if lines > 0 else content
+            recent_errors = [
+                line for line in tail[-50:]
+                if "[ERROR]" in line or " 521" in line or "Error 521" in line
+            ]
+            return {
+                "ok": True,
+                "logs": tail,
+                "total_lines": len(content),
+                "recent_error": recent_errors[-1] if recent_errors else None,
+                "path": str(log_file),
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e), "logs": []}
 
     def _prune_jobs(self) -> None:
         # Caller holds _chat_lock.

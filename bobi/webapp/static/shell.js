@@ -6,6 +6,7 @@
 
 import { mountDashboard } from "./views/dashboard.js";
 import { mountAgent } from "./views/agent.js";
+import { mountMetrics } from "./views/metrics.js";
 
 const TOKEN = document
   .querySelector('meta[name="bobi-webui-token"]')
@@ -26,7 +27,7 @@ export async function api(path, opts = {}) {
       },
     });
   } catch {
-    noteFailure();
+    if (!opts.signal?.aborted) noteFailure();
     return { ok: false, status: 0, data: null };
   }
   noteSuccess();
@@ -152,7 +153,8 @@ function parseRoute() {
   const params = new URLSearchParams(query);
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "agents" && parts[1]) {
-    return { view: "agent", name: decodeURIComponent(parts[1]) };
+    return { view: parts[2] === "metrics" ? "metrics" : "agent",
+      name: decodeURIComponent(parts[1]), session: params.get("session") || "" };
   }
   if (parts[0] === "setup") {
     return {
@@ -169,6 +171,12 @@ function route() {
   const el = document.getElementById("view");
   const r = parseRoute();
   setNavBack();
+  if (r.view === "metrics") {
+    setSubtitle("metrics & routing");
+    setNavBack(r.name, "#/agents/" + encodeURIComponent(r.name));
+    teardown = mountMetrics(el, { api, name: r.name, session: r.session });
+    return;
+  }
   if (r.view === "agent") {
     setSubtitle(r.name);
     setNavBack("agents", "#/");

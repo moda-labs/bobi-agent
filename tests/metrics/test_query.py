@@ -2,12 +2,95 @@
 
 import httpx
 import json
+import sqlite3
 import pytest
 from bobi.admin_client import AdminClientError, run_admin_command
 from bobi.cli import main, metrics
 from bobi.metrics.query import MAX_RESPONSE_BYTES, MAX_ROWS, MetricsQueries, MetricsQueryError
 from bobi.metrics.store import connect, migrate
 from click.testing import CliRunner
+from tests.metrics.helpers import seed_dashboard
+
+
+def test_dashboard_canonical_usage_routing_and_privacy(tmp_path):
+    seed_dashboard(tmp_path, 1_000_000)
+    queries = MetricsQueries(tmp_path)
+    args = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z"}
+    summary = queries.summary({**args, "include_dashboard": True})
+    assert summary["totals"]["input_tokens"] == 720
+    assert summary["totals"]["output_tokens"] == 140
+    assert summary["totals"]["cache_write_input_tokens"] is None
+    assert summary["buckets"][0]["input_tokens"] == 720
+    assert summary["buckets"][0]["is_estimated"] == 0
+    assert summary["routing"]["policy_calls"] == 2
+    assert summary["routing"]["routed_turns"] == 3
+    assert summary["routing"]["fallback_turns"] == 1
+    turns = queries.turns(args)["turns"]
+    assert turns[0]["session_fallback_reason"] == "invalid_config"
+    assert turns[0]["usage"]["input_tokens"] is None
+    assert turns[1]["route_reused"] == 1
+    assert turns[1]["usage"]["input_tokens"] == 320
+    assert turns[-1]["route_reused"] == 0
+    assert turns[-1]["confidence"] == 0.72
+    assert turns[-1]["usage"]["output_tokens"] == 0
+    detail = queries.turn({"turn_id": "t-pro", "include_policy": True})
+    assert detail["router_decisions"][0]["confidence"] == 0.96
+    assert "private-task" not in json.dumps([summary, turns, detail])
+    filtered = queries.summary({**args, "include_dashboard": True, "model": "deepseek-v4-pro"})
+    assert filtered["totals"]["input_tokens"] == 620
+    assert filtered["routing"]["turns"] == 2
+
+
+def test_dashboard_keyset_filters_and_lifecycle_names(tmp_path):
+    seed_dashboard(tmp_path, 1_000_000)
+    queries = MetricsQueries(tmp_path)
+    args = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "limit": 2}
+    first = queries.turns({**args, "session_name": "worker-a"})
+    second = queries.turns({**args, "session_name": "worker-a", "cursor": first["next_cursor"]})
+    assert [turn["turn_id"] for turn in first["turns"] + second["turns"]] == [
+        "t-unknown", "t-reused", "t-pro", "t-routine",
+    ]
+    assert second["next_cursor"] is None
+    assert len(queries.turns({**args, "session_id": "s2"})["turns"]) == 1
+    assert queries.turns({**args, "session_name": "absent"})["turns"] == []
+    with pytest.raises(MetricsQueryError, match="cursor"):
+        queries.turns({**args, "session_name": "other", "cursor": first["next_cursor"]})
+
+
+def test_dashboard_marks_estimates_without_promoting_unknowns(tmp_path):
+    seed_dashboard(tmp_path, 1_000_000)
+    writer = connect(tmp_path / "state/metrics/metrics.db")
+    writer.execute("DELETE FROM usage_measurements WHERE measurement_id='terminal'")
+    writer.commit()
+    writer.close()
+    result = MetricsQueries(tmp_path).summary({
+        "from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "include_dashboard": True,
+    })
+    assert result["totals"]["input_tokens"] == 1399
+    assert result["buckets"][0]["is_estimated"] == 1
+    assert result["totals"]["cache_write_input_tokens"] is None
+    assert result["coverage"]["estimated_invocations"] == 1
+    assert result["coverage"]["unknown_invocations"] == 1
+
+
+def test_dashboard_read_snapshot_does_not_block_wal_writer(tmp_path):
+    seed_dashboard(tmp_path, 1_000_000)
+    queries = MetricsQueries(tmp_path)
+
+    def read_snapshot(reader):
+        original = reader.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+        writer = connect(queries.db_path)
+        writer.execute("UPDATE turns SET status='failed' WHERE turn_id='t-routine'")
+        writer.commit()
+        writer.close()
+        assert reader.execute("SELECT status FROM turns WHERE turn_id='t-routine'").fetchone()[0] == "completed"
+        assert original == 4
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            reader.execute("DELETE FROM turns")
+        return {}
+
+    queries._run(read_snapshot)
+    assert queries.turn({"turn_id": "t-routine"})["turn"]["status"] == "failed"
 
 
 

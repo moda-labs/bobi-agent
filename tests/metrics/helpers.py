@@ -8,6 +8,59 @@ from bobi.metrics.router import ExperimentConfig, RouterDecision, assign_variant
 from bobi.metrics.routing import RoutingContext
 
 
+def seed_dashboard(root, started_at_us):
+    from bobi.metrics.store import connect, migrate
+
+    conn = connect(root / "state/metrics/metrics.db")
+    migrate(conn)
+    conn.executemany(
+        "INSERT INTO sessions(session_id,session_name,brain,provider,started_at_us,status,metadata_json) "
+        "VALUES(?, 'worker-a','claude','gateway',?,'completed',?)",
+        [("s1", started_at_us, "{}"), ("s2", started_at_us, json.dumps({
+            "router_fallback": {"fallback_reason": "invalid_config"}, "secret": "private-task",
+        }))],
+    )
+    for index, turn_id in enumerate(("t-routine", "t-pro", "t-reused", "t-unknown")):
+        started = started_at_us + index * 1_000_000
+        model = "deepseek-flash" if index in (0, 3) else "deepseek-v4-pro"
+        conn.execute(
+            "INSERT INTO turns(turn_id,session_id,turn_index,started_at_us,status,trigger_kind,is_user_initiated) VALUES(?,?,?,?,?,'user',1)",
+            (turn_id, "s2" if index == 3 else "s1", index, started, "completed"),
+        )
+        conn.execute(
+            "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
+            "model_requested,model_selected,started_at_us,status) VALUES(?,?,0,'gateway',?,?,?,'completed')",
+            (f"i{index}", turn_id, f"ds/{model}", model, started),
+        )
+        if index < 3:
+            policy = {"mode": "enforce", "status": "ok", "recommended_model": f"ds/{model}",
+                      "confidence": 0.72 if index == 0 else 0.96, "latency_ms": 12,
+                      "call_id": "call-flash" if index == 0 else "call-pro", "explanation": "private-task"}
+            conn.execute(
+                "INSERT INTO router_decisions(router_decision_id,turn_id,variant_id,model_selected,"
+                "router_score,router_latency_ms,decided_at_us,router_reason,metadata_json,"
+                "router_name,router_version,candidate_models_json) "
+                "VALUES(?,?,'treatment_jev',?,0.12,15,?,'private-task',?,'jev','1','[\"ds/deepseek-flash\",\"ds/deepseek-v4-pro\"]')",
+                (f"r{index}", turn_id, f"ds/{model}", started, json.dumps({"policy": policy})),
+            )
+            conn.execute(
+                "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
+                "model,measurement_source,is_estimated,input_tokens,output_tokens,cache_read_input_tokens,"
+                "cache_write_input_tokens,observed_at_us,token_semantics_version) VALUES(?,'invocation',?,?,'gateway',?,?,?,?,?,?,?,?,1)",
+                (f"u{index}", turn_id, f"i{index}", model, "local_tokenizer" if index == 2 else "provider_stream",
+                 int(index == 2), (100, 300, 999)[index], (0, 60, 999)[index],
+                 (0, 50, 0)[index], 0 if index == 0 else None, started),
+            )
+    conn.execute(
+        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,measurement_source,"
+        "is_estimated,input_tokens,output_tokens,cache_read_input_tokens,observed_at_us,token_semantics_version) "
+        "VALUES('terminal','turn','t-reused','gateway','ds/deepseek-v4-pro','provider_stream',0,320,80,50,?,1)",
+        (started_at_us + 2_000_000,),
+    )
+    conn.commit()
+    conn.close()
+
+
 PROVIDER_VERSIONS = {"captured_at":"2026-09-28","claude_agent_sdk":"0.2.128","claude_code":"2.1.274","codex_cli":"0.157.1","notes":"Synthetic IDs and empty content; token shapes preserve live provider contracts."}
 
 JSONL = {

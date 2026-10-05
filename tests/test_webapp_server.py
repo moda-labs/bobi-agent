@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from bobi import service
 from bobi.webapp import server
+from tests.metrics.helpers import seed_dashboard
 
 TOKEN = "test-token-123"
 
@@ -25,6 +26,65 @@ def _client():
     c = _testclient()
     c.headers.update({"x-bobi-webui-token": TOKEN})
     return c
+
+
+class TestMetrics:
+    RANGE = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z"}
+
+    def test_metrics_endpoints_and_collector_privacy(self, bobi_install):
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        health = bobi_install.state_dir / "metrics/collector.state.json"
+        health.write_text(json.dumps({"status": "running", "db_ready": True,
+                                     "reconciliation_errors": 1, "last_error": "private-task"}))
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        summary = _client().get(base + "/summary", params=self.RANGE)
+        assert summary.status_code == 200
+        assert summary.headers["cache-control"] == "no-store"
+        assert summary.json()["totals"]["input_tokens"] == 720
+        assert summary.json()["collector"]["reconciliation_errors"] == 1
+        assert "private-task" not in summary.text
+        for endpoint in ("/turns", "/turns/t-pro", "/sessions/s1"):
+            result = _client().get(base + endpoint, params=self.RANGE)
+            assert result.status_code == 200
+            assert "private-task" not in result.text
+        assert _client().get(base + "/turns/t-pro").json()["router_decisions"][0]["confidence"] == 0.96
+        assert _client().get(base + "/turns/absent").status_code == 404
+        assert _client().get(base + "/sessions/absent").status_code == 404
+        assert _client().get("/api/agents/absent/metrics/summary", params=self.RANGE).status_code == 404
+
+    def test_metrics_unavailable_validation_and_security(self, bobi_install):
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        response = _client().get(base + "/summary", params=self.RANGE)
+        assert response.status_code == 503
+        assert response.json()["code"] == "metrics_not_ready"
+        assert response.headers["retry-after"] == "1"
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+        assert _testclient().get(base + "/summary", params=self.RANGE).status_code == 403
+        hostile = TestClient(server.build_app(token=TOKEN), base_url="http://evil.example")
+        hostile.headers.update({"x-bobi-webui-token": TOKEN})
+        assert hostile.get(base + "/summary", params=self.RANGE).status_code == 403
+        assert _client().get(base + "/summary").status_code == 422
+        assert _client().get(base + "/summary", params={**self.RANGE, "from": "bad"}).status_code == 400
+        assert _client().get(base + "/turns", params={**self.RANGE, "limit": 201}).status_code == 422
+
+    def test_metrics_reader_saturation_release_and_unsupported_runtime(self, bobi_install):
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.webapp.runtime import LocalRuntime, TeamRuntime
+
+        runtime = LocalRuntime()
+        client = TestClient(server.build_app(token=TOKEN, runtime=runtime), base_url="http://127.0.0.1")
+        client.headers.update({"x-bobi-webui-token": TOKEN})
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/summary"
+        for _ in range(4):
+            assert runtime._metrics_reads.acquire(blocking=False)
+        assert client.get(url, params=self.RANGE).json()["code"] == "metrics_busy"
+        for _ in range(4):
+            runtime._metrics_reads.release()
+        for _ in range(5):
+            assert client.get(url, params=self.RANGE).json()["code"] == "metrics_not_ready"
+        with pytest.raises(MetricsQueryError) as error:
+            TeamRuntime.metrics(runtime, bobi_install.agent_name, "summary", self.RANGE)
+        assert error.value.code == "metrics_unsupported"
 
 
 def _add_design_slot(agents_dir, name, description="An idea, not installed."):
@@ -968,3 +1028,27 @@ class TestMultiAgentRealService:
         for name in two_agents:
             assert c.get(f"/api/agents/{name}/subagents").status_code == 200
         assert paths.bound_root() is None
+
+
+class TestSystemLogs:
+    def test_logs_empty_when_no_file(self, bobi_install):
+        r = _client().get(f"/api/agents/{bobi_install.agent_name}/logs")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["logs"] == []
+
+    def test_logs_tail_and_error_detection(self, bobi_install):
+        log_path = bobi_install.state_dir / "manager.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            "[INFO] Starting server\n"
+            "[WARNING] High latency\n"
+            "[ERROR] API Error: 521 Web server is down\n"
+        )
+        r = _client().get(f"/api/agents/{bobi_install.agent_name}/logs")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert len(data["logs"]) == 3
+        assert "521" in data["recent_error"]

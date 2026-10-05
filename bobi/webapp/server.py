@@ -24,11 +24,12 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 
 from bobi import paths
 from bobi.chat_history import safe_name
+from bobi.metrics.query import MetricsQueryError
 from bobi.webapp.runtime import (
     LocalRuntime,
     TeamAlreadyRunning,
@@ -129,6 +130,17 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def _unknown_run(request, exc) -> JSONResponse:
         return JSONResponse({"error": "unknown run"}, status_code=404)
 
+    @app.exception_handler(MetricsQueryError)
+    def _metrics_error(request, exc) -> JSONResponse:
+        status = 404 if exc.code in {"unknown_session", "unknown_turn"} else 503 if exc.code in {
+            "metrics_busy", "metrics_not_ready", "metrics_unsupported",
+        } else 400
+        headers = {"Cache-Control": "no-store"}
+        if status == 503:
+            headers["Retry-After"] = "1"
+        return JSONResponse({"error": str(exc), "code": exc.code, **exc.detail},
+                            status_code=status, headers=headers)
+
     @app.exception_handler(TeamAlreadyRunning)
     def _already_running(request, exc) -> JSONResponse:
         return JSONResponse({"error": "already running", "pid": exc.pid},
@@ -172,6 +184,33 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_overview(name: str) -> dict:
         return rt.overview(name)
 
+    @app.get("/api/agents/{name}/metrics/summary")
+    def metrics_summary(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                        model: str = "", session_name: str = "") -> JSONResponse:
+        data = rt.metrics(name, "summary", {"from": start, "to": end, "model": model,
+                          "session_name": session_name, "group_by": ["model"], "include_dashboard": True})
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/turns")
+    def metrics_turns(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                      model: str = "", session_name: str = "", session_id: str = "",
+                      limit: int = Query(default=50, ge=1, le=200), cursor: str = "") -> JSONResponse:
+        data = rt.metrics(name, "turns", {"from": start, "to": end, "model": model,
+                          "session_name": session_name, "session_id": session_id,
+                          "limit": limit, "cursor": cursor})
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/sessions/{session_id}")
+    def metrics_session(name: str, session_id: str, cursor: str = "",
+                        limit: int = Query(default=50, ge=1, le=200)) -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "session", {"session_id": session_id, "cursor": cursor,
+                            "limit": limit}), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/turns/{turn_id}")
+    def metrics_turn(name: str, turn_id: str) -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "turn", {"turn_id": turn_id, "include_policy": True}),
+                            headers={"Cache-Control": "no-store"})
+
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
     # Normalized on the way out so the state keys the strip reads are present
@@ -187,6 +226,11 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     @app.get("/api/agents/{name}/sessions")
     def agent_sessions(name: str) -> dict:
         return rt.session_log(name)
+
+    # System daemon logs: manager.log tail for debugging network/LLM/event failures
+    @app.get("/api/agents/{name}/logs")
+    def agent_logs(name: str, lines: int = 200) -> dict:
+        return rt.system_logs(name, lines=max(1, min(lines, 1000)))
 
     # The unified runs view: sessions + workflow runs + monitor runs as one
     # list. Filters are applied before the page window is selected.

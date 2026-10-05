@@ -19,8 +19,18 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import time
+
+_API_ERROR_5XX_RE = re.compile(
+    r"(?:API Error:\s*5\d\d|Error\s*5\d\d:\s*Web server is down|521\s*Web server is down)",
+    re.IGNORECASE,
+)
+
+
+def _is_api_error_text(text: str) -> bool:
+    return bool(_API_ERROR_5XX_RE.search(text)) if text else False
 from collections import deque
 from contextlib import suppress
 from dataclasses import replace
@@ -262,9 +272,23 @@ class _ClaudeSession:
                     "started_at_us": observed_at_us,
                 },
             )
+            content = getattr(block, "content", None)
+            output_bytes = None
+            if content is not None:
+                try:
+                    if isinstance(content, str):
+                        output_bytes = len(content.encode("utf-8"))
+                    elif isinstance(content, (dict, list)):
+                        output_bytes = len(json.dumps(content).encode("utf-8"))
+                    else:
+                        output_bytes = len(str(content).encode("utf-8"))
+                except Exception:
+                    pass
             state["ended_at_us"] = observed_at_us
             state["status"] = "failed" if getattr(block, "is_error", False) else "completed"
             state["is_error"] = bool(getattr(block, "is_error", False))
+            if output_bytes is not None:
+                state["output_bytes"] = output_bytes
             if tool_id not in completed_tool_ids:
                 completed_tool_ids.append(tool_id)
 
@@ -276,6 +300,8 @@ class _ClaudeSession:
                 ]
                 text = "\n".join(text_parts) if text_parts else ""
                 error_kind = str(getattr(msg, "error", "") or "")
+                if not error_kind and _is_api_error_text(text):
+                    error_kind = "api_error"
                 if error_kind:
                     assistant_error_kind = error_kind
                     assistant_error_message = text
@@ -331,6 +357,18 @@ class _ClaudeSession:
                                 isinstance(ServerToolUseBlock, type)
                                 and isinstance(block, ServerToolUseBlock)
                             )
+                            raw_input = getattr(block, "input", None)
+                            input_bytes = None
+                            if raw_input is not None:
+                                try:
+                                    if isinstance(raw_input, (dict, list)):
+                                        input_bytes = len(json.dumps(raw_input).encode("utf-8"))
+                                    elif isinstance(raw_input, str):
+                                        input_bytes = len(raw_input.encode("utf-8"))
+                                    else:
+                                        input_bytes = len(str(raw_input).encode("utf-8"))
+                                except Exception:
+                                    pass
                             tool_states[tool_id] = {
                                 "provider_tool_call_id": tool_id,
                                 "tool_name": tool_name,
@@ -339,6 +377,7 @@ class _ClaudeSession:
                                 "started_at_us": observed_at_us,
                                 "status": "running",
                                 "is_error": False,
+                                "input_bytes": input_bytes,
                             }
                     elif isinstance(block, tool_result_types):
                         finish_tool(block, observed_at_us)
@@ -427,6 +466,10 @@ def _result_to_turn(
         error_message = assistant_error_message
 
     result_text = getattr(msg, "result", "") or ""
+    if not error_kind and _is_api_error_text(result_text):
+        error_kind = "api_error"
+        error_message = result_text
+
     unavailable_kind = classify_brain_unavailability(
         error_kind,
         error_message or result_text,
@@ -931,6 +974,8 @@ class ClaudeBrain(GatewayAwareEngine):
                             b.text for b in msg.content if isinstance(b, TextBlock)
                         )
                         error_kind = str(getattr(msg, "error", "") or "")
+                        if not error_kind and _is_api_error_text(text):
+                            error_kind = "api_error"
                         if error_kind:
                             assistant_error_kind = error_kind
                             assistant_error_message = text
