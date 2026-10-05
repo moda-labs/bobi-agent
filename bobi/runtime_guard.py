@@ -296,7 +296,15 @@ def prepare_brain_runtime(runtime_root: Path | None = None) -> GuardReport:
         except Exception:
             runtime_root = None
     verify_framework_integrity_or_raise()
-    return apply_runtime_write_policy(runtime_root)
+    report = apply_runtime_write_policy(runtime_root)
+    try:
+        from bobi.metrics.runtime import get_runtime
+
+        if runtime_root is not None:
+            get_runtime(runtime_root)
+    except Exception:
+        logger.debug("metrics runtime startup failed", exc_info=True)
+    return report
 
 
 def _record_digest(file) -> tuple[str, str] | None:

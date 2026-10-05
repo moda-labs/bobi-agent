@@ -301,7 +301,7 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
 
 # --- Codex rollout replay ------------------------------------------------
 
-def _codex_rollout_path(session_id: str) -> Path | None:
+def find_codex_rollout(session_id: str) -> Path | None:
     """The Codex rollout file for *session_id*, if one exists.
 
     Codex writes one rollout per thread at
@@ -319,6 +319,9 @@ def _codex_rollout_path(session_id: str) -> Path | None:
         return None
     matches = sorted(root.rglob(f"*{session_id}.jsonl"))
     return matches[-1] if matches else None
+
+
+_codex_rollout_path = find_codex_rollout
 
 
 def _codex_text(content) -> str:
@@ -357,7 +360,7 @@ def read_codex_transcript_messages(session_id: str,
     blocks (see :data:`_CODEX_INJECTED_PREFIXES`) are skipped. Mirrors
     :func:`read_transcript_messages`'s output shape.
     """
-    path = _codex_rollout_path(session_id)
+    path = find_codex_rollout(session_id)
     if not path:
         return []
 

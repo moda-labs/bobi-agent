@@ -1,0 +1,16 @@
+{
+  "modelUsage": {
+    "claude-opus-4-8": {
+      "cacheCreationInputTokens": 24576,
+      "cacheReadInputTokens": 15282,
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 8192,
+        "ephemeral_5m_input_tokens": 16384
+      },
+      "canonicalModel": "claude-opus-4-8",
+      "inputTokens": 2,
+      "outputTokens": 10
+    }
+  },
+  "session_id": "fixture-claude-session"
+}

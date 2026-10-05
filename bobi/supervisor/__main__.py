@@ -96,7 +96,34 @@ def run(root: Path, argv: list[str]) -> int:
 
     config = SupervisorConfig.from_env()
 
-    telemetry = Telemetry(project_root=root, config=config)
+    metrics_collector = None
+    metrics_health_fn = None
+    try:
+        from bobi.metrics.collector import MetricsCollectorService
+        from bobi.metrics.runtime import ENABLED_MODES, resolve_mode
+
+        metrics_mode = resolve_mode()
+        if metrics_mode in ENABLED_MODES:
+            metrics_collector = MetricsCollectorService(root)
+            metrics_collector.start()
+
+            def metrics_health_fn():
+                return {"mode": metrics_mode, **metrics_collector.health()}
+        else:
+            metrics_health_fn = lambda: {
+                "mode": "disabled", "status": "disabled", "db_ready": False
+            }
+    except Exception:
+        log.warning("supervisor: metrics collector failed to start", exc_info=True)
+        metrics_health_fn = lambda: {
+            "mode": "unknown", "status": "degraded", "db_ready": False
+        }
+
+    telemetry = Telemetry(
+        project_root=root,
+        config=config,
+        metrics_health_fn=metrics_health_fn,
+    )
     # Best-effort JOIN of the instance bubble so publishes are signed. The
     # manager mints it on first registration; we converge on the same bubble.
     telemetry.join_bubble()
@@ -125,11 +152,14 @@ def run(root: Path, argv: list[str]) -> int:
     # start, the supervisor still supervises.
     admin = AdminListener(supervisor=supervisor, telemetry=telemetry,
                           project_root=root)
+    telemetry.set_metrics_query_health_fn(admin.metrics_query_health)
     admin.start()
     try:
         return supervisor.run()
     finally:
         admin.stop()
+        if metrics_collector is not None:
+            metrics_collector.stop()
 
 
 if __name__ == "__main__":

@@ -563,7 +563,21 @@ def run_manager_from_config(
     # replaces the framework underneath it is visible to doctor (#928).
     launch_stamp.record_launch(project_path, launch_stamp.MANAGER, os.getpid())
 
+    metrics_collector = None
+    try:
+        from bobi.metrics.collector import MetricsCollectorService
+        from bobi.metrics.runtime import ENABLED_MODES, resolve_mode
+
+        collector_owner = os.environ.get("BOBI_METRICS_COLLECTOR_OWNER", "").strip()
+        if resolve_mode() in ENABLED_MODES and collector_owner != "supervisor":
+            metrics_collector = MetricsCollectorService(project_path)
+            metrics_collector.start()
+    except Exception:
+        log.debug("metrics collector failed to start", exc_info=True)
+
     def _cleanup():
+        if metrics_collector is not None:
+            metrics_collector.stop(timeout=2)
         try:
             if pid_path.exists() and pid_path.read_text().strip() == pid_str:
                 pid_path.unlink(missing_ok=True)
@@ -659,14 +673,17 @@ def run_manager_from_config(
         "Bobi launching manager session for %s",
         paths.agent_name_for_root(project_path),
     )
-    run_persistent_agent(
-        cwd=str(project_path),
-        task=task,
-        name=session_name,
-        role=role,
-        mcp_servers=cfg.mcp_servers or None,
-        subscribe=subscribe,
-    )
+    try:
+        run_persistent_agent(
+            cwd=str(project_path),
+            task=task,
+            name=session_name,
+            role=role,
+            mcp_servers=cfg.mcp_servers or None,
+            subscribe=subscribe,
+        )
+    finally:
+        _cleanup()
 
 
 def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
@@ -815,5 +832,3 @@ def ask(
     append_chat(project_path, agent, "user", text)
     append_chat(project_path, agent, "agent", result.response)
     return result
-
-

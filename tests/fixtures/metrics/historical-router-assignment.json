@@ -1,0 +1,22 @@
+{
+  "experiment_id": "jev-routing-v1",
+  "variant_id": "control",
+  "assignment_unit": "experiment_subject",
+  "assignment_status": "assigned",
+  "assignment_key_hash": "dd653ee82de87012aa58849d303a3707025bcc568251bed2b50f6c98af3216d0",
+  "assignment_algorithm": "hmac-sha256-u64-v1",
+  "cohort": null,
+  "router_name": "jev",
+  "router_version": "1.0.0",
+  "policy_version": "policy-2026-09-29",
+  "feature_schema_version": "features-v1",
+  "candidate_models_json": "[\"model-control\",\"model-treatment\"]",
+  "model_selected": "model-control",
+  "control_model": "model-control",
+  "router_score": 0.13753355569280226,
+  "router_reason": "deterministic_weighted_assignment",
+  "router_latency_ms": 0.033791,
+  "fallback_reason": null,
+  "decided_at_us": 100,
+  "metadata_json": "{\"config_fingerprint\":\"702c8e6467a885eb546d8524b56983cd1b32bbcbed0ff74baecee8b949c36673\",\"expected_weight\":0.5,\"expected_weights\":{\"control\":0.5,\"treatment\":0.5}}"
+}
