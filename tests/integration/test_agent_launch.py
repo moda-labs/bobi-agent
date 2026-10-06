@@ -21,7 +21,9 @@ import time
 
 import pytest
 
+from bobi.events import artifact as event_server_artifact
 from bobi.sdk import _sessions_dir
+from bobi.service import manager_launch_argv
 
 
 # Bind this file's ``bobi_env`` / ``cli_run`` to the dual-brain (stub + claude)
@@ -313,18 +315,55 @@ import sys
 import time
 
 session_dir, mode = sys.argv[1], sys.argv[2]
+extra = sys.argv[3:]
 if mode == "launcher":
-    subprocess.Popen([sys.executable, __file__, session_dir, "leader"],
+    subprocess.Popen([sys.executable, __file__, session_dir, "leader", *extra],
                      start_new_session=True)
     raise SystemExit(0)
 if mode == "leader":
-    subprocess.Popen([sys.executable, __file__, session_dir, "child"])
+    subprocess.Popen([sys.executable, __file__, session_dir, "child", *extra])
 probe = os.path.join(session_dir, "%s-%d.probe" % (mode, os.getpid()))
 while True:
     with open(probe, "w") as handle:
         handle.write("x")
     time.sleep(0.005)
 """
+
+    AGENT_NAME = "test-repo"
+
+    @classmethod
+    def _isolated_paths(cls, tmp_path, name="home"):
+        home_dir = tmp_path / name
+        state_dir = home_dir / "agents" / cls.AGENT_NAME / "run" / "state"
+        state_dir.mkdir(parents=True)
+        return home_dir, state_dir
+
+    @classmethod
+    def _daemon_identity(cls, component, tmp_path):
+        """The argv tail that makes a stub look like the real daemon.
+
+        Derived from the production launch commands - `spawn_team`'s own argv
+        builder and the bundle path `ensure_running` execs - never copied.
+        `_cleanup_bobi_env` matches a hardcoded shape, so copying it here would
+        let both sides agree on a string production had already stopped
+        building; deriving makes that drift fail these tests instead.
+        """
+        if component == "manager":
+            return manager_launch_argv(cls.AGENT_NAME)[1:]
+        return [str(event_server_artifact.bundle_path(tmp_path))]
+
+    @classmethod
+    def _start_stub_daemon(cls, tmp_path, session_dir, identity, environment):
+        session_dir.mkdir()
+        script = tmp_path / f"{session_dir.name}_daemon.py"
+        script.write_text(cls.STUB_AGENT)
+        subprocess.run(
+            [sys.executable, str(script), str(session_dir), "launcher", *identity],
+            check=True,
+            env={**os.environ, **environment},
+            timeout=30,
+        )
+        return cls._await_writers(session_dir)["leader"]
 
     @staticmethod
     def _await_writers(session_dir, timeout=30.0):
@@ -408,6 +447,143 @@ while True:
         # Signal 0 raises once a group is empty, so this pins that the reaper
         # left our own group intact rather than merely failing to reach us.
         os.killpg(os.getpgid(0), 0)
+
+    def test_isolated_env_cleanup_reaps_both_daemons_on_skip(
+        self, tmp_path
+    ):
+        from types import SimpleNamespace
+
+        from .conftest import _cleanup_bobi_env
+
+        home_dir, state_dir = self._isolated_paths(tmp_path)
+        daemon_env = {"BOBI_HOME": str(home_dir)}
+        groups = {}
+        try:
+            for component in ("manager", "event-server"):
+                session_dir = tmp_path / component
+                identity = self._daemon_identity(component, tmp_path)
+                pid = self._start_stub_daemon(
+                    tmp_path, session_dir, identity, daemon_env
+                )
+                groups[component] = pid
+                (state_dir / f"{component}.pid").write_text(str(pid))
+
+            with pytest.raises(pytest.skip.Exception):
+                try:
+                    pytest.skip("readiness failed before fixture yield")
+                finally:
+                    _cleanup_bobi_env(SimpleNamespace(
+                        home_dir=home_dir,
+                        state_dir=state_dir,
+                        agent_name=self.AGENT_NAME,
+                    ))
+        finally:
+            for pid in groups.values():
+                with contextlib.suppress(OSError):
+                    os.killpg(pid, signal.SIGKILL)
+
+        for pid in groups.values():
+            with pytest.raises(ProcessLookupError):
+                os.killpg(pid, 0)
+        assert not (state_dir / "manager.pid").exists()
+        assert not (state_dir / "event-server.pid").exists()
+
+    @pytest.mark.parametrize("component", ["manager", "event-server"])
+    def test_isolated_env_cleanup_does_not_signal_another_bobi_environment(
+        self, tmp_path, component
+    ):
+        from types import SimpleNamespace
+
+        from .conftest import _cleanup_bobi_env
+
+        home_dir, state_dir = self._isolated_paths(tmp_path, "ours")
+        identity = self._daemon_identity(component, tmp_path)
+        victim = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)", *identity],
+            env={
+                **os.environ,
+                "BOBI_HOME": str(tmp_path / "other-home"),
+            },
+            start_new_session=True,
+        )
+        try:
+            (state_dir / f"{component}.pid").write_text(str(victim.pid))
+            _cleanup_bobi_env(SimpleNamespace(
+                home_dir=home_dir,
+                state_dir=state_dir,
+                agent_name=self.AGENT_NAME,
+            ))
+            assert victim.poll() is None
+            assert not (state_dir / f"{component}.pid").exists()
+        finally:
+            with contextlib.suppress(OSError):
+                os.killpg(victim.pid, signal.SIGKILL)
+
+    def test_isolated_env_cleanup_preserves_live_pid_when_identity_is_unknown(
+        self, tmp_path, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        from . import conftest
+
+        home_dir, state_dir = self._isolated_paths(tmp_path)
+        victim = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import time; time.sleep(600)",
+                *self._daemon_identity("manager", tmp_path),
+            ],
+            env={
+                **os.environ,
+                "BOBI_HOME": str(home_dir),
+            },
+            start_new_session=True,
+        )
+        pid_file = state_dir / "manager.pid"
+        launch_file = state_dir / "manager.launch.json"
+        pid_file.write_text(str(victim.pid))
+        launch_file.write_text("{}")
+        monkeypatch.setattr(conftest, "_process_command", lambda pid: "")
+        try:
+            conftest._cleanup_bobi_env(SimpleNamespace(
+                home_dir=home_dir,
+                state_dir=state_dir,
+                agent_name=self.AGENT_NAME,
+            ))
+            assert victim.poll() is None
+            assert pid_file.read_text() == str(victim.pid)
+            assert launch_file.exists()
+        finally:
+            with contextlib.suppress(OSError):
+                os.killpg(victim.pid, signal.SIGKILL)
+
+    def test_isolated_env_cleanup_does_not_signal_a_reused_pid(self, tmp_path):
+        from types import SimpleNamespace
+
+        from .conftest import _cleanup_bobi_env
+
+        home_dir, state_dir = self._isolated_paths(tmp_path)
+        victim = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(600)"],
+            env={
+                **os.environ,
+                "BOBI_HOME": str(home_dir),
+            },
+            start_new_session=True,
+        )
+        try:
+            (state_dir / "manager.pid").write_text(str(victim.pid))
+            _cleanup_bobi_env(SimpleNamespace(
+                home_dir=home_dir,
+                state_dir=state_dir,
+                agent_name=self.AGENT_NAME,
+            ))
+            assert victim.poll() is None
+            assert not (state_dir / "manager.pid").exists()
+        finally:
+            with contextlib.suppress(OSError):
+                os.killpg(victim.pid, signal.SIGKILL)
 
 
 @pytest.mark.timeout(240)

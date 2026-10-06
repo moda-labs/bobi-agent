@@ -12,7 +12,7 @@ import os
 
 import pytest
 
-from tests.integration.conftest import _provision_bobi_env
+from tests.integration.conftest import _cleanup_bobi_env, _provision_bobi_env
 
 HOUSE_RULES = "# House rules\n\nAlways write tests first.\n"
 
@@ -34,6 +34,7 @@ def instructions_bobi_env(tmp_path_factory):
     try:
         yield env
     finally:
+        _cleanup_bobi_env(env)
         if old_home is None:
             os.environ.pop("BOBI_HOME", None)
         else:
