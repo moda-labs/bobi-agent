@@ -677,14 +677,9 @@ async def _run_workflow_async(
             explicit=(step.max_turns if step else 0),
         )
 
-    def _is_prompt_step(step: StepDef) -> bool:
-        return not (
-            step.condition or step.action or step.notify or step.await_event
-        )
-
     def _first_prompt_step() -> StepDef | None:
         for candidate in workflow.steps[start_step:]:
-            if _is_prompt_step(candidate):
+            if candidate.is_prompt_step:
                 return candidate
         return None
 
@@ -992,6 +987,15 @@ async def _run_workflow_async(
                 ctx.set_scope(step.name, result)
                 for k, v in result.items():
                     ctx.set_flat(k, v)
+                if result.get("status") == "error":
+                    error = result.get("reason") or (
+                        f"Native action {step.action} failed"
+                    )
+                    run_failed, failure_error = True, error
+                    _emit_step_failed(
+                        run_key, workflow.name, step.name, error,
+                    )
+                    return OUTCOME_FAILED
                 _emit_lifecycle_event("agent/step.completed", {
                     "run_key": run_key,
                     "workflow": workflow.name,
@@ -1106,32 +1110,33 @@ async def _run_workflow_async(
             # session id and the transcript is resumed natively - the same
             # exemption an effort-only change already relies on.
             step_max_turns = _effective_step_max_turns(step)
+            # A launch role pins every step to it; without one each step runs
+            # as its own agent:, and a step that names none inherits.
+            next_agent = (
+                current_agent if role else (step.agent or current_agent)
+            )
             if (
                 step_model != current_model
                 or step_effort != current_effort
                 or step_max_turns != current_max_turns
+                or next_agent != current_agent
             ):
                 # Continue the live session natively on the new model when
                 # the brain supports it (#642); otherwise fresh + re-inject
                 # the workflow scopes as YAML (lossy fallback). An agent
-                # change entering this branch starts fresh: the new agent
-                # must not inherit the previous agent's transcript under its
-                # system prompt (e.g. a reviewer step contaminated by the
-                # builder's reasoning). An agent change matching on ALL THREE
-                # dials still never enters the branch - a pre-existing gap in
-                # that isolation, narrowed but not closed by adding the cap to
-                # the condition: an agent change that also moves the cap now
-                # gets the fresh-session isolation it always should have had.
-                # No shipped workflow sets a per-step cap yet, so that is a
-                # latent improvement rather than a live behavior change. An
+                # change always enters this branch and always starts fresh:
+                # the new agent must not inherit the previous agent's
+                # transcript under its system prompt (e.g. a reviewer step
+                # contaminated by the builder's reasoning). It used to enter
+                # only when a dial (model/effort/cap) moved too, so an agent
+                # change on identical dials ran the next step inside the
+                # previous agent's session and prompt - which made a
+                # role-less multi-role launch silently single-role. An
                 # effort-only
                 # or cap-only change is exempt from the resume guard
                 # (#778/#845): continuation_token sees the same model on both
                 # sides, so whenever a resumable session id exists the session
                 # just reconnects natively under the new dial.
-                next_agent = (
-                    current_agent if role else (step.agent or current_agent)
-                )
                 token = ""
                 if next_agent == current_agent:
                     token = continuation_token(
@@ -1139,9 +1144,10 @@ async def _run_workflow_async(
                         from_model=current_model, to_model=step_model,
                     )
                 log.info(
-                    "Step %s: switching session options (model %r -> %r, "
-                    "effort %r -> %r, max_turns %d -> %d): %s",
-                    step.name, current_model or "<default>",
+                    "Step %s: switching session options (agent %r -> %r, "
+                    "model %r -> %r, effort %r -> %r, max_turns %d -> %d): %s",
+                    step.name, current_agent or "<none>",
+                    next_agent or "<none>", current_model or "<default>",
                     step_model or "<default>",
                     current_effort or "<default>",
                     step_effort or "<default>",
@@ -1287,7 +1293,10 @@ async def _run_workflow_async(
                 collect["final_text"] = drain.final_text
 
             # Validate handoff
-            handoff = _read_handoff(session_name, step.name)
+            handoff = (
+                _read_handoff(session_name, step.name)
+                if step.handoff.required or step.handoff.optional else {}
+            )
             missing = _validate_handoff(step, handoff)
 
             for retry in range(MAX_HANDOFF_RETRIES):
@@ -1295,8 +1304,12 @@ async def _run_workflow_async(
                     break
                 log.warning(f"Step {step.name}: handoff missing {missing}, re-prompting")
                 fix_prompt = (
+                    f"This is a handoff-repair retry for step '{step.name}', "
+                    "not a new task. Inspect your existing results first. "
+                    "Do not repeat completed work or side effects. "
                     f"Your handoff is missing required fields: {', '.join(missing)}. "
-                    f"Please update your handoff file with these fields and confirm."
+                    f"Please update `{session_handoff_path(session_name, step.name)}` "
+                    "with these fields and confirm."
                 )
                 await client.query(fix_prompt)
                 await _drain_response(client, session_name,
@@ -1581,9 +1594,12 @@ def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
     result = cleanup_mod.cleanup_worktree(repo_root, head_branch, merged=merged)
     result["merged_live"] = merged
     if merge_state.get("error"):
+        # Preserve the worktree, but fail the workflow: an unreadable verdict
+        # is not equivalent to a verified unmerged PR.
+        result["status"] = "error"
         result["merge_state_error"] = merge_state["error"]
-        # `reason` is what reaches a human in the notify message. "not merged"
-        # would be a claim we cannot make: we could not read the PR at all.
+        # `reason` is preserved in the failure event and the run state. "not
+        # merged" would be a claim we cannot make: we could not read the PR.
         result["reason"] = (
             "could not read the PR's merge state, so nothing was deleted: "
             f"{merge_state['error']}"
@@ -1596,6 +1612,15 @@ def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
 _NATIVE_ACTIONS: dict = {
     "cleanup_worktree": _cleanup_worktree_action,
 }
+
+_NATIVE_ACTION_INPUTS: dict[str, tuple[str, ...]] = {
+    "cleanup_worktree": ("repo", "pr_number", "head_branch"),
+}
+
+
+def native_action_required_inputs(action: str) -> tuple[str, ...]:
+    """Return input fields a native action cannot operate without."""
+    return _NATIVE_ACTION_INPUTS.get(action, ())
 
 
 def _execute_native_action(step: StepDef, ctx: VariableContext, cwd: str) -> dict:
@@ -1706,7 +1731,11 @@ def _read_handoff(session_name: str, step_name: str) -> dict:
         return {}
     try:
         content = path.read_text()
-        return yaml.safe_load(content) or {}
+        data = yaml.safe_load(content)
+        # Valid YAML that is not a mapping (a bare scalar, a list) would clear
+        # `_validate_handoff`, whose `f not in handoff` succeeds on `str` and
+        # `list`, then crash output capture on `handoff.get`. Repair instead.
+        return data if isinstance(data, dict) else {}
     except yaml.YAMLError:
         return {}
 
