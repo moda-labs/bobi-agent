@@ -21,7 +21,9 @@ import time
 
 import pytest
 
+from bobi.events import artifact as event_server_artifact
 from bobi.sdk import _sessions_dir
+from bobi.service import manager_launch_argv
 
 
 # Bind this file's ``bobi_env`` / ``cli_run`` to the dual-brain (stub + claude)
@@ -327,12 +329,28 @@ while True:
     time.sleep(0.005)
 """
 
-    @staticmethod
-    def _isolated_paths(tmp_path, name="home"):
+    AGENT_NAME = "test-repo"
+
+    @classmethod
+    def _isolated_paths(cls, tmp_path, name="home"):
         home_dir = tmp_path / name
-        state_dir = home_dir / "agents" / "test-repo" / "run" / "state"
+        state_dir = home_dir / "agents" / cls.AGENT_NAME / "run" / "state"
         state_dir.mkdir(parents=True)
         return home_dir, state_dir
+
+    @classmethod
+    def _daemon_identity(cls, component, tmp_path):
+        """The argv tail that makes a stub look like the real daemon.
+
+        Derived from the production launch commands - `spawn_team`'s own argv
+        builder and the bundle path `ensure_running` execs - never copied.
+        `_cleanup_bobi_env` matches a hardcoded shape, so copying it here would
+        let both sides agree on a string production had already stopped
+        building; deriving makes that drift fail these tests instead.
+        """
+        if component == "manager":
+            return manager_launch_argv(cls.AGENT_NAME)[1:]
+        return [str(event_server_artifact.bundle_path(tmp_path))]
 
     @classmethod
     def _start_stub_daemon(cls, tmp_path, session_dir, identity, environment):
@@ -443,11 +461,7 @@ while True:
         try:
             for component in ("manager", "event-server"):
                 session_dir = tmp_path / component
-                identity = (
-                    ["-m", "bobi.cli", "agent", "test-repo", "start", "--foreground"]
-                    if component == "manager"
-                    else [str(tmp_path / "dist" / "local.js")]
-                )
+                identity = self._daemon_identity(component, tmp_path)
                 pid = self._start_stub_daemon(
                     tmp_path, session_dir, identity, daemon_env
                 )
@@ -461,7 +475,7 @@ while True:
                     _cleanup_bobi_env(SimpleNamespace(
                         home_dir=home_dir,
                         state_dir=state_dir,
-                        agent_name="test-repo",
+                        agent_name=self.AGENT_NAME,
                     ))
         finally:
             for pid in groups.values():
@@ -483,11 +497,7 @@ while True:
         from .conftest import _cleanup_bobi_env
 
         home_dir, state_dir = self._isolated_paths(tmp_path, "ours")
-        identity = (
-            ["-m", "bobi.cli", "agent", "test-repo", "start", "--foreground"]
-            if component == "manager"
-            else [str(tmp_path / "dist" / "local.js")]
-        )
+        identity = self._daemon_identity(component, tmp_path)
         victim = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(600)", *identity],
             env={
@@ -501,7 +511,7 @@ while True:
             _cleanup_bobi_env(SimpleNamespace(
                 home_dir=home_dir,
                 state_dir=state_dir,
-                agent_name="test-repo",
+                agent_name=self.AGENT_NAME,
             ))
             assert victim.poll() is None
             assert not (state_dir / f"{component}.pid").exists()
@@ -522,12 +532,7 @@ while True:
                 sys.executable,
                 "-c",
                 "import time; time.sleep(600)",
-                "-m",
-                "bobi.cli",
-                "agent",
-                "test-repo",
-                "start",
-                "--foreground",
+                *self._daemon_identity("manager", tmp_path),
             ],
             env={
                 **os.environ,
@@ -544,7 +549,7 @@ while True:
             conftest._cleanup_bobi_env(SimpleNamespace(
                 home_dir=home_dir,
                 state_dir=state_dir,
-                agent_name="test-repo",
+                agent_name=self.AGENT_NAME,
             ))
             assert victim.poll() is None
             assert pid_file.read_text() == str(victim.pid)
@@ -572,7 +577,7 @@ while True:
             _cleanup_bobi_env(SimpleNamespace(
                 home_dir=home_dir,
                 state_dir=state_dir,
-                agent_name="test-repo",
+                agent_name=self.AGENT_NAME,
             ))
             assert victim.poll() is None
             assert not (state_dir / "manager.pid").exists()

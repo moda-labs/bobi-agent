@@ -531,6 +531,11 @@ def _cleanup_bobi_env(
     env: BobiEnv, *, include_event_server: bool = True
 ) -> None:
     """Reap every detached daemon owned by an isolated integration env."""
+    # Deliberately literal, and deliberately NOT derived from the production
+    # launch commands. This is the pinned expectation; the tests that exercise
+    # it build their stub daemons from `bobi.service.manager_launch_argv` and
+    # `bobi.events.artifact.bundle_path`, so an argv change in production fails
+    # those tests here rather than quietly leaving the reaper matching nothing.
     identities = {
         "manager.pid": (
             f"-m bobi.cli agent {env.agent_name} start --foreground"

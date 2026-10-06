@@ -337,6 +337,27 @@ def _wait_for_manager_transport(
     raise TransportReadyTimeout(manager_name, timeout)
 
 
+def manager_launch_argv(agent_name: str) -> list[str]:
+    """The argv `spawn_team` detaches the manager daemon with.
+
+    The one definition of that command line. The integration suite's teardown
+    identifies a leaked manager by matching this shape against the process's
+    cmdline (#1021), and derives the shape from here rather than copying it, so
+    changing the argv fails those tests instead of silently de-matching the
+    reaper. `--fresh` and `--subscribe` are appended by the caller, after this
+    prefix, so the prefix stays a stable identity.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "bobi.cli",
+        "agent",
+        agent_name,
+        "start",
+        "--foreground",
+    ]
+
+
 def spawn_team(
     project_path: Path,
     *,
@@ -380,15 +401,7 @@ def spawn_team(
     local_bin = str(Path.home() / ".local" / "bin")
     env["PATH"] = f"{venv_bin}:{local_bin}:{env.get('PATH', '')}"
     env["PYTHONUNBUFFERED"] = "1"
-    cmd = [
-        sys.executable,
-        "-m",
-        "bobi.cli",
-        "agent",
-        paths.agent_name_for_root(project_path),
-        "start",
-        "--foreground",
-    ]
+    cmd = manager_launch_argv(paths.agent_name_for_root(project_path))
     if fresh:
         cmd.append("--fresh")
     for item in subscribe:

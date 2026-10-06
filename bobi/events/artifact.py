@@ -175,6 +175,18 @@ def sanitized_node_environment(
     return environment
 
 
+def bundle_path(event_server_dir: Path) -> Path:
+    """The bundle `ensure_running` hands node as its only argument.
+
+    The one definition of that path. The integration suite's teardown
+    identifies a leaked event server by matching this shape against the
+    process's cmdline (#1021), and derives the shape from here rather than
+    copying it, so moving the bundle fails those tests instead of silently
+    de-matching the reaper.
+    """
+    return event_server_dir / "dist" / BUNDLE_NAME
+
+
 def _require_non_empty(path: Path) -> bytes:
     try:
         data = path.read_bytes()
