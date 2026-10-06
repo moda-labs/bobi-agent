@@ -19,6 +19,7 @@ import pytest
 import yaml
 
 from bobi.sdk import DEAD_STATUSES
+from tests.integration.conftest import _cleanup_bobi_env
 
 
 # Bind this file's ``bobi_env`` / ``cli_run`` to the dual-brain (stub + claude)
@@ -272,9 +273,14 @@ class TestManagerMessaging:
     """Tests that require a fully booted manager with drain loop active."""
 
     @pytest.fixture(autouse=True)
-    def _start_and_stop(self, bobi_env, cli_run):
+    def _start_and_stop(self, request, bobi_env, cli_run):
         log_file = bobi_env.state_dir / "manager.log"
         pid_file = bobi_env.state_dir / "manager.pid"
+        request.addfinalizer(
+            lambda: _cleanup_bobi_env(
+                bobi_env, include_event_server=False
+            )
+        )
 
         # Record log position before start so we only check new output
         log_pos = log_file.stat().st_size if log_file.exists() else 0
