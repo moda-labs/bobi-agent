@@ -1262,13 +1262,19 @@ def restart(fresh):
 
 
 @main.command("install-service")
-def install_service():
+@click.option("--replace", is_flag=True, help="Replace a service installed for a different agent.")
+def install_service(replace: bool = False):
     """Install and start a user-level service for this Bobi Agent."""
     project_path = _detect_project_root()
     name = paths.agent_name_for_root(project_path)
     from bobi import service_manager
 
     previous = service_manager.configured_agent()
+    if previous and previous != name and not replace:
+        raise click.ClickException(
+            f"A service is already installed for agent '{previous}'. "
+            f"Installing '{name}' would stop and remove it. Re-run with --replace to do that."
+        )
     if previous and previous != name:
         click.echo(f"Replacing existing service for agent '{previous}'...")
 

@@ -506,6 +506,97 @@ def test_install_and_uninstall_service_commands(bobi_install, monkeypatch):
     assert "Removed service" in uninstall_result.output
 
 
+def test_install_service_collision_guard_and_replace(bobi_install, monkeypatch):
+    target = Path("/tmp/bobi.service")
+    installed = []
+    monkeypatch.setattr(
+        "bobi.service_manager.install",
+        lambda name, root: installed.append((name, root)) or target,
+    )
+    monkeypatch.setattr(
+        "bobi.service_manager.configured_agent",
+        lambda **kw: "other-agent",
+    )
+
+    # Collision without --replace is refused loudly
+    res = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, "install-service"],
+    )
+    assert res.exit_code != 0
+    assert "A service is already installed for agent 'other-agent'." in res.output
+    assert "Installing 'test-agent' would stop and remove it. Re-run with --replace to do that." in res.output
+    assert installed == []
+
+    # With --replace, prints replacing message and succeeds
+    res_replace = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, "install-service", "--replace"],
+    )
+    assert res_replace.exit_code == 0, res_replace.output
+    assert "Replacing existing service for agent 'other-agent'..." in res_replace.output
+    assert "Installed and started" in res_replace.output
+    assert installed == [(TEST_AGENT_NAME, bobi_install.repo_path)]
+
+
+def test_systemd_install_replaces_different_agent(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    home = tmp_path / "home"
+    root_a = home / ".bobi" / "agents" / "agent-a" / "run"
+    root_b = home / ".bobi" / "agents" / "agent-b" / "run"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("BOBI_HOME", str(home / ".bobi"))
+    monkeypatch.setattr(service_manager.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(service_manager.shutil, "which", lambda _: "/bin/bobi")
+    calls = []
+
+    def run(command, timeout=30):
+        calls.append(command)
+        return _ok(command)
+
+    monkeypatch.setattr(service_manager, "_run", run)
+
+    target_a = service_manager.install("agent-a", root_a, platform="linux")
+    assert service_manager.configured_agent(platform="linux") == "agent-a"
+
+    calls.clear()
+    target_b = service_manager.install("agent-b", root_b, platform="linux")
+    assert target_b == target_a
+    assert service_manager.configured_agent(platform="linux") == "agent-b"
+    assert ["systemctl", "--user", "disable", "--now", "bobi"] in calls
+    assert ["systemctl", "--user", "enable", "--now", "bobi"] in calls
+
+
+def test_launchd_install_replaces_different_agent(tmp_path, monkeypatch):
+    from bobi import service_manager
+
+    home = tmp_path / "home"
+    root_a = home / ".bobi" / "agents" / "agent-a" / "run"
+    root_b = home / ".bobi" / "agents" / "agent-b" / "run"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("BOBI_HOME", str(home / ".bobi"))
+    monkeypatch.setattr(service_manager.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(service_manager.os, "getuid", lambda: 501)
+    monkeypatch.setattr(service_manager.shutil, "which", lambda _: "/bin/bobi")
+    monkeypatch.setattr(service_manager, "_uid_target", lambda: "gui/501")
+    calls = []
+
+    def run(command, timeout=30):
+        calls.append(command)
+        return _ok(command)
+
+    monkeypatch.setattr(service_manager, "_run", run)
+
+    target_a = service_manager.install("agent-a", root_a, platform="darwin")
+    assert service_manager.configured_agent(platform="darwin") == "agent-a"
+
+    calls.clear()
+    target_b = service_manager.install("agent-b", root_b, platform="darwin")
+    assert target_b == target_a
+    assert service_manager.configured_agent(platform="darwin") == "agent-b"
+    assert ["launchctl", "bootout", "gui/501/com.moda-labs.bobi"] in calls
+    assert ["launchctl", "bootstrap", "gui/501", str(target_b)] in calls
+
+
 def test_start_service_fresh_and_subscribe_guard(bobi_install, monkeypatch):
     cleared = []
     actions = []

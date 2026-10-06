@@ -313,8 +313,9 @@ automatic login on an always-on Mac.
 
 Note: Bobi provisions one user-level service per machine user (`bobi.service` on
 Linux / `com.moda-labs.bobi` on macOS). Installing a service for a different agent
-replaces the existing service definition. On headless Linux systems without auto-login,
-enable lingering so the user service starts at boot: `loginctl enable-linger $USER`.
+replaces the existing service definition (pass `--replace` to confirm). On headless
+Linux systems without auto-login, enable lingering so the user service starts at boot:
+`loginctl enable-linger $USER`.
 
 Have Claude Code or Codex help you configure the event server and deployment
 for your machine: open a session and ask it to read [EVENT_SERVER.md](EVENT_SERVER.md)

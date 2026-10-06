@@ -91,7 +91,7 @@ bobi agent <name> status
 bobi agent <name> doctor
 
 # Install or remove the user-level supervisor service (macOS/Linux).
-bobi agent <name> install-service
+bobi agent <name> install-service [--replace]
 bobi agent <name> uninstall-service
 
 # Supervise the manager as the terminal process (containers, pod specs).
