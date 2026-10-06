@@ -138,6 +138,10 @@ async def test_real_codex_comment_body_is_redacted(tmp_path, monkeypatch):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    # Non-login zsh still reads .zshenv; keep user profiles from replacing PATH.
+    zsh_home = tmp_path / "zsh-home"
+    zsh_home.mkdir()
+    monkeypatch.setenv("ZDOTDIR", str(zsh_home))
     monkeypatch.setenv("BOBI_HOME", str(tmp_path / "bobi-home"))
     monkeypatch.delenv("BOBI_ROOT", raising=False)
     monkeypatch.setenv("BOBI_GATEWAY_API_KEY", "local-test-key")
