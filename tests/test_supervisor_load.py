@@ -1,16 +1,17 @@
 """Unit tests for the load-evidence sampler (#903).
 
-The gate derives "legitimately busy" from the live process table - a synthetic
-/proc tree under tmp_path stands in for the real one, so stat parsing, the
-descendant walk, the tick delta, and the fail-closed reads are exercised
-without real processes. The real-process leg lives in the acceptance test in
-test_supervision_restart.py.
+The gate derives "legitimately busy" from the live process table. Synthetic
+/proc trees and injected Darwin ps snapshots exercise parsing, descendant
+attribution, CPU deltas, and fail-closed reads without real processes. The
+real-process leg lives in the acceptance test in test_supervision_restart.py.
 """
 
 import os
 import shutil
 import sys
 from pathlib import Path
+
+import pytest
 
 from bobi.supervisor.config import SupervisorConfig
 from bobi.supervisor.load import (
@@ -259,6 +260,90 @@ class TestLoadEvidence:
 
 
 class TestDarwinLoadEvidence:
+
+    @pytest.mark.parametrize("threshold, active", [(0.5, True), (0.51, False)])
+    def test_exact_cpu_ratio_from_child_and_grandchild(self, threshold, active):
+        baseline = darwin_load_evidence(
+            100, None, host_load=(8.0, 4), now_fn=lambda: 10.0,
+            ps_run=lambda: (
+                "  100     1   0:00.00\n"
+                "  101   100   1:59.50\n"
+                "  102   101   0:00.25\n"
+            ),
+        )
+        assert baseline["active"] is False
+
+        # The child consumes 1.5s and grandchild 2.5s over a 2s interval:
+        # 2 CPU cores, or half of the four-core capacity.
+        ev = darwin_load_evidence(
+            100, baseline["sample"], host_load=(8.0, 4),
+            now_fn=lambda: 12.0, tree_cpu_ratio=threshold,
+            ps_run=lambda: (
+                "  100     1   0:00.00\n"
+                "  101   100   2:01.00\n"
+                "  102   101   0:02.75\n"
+            ),
+        )
+
+        assert ev["busy_descendants"] == 2
+        assert ev["tree_cpu_cores"] == 2.0
+        assert ev["tree_cpu_ratio"] == 0.5
+        assert ev["pegged"] is True
+        assert ev["active"] is active
+
+    def test_busy_manager_and_sibling_do_not_activate_grace(self):
+        baseline = darwin_load_evidence(
+            100, None, host_load=(8.0, 2), now_fn=lambda: 10.0,
+            ps_run=lambda: (
+                "100 1 0:00.00\n101 100 0:00.05\n200 1 0:00.00\n"
+            ),
+        )["sample"]
+
+        # Only the manager and its sibling work; the descendant stays idle.
+        ev = darwin_load_evidence(
+            100, baseline, host_load=(8.0, 2), now_fn=lambda: 11.0,
+            ps_run=lambda: (
+                "100 1 0:01.00\n101 100 0:00.05\n200 1 0:01.00\n"
+            ),
+        )
+
+        assert ev["sample"].ticks == {101: 5}
+        assert ev["busy_descendants"] == 0
+        assert ev["tree_cpu_cores"] == 0.0
+        assert ev["tree_cpu_ratio"] == 0.0
+        assert ev["pegged"] is True
+        assert ev["active"] is False
+
+    @pytest.mark.parametrize("malformed_row", [
+        "200 1",
+        "200 1 0:00.00 extra",
+        "bad-pid 1 0:00.00",
+        "200 bad-ppid 0:00.00",
+        "200 1 not-a-time",
+        "200 1 0:60.00",
+        "200 1 1:60:00.00",
+    ])
+    def test_malformed_ps_row_fails_closed_with_busy_descendant(
+            self, malformed_row):
+        baseline = darwin_load_evidence(
+            100, None, host_load=(8.0, 2), now_fn=lambda: 10.0,
+            ps_run=lambda: "100 1 0:00.00\n101 100 0:00.00\n",
+        )["sample"]
+
+        # A valid busy descendant must not mask a malformed process-table row.
+        ev = darwin_load_evidence(
+            100, baseline, host_load=(8.0, 2), now_fn=lambda: 11.0,
+            ps_run=lambda: (
+                "100 1 0:00.00\n101 100 0:02.00\n" + malformed_row + "\n"
+            ),
+        )
+
+        assert ev["sample"].ticks == {}
+        assert ev["busy_descendants"] == 0
+        assert ev["tree_cpu_cores"] == 0.0
+        assert ev["tree_cpu_ratio"] == 0.0
+        assert ev["pegged"] is True
+        assert ev["active"] is False
 
     def test_default_reader_selects_darwin(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "darwin")
