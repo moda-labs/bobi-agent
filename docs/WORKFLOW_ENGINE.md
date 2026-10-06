@@ -86,7 +86,8 @@ and parsing live in `bobi/workflow/schema.py`.
 ### Prompt step (the default)
 
 Injects `prompt` into the persistent session, waits for the agent to finish the
-turn, then reads a handoff file. This is the only step type that uses the LLM.
+turn, then reads a handoff file if fields are declared. This is the only step
+type that uses the LLM.
 
 ```yaml
   - name: pickup
@@ -359,9 +360,21 @@ blocked_by: <value>  # optional
 
 After the turn, the engine reads that file and checks every `required` field is
 present (`_validate_handoff`). If fields are missing, it re-prompts the agent to
-fill them in, up to `MAX_HANDOFF_RETRIES` (2). If they are still missing, the
-step fails and the workflow fails. Present fields (required and optional) become
-the step's output scope and feed downstream routing and templating.
+fill them in, up to `MAX_HANDOFF_RETRIES` (2). The repair prompt names the step
+and exact handoff path, identifies the retry as repair rather than a new task,
+and tells the agent to inspect existing results without repeating completed
+work or side effects. It does not replay the original dispatch. If fields are
+still missing, the step fails and the workflow fails. Present fields (required
+and optional) become the step's output scope and feed downstream routing and
+templating.
+
+With no declared required or optional fields, a successful turn completes
+without reading a handoff file or requesting a repair. An optional-only
+contract reads supplied outputs but does not require a file to complete.
+Brain errors remain failures regardless of the handoff contract.
+
+A handoff file written for a contractless step is ignored; use the session
+registry and workflow ledger status, not file presence, to determine completion.
 
 ## Execution model
 
