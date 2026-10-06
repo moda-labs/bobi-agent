@@ -32,6 +32,8 @@ from typing import Callable
 
 log = logging.getLogger(__name__)
 
+_BACKLOG_WARNING_INTERVAL = 60.0
+
 
 def _msg_id() -> str:
     ts = int(time.time() * 1000)
@@ -54,6 +56,12 @@ class Message:
     # queued (#688). In-memory only; never crosses the wire.
     on_done: Callable[[], None] | None = field(
         default=None, repr=False, compare=False)
+    # Source timestamps are retained so stale context is rendered when the
+    # session consumes the message, not when the drain enqueues it.
+    event_timestamps: tuple[str, ...] = field(
+        default_factory=tuple, repr=False, compare=False)
+    # Monotonic enqueue time, populated by Inbox.push().
+    enqueued_at: float = field(default=0.0, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -94,31 +102,121 @@ class Inbox:
     priorities never compare ``Message`` objects.
     """
 
-    def __init__(self, session_name: str) -> None:
+    def __init__(self, session_name: str,
+                 stats_callback: Callable[[int, float], None] | None = None
+                 ) -> None:
         self.session_name = session_name
         self._queue: queue.PriorityQueue[tuple[int, int, Message]] = (
             queue.PriorityQueue())
         self._counter = itertools.count()
+        self._queue_lock = threading.Lock()
+        self._queued_at: dict[int, float] = {}
+        self._oldest_queued_at: float | None = None
+        self._stats_callback = stats_callback
+        self.readable = True
+        self._last_backlog_warning = float("-inf")
+        self._warning_timer: threading.Timer | None = None
+        self._warning_timer_lock = threading.Lock()
+
+    def _notify_stats(self) -> None:
+        if self._stats_callback is None:
+            return
+        try:
+            self._stats_callback(self.depth(), self.oldest_age())
+        except Exception:
+            log.debug("Inbox stats callback failed for '%s'",
+                      self.session_name, exc_info=True)
+
+    def _warn_if_backlogged(self) -> None:
+        depth = self.depth()
+        age = self.oldest_age()
+        if depth < 16 and age < 300.0:
+            return
+        now = time.monotonic()
+        if now - self._last_backlog_warning < _BACKLOG_WARNING_INTERVAL:
+            return
+        self._last_backlog_warning = now
+        log.warning("Inbox backlog for '%s': depth=%d oldest_age=%.1fs",
+                    self.session_name, depth, age)
+
+    def _schedule_backlog_check(self) -> None:
+        with self._warning_timer_lock:
+            if self._warning_timer is not None:
+                return
+            timer = threading.Timer(
+                _BACKLOG_WARNING_INTERVAL, self._run_backlog_check)
+            timer.daemon = True
+            self._warning_timer = timer
+            timer.start()
+
+    def _run_backlog_check(self) -> None:
+        with self._warning_timer_lock:
+            self._warning_timer = None
+        if not self.readable or self.empty():
+            return
+        self._warn_if_backlogged()
+        self._schedule_backlog_check()
+
+    def _cancel_backlog_check(self) -> None:
+        with self._warning_timer_lock:
+            timer, self._warning_timer = self._warning_timer, None
+        if timer is not None:
+            timer.cancel()
 
     def start(self) -> None:
         """Make the inbox addressable in-process for its drain loop."""
+        self.readable = True
         register_local_inbox(self.session_name, self)
         log.info(f"Inbox for '{self.session_name}' active")
 
     def push(self, msg: Message, priority: bool = False) -> None:
         """Enqueue a message for the session's run loop to pick up."""
-        self._queue.put((0 if priority else 1, next(self._counter), msg))
+        if not msg.enqueued_at:
+            msg.enqueued_at = time.monotonic()
+        with self._queue_lock:
+            ordinal = next(self._counter)
+            self._queue.put((0 if priority else 1, ordinal, msg))
+            self._queued_at[ordinal] = msg.enqueued_at
+            if (self._oldest_queued_at is None
+                    or msg.enqueued_at < self._oldest_queued_at):
+                self._oldest_queued_at = msg.enqueued_at
+        self._notify_stats()
+        self._warn_if_backlogged()
+        self._schedule_backlog_check()
 
     def recv(self, timeout: float = 2.0) -> Message | None:
         """Block until a message arrives. Returns None on timeout."""
         try:
-            return self._queue.get(timeout=timeout)[2]
+            _, ordinal, msg = self._queue.get(timeout=timeout)
+            with self._queue_lock:
+                removed_at = self._queued_at.pop(ordinal, None)
+                if removed_at == self._oldest_queued_at:
+                    self._oldest_queued_at = min(
+                        self._queued_at.values(), default=None)
+            self._notify_stats()
+            return msg
         except queue.Empty:
             return None
 
     def empty(self) -> bool:
         """Whether nothing is queued right now (racy, best-effort)."""
         return self._queue.empty()
+
+    def depth(self) -> int:
+        """Return the best-effort number of queued messages."""
+        with self._queue_lock:
+            return len(self._queued_at)
+
+    def oldest_age(self) -> float:
+        """Return seconds since the oldest queued message was pushed."""
+        with self._queue_lock:
+            oldest = self._oldest_queued_at
+        return max(0.0, time.monotonic() - oldest) if oldest is not None else 0.0
+
+    def mark_unreadable(self) -> None:
+        """Keep the inbox registered but stop drains feeding its dead reader."""
+        self.readable = False
+        self._cancel_backlog_check()
 
     def respond(self, msg: "Message", response: str) -> None:
         """Return a reply for a wait-mode message to its waiting sender.
@@ -146,6 +244,8 @@ class Inbox:
 
     def close(self) -> None:
         """Stop being addressable; drop the queue."""
+        self.readable = False
+        self._cancel_backlog_check()
         unregister_local_inbox(self.session_name)
 
 
