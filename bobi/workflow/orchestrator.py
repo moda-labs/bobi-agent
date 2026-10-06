@@ -1713,7 +1713,11 @@ def _read_handoff(session_name: str, step_name: str) -> dict:
         return {}
     try:
         content = path.read_text()
-        return yaml.safe_load(content) or {}
+        data = yaml.safe_load(content)
+        # Valid YAML that is not a mapping (a bare scalar, a list) would clear
+        # `_validate_handoff`, whose `f not in handoff` succeeds on `str` and
+        # `list`, then crash output capture on `handoff.get`. Repair instead.
+        return data if isinstance(data, dict) else {}
     except yaml.YAMLError:
         return {}
 

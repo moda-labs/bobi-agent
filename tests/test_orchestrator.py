@@ -607,6 +607,40 @@ class TestRunWorkflow:
             assert "summary" in prompt
             assert dispatch not in prompt
 
+    @pytest.mark.parametrize("body", ["summary\n", "- summary\n- done\n"])
+    def test_non_mapping_handoff_repairs_instead_of_crashing(self, monkeypatch, body):
+        """A handoff that parses to a scalar or a list must take the repair
+        path. `_validate_handoff` tests `f not in handoff`, which succeeds on
+        `str` and `list`, so a non-mapping cleared validation and then crashed
+        output capture on `handoff.get` with an AttributeError.
+        """
+        from bobi.sdk import session_handoff_path
+        from bobi.workflow.orchestrator import MAX_HANDOFF_RETRIES
+
+        brain, _calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        handoff_path = session_handoff_path("wf-adhoc-test-nonmapping", "task")
+        handoff_path.parent.mkdir(parents=True, exist_ok=True)
+        handoff_path.write_text(body)
+        workflow = Workflow(name="adhoc", steps=[
+            StepDef(name="task", prompt="Review the committed revision",
+                    handoff=HandoffContract(required=["summary"])),
+        ])
+
+        collect: dict = {}
+        assert self._mock_asyncio_run(
+            workflow, task="Review the committed revision", repo="test",
+            cwd="/tmp", run_key="nonmapping", collect=collect,
+        ) is False
+        # The run still fails, but as a reported missing-handoff, not a crash.
+        assert collect["error"] == \
+            "Handoff missing required fields after retries: ['summary']"
+        retries = clients[0].queries[1:]
+        assert len(retries) == MAX_HANDOFF_RETRIES
+        for prompt in retries:
+            assert "handoff-repair retry" in prompt
+            assert "missing required fields: summary" in prompt
+
     def test_multi_step_completes(self):
         wf = Workflow(name="t", steps=[
             StepDef(name="setup", prompt="set up"),
@@ -2208,6 +2242,19 @@ class TestHandoffEdgeCases:
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("")
         result = _read_handoff("wf-test-empty", "setup")
+        assert result == {}
+
+    @pytest.mark.parametrize("body", ["summary\n", "- summary\n- done\n"])
+    def test_non_mapping_yaml_returns_empty(self, tmp_path, monkeypatch, body):
+        """Valid YAML that is not a mapping is as unusable as a corrupt file:
+        every caller treats the result as a dict (#1111 F3).
+        """
+        _bind_runtime_root(tmp_path, monkeypatch)
+        sessions_dir = paths.sessions_dir(tmp_path)
+        session_dir = sessions_dir / "wf-test-nonmapping"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text(body)
+        result = _read_handoff("wf-test-nonmapping", "setup")
         assert result == {}
 
 
