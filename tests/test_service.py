@@ -3,6 +3,8 @@
 import os
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_launch_team_spawns_detached_manager_and_returns_entry(bobi_install, monkeypatch):
     from bobi import paths
@@ -108,6 +110,37 @@ def test_spawn_team_returns_without_waiting_for_registration(bobi_install, monke
 
     assert result.startup.pid == os.getpid()
     assert spawned["cmd"][-2:] == ["start", "--foreground"]
+
+
+@pytest.mark.parametrize(
+    ("caller_pid", "expected"),
+    [(300, True), (400, False)],
+)
+def test_caller_is_manager_descendant(
+    bobi_install, monkeypatch, caller_pid, expected,
+):
+    from bobi.service import caller_is_manager_descendant
+
+    (bobi_install.state_dir / "manager.pid").write_text("100")
+    monkeypatch.setattr(
+        "bobi.service._process_parent_map",
+        lambda: {100: 50, 200: 100, 300: 200, 400: 1},
+    )
+
+    assert caller_is_manager_descendant(
+        bobi_install.repo_path, caller_pid=caller_pid,
+    ) is expected
+
+
+def test_process_parent_map_reads_linux_proc_stat(tmp_path):
+    from bobi.service import _process_parent_map
+
+    (tmp_path / "100").mkdir()
+    (tmp_path / "100" / "stat").write_text(
+        "100 (manager with spaces) S 50 0 0 0 0 0 0 0 0 0 0 0\n"
+    )
+
+    assert _process_parent_map(tmp_path) == {100: 50}
 
 
 def test_run_team_foreground_loads_runtime_dotenv(bobi_install, monkeypatch):

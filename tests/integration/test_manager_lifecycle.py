@@ -8,8 +8,11 @@ the stub proves them deterministically in CI while the Claude leg still exercise
 a real manager locally. The same stub brain drives the private sidecar e2e.
 """
 
+import json
 import os
 import signal
+import subprocess
+import sys
 import time
 
 import pytest
@@ -208,6 +211,62 @@ class TestManagerStartStop:
         _wait_for_exit_file(pid_file)
 
 
+@pytest.mark.parametrize("action", ["stop", "restart"])
+@pytest.mark.timeout(120)
+def test_lifecycle_from_manager_descendant_is_refused(
+    stub_bobi_env, stub_cli_run, action
+):
+    pid_file = stub_bobi_env.state_dir / "manager.pid"
+    result_file = stub_bobi_env.state_dir / f"{action}-from-runtime.json"
+    manager = None
+    try:
+        caller_env = {
+            **os.environ,
+            "BOBI_HOME": str(stub_bobi_env.home_dir),
+            "BOBI_EVENT_SERVER": stub_bobi_env.event_server_url,
+            "BOBI_BRAIN": "stub",
+            "BOBI_STUB_BRAIN": "1",
+        }
+        result_file.unlink(missing_ok=True)
+        manager = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _RUNTIME_CALLER_HARNESS,
+                str(pid_file),
+                str(result_file),
+                sys.executable,
+                "-m",
+                "bobi.cli",
+                "agent",
+                stub_bobi_env.agent_name,
+                action,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(stub_bobi_env.project_path),
+            env=caller_env,
+            start_new_session=True,
+        )
+        manager_pid = _wait_for_pid(pid_file)
+        result = _wait_for_json(result_file)
+
+        assert result["returncode"] != 0
+        assert "cannot run from inside the target runtime" in result["output"]
+        assert (
+            f"bobi agent {stub_bobi_env.agent_name} {action}" in result["output"]
+        )
+        assert int(pid_file.read_text().strip()) == manager_pid
+        os.kill(manager_pid, 0)
+    finally:
+        if manager is not None and manager.poll() is None:
+            os.killpg(manager.pid, signal.SIGKILL)
+            manager.wait(timeout=10)
+        stub_cli_run("stop", timeout=30)
+        _wait_for_exit_file(pid_file)
+
+
 @pytest.mark.timeout(180)
 class TestManagerMessaging:
     """Tests that require a fully booted manager with drain loop active."""
@@ -301,6 +360,59 @@ class TestManagerNotRunning:
 
         result = cli_run("ask", "should fail", timeout=5)
         assert result.returncode != 0
+
+
+def _wait_for_pid(pid_file, timeout: float = 15, other_than: int = 0) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)
+        except (ValueError, OSError, ProcessLookupError):
+            pid = 0
+        if pid and pid != other_than:
+            return pid
+        time.sleep(0.1)
+    raise TimeoutError(f"{pid_file} never held a live pid other than {other_than}")
+
+
+def _wait_for_json(path, timeout: float = 15) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.05)
+    raise TimeoutError(f"lifecycle caller did not record a result in {path}")
+
+
+_RUNTIME_CALLER_HARNESS = r"""
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+pid_file = Path(sys.argv[1])
+result_file = Path(sys.argv[2])
+command = sys.argv[3:]
+
+def terminate_runtime(_signum, _frame):
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+
+signal.signal(signal.SIGTERM, terminate_runtime)
+pid_file.write_text(str(os.getpid()))
+result = subprocess.run(command, capture_output=True, text=True)
+result_file.write_text(json.dumps({
+    "returncode": result.returncode,
+    "output": result.stdout + result.stderr,
+}))
+while True:
+    time.sleep(1)
+"""
 
 
 def _wait_for_exit(pid: int, timeout: float = 10):

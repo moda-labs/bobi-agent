@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -465,6 +466,20 @@ def _has_systemd_service() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _refuse_runtime_lifecycle(project_path: Path, command: list[str]) -> None:
+    from bobi.service import caller_is_manager_descendant
+
+    if not caller_is_manager_descendant(project_path):
+        return
+    rendered = shlex.join(
+        ["bobi", "agent", paths.agent_name_for_root(project_path), *command]
+    )
+    raise click.ClickException(
+        f"`{rendered}` cannot run from inside the target runtime.\n"
+        f"Run it from a shell outside the runtime:\n  {rendered}"
+    )
 
 
 def _systemctl(action: str) -> bool:
@@ -1108,6 +1123,10 @@ def stop(force):
         return
 
     project_path = _detect_project_root()
+    command = ["stop"]
+    if force:
+        command.append("--force")
+    _refuse_runtime_lifecycle(project_path, command)
     from bobi.service import stop_team
 
     result = stop_team(project_path, force=force)
@@ -1168,6 +1187,12 @@ def restart(fresh):
         log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
+
+    project_path = _detect_project_root()
+    command = ["restart"]
+    if fresh:
+        command.append("--fresh")
+    _refuse_runtime_lifecycle(project_path, command)
 
     ctx = click.get_current_context()
     ctx.invoke(stop)

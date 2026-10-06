@@ -1357,3 +1357,37 @@ class TestFindTranscript:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
 
         assert find("worker") is None
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_command"),
+    [
+        (["stop", "--force"], f"bobi agent {TEST_AGENT_NAME} stop --force"),
+        (["restart", "--fresh"], f"bobi agent {TEST_AGENT_NAME} restart --fresh"),
+    ],
+)
+def test_lifecycle_command_is_refused_inside_target_runtime(
+    bobi_install, monkeypatch, arguments, expected_command,
+):
+    from bobi import service
+
+    monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
+    monkeypatch.setattr(service, "caller_is_manager_descendant", lambda root: True)
+    monkeypatch.setattr(
+        service,
+        "stop_team",
+        lambda *args, **kwargs: pytest.fail("stop reached the manager signal path"),
+    )
+    monkeypatch.setattr(
+        service,
+        "spawn_team",
+        lambda *args, **kwargs: pytest.fail("restart reached the start path"),
+    )
+
+    result = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, *arguments]
+    )
+
+    assert result.exit_code != 0
+    assert "cannot run from inside the target runtime" in result.output
+    assert expected_command in result.output
