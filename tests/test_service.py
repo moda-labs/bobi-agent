@@ -1,7 +1,46 @@
 """Tests for the plain service core used by CLI and web adapters."""
 
+import multiprocessing
 import os
 from types import SimpleNamespace
+
+import pytest
+
+
+def _run_manager_until_released(root, attempting, entered, release):
+    from bobi import launch_stamp, manager_health
+    from bobi.brain import instructions
+    from bobi.events import subscriptions
+    from bobi.monitors import registry as monitor_registry
+    from bobi.prompts import resolver
+    from bobi import brain, http, reconcile, state_version, subagent
+    from bobi.service import run_manager_from_config
+
+    brain.set_process_brain_from_config = lambda cfg: None
+    instructions.render_team_instructions = lambda project: None
+    subscriptions.discover_subscriptions = lambda project: []
+    subscriptions.monitor_subscription_keys = lambda events: []
+    subscriptions.lifecycle_subscription_keys = lambda: []
+    monitor_registry.MonitorRegistry.load = lambda project_path: SimpleNamespace(
+        effective_monitors=lambda: []
+    )
+    state_version.ensure_state_version = lambda project: None
+    launch_stamp.record_launch = lambda *args, **kwargs: None
+    launch_stamp.clear_launch = lambda *args, **kwargs: None
+    manager_health.start = lambda *args, **kwargs: 1
+    manager_health.stop = lambda: None
+    http.close = lambda: None
+    resolver.build_startup_prompt = lambda *args, **kwargs: "start"
+    reconcile.reconcile_sessions = lambda **kwargs: []
+    subagent.run_persistent_agent = lambda **kwargs: (
+        entered.set(), release.wait(timeout=10)
+    )
+    cfg = SimpleNamespace(
+        agent="test-agent", entry_role="director", monitors=False,
+        mcp_servers={},
+    )
+    attempting.set()
+    run_manager_from_config(root, cfg)
 
 
 def test_launch_team_spawns_detached_manager_and_returns_entry(bobi_install, monkeypatch):
@@ -50,6 +89,51 @@ def test_launch_team_spawns_detached_manager_and_returns_entry(bobi_install, mon
     assert spawned["cwd"] == str(bobi_install.repo_path)
     assert spawned["start_new_session"] is True
     assert spawned["env"]["PYTHONUNBUFFERED"] == "1"
+
+
+def test_manager_instance_lock_blocks_a_second_manager_until_the_first_exits(
+    bobi_install,
+):
+    """A replacement must not subscribe while the prior manager is alive."""
+    ctx = multiprocessing.get_context("spawn")
+    first_attempting = ctx.Event()
+    first_entered = ctx.Event()
+    release_first = ctx.Event()
+    second_attempting = ctx.Event()
+    second_entered = ctx.Event()
+    release_second = ctx.Event()
+    first = ctx.Process(
+        target=_run_manager_until_released,
+        args=(bobi_install.repo_path, first_attempting, first_entered, release_first),
+    )
+    second = ctx.Process(
+        target=_run_manager_until_released,
+        args=(
+            bobi_install.repo_path, second_attempting, second_entered,
+            release_second,
+        ),
+    )
+    first.start()
+    try:
+        assert first_entered.wait(timeout=5)
+        second.start()
+        assert second_attempting.wait(timeout=5)
+        assert not second_entered.is_set()
+
+        release_first.set()
+        assert second_entered.wait(timeout=5)
+    finally:
+        release_first.set()
+        release_second.set()
+        first.join(timeout=5)
+        if second.pid is not None:
+            second.join(timeout=5)
+        if first.is_alive():
+            first.terminate()
+            first.join(timeout=5)
+        if second.pid is not None and second.is_alive():
+            second.terminate()
+            second.join(timeout=5)
 
 
 def test_launch_team_waits_for_manager_transport(bobi_install, monkeypatch):
@@ -108,6 +192,37 @@ def test_spawn_team_returns_without_waiting_for_registration(bobi_install, monke
 
     assert result.startup.pid == os.getpid()
     assert spawned["cmd"][-2:] == ["start", "--foreground"]
+
+
+@pytest.mark.parametrize(
+    ("caller_pid", "expected"),
+    [(300, True), (400, False)],
+)
+def test_caller_is_manager_descendant(
+    bobi_install, monkeypatch, caller_pid, expected,
+):
+    from bobi.service import caller_is_manager_descendant
+
+    (bobi_install.state_dir / "manager.pid").write_text("100")
+    monkeypatch.setattr(
+        "bobi.service._process_parent_map",
+        lambda: {100: 50, 200: 100, 300: 200, 400: 1},
+    )
+
+    assert caller_is_manager_descendant(
+        bobi_install.repo_path, caller_pid=caller_pid,
+    ) is expected
+
+
+def test_process_parent_map_reads_linux_proc_stat(tmp_path):
+    from bobi.service import _process_parent_map
+
+    (tmp_path / "100").mkdir()
+    (tmp_path / "100" / "stat").write_text(
+        "100 (manager with spaces) S 50 0 0 0 0 0 0 0 0 0 0 0\n"
+    )
+
+    assert _process_parent_map(tmp_path) == {100: 50}
 
 
 def test_run_team_foreground_loads_runtime_dotenv(bobi_install, monkeypatch):

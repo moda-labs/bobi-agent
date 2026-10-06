@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -465,6 +466,20 @@ def _has_systemd_service() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _refuse_runtime_lifecycle(project_path: Path, command: list[str]) -> None:
+    from bobi.service import caller_is_manager_descendant
+
+    if not caller_is_manager_descendant(project_path):
+        return
+    rendered = shlex.join(
+        ["bobi", "agent", paths.agent_name_for_root(project_path), *command]
+    )
+    raise click.ClickException(
+        f"`{rendered}` cannot run from inside the target runtime.\n"
+        f"Run it from a shell outside the runtime:\n  {rendered}"
+    )
 
 
 def _systemctl(action: str) -> bool:
@@ -1108,6 +1123,10 @@ def stop(force):
         return
 
     project_path = _detect_project_root()
+    command = ["stop"]
+    if force:
+        command.append("--force")
+    _refuse_runtime_lifecycle(project_path, command)
     from bobi.service import stop_team
 
     result = stop_team(project_path, force=force)
@@ -1168,6 +1187,12 @@ def restart(fresh):
         log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
+
+    project_path = _detect_project_root()
+    command = ["restart"]
+    if fresh:
+        command.append("--fresh")
+    _refuse_runtime_lifecycle(project_path, command)
 
     ctx = click.get_current_context()
     ctx.invoke(stop)
@@ -3268,17 +3293,24 @@ main.add_command(event_server_cmd)
 @subagents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
 @click.option("--role", required=True, help="Agent role (see 'bobi agent <name> roles list')")
+@click.option("--input", "input_values", multiple=True, metavar="KEY=VALUE",
+              help="Bind a workflow input (repeatable), e.g. "
+                   "--input pr_number=123")
+@click.option("--input-json", default=None, metavar="OBJECT",
+              help="Bind workflow inputs from a JSON object")
 @click.option("--id", "run_key", default=None,
               help="Explicit run key for correlation (e.g. an issue number). "
                    "Relaunching the same key resumes that run. Default: a key "
                    "derived from the launch itself - workflow, role, model, "
-                   "effort, task text - so an identical launch collides with "
+                   "effort, inputs, task text - so an identical launch "
+                   "collides with "
                    "the run already in flight instead of starting a second "
                    "one.")
 @click.option("--id-random", "random_key", is_flag=True,
               help="Mint a random run key instead of deriving one from the "
                    "launch. Without it, an un-keyed launch derives its key "
-                   "from the workflow, role, model, effort and task text, so "
+                   "from the workflow, role, model, effort, inputs and task "
+                   "text, so "
                    "relaunching the same one while the first run is still "
                    "going is refused as a duplicate. Use this to fan out N "
                    "copies of an IDENTICAL launch on purpose. Cannot be "
@@ -3318,9 +3350,10 @@ main.add_command(event_server_cmd)
                    "since re-running the same --task otherwise resumes the "
                    "dead session. Implied when the run key is derived (no "
                    "--id), where there is no run the caller meant to continue.")
-def subagents_launch(workflow, role, run_key, random_key, task, timeout, wait,
-                     as_check, post_event, requested_by, non_interactive,
-                     persistent, subscribe, model, effort, fresh):
+def subagents_launch(workflow, role, input_values, input_json, run_key,
+                     random_key, task, timeout, wait, as_check, post_event,
+                     requested_by, non_interactive, persistent, subscribe,
+                     model, effort, fresh):
     """Launch a sub-agent with a workflow and role.
 
     Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
@@ -3334,6 +3367,7 @@ def subagents_launch(workflow, role, run_key, random_key, task, timeout, wait,
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
                     random_key=random_key,
+                    input_values=input_values, input_json=input_json,
                     timeout=timeout, wait=wait, as_check=as_check,
                     post_event=post_event, requested_by=requested_by,
                     interactive=not non_interactive,
@@ -3362,12 +3396,49 @@ def _parse_requested_by(requested_by: str | None) -> dict:
     return parsed
 
 
+def _parse_workflow_inputs(input_values, input_json):
+    """Parse repeatable KEY=VALUE and JSON-object workflow inputs."""
+    parsed = {}
+    if input_json is not None:
+        try:
+            decoded = json.loads(input_json)
+        except json.JSONDecodeError as exc:
+            raise click.UsageError(f"--input-json must be valid JSON: {exc.msg}")
+        if not isinstance(decoded, dict):
+            raise click.UsageError("--input-json must contain a JSON object")
+        parsed.update(decoded)
+
+    for raw in input_values:
+        key, separator, value = raw.partition("=")
+        if not separator or not key:
+            raise click.UsageError(
+                f"--input must use KEY=VALUE syntax (got {raw!r})"
+            )
+        parsed[key] = value
+    for key in ("task", "run_key"):
+        if key in parsed:
+            raise click.UsageError(
+                f"Cannot override built-in workflow input {key!r}"
+            )
+    return parsed
+
+
 def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
-                    timeout, wait,
+                    input_values=(), input_json=None, timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
                     model="", effort="", fresh=False):
     """Dispatch logic for the agent command."""
+    workflow_inputs = _parse_workflow_inputs(input_values, input_json)
+    if as_check and (input_values or input_json is not None):
+        raise click.UsageError(
+            "--input/--input-json require a workflow launch, not --as-check"
+        )
+    if persistent and (input_values or input_json is not None):
+        raise click.UsageError(
+            "--input/--input-json are not supported with --persistent"
+        )
+
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
         raise SystemExit(1)
@@ -3412,6 +3483,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
         with _launch_refusal_is_readable(project_path):
             _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
                             run_key=run_key, random_key=random_key,
+                            input_fields=workflow_inputs,
                             timeout=timeout,
                             requested_by=requested_by, interactive=interactive,
                             persistent=persistent, subscribe=subscribe or [],
@@ -3431,6 +3503,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
             subscribe=subscribe or [],
             run_key=run_key,
             random_key=random_key,
+            input_fields=workflow_inputs,
             model=model,
             effort=effort,
             fresh=fresh,
@@ -3456,11 +3529,14 @@ def _launch_refusal_is_readable(project_path: Path):
     """
     from .launch_lineage import LaunchBlockedError
     from .sdk import ACTIVE_STATUSES
-    from .subagent import DuplicateRunError
+    from .subagent import DuplicateRunError, WorkflowInputError
     try:
         yield
     except LaunchBlockedError as exc:
         click.echo(str(exc), err=True)
+        raise SystemExit(1) from None
+    except WorkflowInputError as exc:
+        click.echo(f"Launch refused: {exc}", err=True)
         raise SystemExit(1) from None
     except DuplicateRunError as exc:
         # Render the real agent name: an LLM pastes a `<name>` placeholder
@@ -3484,6 +3560,7 @@ def _launch_refusal_is_readable(project_path: Path):
 def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
                     interactive: bool, persistent: bool, subscribe: list[str],
+                    input_fields: dict | None = None,
                     model: str = "", effort: str = "",
                     fresh: bool = False, random_key: bool = False) -> None:
     """Run a real agent synchronously and print its final text."""
@@ -3516,6 +3593,7 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
         task=task, cwd=cwd, workflow_name=workflow, timeout=timeout,
         requested_by=requester, interactive=interactive, role=role,
         subscribe=subscribe, run_key=run_key, random_key=random_key,
+        input_fields=input_fields,
         model=model, effort=effort, fresh=fresh, wait=True,
     )
     if result.final_text:
