@@ -7,13 +7,15 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Iterable
 
 from bobi import launch_stamp, paths
 from bobi.__version__ import __version__
-from bobi.fsutil import atomic_write_text
+from bobi.fsutil import atomic_write_text, file_lock
 from bobi.sdk import SessionEntry
 
 
@@ -298,6 +300,60 @@ def _check_nested_runtime(project_path: Path) -> None:
         raise NestedRuntimeError(ancestor, pid)
 
 
+def caller_is_manager_descendant(
+    project_path: Path,
+    *,
+    caller_pid: int | None = None,
+) -> bool:
+    """Whether the caller belongs to the target manager's process tree."""
+    manager_pid = _read_pid(paths.manager_pid_path(project_path))
+    if not manager_pid:
+        return False
+
+    parents = _process_parent_map()
+
+    current = caller_pid or os.getpid()
+    seen: set[int] = set()
+    while current > 0 and current not in seen:
+        if current == manager_pid:
+            return True
+        seen.add(current)
+        current = parents.get(current, 0)
+    return False
+
+
+def _process_parent_map(proc_root: Path = Path("/proc")) -> dict[int, int]:
+    if proc_root.is_dir():
+        parents: dict[int, int] = {}
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+                fields = stat[stat.rfind(")") + 2:].split()
+                parents[int(entry.name)] = int(fields[1])
+            except (OSError, ValueError, IndexError):
+                continue
+        if parents:
+            return parents
+
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,ppid="], text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    parents = {}
+    for line in output.splitlines():
+        try:
+            pid_text, parent_text = line.split()
+            parents[int(pid_text)] = int(parent_text)
+        except ValueError:
+            continue
+    return parents
+
+
 def _wait_for_manager_entry(
     project_path: Path,
     manager_name: str,
@@ -503,6 +559,28 @@ def run_team_foreground(
     )
 
 
+@contextmanager
+def _manager_instance_lock(project_path: Path):
+    """Hold the per-runtime manager lease across the full manager lifetime."""
+    lock_target = paths.state_path(project_path) / "manager-instance"
+    lock_target.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(lock_target):
+        yield
+
+
+def _manager_instance_guard(func):
+    @wraps(func)
+    def guarded(project_path, cfg, extra_subscribe=None, foreground=False):
+        with _manager_instance_lock(project_path):
+            return func(
+                project_path, cfg, extra_subscribe=extra_subscribe,
+                foreground=foreground,
+            )
+
+    return guarded
+
+
+@_manager_instance_guard
 def run_manager_from_config(
     project_path: Path,
     cfg,
@@ -840,5 +918,3 @@ def ask(
     append_chat(project_path, agent, "user", text)
     append_chat(project_path, agent, "agent", result.response)
     return result
-
-
