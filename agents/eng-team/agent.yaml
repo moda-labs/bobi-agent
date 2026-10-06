@@ -147,10 +147,3 @@ auto_dispatch:
     workflow: pr-closed
     cooldown: 60
     allow_self_authored: true
-
-agent: eng-team
-brain:
-  kind: claude
-  base_url: ${ANTHROPIC_BASE_URL}
-  model: ${LLM_MODEL}
-  effort: ${LLM_EFFORT:-medium}
