@@ -987,6 +987,15 @@ async def _run_workflow_async(
                 ctx.set_scope(step.name, result)
                 for k, v in result.items():
                     ctx.set_flat(k, v)
+                if result.get("status") == "error":
+                    error = result.get("reason") or (
+                        f"Native action {step.action} failed"
+                    )
+                    run_failed, failure_error = True, error
+                    _emit_step_failed(
+                        run_key, workflow.name, step.name, error,
+                    )
+                    return OUTCOME_FAILED
                 _emit_lifecycle_event("agent/step.completed", {
                     "run_key": run_key,
                     "workflow": workflow.name,
@@ -1578,9 +1587,12 @@ def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
     result = cleanup_mod.cleanup_worktree(repo_root, head_branch, merged=merged)
     result["merged_live"] = merged
     if merge_state.get("error"):
+        # Preserve the worktree, but fail the workflow: an unreadable verdict
+        # is not equivalent to a verified unmerged PR.
+        result["status"] = "error"
         result["merge_state_error"] = merge_state["error"]
-        # `reason` is what reaches a human in the notify message. "not merged"
-        # would be a claim we cannot make: we could not read the PR at all.
+        # `reason` is preserved in the failure event and the run state. "not
+        # merged" would be a claim we cannot make: we could not read the PR.
         result["reason"] = (
             "could not read the PR's merge state, so nothing was deleted: "
             f"{merge_state['error']}"
@@ -1593,6 +1605,15 @@ def _cleanup_worktree_action(ctx: VariableContext, cwd: str) -> dict:
 _NATIVE_ACTIONS: dict = {
     "cleanup_worktree": _cleanup_worktree_action,
 }
+
+_NATIVE_ACTION_INPUTS: dict[str, tuple[str, ...]] = {
+    "cleanup_worktree": ("repo", "pr_number", "head_branch"),
+}
+
+
+def native_action_required_inputs(action: str) -> tuple[str, ...]:
+    """Return input fields a native action cannot operate without."""
+    return _NATIVE_ACTION_INPUTS.get(action, ())
 
 
 def _execute_native_action(step: StepDef, ctx: VariableContext, cwd: str) -> dict:
