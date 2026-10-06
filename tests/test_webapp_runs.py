@@ -474,6 +474,17 @@ class TestEndpoint:
         assert [r["key"] for r in body["runs"]] == ["session:worker"]
         assert body["counts"]["all"] == 2
 
+    def test_kind_filters_the_payload(self, client, bobi_install):
+        _session(bobi_install, "manager-1", role="director")
+        _monitor(bobi_install, "cron-mon")
+        body_manager = _get(client, f"/api/agents/{bobi_install.agent_name}/runs",
+                            kind="manager").json()
+        assert [r["key"] for r in body_manager["runs"]] == ["session:manager-1"]
+
+        body_monitor = _get(client, f"/api/agents/{bobi_install.agent_name}/runs",
+                            kind="monitor").json()
+        assert [r["title"] for r in body_monitor["runs"]] == ["cron-mon"]
+
     def test_limit_caps_the_payload_and_flags_it(self, client, bobi_install):
         for i in range(3):
             _session(bobi_install, f"worker-{i}", started_at=NOW - 100 * i)

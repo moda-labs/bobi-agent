@@ -88,7 +88,7 @@ const CHAT_POLL_MS = 1500;
 
 /* --- the view -------------------------------------------------------- */
 
-export function mountAgent(el, { api, name }) {
+export function mountAgent(el, { api, name, session = "" }) {
   const base = "/api/agents/" + encodeURIComponent(name);
 
   el.innerHTML = "";
@@ -101,6 +101,7 @@ export function mountAgent(el, { api, name }) {
           <p class="desc" data-el="desc"></p>
         </div>
         <div class="ah-right">
+          <button class="btn bobi-btn small" data-el="refreshBtn" type="button">refresh</button>
           <a class="btn bobi-btn quiet small" data-el="metricsLink">metrics & routing</a>
           <button class="btn bobi-btn quiet small" data-el="logsBtn" type="button">system logs</button>
           <div class="agent-header-state" data-el="band"></div>
@@ -126,8 +127,10 @@ export function mountAgent(el, { api, name }) {
 
       <section class="runs-section">
         <div class="section-label">
-          <span>Runs</span>
-          <span class="count" data-el="runsCount"></span>
+          <div class="section-title-wrap">
+            <span class="section-heading">Runs</span>
+            <span class="count-pill" data-el="runsCount"></span>
+          </div>
         </div>
         <div class="runs-controls">
           <span class="runs-search-field bobi-field">
@@ -148,8 +151,8 @@ export function mountAgent(el, { api, name }) {
                 <th style="width:118px">Status</th>
                 <th>Run</th>
                 <th style="width:150px">When</th>
-                <th style="width:130px" class="r-tok">Tokens · cost</th>
-                <th style="width:280px"></th>
+                <th style="width:160px" class="r-tok">Tokens · cost</th>
+                <th style="width:240px"></th>
               </tr></thead>
               <tbody data-el="runRows"></tbody>
             </table>
@@ -199,6 +202,14 @@ export function mountAgent(el, { api, name }) {
 
   els.title.textContent = name;
   els.metricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics`;
+  if (els.refreshBtn) {
+    els.refreshBtn.addEventListener("click", () => {
+      pollHealth();
+      pollRuns();
+      pollOverview();
+      pollSpend();
+    });
+  }
 
   let timers = [];
   let health = null;
@@ -212,6 +223,7 @@ export function mountAgent(el, { api, name }) {
   let runsRequest = 0;
   let busyVerb = null;
   let runsError = "";       // why the table is empty, when it is not "no runs"
+  let autoOpenedSession = false;
 
   /* --- system logs modal -------------------------------------------- */
   async function fetchAndRenderLogs() {
@@ -520,18 +532,48 @@ export function mountAgent(el, { api, name }) {
 
   const TABS = [
     { key: "all", label: "all" },
+    { key: "manager", label: "manager" },
+    { key: "monitor", label: "monitor" },
     { key: "running", label: "running" },
     { key: "awaiting_action", label: "awaiting action" },
     { key: "failed", label: "failed" },
   ];
 
+  function isManagerRow(r) {
+    return Boolean(r.detail?.is_manager || r.detail?.role === "director" || r.detail?.role === "manager" || (r.origin && r.origin.startsWith("manager")));
+  }
+  function isMonitorRow(r) {
+    return Boolean(r.kind === "monitor" || r.detail?.role === "monitor" || (r.origin && r.origin.startsWith("monitor")));
+  }
+
+  let knownCounts = {};
+
   function renderTabs() {
     const counts = (runs && runs.counts) || {};
+    if (runs && runs.runs) {
+      if (tab === "all") {
+        knownCounts.manager = runs.runs.filter(isManagerRow).length;
+        knownCounts.monitor = runs.runs.filter(isMonitorRow).length;
+      } else if (tab === "manager") {
+        knownCounts.manager = runs.total != null ? runs.total : runs.runs.length;
+      } else if (tab === "monitor") {
+        knownCounts.monitor = runs.total != null ? runs.total : runs.runs.length;
+      }
+    }
     els.tabs.innerHTML = "";
     for (const t of TABS) {
       // ALL stays bare: the panel head's "⌁ N runs" IS the all-count, and
       // printing it again one gap to the right reads as two facts.
-      const n = t.key === "all" ? null : counts[t.key];
+      let n = null;
+      if (t.key === "all") {
+        n = null;
+      } else if (t.key === "manager") {
+        n = knownCounts.manager != null ? knownCounts.manager : null;
+      } else if (t.key === "monitor") {
+        n = knownCounts.monitor != null ? knownCounts.monitor : null;
+      } else {
+        n = counts[t.key];
+      }
       const on = tab === t.key;
       const b = mk("button", "tab" + (on ? " active" : ""),
                    n == null ? t.label : `${t.label} · ${n}`);
@@ -563,9 +605,8 @@ export function mountAgent(el, { api, name }) {
     const rows = (runs && runs.runs) || [];
     els.runRows.innerHTML = "";
     const counts = (runs && runs.counts) || {};
-    // The eyebrow beside this already says "runs", so the count is a
-    // number and nothing else.
-    els.runsCount.textContent = counts.all ? String(counts.all) : "";
+    els.runsCount.textContent = counts.all ? `${counts.all} total` : "";
+    els.runsCount.hidden = !counts.all;
 
     if (!rows.length) {
       els.runsEmpty.hidden = false;
@@ -573,6 +614,10 @@ export function mountAgent(el, { api, name }) {
         ? (runsError || "Loading…")
         : query
           ? `No runs match “${query}”.`
+        : tab === "manager"
+          ? "No manager runs recorded."
+        : tab === "monitor"
+          ? "No monitor runs recorded."
         : tab === "awaiting_action"
           ? "No workflows are waiting for approval or clarification."
         : tab === "failed"
@@ -612,10 +657,6 @@ export function mountAgent(el, { api, name }) {
 
       const when = mk("td", "r-when");
       when.appendChild(mk("span", null, fmtIso(row.started_at) || "—"));
-      if (row.duration_seconds != null) {
-        when.appendChild(document.createTextNode(" "));
-        when.appendChild(mk("span", "dur", fmtDur(row.duration_seconds)));
-      }
       tr.appendChild(when);
 
       // Tokens and cost are independent: a session can record dollars with
@@ -687,24 +728,21 @@ export function mountAgent(el, { api, name }) {
       action, which ends the run without advancing the approval gate. */
   function rowActions(row) {
     const actions = mk("div", "row-actions");
-    const transcript = mk("button", "btn bobi-btn small", "Transcript");
-    transcript.type = "button";
-    transcript.disabled = !row.session_id;
-    if (!row.session_id) transcript.title = "No transcript was recorded for this run";
-    transcript.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openSlab(row);
-    });
-    actions.appendChild(transcript);
 
-    if (!row.session_id && row.kind !== "session") {
-      const details = mk("button", "btn bobi-btn small", "Details");
-      details.type = "button";
-      details.addEventListener("click", (e) => {
+    if (row.session_id) {
+      const metricsLink = mk("a", "btn bobi-btn small metrics-jump-link", "Metrics ↗");
+      metricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(row.session_id)}`;
+      metricsLink.title = "View routing decisions, tokens, and stream telemetry for this session";
+      metricsLink.addEventListener("click", (e) => e.stopPropagation());
+      actions.appendChild(metricsLink);
+
+      const transcript = mk("button", "btn bobi-btn small", "Transcript");
+      transcript.type = "button";
+      transcript.addEventListener("click", (e) => {
         e.stopPropagation();
-        openSlab(row);
+        openSlab(row, "transcript");
       });
-      actions.appendChild(details);
+      actions.appendChild(transcript);
     }
 
     if (row.status === "awaiting_action") {
@@ -756,6 +794,10 @@ export function mountAgent(el, { api, name }) {
     els.backdrop.classList.remove("open");
     els.slabComposer.hidden = true;
     els.slabComposer.innerHTML = "";
+    if (location.hash.includes("session=")) {
+      const cleanHash = location.hash.split("?")[0];
+      history.replaceState(null, "", cleanHash);
+    }
   }
   els.slabClose.addEventListener("click", closeSlab);
   els.backdrop.addEventListener("click", (e) => {
@@ -785,6 +827,10 @@ export function mountAgent(el, { api, name }) {
         button.addEventListener("click", () => openSlab(row, key));
         els.slabTabs.append(button);
       }
+      const fullMetricsLink = mk("a", "btn bobi-btn small slab-metrics-jump", "Full Metrics ↗");
+      fullMetricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(row.session_id)}`;
+      fullMetricsLink.title = "Open full-page Metrics & Routing dashboard for this session";
+      els.slabTabs.append(fullMetricsLink);
       if (section !== "transcript") {
         els.slabKind.textContent = section;
         await renderRunMetrics(els.slabBody, { api, name, row, section, signal: slabAbort.signal });
@@ -883,14 +929,13 @@ export function mountAgent(el, { api, name }) {
     box.innerHTML = "";
     // Reset, never accumulate: one slab element is reused for every row.
     box.className = "composer " + mode;
-    box.hidden = false;
 
-    if (mode === "ended") {
-      box.appendChild(mk("p", "composer-note",
-        "This session has ended and it is not waiting on anything, so there "
-        + "is nothing here to reply to."));
+    // Transcript view: remove send message action (only retain approval gate when awaiting action)
+    if (mode !== "gate") {
+      box.hidden = true;
       return;
     }
+    box.hidden = false;
 
     const gate = mode === "gate";
     const awaited = ((row.detail && row.detail.await_event) || "approval")
@@ -1137,7 +1182,13 @@ export function mountAgent(el, { api, name }) {
       limit: "100",
       offset: String(pageIndex * 100),
     });
-    if (tab !== "all") params.set("status", tab);
+    if (tab !== "all") {
+      if (tab === "manager" || tab === "monitor") {
+        params.set("kind", tab);
+      } else {
+        params.set("status", tab);
+      }
+    }
     if (query) params.set("query", query);
     const { ok, status, data } = await api(base + "/runs?" + params);
     if (request !== runsRequest) return;
@@ -1153,6 +1204,22 @@ export function mountAgent(el, { api, name }) {
       renderTabs();
       renderRuns();
       renderPager();
+      if (session && !autoOpenedSession) {
+        autoOpenedSession = true;
+        let target = (runs.runs || []).find(r => r.session_id === session || r.title === session || r.key === `session:${session}`);
+        if (!target && (session.startsWith("ses_") || session.startsWith("sess-") || session.length >= 32)) {
+          try {
+            const met = await api(`/api/agents/${encodeURIComponent(name)}/metrics/sessions/${encodeURIComponent(session)}`);
+            if (met.ok && met.data?.session?.session_name) {
+              const sessName = met.data.session.session_name;
+              target = (runs.runs || []).find(r => r.session_id === sessName || r.title === sessName || r.key === `session:${sessName}`);
+            }
+          } catch { /* ignore */ }
+        }
+        if (target) {
+          openSlab(target);
+        }
+      }
       return;
     }
     // A read that failed is not a read that is still running. Left saying

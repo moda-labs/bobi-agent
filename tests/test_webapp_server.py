@@ -43,6 +43,8 @@ class TestMetrics:
         assert summary.json()["totals"]["input_tokens"] == 720
         assert summary.json()["collector"]["reconciliation_errors"] == 1
         assert "private-task" not in summary.text
+        summary_s1 = _client().get(base + "/summary", params={**self.RANGE, "session_id": "s1"})
+        assert summary_s1.status_code == 200
         for endpoint in ("/turns", "/turns/t-pro", "/sessions/s1"):
             result = _client().get(base + endpoint, params=self.RANGE)
             assert result.status_code == 200
@@ -1052,3 +1054,47 @@ class TestSystemLogs:
         assert data["ok"] is True
         assert len(data["logs"]) == 3
         assert "521" in data["recent_error"]
+
+
+class TestRoutingConfig:
+    def test_routing_config_lifecycle(self, bobi_install):
+        c = _client()
+        name = bobi_install.agent_name
+
+        # Initial state should be disabled
+        r = c.get(f"/api/agents/{name}/routing/config")
+        assert r.status_code == 200
+        data = r.json()
+        assert "enabled" in data
+
+        # Enable JEV in shadow mode
+        r_update = c.post(f"/api/agents/{name}/routing/config", json={
+            "enabled": True,
+            "mode": "shadow",
+            "control_model": "ds/deepseek-flash",
+            "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
+            "roles": ["engineer"],
+            "min_confidence": 0.85
+        })
+        assert r_update.status_code == 200
+        updated = r_update.json()
+        assert updated["enabled"] is True
+        assert updated["mode"] == "shadow"
+        assert updated["control_model"] == "ds/deepseek-flash"
+
+        # Update to enforce mode
+        r_enforce = c.post(f"/api/agents/{name}/routing/config", json={
+            "enabled": True,
+            "mode": "enforce",
+            "control_model": "ds/deepseek-flash",
+            "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
+            "roles": ["engineer"]
+        })
+        assert r_enforce.status_code == 200
+        assert r_enforce.json()["mode"] == "enforce"
+
+        # Disable JEV
+        r_disable = c.post(f"/api/agents/{name}/routing/config", json={"enabled": False})
+        assert r_disable.status_code == 200
+        assert r_disable.json()["enabled"] is False
+

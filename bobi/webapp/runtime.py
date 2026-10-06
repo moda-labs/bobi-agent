@@ -113,6 +113,23 @@ class TeamRuntime(ABC):
 
         raise MetricsQueryError("metrics are unavailable for this runtime", "metrics_unsupported")
 
+    def get_routing_config(self, name: str) -> dict:
+        """Read JEV routing experiment configuration for an agent."""
+        return {
+            "enabled": False,
+            "experiment_id": "",
+            "mode": "shadow",
+            "control_model": "",
+            "policy_name": "typesafe-jev",
+            "candidate_models": [],
+            "roles": [],
+            "min_confidence": 0.85,
+        }
+
+    def update_routing_config(self, name: str, payload: dict) -> dict:
+        """Enable, disable, or update JEV routing configuration for an agent."""
+        raise NotImplementedError
+
     @abstractmethod
     def dashboard(self) -> dict:
         """Every team slot this runtime can see."""
@@ -334,7 +351,7 @@ class TeamRuntime(ABC):
         """
 
     @abstractmethod
-    def runs(self, name: str, *, status: str = "", query: str = "",
+    def runs(self, name: str, *, status: str = "", kind: str = "", query: str = "",
              offset: int = 0, limit: int | None = None) -> dict:
         """One team's runs: sessions, workflow runs, and monitor runs merged
         into one list, newest first with live runs at the top.
@@ -474,17 +491,34 @@ def session_usage(root: Path, session: str) -> dict:
 
     entry = SessionRegistry(root).get(session)
     if entry is None:
+        from bobi.webapp.runs import _metrics_usage_by_session
+        t_usage = _metrics_usage_by_session(root).get(session)
+        if t_usage:
+            return {
+                "started_at": 0.0, "ended_at": 0.0,
+                "tokens": t_usage.get("total_tokens", 0),
+                "cost_usd": t_usage.get("cost_usd", 0.0),
+                "status": "",
+            }
         return {"started_at": 0.0, "ended_at": 0.0, "tokens": 0,
                 "cost_usd": 0.0, "status": ""}
+    tokens = sum(
+        int(u.get("input_tokens", 0) or 0)
+        + int(u.get("output_tokens", 0) or 0)
+        for u in (entry.model_usage or {}).values()
+        if isinstance(u, dict))
+    cost_usd = round(entry.total_cost_usd or 0.0, 6)
+    if tokens == 0 and cost_usd == 0.0:
+        from bobi.webapp.runs import _metrics_usage_by_session
+        t_usage = _metrics_usage_by_session(root).get(session)
+        if t_usage:
+            tokens = t_usage.get("total_tokens", 0)
+            cost_usd = t_usage.get("cost_usd", 0.0)
     return {
         "started_at": entry.started_at or 0.0,
         "ended_at": entry.terminal_at or 0.0,
-        "tokens": sum(
-            int(u.get("input_tokens", 0) or 0)
-            + int(u.get("output_tokens", 0) or 0)
-            for u in (entry.model_usage or {}).values()
-            if isinstance(u, dict)),
-        "cost_usd": round(entry.total_cost_usd or 0.0, 6),
+        "tokens": tokens,
+        "cost_usd": cost_usd,
         "status": entry.status,
     }
 
@@ -620,6 +654,240 @@ class LocalRuntime(TeamRuntime):
             return data
         finally:
             self._metrics_reads.release()
+
+    def get_routing_config(self, name: str) -> dict:
+        import json
+        from bobi import paths
+        from bobi.config import project_env
+        from bobi.metrics.router import load_experiment
+        from bobi.prompts.resolver import discover_roles
+
+        root = self._resolve(name)
+        env = project_env(root)
+        env_file = paths.env_path(root)
+
+        try:
+            available_roles = [r.get("name", "") for r in discover_roles(project_path=root) if r.get("name")]
+        except Exception:
+            available_roles = []
+        if not available_roles:
+            available_roles = ["director", "engineer"]
+        if "director" not in available_roles:
+            available_roles.insert(0, "director")
+        if "engineer" not in available_roles:
+            available_roles.append("engineer")
+
+        raw_val = env.get("BOBI_METRICS_EXPERIMENT_JSON", "").strip()
+        is_commented = False
+        if not raw_val and env_file.exists():
+            try:
+                for line in env_file.read_text().splitlines():
+                    if line.startswith("# BOBI_METRICS_EXPERIMENT_JSON="):
+                        raw_val = line.split("=", 1)[1].strip()
+                        is_commented = True
+                        break
+            except OSError:
+                pass
+
+        try:
+            configured = load_experiment(env)
+        except Exception:
+            configured = None
+
+        if configured is not None:
+            config, _ = configured
+            policy = config.policy
+            formatted_json = ""
+            try:
+                formatted_json = json.dumps(json.loads(raw_val or "{}"), indent=2)
+            except Exception:
+                pass
+            return {
+                "enabled": True,
+                "raw_json": formatted_json,
+                "experiment_id": config.experiment_id,
+                "cohort": config.cohort or "",
+                "control_model": config.control_model,
+                "policy_name": policy.name if policy else "",
+                "policy_version": policy.version if policy else "",
+                "mode": policy.mode if policy else "enforce",
+                "candidate_models": list(policy.candidate_models) if policy else [v.model for v in config.variants if v.model],
+                "roles": list(policy.roles) if policy else [],
+                "available_roles": available_roles,
+                "entry_points": list(policy.entry_points) if policy else [],
+                "min_confidence": policy.min_confidence if policy else 0.85,
+                "deadline_ms": policy.deadline_ms if policy else 3000,
+                "credential_env": policy.credential_env if policy else "TYPESAFE_API_KEY",
+                "config_path": str(env_file),
+            }
+
+        formatted_json = ""
+        parsed_data = {}
+        if raw_val:
+            try:
+                parsed_data = json.loads(raw_val)
+                formatted_json = json.dumps(parsed_data, indent=2)
+            except Exception:
+                pass
+
+        policy_dict = parsed_data.get("policy") if isinstance(parsed_data.get("policy"), dict) else {}
+        control = parsed_data.get("control_model") or "ds/deepseek-flash"
+        mode = policy_dict.get("mode") or "shadow"
+        candidates = policy_dict.get("candidate_models") or [control, "ds/deepseek-v4-pro"]
+        scope = policy_dict.get("scope") or {}
+        roles = scope.get("roles") or ["engineer", "director"]
+        entry_points = scope.get("entry_points") or ["subagent_persistent", "subagent_phase", "workflow_start"]
+
+        return {
+            "enabled": False,
+            "raw_json": formatted_json,
+            "experiment_id": parsed_data.get("experiment_id", ""),
+            "cohort": parsed_data.get("cohort", "production-opt-in"),
+            "control_model": control,
+            "policy_name": policy_dict.get("name", "typesafe-jev"),
+            "policy_version": policy_dict.get("version", "jev-1.13.0"),
+            "mode": mode,
+            "candidate_models": list(candidates),
+            "roles": list(roles),
+            "available_roles": available_roles,
+            "entry_points": list(entry_points),
+            "min_confidence": policy_dict.get("min_confidence", 0.85),
+            "deadline_ms": policy_dict.get("deadline_ms", 3000),
+            "credential_env": policy_dict.get("credential_env", "TYPESAFE_API_KEY"),
+            "config_path": str(env_file),
+        }
+
+    def update_routing_config(self, name: str, payload: dict) -> dict:
+        import json
+        import os
+        import secrets
+        import time
+        from bobi import paths
+
+        root = self._resolve(name)
+        env_file = paths.env_path(root)
+
+        enabled = bool(payload.get("enabled", True))
+
+        try:
+            from bobi.config import _DOTENV_LOADED
+        except ImportError:
+            _DOTENV_LOADED = {}
+
+        lines: list[str] = []
+        if env_file.exists():
+            try:
+                lines = env_file.read_text().splitlines()
+            except OSError:
+                lines = []
+
+        if not enabled:
+            new_lines = []
+            for line in lines:
+                if line.startswith("BOBI_METRICS_EXPERIMENT_JSON="):
+                    val = line.split("=", 1)[1]
+                    new_lines.append(f"# BOBI_METRICS_EXPERIMENT_JSON={val}")
+                elif line.startswith("# BOBI_METRICS_EXPERIMENT_JSON (disabled)"):
+                    new_lines.append(line)
+                else:
+                    new_lines.append(line)
+            env_file.parent.mkdir(parents=True, exist_ok=True)
+            env_file.write_text("\n".join(new_lines) + ("\n" if new_lines else ""))
+            os.environ.pop("BOBI_METRICS_EXPERIMENT_JSON", None)
+            _DOTENV_LOADED.pop("BOBI_METRICS_EXPERIMENT_JSON", None)
+            return self.get_routing_config(name)
+
+        existing_json_val = None
+        for line in lines:
+            if line.startswith("# BOBI_METRICS_EXPERIMENT_JSON="):
+                existing_json_val = line.split("=", 1)[1].strip()
+                break
+            elif line.startswith("BOBI_METRICS_EXPERIMENT_JSON="):
+                existing_json_val = line.split("=", 1)[1].strip()
+                break
+
+        has_custom_fields = any(k in payload for k in ("mode", "control_model", "candidate_models", "roles", "min_confidence"))
+
+        if not has_custom_fields and existing_json_val:
+            json_val = existing_json_val
+        else:
+            mode = str(payload.get("mode") or "enforce").strip().lower()
+            if mode not in {"shadow", "enforce"}:
+                mode = "shadow"
+
+            control_model = str(payload.get("control_model") or "ds/deepseek-flash").strip()
+            candidates = list(payload.get("candidate_models") or [control_model])
+            if control_model not in candidates:
+                candidates.insert(0, control_model)
+            roles = list(payload.get("roles") or ["director", "engineer"])
+            min_conf = float(payload.get("min_confidence") or 0.85)
+
+            exp_id = payload.get("experiment_id") or f"{name}-jev-{mode}-{int(time.time())}"
+            config_dict = {
+                "experiment_id": exp_id,
+                "router_name": "bobi-arm",
+                "router_version": "1",
+                "policy_version": f"{name}-jev-{mode}-v1",
+                "feature_schema_version": "jev-features-v1",
+                "control_model": control_model,
+                "cohort": f"{name}-routing",
+                "variants": [
+                    {"variant_id": "control", "weight": 0.0 if mode == "enforce" else 1.0, "model": control_model},
+                    {"variant_id": "treatment_jev", "weight": 1.0 if mode == "enforce" else 0.0, "policy": "typesafe-jev"},
+                ],
+                "policy": {
+                    "name": "typesafe-jev",
+                    "version": "jev-1.13.0",
+                    "brain": "claude",
+                    "mode": mode,
+                    "candidate_models": candidates,
+                    "scope": {
+                        "entry_points": ["subagent_persistent", "subagent_phase", "workflow_start"],
+                        "roles": roles,
+                    },
+                    "egress": {
+                        "prompt": "none",
+                        "max_prompt_bytes": 8192,
+                    },
+                    "credential_env": "TYPESAFE_API_KEY",
+                    "options": {
+                        "instructions": f"Choose the least costly candidate that can reliably complete the task. When task information is insufficient, choose {control_model}.",
+                        "criteria": {m: f"Route to {m} based on complexity." for m in candidates}
+                    },
+                    "min_confidence": min_conf,
+                    "deadline_ms": 3000,
+                    "max_in_flight": 8,
+                    "store_reason_text": False
+                }
+            }
+            json_val = json.dumps(config_dict)
+
+        has_secret = any(l.startswith("BOBI_METRICS_ASSIGNMENT_SECRET=") for l in lines)
+        secret_val = secrets.token_urlsafe(32)
+        secret_line = None
+        if not has_secret and "BOBI_METRICS_ASSIGNMENT_SECRET" not in os.environ:
+            secret_line = f"BOBI_METRICS_ASSIGNMENT_SECRET={secret_val}"
+            os.environ["BOBI_METRICS_ASSIGNMENT_SECRET"] = secret_val
+
+        new_lines = []
+        replaced = False
+        for line in lines:
+            if line.startswith("BOBI_METRICS_EXPERIMENT_JSON=") or line.startswith("# BOBI_METRICS_EXPERIMENT_JSON"):
+                new_lines.append(f"BOBI_METRICS_EXPERIMENT_JSON={json_val}")
+                replaced = True
+            else:
+                new_lines.append(line)
+        if not replaced:
+            new_lines.append(f"BOBI_METRICS_EXPERIMENT_JSON={json_val}")
+        if secret_line:
+            new_lines.append(secret_line)
+
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text("\n".join(new_lines) + "\n")
+        os.environ["BOBI_METRICS_EXPERIMENT_JSON"] = json_val
+        _DOTENV_LOADED["BOBI_METRICS_EXPERIMENT_JSON"] = json_val
+
+        return self.get_routing_config(name)
 
     def dashboard(self) -> dict:
         """Every agent slot on this machine: installed (with run state)
@@ -977,7 +1245,7 @@ class LocalRuntime(TeamRuntime):
         except (run_actions.RunNotWaiting, run_actions.ActionFailed) as e:
             raise TeamLifecycleError(str(e)) from None
 
-    def runs(self, name: str, *, status: str = "", query: str = "",
+    def runs(self, name: str, *, status: str = "", kind: str = "", query: str = "",
              offset: int = 0, limit: int | None = None) -> dict:
         """Fold this machine's three run stores for one team. Every read takes
         the resolved root explicitly - this process serves every team and
@@ -990,6 +1258,7 @@ class LocalRuntime(TeamRuntime):
             root,
             manager_name=service.manager_session_name(root),
             status=status or "",
+            kind=kind or "",
             query=query or "",
             offset=max(0, offset),
             limit=limit if limit and limit > 0 else DEFAULT_LIMIT,

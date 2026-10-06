@@ -412,6 +412,7 @@ class MetricsQueries:
         run_key = str(args.get("run_key") or "").strip() or None
         experiment_id = str(args.get("experiment_id") or "").strip() or None
         variant_id = str(args.get("variant_id") or "").strip() or None
+        routing_mode = str(args.get("routing") or "").strip().lower() or None
         dashboard = args.get("include_dashboard", False)
         if not isinstance(dashboard, bool):
             raise MetricsQueryError("include_dashboard must be a boolean", "bad_request")
@@ -440,8 +441,12 @@ class MetricsQueries:
                 filters.append("s.session_name=?")
                 params.append(session_name)
             if model:
-                filters.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND i.model_selected=?)" if dashboard else "b.model=?")
-                params.append(model)
+                if dashboard:
+                    filters.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND (i.model_selected=? OR i.model_requested=?))")
+                    params.extend([model, model])
+                else:
+                    filters.append("b.model=?")
+                    params.append(model)
             if run_key:
                 filters.append("s.run_key=?")
                 params.append(run_key)
@@ -451,6 +456,10 @@ class MetricsQueries:
             if variant_id:
                 filters.append("EXISTS (SELECT 1 FROM router_decisions r WHERE r.turn_id=t.turn_id AND r.variant_id=?)")
                 params.append(variant_id)
+            if routing_mode in {"jev", "routed"}:
+                filters.append("EXISTS (SELECT 1 FROM router_decisions rd WHERE rd.turn_id=t.turn_id)")
+            elif routing_mode in {"direct", "baseline", "none"}:
+                filters.append("NOT EXISTS (SELECT 1 FROM router_decisions rd WHERE rd.turn_id=t.turn_id)")
             where = " AND ".join(filters)
             # Exact terminal aggregates are canonical for totals. Invocation
             # rows remain available for granular drill-down without mixing
@@ -664,8 +673,15 @@ class MetricsQueries:
         if args.get("model"):
             model = _required_id(args, "model")
             filters["model"] = model
-            conditions.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND i.model_selected=?)")
-            params.append(model)
+            conditions.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND (i.model_selected=? OR i.model_requested=?))")
+            params.extend([model, model])
+        if args.get("routing"):
+            routing = _required_id(args, "routing").lower()
+            filters["routing"] = routing
+            if routing in {"jev", "routed"}:
+                conditions.append("EXISTS (SELECT 1 FROM router_decisions rd WHERE rd.turn_id=t.turn_id)")
+            elif routing in {"direct", "baseline", "none"}:
+                conditions.append("NOT EXISTS (SELECT 1 FROM router_decisions rd WHERE rd.turn_id=t.turn_id)")
         position = _decode_cursor(args.get("cursor"), filters, ("started_at_us", "turn_id"))
         if position is not None:
             if type(position["started_at_us"]) is not int or not isinstance(position["turn_id"], str):

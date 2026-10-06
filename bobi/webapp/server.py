@@ -186,17 +186,22 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
 
     @app.get("/api/agents/{name}/metrics/summary")
     def metrics_summary(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
-                        model: str = "", session_name: str = "") -> JSONResponse:
+                        model: str = "", session_name: str = "", session_id: str = "",
+                        routing: str = "") -> JSONResponse:
         data = rt.metrics(name, "summary", {"from": start, "to": end, "model": model,
-                          "session_name": session_name, "group_by": ["model"], "include_dashboard": True})
+                          "session_name": session_name, "session_id": session_id,
+                          "routing": routing,
+                          "group_by": ["model"], "include_dashboard": True})
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/agents/{name}/metrics/turns")
     def metrics_turns(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
                       model: str = "", session_name: str = "", session_id: str = "",
+                      routing: str = "",
                       limit: int = Query(default=50, ge=1, le=200), cursor: str = "") -> JSONResponse:
         data = rt.metrics(name, "turns", {"from": start, "to": end, "model": model,
                           "session_name": session_name, "session_id": session_id,
+                          "routing": routing,
                           "limit": limit, "cursor": cursor})
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
@@ -210,6 +215,14 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def metrics_turn(name: str, turn_id: str) -> JSONResponse:
         return JSONResponse(rt.metrics(name, "turn", {"turn_id": turn_id, "include_policy": True}),
                             headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/routing/config")
+    def get_routing_config(name: str) -> JSONResponse:
+        return JSONResponse(rt.get_routing_config(name), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/agents/{name}/routing/config")
+    def update_routing_config(name: str, payload: dict) -> JSONResponse:
+        return JSONResponse(rt.update_routing_config(name, payload), headers={"Cache-Control": "no-store"})
 
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
@@ -235,10 +248,10 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     # The unified runs view: sessions + workflow runs + monitor runs as one
     # list. Filters are applied before the page window is selected.
     @app.get("/api/agents/{name}/runs")
-    def agent_runs(name: str, status: str = "", query: str = "",
+    def agent_runs(name: str, status: str = "", kind: str = "", query: str = "",
                    offset: int = 0, limit: int = 0) -> dict:
         return rt.runs(
-            name, status=status, query=query, offset=max(0, offset),
+            name, status=status, kind=kind, query=query, offset=max(0, offset),
             limit=limit or None)
 
     # The runs table's one write action. Resume ANSWERS a gate: the verdict
