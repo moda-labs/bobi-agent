@@ -339,7 +339,7 @@ class Session:
         # Extra event topics beyond this session's own inbox/<self> (e.g. the
         # manager's external resource topics). inbox/<self> is always added.
         self._subscribe = list(subscribe or [])
-        self.inbox = Inbox(name)
+        self.inbox = Inbox(name, stats_callback=self._record_inbox_stats)
         self._system_prompt = system_prompt or {
             "type": "preset",
             "preset": "claude_code",
@@ -406,9 +406,20 @@ class Session:
     def detect_state(self) -> str:
         return self._state
 
+    def _record_inbox_stats(self, depth: int, oldest_age: float) -> None:
+        """Persist queue telemetry without treating queue movement as progress."""
+        try:
+            get_registry().update_inbox_stats(
+                self.name, depth=depth, oldest_age=oldest_age)
+        except Exception:
+            log.debug("Could not persist inbox stats for '%s'", self.name,
+                      exc_info=True)
+
     def _set_state(self, state: str) -> None:
         """Update state and wake any waiter when the session becomes idle or terminal."""
         self._state = state
+        if state == "error":
+            self.inbox.mark_unreadable()
         if state in ("waiting_input", "stopped", "error") and self._input_ready:
             self._input_ready.set()
 
@@ -1480,6 +1491,18 @@ class Session:
                     )
                 continue
 
+            from bobi.events.client import stale_event_annotation
+            stale_notes = [
+                note for timestamp in msg.event_timestamps
+                if (note := stale_event_annotation(timestamp)) is not None
+            ]
+            if stale_notes:
+                msg.text += "\n" + "\n".join(stale_notes)
+            queued_for = max(0.0, time.monotonic() - msg.enqueued_at)
+            log.info(
+                "Consuming inbox message for %s (queued %.1fs, depth=%d)",
+                self.name, queued_for, self.inbox.depth(),
+            )
             await self._process_message(msg)
             if self._state == "error":
                 return

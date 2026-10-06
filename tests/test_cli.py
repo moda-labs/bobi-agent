@@ -114,6 +114,29 @@ def test_agent_group_pins_team_brain_for_cli_process(bobi_install, monkeypatch):
     assert os.environ.get("ANTHROPIC_AUTH_TOKEN") == "from-runtime-dotenv"
 
 
+def test_status_reports_active_inbox_backlog(bobi_install):
+    import os
+    import time
+
+    from bobi.sdk import SessionEntry, get_registry
+
+    get_registry().register(SessionEntry(
+        name="bobi-test-agent-director",
+        role="director",
+        cwd=str(bobi_install.repo_path),
+        pid=os.getpid(),
+        status="idle",
+        inbox_depth=4,
+        inbox_oldest_age_seconds=10.0,
+        inbox_oldest_enqueued_at=time.time() - 30.0,
+    ))
+
+    result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "status"])
+
+    assert result.exit_code == 0, result.output
+    assert "inbox=4, oldest=30s" in result.output
+
+
 def test_agent_group_pins_gateway_openai_brain_for_cli_process(
     bobi_install, monkeypatch,
 ):
@@ -402,6 +425,72 @@ class TestSubagents:
         assert result.exit_code == 0, result.output
         assert mock.call_args[1]["random_key"] is True
 
+    def test_workflow_inputs_are_passed_from_flags_and_json(self, bobi_install):
+        with patch(
+            "bobi.subagent.launch_agent", return_value="wf-pr-closed-x"
+        ) as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "pr-closed", "--role", "engineer",
+                "--input", "repo=moda-labs/bobi-agent",
+                "--input", "head_branch=agent/123",
+                "--input-json", '{"pr_number":123,"merged":true}',
+                "--task", "Recover PR cleanup",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args.kwargs["input_fields"] == {
+            "repo": "moda-labs/bobi-agent",
+            "head_branch": "agent/123",
+            "pr_number": 123,
+            "merged": True,
+        }
+
+    def test_invalid_workflow_input_syntax_is_rejected(self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer",
+                "--input", "missing-separator", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert "KEY=VALUE" in result.output
+        mock.assert_not_called()
+
+    @pytest.mark.parametrize("args", [
+        ["--input", "task=other"],
+        ["--input-json", '{"run_key":"other"}'],
+    ])
+    def test_builtin_workflow_inputs_cannot_be_overridden(self, bobi_install,
+                                                          args):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", *args, "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert "Cannot override built-in workflow input" in result.output
+        mock.assert_not_called()
+
+    def test_missing_native_action_inputs_refuse_the_launch(self, bobi_install):
+        workflows = bobi_install.repo_path / "package" / "workflows"
+        workflows.mkdir(exist_ok=True)
+        (workflows / "pr-closed.yaml").write_text(
+            "name: pr-closed\nsteps:\n"
+            "  - name: cleanup\n    action: cleanup_worktree\n"
+        )
+
+        result = CliRunner().invoke(main, [
+            "agent", TEST_AGENT_NAME, "subagents", "launch",
+            "-w", "pr-closed", "--role", "engineer",
+            "--task", "Recover PR cleanup",
+        ])
+
+        assert result.exit_code == 1
+        assert "Launch refused" in result.output
+        assert "head_branch" in result.output
+        assert "pr_number" in result.output
+        assert "--input" in result.output
+
     def test_id_random_reaches_the_wait_path_too(self, bobi_install):
         """--wait needs its OWN --id-random passthrough (#850).
 
@@ -458,6 +547,17 @@ class TestSubagents:
         assert mock.call_args[1]["run_key"] is None
         assert mock.call_args[1]["workflow_name"] == "adhoc"
 
+    def test_wait_passes_workflow_inputs(self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            mock.return_value = MagicMock(final_text="", success=True, error="")
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--role", "engineer", "--wait",
+                "--input", "mode=recovery", "--task", "Recover",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args.kwargs["input_fields"] == {"mode": "recovery"}
+
     def test_id_and_id_random_are_mutually_exclusive(self, bobi_install):
         with patch("bobi.subagent.launch_agent") as mock:
             result = CliRunner().invoke(main, [
@@ -510,13 +610,124 @@ class TestSubagents:
         assert result.exit_code != 0
         assert "--workflow" in result.output
 
-    def test_role_required(self, bobi_install):
-        result = CliRunner().invoke(main, [
-            "agent", TEST_AGENT_NAME, "subagents", "launch",
-            "-w", "adhoc", "--task", "X",
+    @staticmethod
+    def _install_workflow(bobi_install, name, steps):
+        import yaml
+        wf_dir = bobi_install.repo_path / "package" / "workflows"
+        (wf_dir / f"{name}.yaml").write_text(yaml.dump(
+            {"name": name, "steps": steps}))
+
+    def _install_multi_role(self, bobi_install, *, second_agent="engineer"):
+        """director -> engineer -> director, with route/notify steps that name
+        no agent: only PROMPT steps must name one."""
+        self._install_workflow(bobi_install, "multi-role", [
+            {"name": "draft", "agent": "director", "prompt": "draft"},
+            {"name": "announce", "notify": "slack", "message": "drafted"},
+            {"name": "build", "agent": second_agent, "prompt": "build"},
+            {"name": "route", "if": "ok == true", "goto": "review",
+             "else": "review"},
+            {"name": "review", "agent": "director", "prompt": "review"},
         ])
+
+    def test_omitted_role_launches_each_step_as_its_own_agent(
+            self, bobi_install):
+        """No --role on a workflow whose every prompt step names its agent:
+        launches with role "" - the auto-dispatch path - so the executor's
+        `role or step.agent` falls through to each step's own agent instead
+        of pinning them all to one."""
+        self._install_multi_role(bobi_install)
+        with patch("bobi.subagent.launch_agent",
+                   return_value="wf-multi-role-7") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "multi-role", "--id", "7", "--task", "Ship #7",
+            ])
+        assert result.exit_code == 0, result.output
+        mock.assert_called_once()
+        assert mock.call_args.kwargs["role"] == ""
+        assert mock.call_args.kwargs["workflow_name"] == "multi-role"
+
+    def test_omitted_role_on_adhoc_is_refused(self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "adhoc", "--task", "X",
+            ])
         assert result.exit_code != 0
-        assert "--role" in result.output
+        assert ("--role is required: workflow adhoc has steps without an "
+                "agent: (task)") in result.output
+        mock.assert_not_called()
+
+    def test_omitted_role_names_every_agentless_prompt_step(
+            self, bobi_install):
+        self._install_workflow(bobi_install, "half-roled", [
+            {"name": "plan", "agent": "director", "prompt": "plan"},
+            {"name": "build", "prompt": "build"},
+            {"name": "ship", "prompt": "ship"},
+        ])
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "half-roled", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert ("workflow half-roled has steps without an agent: "
+                "(build, ship)") in result.output
+        mock.assert_not_called()
+
+    def test_omitted_role_refuses_an_unknown_step_role(self, bobi_install):
+        """Checked at launch, not mid-run after earlier steps already spent."""
+        self._install_multi_role(bobi_install, second_agent="ghost")
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "multi-role", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert ("Unknown role 'ghost' (workflow multi-role, step 'build')"
+                in result.output)
+        assert "director" in result.output  # the available roles are listed
+        mock.assert_not_called()
+
+    def test_omitted_role_on_an_unknown_workflow_is_refused(
+            self, bobi_install):
+        with patch("bobi.subagent.launch_agent") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "no-such-workflow", "--task", "X",
+            ])
+        assert result.exit_code != 0
+        assert "--role is required" in result.output
+        mock.assert_not_called()
+
+    def test_omitted_role_is_refused_for_a_persistent_launch(
+            self, bobi_install):
+        """A persistent session never runs the steps, so their agent: fields
+        cannot supply its role - it would silently run with no role prompt."""
+        self._install_multi_role(bobi_install)
+        for flags in (["--persistent"], ["--subscribe", "slack:T1"]):
+            with patch("bobi.subagent.launch_agent") as mock:
+                result = CliRunner().invoke(main, [
+                    "agent", TEST_AGENT_NAME, "subagents", "launch",
+                    "-w", "multi-role", *flags, "--task", "X",
+                ])
+            assert result.exit_code != 0, flags
+            assert "--role is required with --persistent" in result.output
+            mock.assert_not_called()
+
+    def test_explicit_role_still_pins_a_multi_role_workflow(
+            self, bobi_install):
+        """--role given is unchanged: it is passed through as-is and the step
+        agent: fields are not consulted (not even validated)."""
+        self._install_multi_role(bobi_install, second_agent="ghost")
+        with patch("bobi.subagent.launch_agent",
+                   return_value="wf-multi-role-7") as mock:
+            result = CliRunner().invoke(main, [
+                "agent", TEST_AGENT_NAME, "subagents", "launch",
+                "-w", "multi-role", "--role", "engineer", "--task", "X",
+            ])
+        assert result.exit_code == 0, result.output
+        assert mock.call_args.kwargs["role"] == "engineer"
 
     def test_invalid_role(self, bobi_install):
         result = CliRunner().invoke(main, [
@@ -1280,3 +1491,37 @@ class TestFindTranscript:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
 
         assert find("worker") is None
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_command"),
+    [
+        (["stop", "--force"], f"bobi agent {TEST_AGENT_NAME} stop --force"),
+        (["restart", "--fresh"], f"bobi agent {TEST_AGENT_NAME} restart --fresh"),
+    ],
+)
+def test_lifecycle_command_is_refused_inside_target_runtime(
+    bobi_install, monkeypatch, arguments, expected_command,
+):
+    from bobi import service
+
+    monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
+    monkeypatch.setattr(service, "caller_is_manager_descendant", lambda root: True)
+    monkeypatch.setattr(
+        service,
+        "stop_team",
+        lambda *args, **kwargs: pytest.fail("stop reached the manager signal path"),
+    )
+    monkeypatch.setattr(
+        service,
+        "spawn_team",
+        lambda *args, **kwargs: pytest.fail("restart reached the start path"),
+    )
+
+    result = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, *arguments]
+    )
+
+    assert result.exit_code != 0
+    assert "cannot run from inside the target runtime" in result.output
+    assert expected_command in result.output
