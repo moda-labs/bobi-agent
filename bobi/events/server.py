@@ -594,7 +594,7 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     env["WS_NO_BUFFER_UTIL"] = "1"
     env["WS_NO_UTF_8_VALIDATE"] = "1"
 
-    bundle = es_dir / "dist" / event_server_artifact.BUNDLE_NAME
+    bundle = event_server_artifact.bundle_path(es_dir)
     with open(log_file, "a") as lf:
         proc = subprocess.Popen(
             [node, str(bundle)],

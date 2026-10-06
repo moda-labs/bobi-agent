@@ -95,6 +95,17 @@ class StepDef:
     # Native action step fields
     action: str = ""         # registered action name (e.g. "cleanup_worktree")
 
+    @property
+    def is_prompt_step(self) -> bool:
+        """True for a step that runs a model turn - not a route, action,
+        notify or await step. The one spelling of that predicate: the
+        executor uses it to pick the acting session, and ``subagents
+        launch`` uses it to decide whether a role-less launch can honor
+        every step's own ``agent:``."""
+        return not (
+            self.condition or self.action or self.notify or self.await_event
+        )
+
 
 # Period vocabulary -> strftime bucket. The bucket is the run identity for one
 # period of a periodic workflow: every dispatcher derives the same run_key from
