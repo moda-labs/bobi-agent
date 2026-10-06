@@ -1497,7 +1497,7 @@ def test_slack_socket_mode_token_is_optional():
     config = yaml.safe_load((Path(__file__).resolve().parents[2] / "agents/eng-team/agent.yaml").read_text())
     slack = next(service for service in config["services"] if service["name"] == "slack")
     assert slack["credentials"]["app_token"] == "${SLACK_APP_TOKEN:-}"
-    assert slack["channels"] == "${SLACK_CHANNELS}"
+    assert slack["channels"] == "${SLACK_CHANNELS:-}"
 
 
 def test_session_construction_preserves_configured_model(

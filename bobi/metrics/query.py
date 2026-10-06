@@ -406,7 +406,8 @@ class MetricsQueries:
 
     def summary(self, args: dict[str, Any]) -> dict[str, object]:
         start, end = _time_range(args)
-        session_id = str(args.get("session_id") or args.get("session") or "").strip() or None
+        session = str(args.get("session") or "").strip() or None
+        session_id = str(args.get("session_id") or "").strip() or None
         session_name = str(args.get("session_name") or "").strip() or None
         model = str(args.get("model") or "").strip() or None
         run_key = str(args.get("run_key") or "").strip() or None
@@ -434,12 +435,18 @@ class MetricsQueries:
         def build(conn: sqlite3.Connection) -> dict[str, object]:
             filters = ["t.started_at_us>=?", "t.started_at_us<?"]
             params: list[object] = [start, end]
-            if session_id:
+            if session_id and session_name:
+                filters.append("t.session_id=? AND s.session_name=?")
+                params.extend([session_id, session_name])
+            elif session_id:
                 filters.append("t.session_id=?")
                 params.append(session_id)
-            if session_name:
+            elif session_name:
                 filters.append("s.session_name=?")
                 params.append(session_name)
+            elif session:
+                filters.append("(t.session_id=? OR s.session_name=?)")
+                params.extend([session, session])
             if model:
                 if dashboard:
                     filters.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND (i.model_selected=? OR i.model_requested=?))")
@@ -584,12 +591,18 @@ class MetricsQueries:
             totals["reported_cost_usd"], totals["estimated_cost_usd"] = costs[0], costs[1]
             coverage_filters = ["i.started_at_us>=?", "i.started_at_us<?"]
             coverage_values: list[object] = [start, end]
-            if session_id:
+            if session_id and session_name:
+                coverage_filters.append("i.turn_id IN (SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id=t.session_id WHERE t.session_id=? AND s.session_name=?)")
+                coverage_values.extend([session_id, session_name])
+            elif session_id:
                 coverage_filters.append("i.turn_id IN (SELECT turn_id FROM turns WHERE session_id=?)")
                 coverage_values.append(session_id)
-            if session_name:
+            elif session_name:
                 coverage_filters.append("i.turn_id IN (SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id=t.session_id WHERE s.session_name=?)")
                 coverage_values.append(session_name)
+            elif session:
+                coverage_filters.append("i.turn_id IN (SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id=t.session_id WHERE t.session_id=? OR s.session_name=?)")
+                coverage_values.extend([session, session])
             if model:
                 coverage_filters.append("i.model_selected=?")
                 coverage_values.append(model)
@@ -663,13 +676,32 @@ class MetricsQueries:
         filters = {"from_us": start, "to_us": end, "limit": limit}
         conditions = ["t.started_at_us>=?", "t.started_at_us<?"]
         params: list[object] = [start, end]
-        for key, column in (("session_id", "t.session_id"), ("session_name", "s.session_name"),
-                            ("run_key", "s.run_key")):
-            if args.get(key):
-                value = _required_id(args, key)
-                filters[key] = value
-                conditions.append(f"{column}=?")
-                params.append(value)
+        session = str(args.get("session") or "").strip() or None
+        session_id = str(args.get("session_id") or "").strip() or None
+        session_name = str(args.get("session_name") or "").strip() or None
+        if session_id and session_name:
+            filters["session_id"] = session_id
+            filters["session_name"] = session_name
+            conditions.append("t.session_id=? AND s.session_name=?")
+            params.extend([session_id, session_name])
+        elif session_id:
+            filters["session_id"] = session_id
+            conditions.append("t.session_id=?")
+            params.append(session_id)
+        elif session_name:
+            filters["session_name"] = session_name
+            conditions.append("s.session_name=?")
+            params.append(session_name)
+        elif session:
+            filters["session"] = session
+            conditions.append("(t.session_id=? OR s.session_name=?)")
+            params.extend([session, session])
+
+        if args.get("run_key"):
+            run_key = _required_id(args, "run_key")
+            filters["run_key"] = run_key
+            conditions.append("s.run_key=?")
+            params.append(run_key)
         if args.get("model"):
             model = _required_id(args, "model")
             filters["model"] = model

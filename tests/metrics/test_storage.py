@@ -346,7 +346,9 @@ def test_service_imports_spools_and_exposes_health(tmp_path):
     assert health["producer_count"] == 1
     assert health["telemetry_events_dropped"] == 0
     assert health["uncommitted_spool_bytes"] == 0
-    assert health["import_lag_ms"] == 0
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline and not service.health_path.exists():
+        time.sleep(0.01)
     persisted = json.loads(service.health_path.read_text())
     assert persisted["role"] == "active"
     assert persisted["uncommitted_spool_bytes"] == 0

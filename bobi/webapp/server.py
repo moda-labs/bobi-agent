@@ -187,21 +187,21 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     @app.get("/api/agents/{name}/metrics/summary")
     def metrics_summary(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
                         model: str = "", session_name: str = "", session_id: str = "",
-                        routing: str = "") -> JSONResponse:
+                        session: str = "", routing: str = "") -> JSONResponse:
         data = rt.metrics(name, "summary", {"from": start, "to": end, "model": model,
                           "session_name": session_name, "session_id": session_id,
-                          "routing": routing,
+                          "session": session, "routing": routing,
                           "group_by": ["model"], "include_dashboard": True})
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/agents/{name}/metrics/turns")
     def metrics_turns(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
                       model: str = "", session_name: str = "", session_id: str = "",
-                      routing: str = "",
+                      session: str = "", routing: str = "",
                       limit: int = Query(default=50, ge=1, le=200), cursor: str = "") -> JSONResponse:
         data = rt.metrics(name, "turns", {"from": start, "to": end, "model": model,
                           "session_name": session_name, "session_id": session_id,
-                          "routing": routing,
+                          "session": session, "routing": routing,
                           "limit": limit, "cursor": cursor})
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
 

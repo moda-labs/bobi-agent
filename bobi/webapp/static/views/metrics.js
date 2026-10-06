@@ -198,7 +198,11 @@ function chart(container, buckets) {
   container.append(svg);
 }
 
-function turnRows(container, turns, open) {
+function turnRows(container, turns, open, agentNameOrHandler = "", onFilterSession = null) {
+  const onSessionClick = typeof agentNameOrHandler === "function"
+    ? agentNameOrHandler
+    : (typeof onFilterSession === "function" ? onFilterSession : null);
+
   table(container, [
     "Started", "Session / lifecycle", "Routing Arm", "Policy / State",
     "Recommendation", "Model (selected / provider)", "Tokens (in / out)", "Status"
@@ -217,6 +221,14 @@ function turnRows(container, turns, open) {
     const sessName = turn.session_name || "session";
     const shortId = turn.session_id ? (turn.session_id.length > 20 ? turn.session_id.slice(0, 16) + "…" : turn.session_id) : "";
     const strongName = node("strong", sessName, "sess-name");
+    if (onSessionClick && turn.session_name) {
+      strongName.classList.add("clickable-session");
+      strongName.title = `Filter metrics to session: ${turn.session_name}`;
+      strongName.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onSessionClick(turn.session_name);
+      });
+    }
     const sep = node("span", " / ", "subtle-sep");
     const idSpan = node("code", shortId, "subtle-id");
     if (turn.session_id) idSpan.title = turn.session_id;
@@ -616,6 +628,7 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
     tabButtons.forEach(btn => {
       btn.classList.toggle("active", btn.dataset.tab === tabId);
     });
+    container.classList.toggle("tab-all-active", tabId === "all");
     panelRouting.hidden = !(tabId === "all" || tabId === "routing");
     panelTools.hidden = !(tabId === "all" || tabId === "tools");
     panelTranscript.hidden = !(tabId === "transcript");
@@ -682,43 +695,46 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
       const mode = (decision.policy_mode || "").toLowerCase();
       let armBadge;
       if (decision.fallback_reason) {
-        armBadge = node("span", "⚠️ JEV Fallback", "badge badge-jev-fallback");
+        armBadge = node("span", "⚠️ Fallback", "arm-tag arm-fallback");
       } else if (mode === "enforce" || decision.variant_id === "treatment_jev" || decision.variant_id === "treatment") {
-        armBadge = node("span", "⚡ JEV Enforce", "badge badge-jev-enforce");
+        armBadge = node("span", "⚡ Enforce", "arm-tag arm-enforce");
       } else {
-        armBadge = node("span", "👁️ JEV Shadow", "badge badge-jev-shadow");
+        armBadge = node("span", "👁️ Shadow", "arm-tag arm-shadow");
       }
 
-      const modeSpan = node("span", decision.policy_mode || "not recorded", `badge-policy-mode ${mode}`);
-      const polState = policyState({ ...row, ...decision });
-      const stateSpan = node("span", polState, `badge-policy-state state-${polState.toLowerCase().replace(/[^a-z0-9]/g, "-")}`);
       const polModeCell = node("div", "", "cell-mode-status");
-      polModeCell.append(modeSpan, stateSpan);
+      const modeText = node("span", (decision.policy_mode || "—").toUpperCase(), `mode-text ${mode}`);
+      const polState = policyState({ ...row, ...decision });
+      const stateDot = node("span", "", `state-dot-tag state-${polState.toLowerCase().replace(/[^a-z0-9]/g, "-")}`);
+      stateDot.innerHTML = `<span class="state-dot">●</span> ${escapeHtml(polState)}`;
+      polModeCell.append(modeText, stateDot);
 
       const recModel = decision.recommended_model
-        ? node("span", decision.recommended_model, "model-badge")
+        ? node("code", decision.recommended_model, "table-code-model")
         : node("span", "—", "dash-empty");
 
       let confCell;
       if (decision.confidence != null) {
         const cNum = Number(decision.confidence);
-        confCell = node("span", `${Math.round(cNum * 100)}% (${cNum.toFixed(2)})`, `confidence-badge ${cNum < 0.6 ? "low" : "high"}`);
+        const pct = Math.round(cNum * 100);
+        confCell = node("span", `${pct}%`, `conf-pct bobi-tnum ${cNum < 0.6 ? "text-amber" : ""}`);
+        confCell.title = `Confidence score: ${cNum.toFixed(3)}`;
       } else {
         confCell = node("span", "—", "dash-empty");
       }
 
       const selModel = decision.model_selected
-        ? node("span", decision.model_selected, "model-badge")
+        ? node("code", decision.model_selected, "table-code-model")
         : node("span", "—", "dash-empty");
 
       const fb = decision.fallback_reason || row.session_fallback_reason;
       let fbCell;
       if (fb) {
         const cleanFb = fb.replace(/^policy_/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-        fbCell = node("span", cleanFb, "badge badge-fallback-reason");
+        fbCell = node("span", cleanFb, "fb-reason-text");
         fbCell.title = `Fallback triggered: ${fb}`;
       } else {
-        fbCell = node("span", "None", "badge-none");
+        fbCell = node("span", "—", "dash-empty");
       }
 
       const rLat = decision.router_latency_ms != null ? Math.round(decision.router_latency_ms) : null;
@@ -755,7 +771,7 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
     panelRouting.append(renderEmptyCard("🤖", "No LLM Invocations Recorded", "No sequential model generation rounds were executed in this turn."));
   } else {
     table(panelRouting, [
-      "#", "Provider", "Model (selected / req)", "Latency", "Tokens (in / out)", "Action / Stop Reason", "Status"
+      "#", "Provider", "Model (selected / req)", "Latency", "Tokens (in / out)", "Tools / Stop Reason", "Status"
     ], invocations.map((inv, idx) => {
       const stepNum = `#${inv.invocation_index ? inv.invocation_index : idx + 1}`;
       const lat = inv.provider_latency_ms ?? inv.wall_duration_ms;
@@ -770,9 +786,9 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
       const modelSel = inv.model_selected || "";
       const displayModel = modelReq || modelSel || "not recorded";
       const modelCell = node("div", "", "cell-model");
-      modelCell.append(node("span", displayModel, "model-badge"));
+      modelCell.append(node("code", displayModel, "table-code-model"));
       if (modelSel && modelReq && modelSel !== modelReq && !modelReq.endsWith("/" + modelSel)) {
-        const selSpan = node("span", ` (sel: ${modelSel})`, "routed-from-badge");
+        const selSpan = node("span", ` (sel: ${modelSel})`, "routed-from-hint");
         selSpan.title = `Provider selected ${modelSel}`;
         modelCell.append(selSpan);
       }
@@ -787,13 +803,9 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
         const summaryParts = Object.entries(counts).map(([name, count]) =>
           count > 1 ? `${name} ×${count}` : name
         );
-        const actionBtn = node("button", `🔧 ${summaryParts.join(", ")}`, "tool-badge-btn");
-        actionBtn.type = "button";
-        actionBtn.title = `Triggered ${tools.length} tool execution(s). Click to view details in Tools Executed tab.`;
-        actionBtn.addEventListener("click", () => setTab("tools"));
-        actionCell = actionBtn;
+        actionCell = node("span", summaryParts.join(", "), "tool-summary-text");
       } else if (idx === invocations.length - 1 && inv.status === "completed") {
-        actionCell = node("span", "💬 Final Response", "final-badge");
+        actionCell = node("span", "Final Response", "final-response-text");
       } else {
         actionCell = document.createTextNode(inv.stop_reason || "—");
       }
@@ -861,7 +873,7 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
       const tools = toolMap.get(inv.invocation_id);
 
       const modelName = inv.model_requested || inv.model_selected || "—";
-      const modelCell = node("span", modelName, "model-badge");
+      const modelCell = node("code", modelName, "table-code-model");
 
       let actionDesc;
       if (tools && tools.length) {
@@ -873,9 +885,9 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
         const summaryParts = Object.entries(counts).map(([name, count]) =>
           count > 1 ? `${name} ×${count}` : name
         );
-        actionDesc = node("span", `🔧 ${summaryParts.join(", ")}`, "tool-badge-btn");
+        actionDesc = node("span", summaryParts.join(", "), "tool-summary-text");
       } else if (idx === invocations.length - 1 && inv.status === "completed") {
-        actionDesc = node("span", "💬 Final Response", "final-badge");
+        actionDesc = node("span", "Final Response", "final-response-text");
       } else {
         actionDesc = document.createTextNode(inv.stop_reason || "completed");
       }
@@ -912,7 +924,7 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
         className: "highlight-turn-row",
         cells: [
           node("strong", "Total (Turn)"),
-          node("span", totalTurnModel, "model-badge"),
+          node("code", totalTurnModel, "table-code-model"),
           node("strong", number(totalIn)),
           node("strong", number(totalOut)),
           cacheRead > 0 ? node("span", `${number(cacheRead)} (${cachePct}%)`, "text-green") : node("span", "—", "dash-empty"),
@@ -942,7 +954,7 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
       className: usage.scope === "turn" ? "highlight-turn-row" : "",
       cells: [
         node("span", usage.supersedes_measurement_id ? `${usage.scope} (#${usage.supersedes_measurement_id})` : usage.scope, `badge badge-scope ${usage.scope}`),
-        node("span", usage.model || "—", "model-badge"),
+        node("code", usage.model || "—", "table-code-model"),
         node("span", (usage.measurement_source || "unknown").replace(/_/g, " "), "source-tag"),
         node("span", usage.is_estimated ? "Estimated" : "Reported", `badge ${usage.is_estimated ? "badge-estimated" : "badge-reported"}`),
         number(usage.input_tokens),
@@ -967,7 +979,7 @@ export function renderTurnMetrics(container, data, section = "all", row = {}, on
       const formattedUsd = `$${usdNum.toFixed(4)}`;
       return [
         node("span", cost.scope || "turn", `badge badge-scope ${cost.scope}`),
-        node("span", cost.model || "—", "model-badge"),
+        node("code", cost.model || "—", "table-code-model"),
         node("strong", formattedUsd, "bobi-tnum text-cost"),
         node("span", (cost.measurement_source || "unknown").replace(/_/g, " "), "source-tag"),
         node("span", cost.is_estimated ? "Estimated" : "Reported", `badge ${cost.is_estimated ? "badge-estimated" : "badge-reported"}`)
@@ -1068,6 +1080,10 @@ export function mountMetrics(element, { api, name, session = "" }) {
   const note = node("p", "Loading metrics…", "metrics-note");
   note.setAttribute("role", "status");
   statusBar.append(note);
+
+  // Active Session Filter Banner
+  const sessionFilterBar = node("div", "", "metrics-active-filter-bar");
+  sessionFilterBar.hidden = true;
 
   // Summary sections
   const summary = node("section", "", "metrics-summary");
@@ -1182,9 +1198,59 @@ export function mountMetrics(element, { api, name, session = "" }) {
     if (e.target === jevModalBackdrop) closeJevConfigModal();
   });
 
-  content.append(statusBar, summary, turns, pager);
+  content.append(statusBar, sessionFilterBar, summary, turns, pager);
   page.append(header, content, drawerBackdrop, jevModalBackdrop);
   element.replaceChildren(page);
+
+  let currentSessionFilter = session || "";
+
+  function updateBreadcrumbs() {
+    breadcrumbs.replaceChildren();
+    const backLink = node("a", `← ${name}`, "metrics-back-link");
+    backLink.href = `#/agents/${encodeURIComponent(name)}`;
+    breadcrumbs.append(backLink, node("span", "/", "sep"));
+    if (currentSessionFilter) {
+      const allMetricsLink = node("a", "metrics & routing", "metrics-crumb-link");
+      allMetricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics`;
+      allMetricsLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        setSessionFilter("");
+      });
+      breadcrumbs.append(allMetricsLink, node("span", "/", "sep"), node("span", `session: ${currentSessionFilter}`, "curr"));
+    } else {
+      breadcrumbs.append(node("span", "metrics & routing", "curr"));
+    }
+  }
+
+  function updateSessionFilterUI() {
+    sessionFilterBar.hidden = !currentSessionFilter;
+    if (currentSessionFilter) {
+      sessionFilterBar.replaceChildren();
+      const mafbLabel = node("div", "", "mafb-label");
+      mafbLabel.append(
+        node("span", "🎯", "mafb-icon"),
+        document.createTextNode(" Filtered to session: "),
+        node("code", currentSessionFilter, "bobi-code mafb-code")
+      );
+      const clearBtn = node("button", "✕ View All Sessions", "btn bobi-btn small mafb-clear-btn");
+      clearBtn.type = "button";
+      clearBtn.addEventListener("click", () => setSessionFilter(""));
+      sessionFilterBar.append(mafbLabel, clearBtn);
+    }
+    updateBreadcrumbs();
+  }
+
+  function setSessionFilter(sess) {
+    currentSessionFilter = sess;
+    updateSessionFilterUI();
+    const newHash = currentSessionFilter
+      ? `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(currentSessionFilter)}`
+      : `#/agents/${encodeURIComponent(name)}/metrics`;
+    history.replaceState(null, "", newHash);
+    load(true);
+  }
+
+  updateSessionFilterUI();
 
   let stopped = false;
   let pending = false;
@@ -1451,6 +1517,9 @@ export function mountMetrics(element, { api, name, session = "" }) {
         from: new Date(end.getTime() - 30 * 86400000).toISOString(),
         to: end.toISOString(),
       });
+      if (currentSessionFilter) {
+        params.set("session", currentSessionFilter);
+      }
       if (clearDetail) { detailController?.abort(); closeDrawer(); }
     }
 
@@ -1485,17 +1554,22 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
       turns.replaceChildren();
       const tHead = node("div", "", "metrics-table-head");
-      tHead.append(node("h3", `Recent turns across fleet (${allTurns.length})`));
+      const titleText = currentSessionFilter
+        ? `Turns for session: ${currentSessionFilter} (${allTurns.length})`
+        : `Recent turns across fleet (${allTurns.length})`;
+      tHead.append(node("h3", titleText));
       turns.append(tHead);
 
       turnRows(turns, currentTurns, (turn, idx) => {
         openAtIndex(idx);
-      }, name);
+      }, name, (sess) => setSessionFilter(sess));
 
       if (!currentTurns.length) {
         turns.append(node("p", "No recorded turns in this window.", "runs-empty"));
       }
-      note.textContent = `Showing ${currentTurns.length} turns · Click any row to inspect turn details`;
+      note.textContent = currentSessionFilter
+        ? `Showing ${currentTurns.length} turn${currentTurns.length === 1 ? '' : 's'} for session ${currentSessionFilter} · Click any row to inspect turn details`
+        : `Showing ${currentTurns.length} turns across fleet · Click any row to inspect turn details`;
 
       pager.replaceChildren();
       const nextCursor = results[1].data.next_cursor;
