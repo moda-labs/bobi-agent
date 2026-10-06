@@ -8,6 +8,7 @@ import urllib.request
 import pytest
 
 from bobi import manager_health
+from bobi.inbox import Inbox, Message
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +56,7 @@ class TestHealthServer:
         state_path.write_text(json.dumps(state))
         monkeypatch.setattr(sdk, "get_registry", lambda: registry)
         monkeypatch.setattr(manager_health.time, "time", lambda: 450.0)
+        registry.update_inbox_stats("director", depth=3, oldest_age=25.0)
         port = manager_health.start(tmp_path / "state", "test-project")
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health",
                                     timeout=2) as response:
@@ -63,6 +65,8 @@ class TestHealthServer:
             "pinned_seq": 223, "pending_batches": 98,
             "oldest_event_type": "agent/session.completed",
             "oldest_age_seconds": 350.0}
+        assert data["sessions"][0]["inbox"] == {
+            "depth": 3, "oldest_age_seconds": 25.0}
         assert registry.get("director").last_activity == 10.0
 
     def test_start_returns_port_and_writes_port_file(self, tmp_path):
@@ -344,6 +348,39 @@ class TestManagerBlock:
         assert block["status"] == "running"
         assert block["last_activity"] == 100.0
         assert block["idle_seconds"] == 600.0
+
+    def test_manager_block_reports_live_inbox_depth_and_age(self, monkeypatch):
+        from bobi import sdk
+
+        class _Entry:
+            name = "moda-mgr-p"
+            status = "idle"
+            last_activity = 100.0
+            inbox_depth = 0
+            inbox_oldest_age_seconds = 0.0
+            inbox_oldest_enqueued_at = 0.0
+
+        class _Reg:
+            def get(self, name):
+                return _Entry()
+
+        inbox = Inbox("moda-mgr-p")
+        inbox.start()
+        msg = Message(id="one", sender="event-bus", text="queued")
+        inbox.push(msg)
+        monkeypatch.setattr("bobi.inbox.time.monotonic",
+                            lambda: msg.enqueued_at + 12.4)
+        monkeypatch.setattr(sdk, "get_registry", lambda: _Reg())
+        monkeypatch.setattr(manager_health.time, "time", lambda: 700.0)
+        try:
+            block = manager_health._manager_block_from_registry("moda-mgr-p")
+        finally:
+            inbox.close()
+
+        assert block["inbox"] == {
+            "depth": 1,
+            "oldest_age_seconds": 12.4,
+        }
 
     def test_manager_block_surfaces_persisted_auth_failure(self, monkeypatch):
         from bobi import sdk
