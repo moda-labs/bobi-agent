@@ -13,6 +13,7 @@ import httpx
 
 from bobi import paths
 from bobi.gitutil import github_token
+from bobi.github_redaction import redact_github_secrets
 
 DEFAULT_FEEDBACK_REPO = "moda-labs/bobi-agent"
 GITHUB_API_URL = "https://api.github.com"
@@ -328,6 +329,8 @@ def create_github_issue(
     """Create one issue through GitHub's REST API."""
     repo = validate_repo(repo)
     headers = _auth_headers(token)
+    title = redact_github_secrets(title)[0]
+    body = redact_github_secrets(body)[0]
     payload: dict[str, Any] = {"title": title, "body": body}
     if labels:
         payload["labels"] = labels
@@ -472,10 +475,8 @@ def comment_on_issue(
     api_url: str | None = None,
 ) -> str:
     """Add one comment to an existing issue, returning its URL."""
-    from bobi.setup.actions import redact_secrets
-
     repo = validate_repo(repo)
-    body = redact_secrets(body)[0]
+    body = redact_github_secrets(body)[0]
     response = _request(
         "POST",
         f"{api_url or github_api_url()}/repos/{repo}/issues/{number}/comments",

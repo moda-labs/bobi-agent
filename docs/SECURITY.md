@@ -32,12 +32,22 @@ be served over TLS.
   `Config.load()` resolves them at runtime through one path.
 - **Never committed.** `run/.env` and the bubble key live under `run/` and are
   gitignored. Treat them like any credential; never copy them off the host.
-- **GitHub comments are scrubbed.** Bobi redacts secret-shaped text from
-  feedback recurrence comments and agent `gh issue comment` / `gh pr comment`
-  bodies before they are sent to GitHub. Agent commands must supply `--body`/`-b`
-  or `--body-file`/`-F` (including `-` for stdin); missing, unreadable, or
-  ambiguous bodies fail closed. The wrapper preserves unrelated commands and
-  genuine help/delete-only modes. Claude's Bash hook restores the wrapper after
+- **GitHub publications are scrubbed.** Bobi redacts recognizable credentials
+  from feedback issue titles/bodies and recurrence comments before sending them.
+  The agent `gh` wrapper covers issue/PR comments, creation, edits, closing
+  comments, PR reviews, and release creation/edits (including `release new`).
+  It inspects `--body`/`-b`, `--body-file`/`-F`, closing `--comment`/`-c`,
+  release `--notes`/`-n` and `--notes-file`/`-F`, and `--title`/`-t`.
+  File flags accept `-` for stdin; source files remain unchanged.
+  Comment, create, and review commands require explicit inspectable text
+  (except body-free approval reviews); missing, unreadable, or ambiguous text
+  fails closed. Metadata-only edits/closes and genuine help/delete-only modes
+  pass through. Publication redaction detects prefixed GitHub, Anthropic,
+  OpenAI project, Slack, Linear, AWS, Google, Venn, and Fly.io credentials,
+  JWTs, and private keys. It preserves commit SHAs, test identifiers, and prose
+  by avoiding generic long-string, bare `sk-`, bearer, and key/value heuristics.
+  The wrapper preserves unrelated commands.
+  Claude's Bash hook restores the wrapper after
   shell startup; Codex disables login shells and shell snapshots while the
   wrapper is installed. The wrapper loads its own Bobi package in isolated
   Python mode, ignoring project modules and inherited `PYTHONPATH`.

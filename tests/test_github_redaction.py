@@ -300,7 +300,8 @@ def test_shim_does_not_read_flags_after_delimiter(tmp_path):
     assert payload["argv"] == ["pr", "comment", "--body-file", "-", "--", "--body-file"]
     assert payload["stdin"] == "safe"
 
-def test_empty_path_entries_are_preserved_when_gh_is_missing(tmp_path):
+def test_empty_path_entries_are_preserved_when_gh_is_missing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     env = {"PATH": str(tmp_path) + os.pathsep}
     original = dict(env)
 
@@ -436,3 +437,158 @@ async def test_claude_hook_does_not_change_permissions_or_unrelated_tools():
     assert await _protect_github_shell({"tool_name": "Read", "tool_input": {}}, None, {}) == {}
     output = await _protect_github_shell({"tool_name": "Bash", "tool_input": {}}, None, {})
     assert output["continue"] is False
+
+
+@pytest.mark.parametrize("command,flag,output_flag", [
+    (["pr", "review", "42", "--comment"], "--body", "--body-file"),
+    (["pr", "review", "42", "-c"], "-F", "--body-file"),
+    (["pr", "create", "--title", "fix"], "-b", "--body-file"),
+    (["pr", "create", "--title", "fix"], "--body-file", "--body-file"),
+    (["issue", "create", "--title", "fix"], "--body", "--body-file"),
+    (["issue", "create", "--title", "fix"], "-F", "--body-file"),
+    (["pr", "edit", "42"], "--body", "--body-file"),
+    (["pr", "edit", "42"], "--body-file", "--body-file"),
+    (["issue", "edit", "42"], "-b", "--body-file"),
+    (["issue", "edit", "42"], "-F", "--body-file"),
+    (["issue", "close", "42"], "--comment", "--comment"),
+    (["issue", "close", "42"], "-c", "--comment"),
+    (["pr", "close", "42"], "--comment", "--comment"),
+    (["release", "create", "v1"], "--notes", "--notes-file"),
+    (["release", "create", "v1"], "--notes-file", "--notes-file"),
+    (["release", "edit", "v1"], "-n", "--notes-file"),
+    (["release", "edit", "v1"], "-F", "--notes-file"),
+])
+@pytest.mark.parametrize("form", ["separate", "equals"])
+def test_other_publication_surfaces_are_redacted(tmp_path, command, flag, output_flag, form):
+    secret = "github_pat_" + "A" * 30
+    value = f"logs: {secret}"
+    is_file = flag in {"--body-file", "--notes-file", "-F"}
+    if is_file:
+        source = tmp_path / "publication.md"
+        source.write_text(value)
+        value = str(source)
+    args = [flag, value] if form == "separate" else [flag + "=" + value]
+
+    result, payload = _run_shim(tmp_path, *command, *args)
+
+    assert result.returncode == 0, result.stderr
+    assert secret not in json.dumps(payload)
+    if output_flag == "--comment":
+        assert payload["argv"] == [*command, "--comment", "logs: [redacted]"]
+    else:
+        assert payload["argv"] == [*command, output_flag, "-"]
+        assert payload["stdin"] == "logs: [redacted]"
+    if is_file:
+        assert source.read_text() == f"logs: {secret}"
+
+
+@pytest.mark.parametrize("resource", ["pr", "issue", "release"])
+@pytest.mark.parametrize("flag", ["--title", "-t", "--title=", "-t="])
+def test_publication_titles_are_redacted(tmp_path, resource, flag):
+    secret = "ghp_" + "A" * 36
+    args = [flag + secret] if flag.endswith("=") else [flag, secret]
+    text_args = ["--notes", "safe"] if resource == "release" else ["--body", "safe"]
+
+    result, payload = _run_shim(tmp_path, resource, "create", *args, *text_args)
+
+    assert result.returncode == 0, result.stderr
+    assert secret not in json.dumps(payload)
+    assert payload["argv"][2:4] == ["--title", "[redacted]"]
+
+
+@pytest.mark.parametrize("secret", [
+    *[prefix + "A" * 36 for prefix in (
+        "ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_", "sk-ant-", "sk-proj-",
+        "xoxb-", "xapp-", "xoxp-", "xoxa-", "xoxr-", "lin_api_", "AIza", "venn_", "fm2_",
+    )],
+    "AKIA" + "A" * 16,
+    "eyJ" + "A" * 25 + ".payload.signature",
+    "-----BEGIN RSA PRIVATE KEY-----\nprivate material\n-----END RSA PRIVATE KEY-----",
+])
+def test_publish_redactor_retains_prefixed_secret_detection(tmp_path, secret):
+    result, payload = _run_shim(tmp_path, "issue", "comment", "12", "--body", secret)
+
+    assert result.returncode == 0
+    assert payload["stdin"] == "[redacted]"
+
+
+def test_publication_preserves_shas_identifiers_and_prose(tmp_path):
+    content = (
+        "Verdict: LANDABLE @ 346a17ba8f31028d73ee5d1fd8ddfb54331181b9\n"
+        "test_comment_redacts_secrets_before_posting_to_github\n"
+        "The api_key: is documented. Bearer authentication is supported.\n"
+        "sk-" + "A" * 25
+    )
+    result, payload = _run_shim(tmp_path, "pr", "comment", "42", "--body", content)
+
+    assert result.returncode == 0
+    assert payload["stdin"] == content
+    assert "redacted" not in result.stderr
+
+
+@pytest.mark.parametrize("command,flag", [
+    (["pr", "review", "42", "--comment"], "--body-file"),
+    (["release", "create", "v1"], "--notes-file"),
+])
+def test_other_publications_redact_stdin(tmp_path, command, flag):
+    result, payload = _run_shim(tmp_path, *command, flag, "-", stdin="ghp_" + "A" * 36)
+
+    assert result.returncode == 0
+    assert payload["stdin"] == "[redacted]"
+
+
+@pytest.mark.parametrize("command,flag", [
+    (["issue", "close", "42"], "-c"),
+    (["release", "edit", "v1"], "-n"),
+    (["issue", "edit", "42"], "-b"),
+    (["pr", "create", "--body", "safe"], "-t"),
+])
+def test_other_publications_redact_attached_short_flags(tmp_path, command, flag):
+    secret = "ghp_" + "A" * 36
+    result, payload = _run_shim(tmp_path, *command, flag + secret)
+
+    assert result.returncode == 0, result.stderr
+    assert secret not in json.dumps(payload)
+    assert "[redacted]" in json.dumps(payload)
+
+
+@pytest.mark.parametrize("command,args", [
+    (["pr", "create"], ["--title", "fix"]),
+    (["issue", "create"], ["--title", "fix"]),
+    (["pr", "review", "42", "--comment"], []),
+    (["release", "create", "v1"], []),
+    (["issue", "close", "42"], ["--comment"]),
+    (["release", "edit", "v1"], ["--notes-file", "/nonexistent/notes.md"]),
+    (["pr", "edit", "42"], ["--body", "one", "-F", "-"]),
+    (["release", "create", "v1"], ["--notes", "one", "-F", "-"]),
+    (["issue", "create"], ["--title"]),
+])
+def test_other_uninspectable_publications_fail_closed(tmp_path, command, args):
+    result, payload = _run_shim(tmp_path, *command, *args)
+
+    assert result.returncode == 2
+    assert payload is None
+
+
+@pytest.mark.parametrize("args", [
+    ["pr", "review", "42", "--approve"],
+    ["issue", "close", "42"],
+    ["issue", "edit", "42", "--add-label", "bug"],
+    ["pr", "edit", "42", "--base", "main"],
+    ["release", "edit", "v1", "--draft=false"],
+    ["release", "create", "--help"],
+])
+def test_metadata_and_help_modes_pass_through(tmp_path, args):
+    result, payload = _run_shim(tmp_path, *args)
+
+    assert result.returncode == 0, result.stderr
+    assert payload["argv"] == args
+
+
+def test_publish_redactor_is_idempotent():
+    from bobi.github_redaction import redact_github_secrets
+
+    clean, count = redact_github_secrets("token: ghp_" + "A" * 36)
+
+    assert (clean, count) == ("token: [redacted]", 1)
+    assert redact_github_secrets(clean) == (clean, 0)

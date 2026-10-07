@@ -509,6 +509,59 @@ def test_comment_redacts_secrets_before_posting():
     assert seen["body"] == "diagnostic output: [redacted]"
 
 
+def test_issue_creation_redacts_title_and_body_before_posting():
+    seen = {}
+    secret = "github_pat_" + "A" * 30
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(201, json={
+            "html_url": "https://github.com/example/support/issues/42",
+            "number": 42,
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = create_github_issue(
+            "example/support", "bug", f"Failure with {secret}",
+            f"Logs contain {secret}", ["bug"], token="t", client=client,
+        )
+
+    assert seen == {
+        "title": "Failure with [redacted]",
+        "body": "Logs contain [redacted]", "labels": ["bug"],
+    }
+    assert result.title == seen["title"]
+
+
+@pytest.mark.parametrize("create", [False, True])
+def test_feedback_publication_preserves_diagnostic_content(create):
+    content = (
+        "Verdict: LANDABLE @ 346a17ba8f31028d73ee5d1fd8ddfb54331181b9\n"
+        "test_comment_redacts_secrets_before_posting_to_github\n"
+        "The api_key: is documented. Bearer authentication is supported."
+    )
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(201, json={
+            "html_url": "https://github.com/example/support/issues/42" + (
+                "" if create else "#issuecomment-1"
+            ),
+            "number": 42,
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        if create:
+            create_github_issue(
+                "example/support", "bug", content, content, [], token="t", client=client,
+            )
+            assert seen["title"] == content
+        else:
+            comment_on_issue("example/support", 42, content, token="t", client=client)
+    assert seen["body"] == content
+
+
 def test_recurrence_comment_is_short_and_carries_no_second_footer():
     context = FeedbackContext(
         bobi_version="1.2.3", agent_slot="eng", package="eng-team",

@@ -1,8 +1,9 @@
-"""Redact secrets from GitHub comments posted by agent shell commands."""
+"""Redact secrets from GitHub publications posted by agent shell commands."""
 
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -15,6 +16,35 @@ PYTHON_EXECUTABLE_ENV = "BOBI_PYTHON_EXECUTABLE"
 
 _BODY_FLAGS = ("--body", "-b")
 _BODY_FILE_FLAGS = ("--body-file", "-F")
+_TITLE_FLAGS = ("--title", "-t")
+_COMMENT_FLAGS = ("--comment", "-c")
+_NOTES_FLAGS = ("--notes", "-n")
+_NOTES_FILE_FLAGS = ("--notes-file", "-F")
+
+# Publishing must preserve commit-head verdicts, test names, and ordinary prose.
+# Unlike chat-input redaction, only recognizable credential shapes are removed.
+_PUBLISH_SECRET_TOKEN = re.compile(
+    r"""(
+        -----BEGIN[A-Z ]*PRIVATE\ KEY-----.*?-----END[A-Z ]*PRIVATE\ KEY-----
+      | gh[pousr]_[A-Za-z0-9]{20,}
+      | github_pat_[A-Za-z0-9_]{20,}
+      | sk-(?:ant|proj)-[A-Za-z0-9_-]{20,}
+      | xox[abprs]-[A-Za-z0-9-]{10,}
+      | xapp-[A-Za-z0-9-]{10,}
+      | lin_api_[A-Za-z0-9]{10,}
+      | AKIA[0-9A-Z]{16}
+      | AIza[0-9A-Za-z_-]{20,}
+      | eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+
+      | venn_[A-Za-z0-9]{8,}
+      | fm2_[A-Za-z0-9_-]{10,}
+    )""",
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def redact_github_secrets(text: str) -> tuple[str, int]:
+    """Remove recognizable credentials without guessing from prose or length."""
+    return _PUBLISH_SECRET_TOKEN.subn("[redacted]", text)
 
 
 def shim_dir() -> Path:
@@ -97,20 +127,28 @@ def github_comment_hooks(hooks: dict | None) -> dict | None:
     return protected
 
 
-def _is_comment_command(argv: Sequence[str]) -> bool:
+def _publishing_command(argv: Sequence[str]) -> tuple[str, str] | None:
     commands: list[str] = []
     index = 0
     while index < len(argv):
         arg = argv[index]
-        if arg in (*_BODY_FLAGS, *_BODY_FILE_FLAGS, "-R", "--repo"):
+        if arg == "--":
+            return None
+        if arg in ("-R", "--repo"):
             index += 2
             continue
         if not arg.startswith("-"):
             commands.append(arg)
             if len(commands) == 2:
-                return commands[0] in {"issue", "pr"} and commands[1] == "comment"
+                resource, action = commands
+                actions = {
+                    "issue": {"comment", "create", "edit", "close"},
+                    "pr": {"comment", "review", "create", "edit", "close"},
+                    "release": {"create", "new", "edit"},
+                }
+                return (resource, action) if action in actions.get(resource, set()) else None
         index += 1
-    return False
+    return None
 
 
 def _flag_value(argv: Sequence[str], index: int, flag: str) -> tuple[str, int]:
@@ -122,14 +160,24 @@ def _flag_value(argv: Sequence[str], index: int, flag: str) -> tuple[str, int]:
     return arg[len(flag) :].removeprefix("="), 1
 
 
-def _redacted_comment(
-    argv: Sequence[str], stdin: TextIO,
+def _redacted_publication(
+    argv: Sequence[str], stdin: TextIO, command: tuple[str, str],
 ) -> tuple[list[str], str, int]:
-    from bobi.setup.actions import redact_secrets
+    resource, action = command
+    body_flags = _BODY_FLAGS
+    file_flags = _BODY_FILE_FLAGS
+    output_flag = "--body-file"
+    if resource == "release":
+        body_flags, file_flags = _NOTES_FLAGS, _NOTES_FILE_FLAGS
+        output_flag = "--notes-file"
+    elif action == "close":
+        body_flags, file_flags = _COMMENT_FLAGS, ()
+        output_flag = "--comment"
 
     clean_args: list[str] = []
     body: str | None = None
     insert_at: int | None = None
+    count = 0
     read_only = {"--help": False, "--delete-last": False}
     index = 0
     while index < len(argv):
@@ -143,6 +191,20 @@ def _redacted_comment(
             clean_args.extend(argv[index:index + 2])
             index += 2
             continue
+        title_matched = False
+        for flag in _TITLE_FLAGS:
+            if arg == flag or arg.startswith(f"{flag}=") or (
+                len(flag) == 2 and arg.startswith(flag)
+            ):
+                value, consumed = _flag_value(argv, index, flag)
+                redacted, removed = redact_github_secrets(value)
+                clean_args.extend(["--title", redacted])
+                count += removed
+                index += consumed
+                title_matched = True
+                break
+        if title_matched:
+            continue
         boolean_flag, separator, value = arg.partition("=")
         if boolean_flag == "-h":
             boolean_flag = "--help"
@@ -154,12 +216,12 @@ def _redacted_comment(
                 "1", "t", "T", "true", "TRUE", "True",
             }
         matched = False
-        for flag in _BODY_FLAGS:
+        for flag in body_flags:
             if arg == flag or arg.startswith(f"{flag}=") or (
                 len(flag) == 2 and arg.startswith(flag)
             ):
                 if body is not None:
-                    raise ValueError("GitHub comment body was provided more than once")
+                    raise ValueError("GitHub publication text was provided more than once")
                 value, consumed = _flag_value(argv, index, flag)
                 body = value
                 insert_at = len(clean_args)
@@ -168,12 +230,12 @@ def _redacted_comment(
                 break
         if matched:
             continue
-        for flag in _BODY_FILE_FLAGS:
+        for flag in file_flags:
             if arg == flag or arg.startswith(f"{flag}=") or (
                 len(flag) == 2 and arg.startswith(flag)
             ):
                 if body is not None:
-                    raise ValueError("GitHub comment body was provided more than once")
+                    raise ValueError("GitHub publication text was provided more than once")
                 value, consumed = _flag_value(argv, index, flag)
                 body = stdin.read() if value == "-" else Path(value).read_text()
                 insert_at = len(clean_args)
@@ -188,13 +250,24 @@ def _redacted_comment(
     if body is None:
         if any(read_only.values()):
             return list(argv), "", 0
+        # Edits and closes can change metadata without publishing a body.
+        # An approval review also permits an empty body without prompting.
+        if action in {"edit", "close"} or (
+            action == "review" and any(arg in {"--approve", "-a"} for arg in clean_args)
+        ):
+            return clean_args, "", count
         raise ValueError(
-            "GitHub comments must use --body or --body-file so Bobi can redact secrets"
+            f"GitHub publications must use {body_flags[0]} or {output_flag} "
+            "so Bobi can redact secrets"
         )
 
-    redacted, count = redact_secrets(body)
+    redacted, removed = redact_github_secrets(body)
+    count += removed
     position = len(clean_args) if insert_at is None else insert_at
-    clean_args[position:position] = ["--body-file", "-"]
+    if action == "close":
+        clean_args[position:position] = [output_flag, redacted]
+        return clean_args, "", count
+    clean_args[position:position] = [output_flag, "-"]
     return clean_args, redacted, count
 
 
@@ -206,15 +279,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 127
 
     stdin_text: str | None = None
-    if _is_comment_command(args):
+    command = _publishing_command(args)
+    if command is not None:
         try:
-            args, stdin_text, count = _redacted_comment(args, sys.stdin)
+            args, stdin_text, count = _redacted_publication(args, sys.stdin, command)
         except (OSError, UnicodeError, ValueError) as exc:
             print(f"bobi: {exc}", file=sys.stderr)
             return 2
         if count:
             print(
-                f"bobi: redacted {count} secret value(s) from GitHub comment",
+                f"bobi: redacted {count} secret value(s) from GitHub publication",
                 file=sys.stderr,
             )
 
