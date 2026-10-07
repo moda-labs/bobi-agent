@@ -198,6 +198,26 @@ class TestChatPriority:
         assert [inbox.recv(timeout=0).id for _ in range(4)] == [
             "old-1", "chat", "old-2", "young"]
 
+    def test_promotion_credit_is_regranted_for_each_aged_normal(self,
+                                                               monkeypatch):
+        now = [0.0]
+        monkeypatch.setattr("bobi.inbox.time.monotonic", lambda: now[0])
+        inbox = Inbox("test-aging-repeat")
+        try:
+            inbox.push(Message(id="old-1", sender="s", text="old-1"))
+            inbox.push(Message(id="old-2", sender="s", text="old-2"))
+            now[0] = 120.0
+            order = []
+            # Keep chat queued at every receive so each aged normal needs
+            # another promotion after yielding back to chat (#1074).
+            for i in range(4):
+                inbox.push(Message(id=f"chat-{i}", sender="s", text="chat"),
+                           priority=True)
+                order.append(inbox.recv(timeout=0).id)
+            assert order == ["old-1", "chat-0", "old-2", "chat-1"]
+        finally:
+            inbox.close()
+
     def test_promoted_bulk_updates_stats_without_losing_chat_age(self,
                                                                monkeypatch):
         now = [10.0]
