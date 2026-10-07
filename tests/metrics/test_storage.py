@@ -329,7 +329,11 @@ def test_service_imports_spools_and_exposes_health(tmp_path):
             conn = connect(service.db_path, readonly=True)
             try:
                 try:
-                    if conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 1:
+                    health = service.health()
+                    if (conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 1
+                            and health["status"] == "running"
+                            and health["producer_count"] == 1
+                            and health["uncommitted_spool_bytes"] == 0):
                         break
                 except sqlite3.OperationalError:
                     pass
@@ -337,7 +341,7 @@ def test_service_imports_spools_and_exposes_health(tmp_path):
                 conn.close()
         time.sleep(0.01)
     else:
-        raise AssertionError("collector did not project the turn")
+        raise AssertionError("collector did not project the turn and publish ready health")
 
     health = service.health()
     assert health["status"] == "running"
