@@ -100,8 +100,9 @@ class Inbox:
     human is waiting) and normal (everything else - bulk webhooks, agent
     inbox messages). Chat is received first unless the oldest normal message
     has waited at least 120 seconds; that message takes the next receive
-    opportunity. FIFO holds within each class. This does not interrupt an
-    active turn or bound the time spent processing older normal messages.
+    opportunity, then yields back to waiting chat. FIFO holds within each
+    class. This does not interrupt an active turn or bound the time spent
+    processing older normal messages.
     """
 
     def __init__(self, session_name: str,
@@ -110,6 +111,7 @@ class Inbox:
         self.session_name = session_name
         self._chat: deque[Message] = deque()
         self._bulk: deque[tuple[float, Message]] = deque()
+        self._promoted: bool = False
         self._condition = threading.Condition()
         self._oldest_queued_at: float | None = None
         self._stats_callback = stats_callback
@@ -194,11 +196,15 @@ class Inbox:
             if not self._condition.wait_for(
                     lambda: self._chat or self._bulk, timeout=timeout):
                 return None
-            if self._bulk and (not self._chat or
-                              time.monotonic() - self._bulk[0][0] >= BULK_MAX_DELAY):
+            if self._bulk and (not self._chat or (
+                    not self._promoted
+                    and time.monotonic() - self._bulk[0][0] >= BULK_MAX_DELAY)):
                 msg = self._bulk.popleft()[1]
+                if self._chat:
+                    self._promoted = True
             else:
                 msg = self._chat.popleft()
+                self._promoted = False
             if msg.enqueued_at == self._oldest_queued_at:
                 self._oldest_queued_at = min(
                     (message.enqueued_at for message in self._chat),

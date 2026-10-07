@@ -196,7 +196,7 @@ class TestChatPriority:
         inbox.push(Message(id="young", sender="s", text="young"))
         inbox.push(Message(id="chat", sender="s", text="chat"), priority=True)
         assert [inbox.recv(timeout=0).id for _ in range(4)] == [
-            "old-1", "old-2", "chat", "young"]
+            "old-1", "chat", "old-2", "young"]
 
     def test_promoted_bulk_updates_stats_without_losing_chat_age(self,
                                                                monkeypatch):

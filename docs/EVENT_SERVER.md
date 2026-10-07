@@ -445,8 +445,9 @@ sessions must not share a cursor):
   after a process restart.
 - The session inbox normally serves chat before normal/bulk messages, FIFO
   within each class. Once the oldest normal message has waited 120 seconds,
-  it takes the next receive opportunity ahead of chat. Active turns are not
-  interrupted, and older normal work can extend the wall-clock delivery time.
+  it takes one receive opportunity ahead of chat, then yields back to waiting
+  chat before another promotion. Active turns are not interrupted, and older
+  normal work can extend the wall-clock delivery time.
 - A pinned ACK watermark warns when its oldest batch reaches 300 seconds or
   64 batches accumulate. Warnings include the session, pinning batch sequence,
   event types, age and pending count, and repeat after 60, 120, 240, then every
