@@ -424,7 +424,8 @@ class TestTurnCapIsResumable:
         """
         from bobi.workflow import orchestrator
 
-        async def _mute_drain(client, session_name, *, model):
+        async def _mute_drain(client, session_name, *, model,
+                              telemetry_context=None, observation=None):
             return orchestrator.DrainResult(None, "", "")
 
         monkeypatch.setattr(orchestrator, "_drain_response", _mute_drain)

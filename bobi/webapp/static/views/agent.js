@@ -605,7 +605,7 @@ export function mountAgent(el, { api, name, session = "" }) {
     const rows = (runs && runs.runs) || [];
     els.runRows.innerHTML = "";
     const counts = (runs && runs.counts) || {};
-    els.runsCount.textContent = counts.all ? `${counts.all} total` : "";
+    els.runsCount.textContent = counts.all ? String(counts.all) : "";
     els.runsCount.hidden = !counts.all;
 
     if (!rows.length) {
@@ -657,6 +657,10 @@ export function mountAgent(el, { api, name, session = "" }) {
 
       const when = mk("td", "r-when");
       when.appendChild(mk("span", null, fmtIso(row.started_at) || "—"));
+      if (row.duration_seconds != null) {
+        when.appendChild(document.createTextNode(" "));
+        when.appendChild(mk("span", "dur", fmtDur(row.duration_seconds)));
+      }
       tr.appendChild(when);
 
       // Tokens and cost are independent: a session can record dollars with
@@ -735,14 +739,26 @@ export function mountAgent(el, { api, name, session = "" }) {
       metricsLink.title = "View routing decisions, tokens, and stream telemetry for this session";
       metricsLink.addEventListener("click", (e) => e.stopPropagation());
       actions.appendChild(metricsLink);
+    }
 
-      const transcript = mk("button", "btn bobi-btn small", "Transcript");
-      transcript.type = "button";
-      transcript.addEventListener("click", (e) => {
+    const transcript = mk("button", "btn bobi-btn small", "Transcript");
+    transcript.type = "button";
+    transcript.disabled = !row.session_id;
+    if (!row.session_id) transcript.title = "No transcript was recorded for this run";
+    transcript.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openSlab(row, "transcript");
+    });
+    actions.appendChild(transcript);
+
+    if (!row.session_id && row.kind !== "session") {
+      const details = mk("button", "btn bobi-btn small", "Details");
+      details.type = "button";
+      details.addEventListener("click", (e) => {
         e.stopPropagation();
-        openSlab(row, "transcript");
+        openSlab(row);
       });
-      actions.appendChild(transcript);
+      actions.appendChild(details);
     }
 
     if (row.status === "awaiting_action") {
@@ -930,12 +946,13 @@ export function mountAgent(el, { api, name, session = "" }) {
     // Reset, never accumulate: one slab element is reused for every row.
     box.className = "composer " + mode;
 
-    // Transcript view: remove send message action (only retain approval gate when awaiting action)
-    if (mode !== "gate") {
-      box.hidden = true;
+    box.hidden = false;
+    if (mode === "ended") {
+      box.appendChild(mk("p", "composer-note",
+        "This session has ended and it is not waiting on anything, so there "
+        + "is nothing here to reply to."));
       return;
     }
-    box.hidden = false;
 
     const gate = mode === "gate";
     const awaited = ((row.detail && row.detail.await_event) || "approval")

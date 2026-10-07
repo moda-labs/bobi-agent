@@ -21,6 +21,9 @@ from tests.metrics.helpers import configured, context
 from .conftest import _drain
 
 
+pytestmark = pytest.mark.live
+
+
 @pytest.mark.skipif(os.environ.get("BOBI_JEV_LIVE_TYPESAFE") != "1",
                     reason="requires approved live TypeSafe and execution gateway opt-in")
 @pytest.mark.asyncio

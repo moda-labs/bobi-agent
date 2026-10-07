@@ -267,7 +267,7 @@ function turnRows(container, turns, open, agentNameOrHandler = "", onFilterSessi
     } else {
       variantCell = node("span", "➡️ Direct", "badge badge-direct");
       variantCell.title = "Direct routing: executed using default agent baseline model (no JEV policy was invoked)";
-      polCell = node("span", "Baseline (No JEV)", "badge-subtle-policy");
+      polCell = node("span", turn.session_fallback_reason || "Baseline (No JEV)", "badge-subtle-policy");
       polCell.title = "Turn executed without JEV policy override";
       recCell = node("span", "—", "dash-empty");
       const modelName = models.join(", ") || turn.model_selected || "default model";
@@ -1029,9 +1029,9 @@ export async function renderRunMetrics(container, { api, name, row, section, sig
       if (signal.aborted || request !== detailRequest) return;
       if (!detail.ok) { container.replaceChildren(node("p", detail.data?.error || "Could not read turn.")); return; }
       renderTurnMetrics(container, detail.data, section, turn, () => load(), null, name);
-    }, (sessName) => {
-      location.hash = `#/agents/${encodeURIComponent(name)}/metrics/${encodeURIComponent(sessName)}`;
-    }, name);
+    }, name, (sessName) => {
+      location.hash = `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(sessName)}`;
+    });
     if (result.data.next_cursor) {
       const next = node("button", "older turns", "btn bobi-btn small");
       next.type = "button";
@@ -1084,6 +1084,23 @@ export function mountMetrics(element, { api, name, session = "" }) {
   // Active Session Filter Banner
   const sessionFilterBar = node("div", "", "metrics-active-filter-bar");
   sessionFilterBar.hidden = true;
+
+  const filters = node("div", "", "metrics-toolbar-card");
+  const modelInput = node("input", "", "metrics-search-input");
+  modelInput.type = "text";
+  modelInput.setAttribute("aria-label", "Provider model filter");
+  modelInput.placeholder = "Provider model filter";
+  modelInput.addEventListener("change", () => load(true));
+  const sessionInput = node("input", "", "metrics-search-input");
+  sessionInput.type = "text";
+  sessionInput.setAttribute("aria-label", "Session name");
+  sessionInput.placeholder = "Session name or ID";
+  sessionInput.addEventListener("change", () => setSessionFilter(sessionInput.value.trim()));
+  const modelField = node("label", "Provider model", "metrics-search-box bobi-field");
+  const sessionField = node("label", "Session", "metrics-search-box bobi-field");
+  modelField.append(modelInput);
+  sessionField.append(sessionInput);
+  filters.append(modelField, sessionField);
 
   // Summary sections
   const summary = node("section", "", "metrics-summary");
@@ -1198,7 +1215,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
     if (e.target === jevModalBackdrop) closeJevConfigModal();
   });
 
-  content.append(statusBar, sessionFilterBar, summary, turns, pager);
+  content.append(statusBar, filters, sessionFilterBar, summary, turns, pager);
   page.append(header, content, drawerBackdrop, jevModalBackdrop);
   element.replaceChildren(page);
 
@@ -1223,6 +1240,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
   }
 
   function updateSessionFilterUI() {
+    sessionInput.value = currentSessionFilter;
     sessionFilterBar.hidden = !currentSessionFilter;
     if (currentSessionFilter) {
       sessionFilterBar.replaceChildren();
@@ -1520,6 +1538,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
       if (currentSessionFilter) {
         params.set("session", currentSessionFilter);
       }
+      if (modelInput.value.trim()) params.set("model", modelInput.value.trim());
       if (clearDetail) { detailController?.abort(); closeDrawer(); }
     }
 

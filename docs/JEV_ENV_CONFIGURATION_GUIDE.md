@@ -142,6 +142,6 @@ The JSON structure contains top-level experiment metadata and an inner `policy` 
 >
 > When you update `.env`:
 > 1. In the Web UI: Click **Save & Restart Agent** in the JEV modal.
-> 2. Via CLI: Run `bobi agent restart <agent-name>`.
+> 2. Via CLI: Run `bobi agent <agent-name> restart`.
 >
 > Once restarted, the `director` and all subsequent workflow workers (`engineer`) immediately adopt the updated JEV policy.
