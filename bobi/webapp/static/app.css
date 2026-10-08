@@ -3783,8 +3783,8 @@ table.runs { width: 100%; border-collapse: collapse; }
 }
 .turn-drawer-modal {
   position: relative;
-  width: min(1040px, calc(100vw - 128px));
-  max-width: 1040px;
+  width: min(1200px, calc(100vw - 64px));
+  max-width: 1200px;
   height: min(84vh, 800px);
   max-height: calc(100vh - 96px);
   margin: auto;
@@ -4516,10 +4516,13 @@ table.runs { width: 100%; border-collapse: collapse; }
   white-space: nowrap;
 }
 .turn-drawer-modal .metrics-table td {
-  padding: 9px 10px;
+  padding: 10px 12px;
   font-size: 12.5px;
   border-bottom: 1px solid var(--border-hairline);
   color: var(--text-primary);
+  vertical-align: top;
+}
+.turn-drawer-modal .metrics-table td.bobi-tnum {
   white-space: nowrap;
 }
 .turn-drawer-modal .metrics-table tbody tr:last-child td {
@@ -5551,8 +5554,8 @@ a.metrics-conversation-badge:hover {
   flex-direction: column;
   gap: 4px;
   align-items: flex-start;
-  min-width: 180px;
-  max-width: 320px;
+  min-width: 140px;
+  max-width: 220px;
 }
 .jev-routing-details {
   display: flex;

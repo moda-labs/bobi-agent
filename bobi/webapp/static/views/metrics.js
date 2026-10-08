@@ -434,8 +434,10 @@ function jevDetailBlock(route = {}) {
 
   if (fallback) {
     const cleanReason = String(fallback).replace(/^policy_/, "").replace(/_/g, " ");
-    if (suggested && selected) {
-      details.append(node("div", `Suggest: ${suggested} → Selected: ${selected}`, "jev-meta-models"));
+    if (suggested) {
+      details.append(node("div", `Suggest: ${suggested} → Fallback`, "jev-meta-models"));
+    } else {
+      details.append(node("div", "Fallback triggered", "jev-meta-models"));
     }
     const sub = node("div", "", "jev-meta-sub");
     if (conf) sub.append(node("span", `Conf ${conf}${minConf ? ` (< ${minConf})` : ""}`, "jev-meta-conf"));
@@ -725,7 +727,6 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
       "Output Tokens",
       "Cache Read",
       "Cache Write",
-      "Total Cached",
       "Cost ($)"
     ], invocations.map((invocation, index) => {
       const usage = usageMap.get(invocation.invocation_id) || {};
@@ -773,13 +774,7 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
       const cacheWriteCell = node("div", "", "token-cell");
       cacheWriteCell.append(node("span", number(usage.cache_write_input_tokens), "bobi-tnum token-main-val"));
 
-      // 8. Total Cached Cell
-      const totalCached = (usage.cache_read_input_tokens != null || usage.cache_write_input_tokens != null)
-        ? (usage.cache_read_input_tokens || 0) + (usage.cache_write_input_tokens || 0) : null;
-      const totalCachedCell = node("div", "", "token-cell");
-      totalCachedCell.append(node("span", totalCached == null ? "—" : number(totalCached), "bobi-tnum token-main-val"));
-
-      // 9. Cost Cell
+      // 8. Cost Cell
       const terminalCost = invocations.length === 1 ? (data.cost_measurements || []).find(item => item.scope === "turn") : null;
       const turnLevelCost = (data.cost_measurements || []).find(item => item.scope === "turn");
       const cost = (data.cost_measurements || []).filter(item => item.invocation_id === invocation.invocation_id)
@@ -811,7 +806,6 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
         outputCell,
         cacheReadCell,
         cacheWriteCell,
-        totalCachedCell,
         amountCell
       ];
     }));
