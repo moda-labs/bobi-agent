@@ -1370,10 +1370,12 @@ export function mountMetrics(element, { api, name, session = "" }) {
       }
     }
 
+    const cacheRead = data.totals.cache_read_input_tokens;
+    const cachePercent = data.totals.input_tokens > 0 && cacheRead != null
+      ? ` (${(cacheRead / data.totals.input_tokens * 100).toFixed(1)}%)` : "";
     const fields = [
-      ["input_tokens", "Input tokens", "clay", data.totals.cache_read_input_tokens != null ? `${number(data.totals.cache_read_input_tokens)} cache read (included)` : "canonical input", "tile-input", number(data.totals.input_tokens)],
-      ["output_tokens", "Output tokens", "accent", "canonical output", "tile-output", number(data.totals.output_tokens)],
-      ["cache_read_input_tokens", "Prompt Cache Hits", "accent", data.totals.input_tokens > 0 && data.totals.cache_read_input_tokens != null ? `${(data.totals.cache_read_input_tokens / data.totals.input_tokens * 100).toFixed(1)}% cache hit ratio` : "cache usage not recorded", "tile-cache-read", number(data.totals.cache_read_input_tokens)],
+      ["input_tokens", "Input tokens", "", cacheRead != null ? `${number(cacheRead)}${cachePercent} cache read (included)` : "canonical input", "tile-input", number(data.totals.input_tokens)],
+      ["output_tokens", "Output tokens", "", "canonical output", "tile-output", number(data.totals.output_tokens)],
       ["total_cost_usd", "Total Spend (USD)", costBadge, costSub, "tile-cost", costDisplay]
     ];
 
@@ -1382,8 +1384,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
       const tileHead = node("div", "", "tile-head");
       tileHead.append(node("span", label, "tile-label"));
       if (badgeText) {
-        const isClay = badgeText === "RAW";
-        tileHead.append(node("span", badgeText, `tile-badge ${isClay ? "clay" : "accent"}`));
+        tileHead.append(node("span", badgeText, "tile-badge accent"));
       }
       const value = node("strong", displayVal, "bobi-tnum");
       if (field === "total_cost_usd") value.classList.add("text-green");

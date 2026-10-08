@@ -1005,7 +1005,7 @@
 /* KPI metric tiles */
 .metrics-tiles {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 14px;
 }
 @media (max-width: 960px) {
@@ -1044,8 +1044,6 @@
 }
 .metrics-tile.tile-input::before { background: var(--bobi-clay); }
 .metrics-tile.tile-output::before { background: var(--accent); }
-.metrics-tile.tile-cache-read::before { background: #10b981; }
-.metrics-tile.tile-cache-write::before { background: var(--border-strong); }
 
 .metrics-tile:hover {
   transform: translateY(-2px);

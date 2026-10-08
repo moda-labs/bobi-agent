@@ -80,6 +80,7 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   Model filtering selects turns with a matching invocation,
   including canonical terminal usage whose model uses a provider alias.
 - Tiles and UTC buckets use canonical usage, not the sum of provenance rows.
+  The summary has input tokens, output tokens, and spend tiles; cache-read tokens and their percentage of total input appear together in the input tile.
   Missing dimensions read **not recorded**; estimated usage is labeled and
   invocation coverage separates exact, estimated, and unknown measurements.
 - Routing shows assignment, recommendation, policy confidence, selected and
