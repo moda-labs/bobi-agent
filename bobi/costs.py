@@ -27,9 +27,21 @@ log = logging.getLogger(__name__)
 # authoritative source of cost is always the provider's own billing.
 PRICE_TABLE: dict[str, tuple[float, float, float]] = {
     # Anthropic (cache read = 10% of input)
+    "anthropic:claude-haiku-4-5-20251001": (1.0, 0.10, 5.0),
+    "anthropic:claude-haiku-4-5": (1.0, 0.10, 5.0),
+    "anthropic:claude-sonnet-4-5-20250929": (3.0, 0.30, 15.0),
+    "anthropic:claude-sonnet-4-5": (3.0, 0.30, 15.0),
+    "anthropic:claude-opus-4-5-20251101": (15.0, 1.50, 75.0),
+    "anthropic:claude-opus-4-5": (15.0, 1.50, 75.0),
+    "anthropic:claude-3-7-sonnet-20250219": (3.0, 0.30, 15.0),
+    "anthropic:claude-3-7-sonnet": (3.0, 0.30, 15.0),
+    "anthropic:claude-3-5-sonnet-20241022": (3.0, 0.30, 15.0),
+    "anthropic:claude-3-5-sonnet": (3.0, 0.30, 15.0),
     "anthropic:claude-sonnet-4-20250514": (3.0, 0.30, 15.0),
     "anthropic:claude-opus-4-20250514": (15.0, 1.50, 75.0),
     "anthropic:claude-haiku-3-5-20241022": (0.80, 0.08, 4.0),
+    "anthropic:claude-3-5-haiku-20241022": (0.80, 0.08, 4.0),
+    "anthropic:claude-3-5-haiku": (0.80, 0.08, 4.0),
     # OpenAI - current codex lineup (gpt-5.6 family) and still-offered tiers
     "openai:gpt-5.6": (5.00, 0.50, 30.00),
     "openai:gpt-5.6-sol": (5.00, 0.50, 30.00),
@@ -70,6 +82,44 @@ IMAGE_PRICE_TABLE: dict[str, float] = {
 }
 
 
+def _lookup_prices(provider: str, model: str) -> tuple[float, float, float] | None:
+    key = f"{provider}:{model}"
+    if key in PRICE_TABLE:
+        return PRICE_TABLE[key]
+    if provider == "gateway":
+        for p in ("anthropic", "openai", "google"):
+            res = _lookup_prices(p, model)
+            if res:
+                return res
+    import re
+    stripped = re.sub(r"-\d{8}$", "", model)
+    stripped = re.sub(r"-latest$", "", stripped)
+    if stripped != model:
+        key = f"{provider}:{stripped}"
+        if key in PRICE_TABLE:
+            return PRICE_TABLE[key]
+    m = model.lower()
+    if "haiku" in m:
+        return (1.0, 0.10, 5.0)
+    if "sonnet" in m:
+        return (3.0, 0.30, 15.0)
+    if "opus" in m:
+        return (15.0, 1.50, 75.0)
+    if "gpt-4o-mini" in m or "codex-mini" in m:
+        return (0.15, 0.075, 0.60)
+    if "gpt-4o" in m or "gpt-4" in m:
+        return (2.50, 1.25, 10.0)
+    if "gpt-5" in m or "codex" in m:
+        return (1.75, 0.175, 14.0)
+    if "flash" in m:
+        return (0.15, 0.0375, 0.60)
+    if "pro" in m:
+        return (1.25, 0.3125, 10.0)
+    if "deepseek" in m:
+        return (0.27, 0.07, 1.10)
+    return None
+
+
 def estimate_cost(provider: str, model: str,
                   input_tokens: int = 0, output_tokens: int = 0,
                   cached_input_tokens: int = 0) -> float:
@@ -80,8 +130,7 @@ def estimate_cost(provider: str, model: str,
     bills at the full input rate. ``output_tokens`` already includes any
     reasoning tokens - callers must not add those separately.
     """
-    key = f"{provider}:{model}"
-    prices = PRICE_TABLE.get(key)
+    prices = _lookup_prices(provider, model)
     if not prices:
         return 0.0
     input_price, cached_price, output_price = prices

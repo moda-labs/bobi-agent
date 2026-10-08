@@ -308,10 +308,10 @@ WITH candidates AS (
         + (u.output_tokens IS NOT NULL)
         + (u.reasoning_output_tokens IS NOT NULL) AS completeness,
         CASE u.measurement_source
+            WHEN 'provider_reconciled' THEN 70
+            WHEN 'claude_transcript' THEN 65
+            WHEN 'codex_rollout' THEN 65
             WHEN 'provider_stream' THEN 50
-            WHEN 'provider_reconciled' THEN 45
-            WHEN 'claude_transcript' THEN 40
-            WHEN 'codex_rollout' THEN 40
             WHEN 'local_tokenizer' THEN 20
             WHEN 'calibrated_estimator' THEN 10
             ELSE 0

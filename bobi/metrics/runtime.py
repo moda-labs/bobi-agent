@@ -897,6 +897,42 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             session_id=observation.session_id,
             turn_id=observation.turn_id,
         )
+    else:
+        from bobi.costs import estimate_cost
+        est_total = 0.0
+        primary_model = None
+        for m, usages in (usage_by_model or invocation_usage_by_model).items():
+            primary_model = primary_model or m
+            agg = _aggregate_usage(usages)
+            est_total += estimate_cost(
+                observation.provider,
+                m,
+                input_tokens=agg.get("input_tokens") or 0,
+                output_tokens=agg.get("output_tokens") or 0,
+                cached_input_tokens=agg.get("cache_read_input_tokens") or 0,
+            )
+        if est_total > 0:
+            runtime.emit(
+                "cost.recorded",
+                {
+                    "cost_measurement_id": _stable_id("cost", observation.turn_id, "turn", "est"),
+                    "scope": "turn",
+                    "session_id": observation.session_id,
+                    "turn_id": observation.turn_id,
+                    "invocation_id": None,
+                    "provider": observation.provider,
+                    "model": primary_model,
+                    "amount_usd": est_total,
+                    "measurement_source": "calibrated_estimator",
+                    "is_estimated": 1,
+                    "price_snapshot_id": None,
+                    "provider_event_id": provider_turn_id or None,
+                    "observed_at_us": ended_at_us,
+                    "raw_cost_json": None,
+                },
+                session_id=observation.session_id,
+                turn_id=observation.turn_id,
+            )
     if fault_action is not None:
         time.sleep(fault_action.hold_seconds)
         _emit_turn_row(

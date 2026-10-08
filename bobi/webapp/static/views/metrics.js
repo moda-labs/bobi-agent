@@ -351,10 +351,46 @@ function routeExplanation(route = {}) {
   return ["Default Config", "Executed the configured model without a policy override"];
 }
 
-function costText(costs = {}) {
+const MODEL_PRICES = {
+  "haiku": [1.0, 0.10, 5.0],
+  "sonnet": [3.0, 0.30, 15.0],
+  "opus": [15.0, 1.50, 75.0],
+  "gpt-4o-mini": [0.15, 0.075, 0.60],
+  "codex-mini": [0.15, 0.075, 0.60],
+  "gpt-4o": [2.50, 1.25, 10.0],
+  "gpt-5": [1.75, 0.175, 14.0],
+  "codex": [1.75, 0.175, 14.0],
+  "flash": [0.15, 0.0375, 0.60],
+  "pro": [1.25, 0.3125, 10.0],
+  "deepseek": [0.27, 0.07, 1.10],
+};
+
+function estimateTokenCost(model = "", inputTokens = 0, outputTokens = 0, cacheReadTokens = 0) {
+  const m = (model || "").toLowerCase();
+  let rates = null;
+  for (const [key, price] of Object.entries(MODEL_PRICES)) {
+    if (m.includes(key)) {
+      rates = price;
+      break;
+    }
+  }
+  if (!rates) return null;
+  const [inPrice, cachePrice, outPrice] = rates;
+  const cached = Math.min(Math.max(cacheReadTokens || 0, 0), Math.max(inputTokens || 0, 0));
+  const uncached = Math.max((inputTokens || 0) - cached, 0);
+  const cost = (uncached * inPrice + cached * cachePrice + Math.max(outputTokens || 0, 0) * outPrice) / 1000000;
+  return cost > 0 ? cost : null;
+}
+
+function costText(costs = {}, turn = null) {
   const parts = [];
-  if (costs.reported_cost_usd != null) parts.push("$" + Number(costs.reported_cost_usd).toFixed(4));
-  if (costs.estimated_cost_usd != null) parts.push("$" + Number(costs.estimated_cost_usd).toFixed(4) + " est");
+  if (costs?.reported_cost_usd != null) parts.push("$" + Number(costs.reported_cost_usd).toFixed(4));
+  if (costs?.estimated_cost_usd != null) parts.push("$" + Number(costs.estimated_cost_usd).toFixed(4) + " est");
+  if (!parts.length && turn?.usage?.input_tokens != null && turn?.usage?.output_tokens != null) {
+    const rawModel = (turn.invocations || [])[0]?.model_selected || turn.model_selected || "";
+    const est = estimateTokenCost(rawModel, turn.usage.input_tokens, turn.usage.output_tokens, turn.usage.cache_read_input_tokens);
+    if (est != null) parts.push("$" + Number(est).toFixed(4) + " est");
+  }
   return parts.join(" / ") || "—";
 }
 
@@ -448,26 +484,39 @@ function turnRows(container, turns, open, agentNameOrHandler = "", onFilterSessi
     const topicCell = node("div", "", "metrics-topic-cell");
     const userMsg = turn.conversation?.user_message;
     const hasUserMsg = Boolean(userMsg);
-    const titleText = userMsg
-      || turn.conversation?.response_snippet
-      || (turn.session_name ? `${turn.session_name} · Startup` : "Agent Session Startup");
-    const topicTitle = node("div", titleText, "metrics-topic-title" + (hasUserMsg ? "" : " metrics-system-trigger"));
-    topicTitle.title = titleText;
+    const sessionName = turn.session_name || shortSessionId(turn.session_id || "");
 
-    const topicMeta = node("div", "", "metrics-topic-meta");
+    const topicHeader = node("div", "", "metrics-topic-header");
+    const sessionTitle = node("span", sessionName, "metrics-topic-session-name" + (onSessionClick ? " clickable-session" : ""));
+    sessionTitle.title = turn.session_name ? `${turn.session_name} (${turn.session_id})` : (turn.session_id || "");
     if (onSessionClick && turn.session_id) {
-      const filter = node("button", turn.session_name || shortSessionId(turn.session_id), "sess-name clickable-session");
-      filter.type = "button";
-      filter.title = "Filter lifecycle: " + turn.session_id;
-      filter.addEventListener("click", event => { event.stopPropagation(); onSessionClick(turn.session_id); });
-      topicMeta.append(filter);
+      sessionTitle.addEventListener("click", event => {
+        event.stopPropagation();
+        onSessionClick(turn.session_id);
+      });
     }
+    topicHeader.append(sessionTitle);
+
     const origin = conversationBadge(turn.conversation?.origin);
-    if (origin) topicMeta.append(origin);
-    if (turn.tool_count) {
-      topicMeta.append(node("span", `${turn.tool_count} tool calls`, "metrics-conversation-badge"));
+    if (origin) topicHeader.append(origin);
+
+    const topicSub = node("div", "", "metrics-topic-sub");
+    if (hasUserMsg) {
+      const msgSnippet = node("span", userMsg, "metrics-topic-msg");
+      msgSnippet.title = userMsg;
+      topicSub.append(msgSnippet);
+    } else if (turn.conversation?.response_snippet) {
+      const respSnippet = node("span", "↳ " + turn.conversation.response_snippet, "metrics-topic-system");
+      respSnippet.title = turn.conversation.response_snippet;
+      topicSub.append(respSnippet);
+    } else {
+      const defaultSnippet = node("span", "↳ Startup / background event", "metrics-topic-system");
+      topicSub.append(defaultSnippet);
     }
-    topicCell.append(topicTitle, topicMeta);
+    if (turn.tool_count) {
+      topicSub.append(node("span", `${turn.tool_count} tools`, "metrics-conversation-badge"));
+    }
+    topicCell.append(topicHeader, topicSub);
 
     const model = node("div", "", "cell-model-decision");
     const rawModels = [...new Set((turn.invocations || []).map(item => item.model_selected || item.model_requested).filter(Boolean))];
@@ -477,7 +526,7 @@ function turnRows(container, turns, open, agentNameOrHandler = "", onFilterSessi
     model.append(node("code", displayModel, "table-code-model"), badge);
 
     const total = turn.usage?.input_tokens != null && turn.usage?.output_tokens != null ? Number(turn.usage.input_tokens) + Number(turn.usage.output_tokens) : null;
-    const tokens = node("span", (total == null ? "—" : number(total) + " tok" + (turn.usage.is_estimated ? " est" : "")) + " · " + costText(turn.costs), "bobi-tnum");
+    const tokens = node("span", (total == null ? "—" : number(total) + " tok" + (turn.usage.is_estimated ? " est" : "")) + " · " + costText(turn.costs, turn), "bobi-tnum");
     tokens.title = "Input + output tokens. Cache and reasoning dimensions are shown separately in telemetry.";
     return {turn, onClick: () => open(turn, index), cells: [identity, topicCell, model, confidenceCell(turn.confidence), tokens, turn.wall_duration_ms == null ? "—" : (turn.wall_duration_ms / 1000).toFixed(1) + "s"]};
   }));
@@ -739,11 +788,18 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
       if (cost?.amount_usd != null) {
         amountCell.append(node("span", "$" + Number(cost.amount_usd).toFixed(6), "bobi-tnum token-main-val text-green"));
         amountCell.append(node("span", cost.is_estimated ? "estimated list price" : (cost.scope === "turn" ? "turn total" : "provider reported"), "token-sub-val"));
-      } else if (turnLevelCost?.amount_usd != null && invocations.length > 1) {
-        amountCell.append(node("span", "—", "bobi-tnum token-main-val"));
-        amountCell.append(node("span", "billed per turn", "token-sub-val"));
       } else {
-        amountCell.append(node("span", "not recorded", "bobi-tnum token-main-val"));
+        const invModel = invocation.model_selected || invocation.model_requested || "";
+        const invEst = estimateTokenCost(invModel, usage.input_tokens, usage.output_tokens, usage.cache_read_input_tokens);
+        if (invEst != null) {
+          amountCell.append(node("span", "$" + Number(invEst).toFixed(6), "bobi-tnum token-main-val text-green"));
+          amountCell.append(node("span", "token estimate", "token-sub-val"));
+        } else if (turnLevelCost?.amount_usd != null && invocations.length > 1) {
+          amountCell.append(node("span", "—", "bobi-tnum token-main-val"));
+          amountCell.append(node("span", "billed per turn", "token-sub-val"));
+        } else {
+          amountCell.append(node("span", "not recorded", "bobi-tnum token-main-val"));
+        }
       }
 
       return [
@@ -765,21 +821,29 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
   const totalLine = node("div", "", "metrics-turn-totals");
   pair(totalLine, "Turn input / output", `${number(totals.input_tokens)} / ${number(totals.output_tokens)}`);
   pair(totalLine, "Cache read / write", `${number(totals.cache_read_input_tokens)} / ${number(totals.cache_write_input_tokens)}`);
-  const turnCostForTotal = (data.cost_measurements || []).find(item => item.scope === "turn") || (costs.length ? costs[0] : null);
+  let turnCostForTotal = (data.cost_measurements || []).find(item => item.scope === "turn") || (costs.length ? costs[0] : null);
+  if (!turnCostForTotal && totals.input_tokens != null && totals.output_tokens != null) {
+    const invModel = invocations[0]?.model_selected || invocations[0]?.model_requested || "";
+    const est = estimateTokenCost(invModel, totals.input_tokens, totals.output_tokens, totals.cache_read_input_tokens);
+    if (est != null) {
+      turnCostForTotal = { amount_usd: est, is_estimated: 1 };
+    }
+  }
   if (turnCostForTotal?.amount_usd != null) {
-    pair(totalLine, "Turn cost", "$" + Number(turnCostForTotal.amount_usd).toFixed(6));
+    pair(totalLine, "Turn cost", "$" + Number(turnCostForTotal.amount_usd).toFixed(6) + (turnCostForTotal.is_estimated ? " (est)" : ""));
   }
   pair(totalLine, "Basis", totals.is_estimated == null ? null : totals.is_estimated ? "estimated" : "reported");
   panelUsage.append(totalLine);
 
   technical.append(panelUsage);
-  if (costs.length) {
+  if (costs.length || turnCostForTotal) {
     const costPanel = node("div", "", "panel-cost");
-    costPanel.append(createSectionHead("", "Recorded costs (not additive)", costs.length,
-      "Official provider invoices or estimates recorded at the turn or session level. Rows are non-additive with invocation totals."));
-    table(costPanel, ["Scope", "Model", "USD", "Basis"], costs.map(cost => [
-      cost.scope,
-      cost.model,
+    const displayCosts = costs.length ? costs : [turnCostForTotal];
+    costPanel.append(createSectionHead("", "Turn Invoiced / Reconciled Spend", displayCosts.length,
+      "Official provider billing or calibrated estimates for the overall turn."));
+    table(costPanel, ["Scope", "Model", "USD", "Basis"], displayCosts.map(cost => [
+      cost.scope || "turn",
+      cost.model || (invocations[0]?.model_selected || "—"),
       node("span", "$" + Number(cost.amount_usd).toFixed(6), "bobi-tnum text-green"),
       cost.is_estimated ? "Estimated" : "Reported"
     ]));

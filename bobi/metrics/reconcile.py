@@ -216,7 +216,8 @@ def _superseded_estimate(
     row = conn.execute(
         "SELECT measurement_id FROM usage_measurements WHERE turn_id=? "
         "AND COALESCE(invocation_id,'')=COALESCE(?,'') "
-        "AND provider=? AND model=? AND is_estimated=1 "
+        "AND provider=? AND model=? "
+        "AND (is_estimated=1 OR measurement_source='provider_stream') "
         "ORDER BY observed_at_us DESC,measurement_id DESC LIMIT 1",
         (turn_id, invocation_id, provider, model),
     ).fetchone()
@@ -539,10 +540,13 @@ def reconcile_missing(
         turn_ids = [
             str(row[0])
             for row in conn.execute(
-                "SELECT t.turn_id FROM turns AS t WHERE NOT EXISTS ("
+                "SELECT t.turn_id FROM turns AS t "
+                "JOIN sessions AS s USING(session_id) "
+                "WHERE NOT EXISTS ("
                 "SELECT 1 FROM usage_measurements AS u "
                 "WHERE u.turn_id=t.turn_id AND u.scope='turn' "
-                "AND u.is_estimated=0) "
+                "AND u.measurement_source IN ('claude_transcript', 'codex_rollout', 'provider_reconciled')) "
+                "AND s.provider IN ('anthropic', 'openai', 'gateway') "
                 + ("AND t.ended_at_us IS NOT NULL " if terminal_only else "")
                 + "ORDER BY t.started_at_us"
             )
