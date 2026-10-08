@@ -33,6 +33,8 @@ def test_dashboard_canonical_usage_routing_and_privacy(tmp_path):
     assert turns[-1]["route_reused"] == 0
     assert turns[-1]["confidence"] == 0.72
     assert turns[-1]["usage"]["output_tokens"] == 0
+    assert turns[-1]["tool_count"] == 0
+    assert turns[-1]["costs"] == {"reported_cost_usd": None, "estimated_cost_usd": None}
     detail = queries.turn({"turn_id": "t-pro", "include_policy": True})
     assert detail["router_decisions"][0]["confidence"] == 0.96
     assert "private-task" not in json.dumps([summary, turns, detail])
@@ -55,6 +57,25 @@ def test_dashboard_keyset_filters_and_lifecycle_names(tmp_path):
     assert queries.turns({**args, "session_name": "absent"})["turns"] == []
     with pytest.raises(MetricsQueryError, match="cursor"):
         queries.turns({**args, "session_name": "other", "cursor": first["next_cursor"]})
+
+def test_dashboard_sessions_and_canonical_turn_breakdown(tmp_path):
+    seed_dashboard(tmp_path, 1_000_000)
+    queries = MetricsQueries(tmp_path)
+    args = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "limit": 1}
+    first = queries.sessions(args)
+    second = queries.sessions({**args, "cursor": first["next_cursor"]})
+    assert {first["sessions"][0]["session_id"], second["sessions"][0]["session_id"]} == {"s1", "s2"}
+    assert first["sessions"][0]["session_name"] == second["sessions"][0]["session_name"] == "worker-a"
+    assert second["next_cursor"] is None
+    detail = queries.turn({"turn_id": "t-reused", "include_breakdown": True})
+    assert detail["session"]["session_id"] == "s1"
+    assert detail["best_usage"][0]["input_tokens"] == 320
+    assert detail["best_usage"][0]["is_estimated"] == 0
+    assert detail["usage_totals"]["input_tokens"] == 320
+    assert detail["invocation_usage"][0]["is_estimated"] == 1
+    assert len(detail["usage_measurements"]) > len(detail["best_usage"])
+    assert "raw_usage_json" not in detail["best_usage"][0]
+    assert "private-task" not in json.dumps(detail)
 
 
 def test_dashboard_marks_estimates_without_promoting_unknowns(tmp_path):
@@ -574,6 +595,9 @@ def test_summary_cost_selects_one_granularity_without_double_counting(metrics_ro
     result = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
 
     assert result["totals"]["reported_cost_usd"] == pytest.approx(0.25)
+    assert MetricsQueries(metrics_root).turns({"window_seconds": 10, "end_at": 4})["turns"][0]["costs"] == {
+        "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": None,
+    }
 
 
 def test_exact_cost_suppresses_estimate_for_same_invocation(metrics_root):
@@ -614,6 +638,9 @@ def test_mixed_exact_and_estimated_invocation_costs_keep_one_granularity(metrics
 
     assert result["totals"]["reported_cost_usd"] == pytest.approx(0.25)
     assert result["totals"]["estimated_cost_usd"] == pytest.approx(0.05)
+    assert MetricsQueries(metrics_root).turns({"window_seconds": 10, "end_at": 4})["turns"][0]["costs"] == {
+        "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": pytest.approx(0.05),
+    }
 
 
 def test_exact_turn_cost_precedes_complete_estimated_invocation_costs(metrics_root):

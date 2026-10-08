@@ -723,8 +723,11 @@ class MetricsQueries:
 
         def build(conn: sqlite3.Connection) -> dict[str, object]:
             selected = conn.execute(
-                "SELECT t.turn_id,t.session_id,t.turn_index,t.started_at_us,t.status,t.wall_duration_ms,"
-                "s.session_name,s.role," + ROUTING_PUBLIC_SQL + ","
+                "SELECT t.turn_id,t.session_id,t.turn_index,t.started_at_us,t.ended_at_us,t.status,t.wall_duration_ms,"
+                "t.trigger_kind,t.trigger_id,s.session_name,s.provider_session_id,s.brain,s.role,"
+                "s.started_at_us AS session_started_at_us,"
+                "(SELECT MIN(next.started_at_us) FROM turns next WHERE next.session_id=t.session_id "
+                "AND next.started_at_us>t.started_at_us) AS next_started_at_us," + ROUTING_PUBLIC_SQL + ","
                 "json_extract(s.metadata_json,'$.router_fallback.fallback_reason') AS session_fallback_reason,"
                 "CASE WHEN json_extract(d.metadata_json,'$.policy.call_id') IS NOT NULL THEN EXISTS ("
                 "SELECT 1 FROM router_decisions prior JOIN turns previous ON previous.turn_id=prior.turn_id "
@@ -746,6 +749,15 @@ class MetricsQueries:
                     f"FROM best_usage b WHERE b.turn_id=? AND ({_chosen_usage()})", (row["turn_id"],),
                 ).fetchone()
                 row["usage"] = _row(usage)
+                row["tool_count"] = conn.execute(
+                    "SELECT COUNT(*) FROM tool_executions WHERE turn_id=?", (row["turn_id"],),
+                ).fetchone()[0]
+                costs = conn.execute(
+                    "SELECT SUM(CASE WHEN c.is_estimated=0 THEN c.amount_usd END),"
+                    "SUM(CASE WHEN c.is_estimated=1 THEN c.amount_usd END) FROM cost_measurements c "
+                    f"WHERE c.turn_id=? AND ({_chosen_cost()})", (row["turn_id"],),
+                ).fetchone()
+                row["costs"] = {"reported_cost_usd": costs[0], "estimated_cost_usd": costs[1]}
                 row["invocations"] = [_row(invocation) for invocation in conn.execute(
                     "SELECT provider,model_requested,model_selected,status FROM llm_invocations "
                     "WHERE turn_id=? ORDER BY invocation_index LIMIT ?", (row["turn_id"], MAX_ROWS + 1),
@@ -759,6 +771,37 @@ class MetricsQueries:
                 )
             return {"turns": rows, "next_cursor": next_cursor,
                     "range": {"from_us": start, "to_us": end}}
+
+        return self._run(build)
+
+    def sessions(self, args: dict[str, Any]) -> dict[str, object]:
+        start, end = _time_range(args)
+        limit = _limit(args)
+        filters = {"from_us": start, "to_us": end, "limit": limit}
+        position = _decode_cursor(args.get("cursor"), filters, ("started_at_us", "session_id"))
+        if position is not None and (
+            type(position["started_at_us"]) is not int or not isinstance(position["session_id"], str)
+        ):
+            raise MetricsQueryError("invalid cursor position", "invalid_cursor")
+
+        def build(conn: sqlite3.Connection) -> dict[str, object]:
+            conditions = ["EXISTS (SELECT 1 FROM turns t WHERE t.session_id=s.session_id "
+                          "AND t.started_at_us>=? AND t.started_at_us<?)"]
+            params: list[object] = [start, end]
+            if position is not None:
+                conditions.append("(s.started_at_us,s.session_id)<(?,?)")
+                params.extend((position["started_at_us"], position["session_id"]))
+            selected = conn.execute(
+                "SELECT s.session_id,s.session_name,s.started_at_us,s.ended_at_us,s.status FROM sessions s WHERE "
+                + " AND ".join(conditions) + " ORDER BY s.started_at_us DESC,s.session_id DESC LIMIT ?",
+                (*params, limit + 1),
+            ).fetchall()
+            sessions = [_row(row) or {} for row in selected[:limit]]
+            cursor = None
+            if len(selected) > limit:
+                last = sessions[-1]
+                cursor = _encode_cursor({key: last[key] for key in ("started_at_us", "session_id")}, filters)
+            return {"sessions": sessions, "next_cursor": cursor}
 
         return self._run(build)
 
@@ -821,6 +864,9 @@ class MetricsQueries:
         include_policy = args.get("include_policy", False)
         if not isinstance(include_policy, bool):
             raise MetricsQueryError("include_policy must be a boolean", "bad_request")
+        include_breakdown = args.get("include_breakdown", False)
+        if not isinstance(include_breakdown, bool):
+            raise MetricsQueryError("include_breakdown must be a boolean", "bad_request")
 
         def build(conn: sqlite3.Connection) -> dict[str, object]:
             turn = conn.execute(
@@ -849,7 +895,7 @@ class MetricsQueries:
                 for decision in decisions:
                     decision.update(public_policy[decision["router_decision_id"]])
             _enforce_row_count(steps, invocations, tools, usage, costs, decisions)
-            return {
+            result = {
                 "turn": _row(turn),
                 "workflow_steps": steps,
                 "invocations": invocations,
@@ -859,5 +905,26 @@ class MetricsQueries:
                 "router_decisions": decisions,
                 "coverage": _coverage(conn, "i.turn_id=?", (turn_id,)),
             }
+            if include_breakdown:
+                session = conn.execute(
+                    f"SELECT {_columns(SESSION_PUBLIC_COLUMNS)} FROM sessions WHERE session_id=?", (turn["session_id"],),
+                ).fetchone()
+                next_started = conn.execute(
+                    "SELECT MIN(started_at_us) FROM turns WHERE session_id=? AND started_at_us>?",
+                    (turn["session_id"], turn["started_at_us"]),
+                ).fetchone()[0]
+                usage_columns = ("measurement_id,scope,turn_id,invocation_id,provider,model,measurement_source,is_estimated,"
+                                 + ",".join(TOKEN_COLUMNS))
+                best_usage = rows("SELECT " + usage_columns + f" FROM best_usage b WHERE b.turn_id=? AND ({_chosen_usage()})")
+                invocation_usage = rows("SELECT " + usage_columns + " FROM best_usage b WHERE b.turn_id=? "
+                                        f"AND b.scope='invocation' AND ({_effective_usage('b')})")
+                totals = conn.execute(
+                    "SELECT " + ",".join(_strict_sum(column) for column in TOKEN_COLUMNS)
+                    + f",MAX(b.is_estimated) AS is_estimated FROM best_usage b WHERE b.turn_id=? AND ({_chosen_usage()})",
+                    (turn_id,),
+                ).fetchone()
+                result.update(session=_row(session), next_started_at_us=next_started, best_usage=best_usage,
+                              invocation_usage=invocation_usage, usage_totals=_row(totals))
+            return result
 
         return self._run(build)

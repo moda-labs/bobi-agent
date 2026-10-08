@@ -1,14 +1,5 @@
 import { api } from "../shell.js";
 
-const TOKEN_FIELDS = [
-  ["input_tokens", "Input tokens"], ["uncached_input_tokens", "Uncached input"],
-  ["output_tokens", "Output tokens"], ["cache_read_input_tokens", "Cache read"],
-  ["cache_write_input_tokens", "Cache write"], ["cache_write_5m_input_tokens", "Cache write · 5m"],
-  ["cache_write_1h_input_tokens", "Cache write · 1h"],
-  ["cache_write_unknown_ttl_input_tokens", "Cache write · unknown TTL"],
-  ["reasoning_output_tokens", "Reasoning output (included in output)"],
-];
-
 function node(tag, text = "", className = "") {
   const element = document.createElement(tag);
   if (text) element.textContent = text;
@@ -30,6 +21,163 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
+function shortSessionId(id = "") {
+  return id.length > 18 ? id.slice(0, 10) + "…" + id.slice(-4) : id;
+}
+
+function sessionLabel(session) {
+  const started = new Date(session.started_at_us / 1000).toLocaleString();
+  return `${session.session_name} (${shortSessionId(session.session_id)}) · ${started}`;
+}
+
+function conversationBadge(origin = {}) {
+  if (!origin || !origin.source || !origin.source.trim()) {
+    return null;
+  }
+  const label = origin.source === "slack"
+    ? `Slack ${origin.channel_name ? "#" + origin.channel_name : origin.channel_id || ""}${origin.thread_id ? " · Thread " + origin.thread_id : ""}`
+    : origin.source;
+  const badge = node("span", label, "metrics-conversation-badge");
+  if (origin.url && /^https:\/\/app\.slack\.com\/client\/T[A-Z0-9]+\/[CDG][A-Z0-9]+\/thread\/[CDG][A-Z0-9]+-\d+\.\d+$/.test(origin.url)) {
+    const link = node("a", label, "metrics-conversation-badge");
+    link.href = origin.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.addEventListener("click", event => event.stopPropagation());
+    return link;
+  }
+  return badge;
+}
+
+function markdown(text) {
+  const body = node("div", "", "metrics-markdown");
+  let code = null;
+  for (const line of text.split("\n")) {
+    if (/^\s*```/.test(line)) {
+      if (code) code = null;
+      else { code = node("code"); const block = node("pre"); block.append(code); body.append(block); }
+    } else if (code) {
+      code.append(document.createTextNode(line + "\n"));
+    } else {
+      const block = node("p");
+      const heading = line.match(/^#{1,6}\s+(.+)/);
+      const content = heading ? heading[1] : line;
+      for (const part of content.split(/(`[^`]+`|\*\*[^*]+\*\*)/g)) {
+        block.append(part.startsWith("`") && part.endsWith("`")
+          ? node("code", part.slice(1, -1))
+          : part.startsWith("**") && part.endsWith("**")
+            ? node("strong", part.slice(2, -2)) : document.createTextNode(part));
+      }
+      if (heading) block.classList.add("metrics-markdown-heading");
+      body.append(block);
+    }
+  }
+  return body;
+}
+
+function turnIO(conversation = {}) {
+  if (!conversation.input && !conversation.response) {
+    const system = ["cron", "monitor", "workflow", "system", "heartbeat", "sleep-cycle"].includes(conversation.origin?.source);
+    return node("div", system
+      ? "System execution turn — no direct user chat input recorded."
+      : "No input or response recorded for this turn.", "metrics-note metrics-turn-empty-io");
+  }
+  const panel = node("section", "", "metrics-turn-io");
+  const head = node("div", "", "metrics-io-head");
+  head.append(node("h3", "Turn conversation transcript"));
+  const badge = conversationBadge(conversation.origin);
+  if (badge) head.append(badge);
+  panel.append(head);
+
+  const hasUserMessage = Boolean(conversation.user_message);
+  const isWorkflow = conversation.origin?.source === "workflow_step" || (conversation.input && conversation.input.includes("Workflow ") && (conversation.input.includes("background for run") || conversation.input.includes("steps:")));
+  const isMaintenance = (conversation.input && /sleep cycle|curator|memory compaction|maintainer/i.test(conversation.input)) || ["cron", "monitor", "system", "heartbeat", "sleep-cycle"].includes(conversation.origin?.source);
+
+  if (hasUserMessage) {
+    const block = node("section", "", "metrics-io-block io-block-user");
+    const bar = node("div", "", "metrics-io-head");
+    const labelRow = node("div", "", "io-role-row");
+    if (isWorkflow) {
+      labelRow.append(node("span", "⚙️", "io-role-icon"), node("h4", "Workflow Objective"));
+    } else {
+      labelRow.append(node("span", "👤", "io-role-icon"), node("h4", "User Message"));
+    }
+    bar.append(labelRow);
+    const copy = node("button", "copy", "btn bobi-btn small quiet");
+    copy.type = "button";
+    copy.setAttribute("aria-label", "Copy Input / Prompt");
+    copy.title = isWorkflow ? "Copy workflow prompt" : "Copy user message";
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(conversation.input || conversation.user_message); copy.textContent = "copied"; }
+      catch { copy.textContent = "copy unavailable"; }
+    });
+    bar.append(copy);
+    block.append(bar, markdown(conversation.user_message));
+
+    if (conversation.input && conversation.input !== conversation.user_message) {
+      const details = node("details", "", "metrics-full-prompt-details");
+      const summaryText = isWorkflow
+        ? `View workflow input & orchestration context (${number(conversation.input.length)} chars)`
+        : `System prompt & raw context (${number(conversation.input.length)} chars)`;
+      details.append(node("summary", summaryText), node("pre", conversation.input));
+      block.append(details);
+    }
+    panel.append(block);
+  } else if (conversation.input) {
+    const block = node("section", "", "metrics-io-block io-block-system");
+    const bar = node("div", "", "metrics-io-head");
+    const labelRow = node("div", "", "io-role-row");
+    if (isMaintenance) {
+      labelRow.append(node("span", "⚡", "io-role-icon"), node("h4", "System Maintenance / Sleep Cycle"));
+    } else {
+      labelRow.append(node("span", "⚡", "io-role-icon"), node("h4", "Agent Startup & System Context"));
+    }
+    bar.append(labelRow);
+    const copy = node("button", "copy", "btn bobi-btn small quiet");
+    copy.type = "button";
+    copy.setAttribute("aria-label", "Copy Input / Prompt");
+    copy.title = "Copy system prompt";
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(conversation.input); copy.textContent = "copied"; }
+      catch { copy.textContent = "copy unavailable"; }
+    });
+    bar.append(copy);
+    const descText = isMaintenance
+      ? "Scheduled background maintenance and memory compaction cycle."
+      : "This turn was initiated by the agent runtime without a direct user chat message.";
+    block.append(bar, node("p", descText, "metrics-note"));
+    const details = node("details", "", "metrics-full-prompt-details");
+    const summaryLabel = isMaintenance
+      ? `View maintenance instructions (${number(conversation.input.length)} chars)`
+      : `View startup role prompt (${number(conversation.input.length)} chars)`;
+    details.append(node("summary", summaryLabel), node("pre", conversation.input));
+    block.append(details);
+    panel.append(block);
+  }
+
+  if (conversation.response) {
+    const block = node("section", "", "metrics-io-block io-block-assistant");
+    const bar = node("div", "", "metrics-io-head");
+    const labelRow = node("div", "", "io-role-row");
+    labelRow.append(node("span", "🤖", "io-role-icon"), node("h4", "Assistant Response"));
+    bar.append(labelRow);
+    const copy = node("button", "copy", "btn bobi-btn small quiet");
+    copy.type = "button";
+    copy.setAttribute("aria-label", "Copy Assistant Response");
+    copy.title = "Copy assistant response";
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(conversation.response); copy.textContent = "copied"; }
+      catch { copy.textContent = "copy unavailable"; }
+    });
+    bar.append(copy);
+    block.append(bar, markdown(conversation.response));
+    panel.append(block);
+  }
+
+  if (conversation.truncated) panel.append(node("p", "Transcript preview is truncated; copy contains the displayed text only.", "metrics-note"));
+  return panel;
+}
+
 function pair(container, label, value) {
   const row = node("div", "", "metrics-pair");
   row.append(node("span", label), node("span", value == null ? "not recorded" : String(value), "bobi-tnum"));
@@ -47,18 +195,6 @@ function createSectionHead(icon, title, count, description) {
   return head;
 }
 
-function renderEmptyCard(icon, title, desc) {
-  const card = node("div", "", "turn-empty-card");
-  card.innerHTML = `
-    <span class="tec-empty-icon">${icon}</span>
-    <div class="tec-empty-body">
-      <h5>${title}</h5>
-      <p>${desc}</p>
-    </div>
-  `;
-  return card;
-}
-
 function table(container, headers, rows) {
   const wrap = node("div", "", "runs-scroll");
   const element = node("table", "", "runs metrics-table");
@@ -72,12 +208,21 @@ function table(container, headers, rows) {
     const isObj = !Array.isArray(rowDef) && rowDef && rowDef.cells;
     const cells = isObj ? rowDef.cells : rowDef;
     if (isObj && rowDef.className) row.className = rowDef.className;
+    if (isObj && rowDef.turn) row.dataset.turnId = rowDef.turn.turn_id;
     if (isObj && typeof rowDef.onClick === "function") {
       row.classList.add("clickable-row");
+      row.tabIndex = 0;
       row.addEventListener("click", rowDef.onClick);
+      row.addEventListener("keydown", event => {
+        if (event.target === row && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          rowDef.onClick();
+        }
+      });
     }
     cells.forEach(value => {
-      const cell = node("td", "", "bobi-tnum");
+      const numeric = typeof value === "number" || (typeof value === "string" && /^(?:[\d.,]+(?:ms|s|%)?|—|\$[\d.]+)$/.test(value));
+      const cell = node("td", "", numeric ? "bobi-tnum" : "");
       cell.append(value instanceof Node ? value : document.createTextNode(value == null ? "not recorded" : String(value)));
       row.append(cell);
     });
@@ -86,23 +231,6 @@ function table(container, headers, rows) {
   element.append(head, body);
   wrap.append(element);
   container.append(wrap);
-}
-
-function policyState(row) {
-  if (!row.router_decision_id) return row.session_fallback_reason || "No decision recorded";
-  if (row.route_reused) return "Reused session route";
-  return row.policy_status === "not_called" ? "Policy not called" : row.policy_status || "Policy status not recorded";
-}
-
-function toolIcon(name = "", kind = "") {
-  const n = (name || "").toLowerCase();
-  const k = (kind || "").toLowerCase();
-  if (n.includes("bash") || n.includes("terminal") || n.includes("sh") || k === "shell") return "🐚";
-  if (n.includes("read") || n.includes("view") || k === "filesystem" || k === "fs") return "📄";
-  if (n.includes("write") || n.includes("edit") || n.includes("replace") || n.includes("create")) return "✏️";
-  if (n.includes("glob") || n.includes("grep") || n.includes("search") || k === "search") return "🔍";
-  if (n.includes("web") || n.includes("fetch") || n.includes("url") || n.includes("http")) return "🌐";
-  return "🔧";
 }
 
 function chart(container, buckets) {
@@ -198,107 +326,160 @@ function chart(container, buckets) {
   container.append(svg);
 }
 
-function turnRows(container, turns, open, agentNameOrHandler = "", onFilterSession = null) {
-  const onSessionClick = typeof agentNameOrHandler === "function"
-    ? agentNameOrHandler
-    : (typeof onFilterSession === "function" ? onFilterSession : null);
+function confidenceCell(value, detail = false) {
+  const score = value == null ? null : Number(value);
+  const valid = score != null && Number.isFinite(score) && score >= 0 && score <= 1;
+  const tone = valid && score >= 0.8 ? "confidence-high" : valid && score >= (detail ? 0 : 0.5) && score < (detail ? 0.6 : 0.8) ? "confidence-warning" : "";
+  const cell = node("span", valid ? Math.round(score * 100) + "%" : "—", "conf-pct bobi-tnum " + tone);
+  if (valid) cell.title = "Raw score: " + score.toFixed(3);
+  return cell;
+}
 
-  table(container, [
-    "Started", "Session / lifecycle", "Routing Arm", "Policy / State",
-    "Recommendation", "Model (selected / provider)", "Tokens (in / out)", "Status"
-  ], turns.map((turn, idx) => {
-    const d = new Date(turn.started_at_us / 1000);
-    const timeStr = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const dateStr = d.toLocaleDateString([], { month: "short", day: "numeric" });
-    const startedCell = node("div", "", "cell-started");
-    startedCell.append(node("span", `${dateStr}, ${timeStr}`, "started-time-text"));
+function routeExplanation(route = {}) {
+  const model = route.model_selected || route.model_requested || "the configured model";
+  if (model === "<synthetic>" || route.model_requested === "<synthetic>") {
+    return ["System Turn", "Executed locally without upstream LLM API call"];
+  }
+  const fallback = route.fallback_reason || route.session_fallback_reason;
+  if (fallback) {
+    const reason = String(fallback).replace(/^policy_/, "").replace(/_/g, " ");
+    return [/breaker|circuit/.test(fallback) ? "Fallback (Breaker)" : "Fallback", reason + "; executed " + model];
+  }
+  if (route.route_reused) return ["Sticky Session", "Maintained the recorded session route with " + model];
+  if (route.policy_mode === "shadow") return ["Shadow Evaluation", "Recommended " + (route.recommended_model || "—") + "; kept the configured model " + model];
+  if (route.policy_mode === "enforce" && route.policy_status !== "not_called") return ["Router Decision", "Policy selected " + model + (route.recommended_model && route.recommended_model !== model ? "; recommendation: " + route.recommended_model : "")];
+  return ["Default Config", "Executed the configured model without a policy override"];
+}
 
-    const isRouted = Boolean(turn.router_decision_id);
-    const confidence = turn.confidence == null ? null : Number(turn.confidence).toFixed(3);
-    const models = [...new Set((turn.invocations || []).map(inv => inv.model_requested || inv.model_selected || "unknown"))];
+function costText(costs = {}) {
+  const parts = [];
+  if (costs.reported_cost_usd != null) parts.push("$" + Number(costs.reported_cost_usd).toFixed(4));
+  if (costs.estimated_cost_usd != null) parts.push("$" + Number(costs.estimated_cost_usd).toFixed(4) + " est");
+  return parts.join(" / ") || "—";
+}
 
-    const sessionCell = node("div", "", "cell-session");
-    const sessName = turn.session_name || "session";
-    const shortId = turn.session_id ? (turn.session_id.length > 20 ? turn.session_id.slice(0, 16) + "…" : turn.session_id) : "";
-    const strongName = node("strong", sessName, "sess-name");
-    if (onSessionClick && turn.session_name) {
-      strongName.classList.add("clickable-session");
-      strongName.title = `Filter metrics to session: ${turn.session_name}`;
-      strongName.addEventListener("click", (e) => {
-        e.stopPropagation();
-        onSessionClick(turn.session_name);
-      });
+function jevStatusBadge(turn = {}) {
+  const isSynthetic = turn.model_selected === "<synthetic>" || turn.model_requested === "<synthetic>" || (turn.invocations?.length === 1 && turn.invocations[0].model_selected === "<synthetic>");
+  if (isSynthetic) {
+    const badge = node("span", "System Turn", "arm-tag arm-tag-system");
+    badge.title = "Turn executed locally without upstream LLM API call";
+    return badge;
+  }
+  const [label, explanation] = routeExplanation(turn);
+  let badgeClass = "arm-tag-direct";
+  if (label.startsWith("Fallback")) badgeClass = "arm-tag-fallback";
+  else if (label === "Sticky Session") badgeClass = "arm-tag-sticky";
+  else if (label === "Router Decision") badgeClass = "arm-tag-enforce";
+  else if (label === "Shadow Evaluation") badgeClass = "arm-tag-shadow";
+  const badge = node("span", label, "arm-tag " + badgeClass);
+  badge.title = explanation;
+  return badge;
+}
+
+function jevDetailBlock(route = {}) {
+  const container = node("div", "", "cell-jev-breakdown");
+  const isSynthetic = route.model_selected === "<synthetic>" || route.model_requested === "<synthetic>";
+  if (isSynthetic) {
+    container.append(node("span", "System Turn", "arm-tag arm-tag-system"));
+    container.append(node("div", "No upstream LLM API call", "model-provider-status"));
+    return container;
+  }
+
+  const badge = jevStatusBadge(route);
+  container.append(badge);
+
+  const fallback = route.fallback_reason || route.session_fallback_reason;
+  const suggested = route.recommended_model;
+  const selected = route.model_selected || route.model_requested;
+  const conf = route.confidence != null ? Math.round(Number(route.confidence) * 100) + "%" : null;
+  const minConf = route.min_confidence != null ? Math.round(Number(route.min_confidence) * 100) + "%" : null;
+
+  const details = node("div", "", "jev-routing-details");
+
+  if (fallback) {
+    const cleanReason = String(fallback).replace(/^policy_/, "").replace(/_/g, " ");
+    if (suggested && selected) {
+      details.append(node("div", `Suggest: ${suggested} → Selected: ${selected}`, "jev-meta-models"));
     }
-    const sep = node("span", " / ", "subtle-sep");
-    const idSpan = node("code", shortId, "subtle-id");
-    if (turn.session_id) idSpan.title = turn.session_id;
-    sessionCell.append(strongName, sep, idSpan);
-
-    let variantCell;
-    let polCell;
-    let recCell;
-    const modelCell = node("div", "", "cell-model");
-
-    if (isRouted) {
-      const mode = (turn.policy_mode || "").toLowerCase();
-      const isFallback = Boolean(turn.fallback_reason);
-      if (isFallback) {
-        variantCell = node("span", "⚠️ JEV Fallback", "badge badge-jev-fallback");
-        variantCell.title = `JEV fallback: ${turn.fallback_reason}`;
-      } else if (mode === "enforce" || turn.variant_id === "treatment_jev" || turn.variant_id === "treatment") {
-        variantCell = node("span", "⚡ JEV Enforce", "badge badge-jev-enforce");
-        variantCell.title = "JEV policy enforced: dynamically selected optimal model for this turn";
-      } else {
-        variantCell = node("span", "👁️ JEV Shadow", "badge badge-jev-shadow");
-        variantCell.title = "JEV shadow mode: evaluated recommendation without execution override";
-      }
-      const polText = confidence != null ? `${policyState(turn)} · conf ${confidence}` : policyState(turn);
-      polCell = node("span", polText, "policy-text");
-      recCell = turn.recommended_model
-        ? node("span", turn.recommended_model, "model-badge")
-        : node("span", "—", "dash-empty");
-      const sel = turn.model_selected || "";
-      const prov = models.join(", ");
-      if (sel && prov && sel !== prov && !prov.endsWith("/" + sel) && !sel.endsWith("/" + prov)) {
-        modelCell.append(node("span", sel, "model-badge"), node("span", " → ", "subtle-arrow"), node("span", prov, "model-badge"));
-      } else {
-        modelCell.append(node("span", prov || sel || "unknown", "model-badge"));
-      }
+    const sub = node("div", "", "jev-meta-sub");
+    if (conf) sub.append(node("span", `Conf ${conf}${minConf ? ` (< ${minConf})` : ""}`, "jev-meta-conf"));
+    if (cleanReason) sub.append(node("span", `${conf ? " · " : ""}${cleanReason}`, "jev-meta-reason"));
+    details.append(sub);
+  } else if (route.route_reused) {
+    details.append(node("div", "Sticky session route", "jev-meta-models"));
+    details.append(node("div", `Maintained ${selected || "model"} from turn 1`, "jev-meta-sub"));
+  } else if (route.policy_mode === "enforce" && route.policy_status !== "not_called") {
+    if (suggested && suggested !== selected) {
+      details.append(node("div", `Enforced: ${selected} (suggest: ${suggested})`, "jev-meta-models"));
     } else {
-      variantCell = node("span", "➡️ Direct", "badge badge-direct");
-      variantCell.title = "Direct routing: executed using default agent baseline model (no JEV policy was invoked)";
-      polCell = node("span", turn.session_fallback_reason || "Baseline (No JEV)", "badge-subtle-policy");
-      polCell.title = "Turn executed without JEV policy override";
-      recCell = node("span", "—", "dash-empty");
-      const modelName = models.join(", ") || turn.model_selected || "default model";
-      modelCell.append(node("span", modelName, "model-badge"));
+      details.append(node("div", `Enforced: ${selected || "model"}`, "jev-meta-models"));
     }
+    if (conf) details.append(node("div", `Confidence: ${conf} (enforced)`, "jev-meta-sub jev-meta-conf-good"));
+  } else if (route.policy_mode === "shadow") {
+    details.append(node("div", `Suggest: ${suggested || "—"} (conf ${conf || "—"})`, "jev-meta-models"));
+    details.append(node("div", `Kept configured: ${selected || "model"}`, "jev-meta-sub"));
+  } else {
+    details.append(node("div", "Configured model directly executed", "jev-meta-sub"));
+  }
 
-    const inTok = turn.usage?.input_tokens;
-    const outTok = turn.usage?.output_tokens;
-    const cacheRead = turn.usage?.cache_read_input_tokens || 0;
-    const cachePct = inTok ? Math.round((cacheRead / inTok) * 100) : 0;
-    const tokStr = inTok != null && cacheRead > 0
-      ? `${number(inTok)} / ${number(outTok)} (${cachePct}% cached)`
-      : (inTok != null ? `${number(inTok)} / ${number(outTok)}` : "—");
+  container.append(details);
+  return container;
+}
 
-    const statusBadge = node("span", turn.status, `status-badge ${turn.status}`);
-    statusBadge.prepend(node("span", "", "status-dot"));
+function turnRows(container, turns, open, agentNameOrHandler = "", onFilterSession = null) {
+  const onSessionClick = typeof agentNameOrHandler === "function" ? agentNameOrHandler : onFilterSession;
+  table(container, ["Turn", "Session / Topic", "Model & Decision", "Confidence", "Tokens / Cost", "Latency"], turns.map((turn, index) => {
+    const identity = node("div", "", "metrics-turn-identity");
+    const date = new Date(turn.started_at_us / 1000);
+    const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+    const time = node("span", minutes < 1 ? "just now" : minutes < 60 ? minutes + "m ago" : date.toLocaleString(), "metrics-provenance");
+    time.title = date.toISOString();
+    const session = node("button", shortSessionId(turn.session_id || ""), "session-id-pill");
+    session.type = "button";
+    session.title = "Copy session ID: " + (turn.session_id || "");
+    session.addEventListener("click", async event => {
+      event.stopPropagation();
+      try { await navigator.clipboard.writeText(turn.session_id); session.title = "Copied session ID"; }
+      catch { session.title = "Copy unavailable: " + turn.session_id; }
+    });
+    identity.append(node("span", "#" + (turn.turn_index ?? index + 1), "bobi-tnum"), time, session);
 
-    return {
-      turn,
-      onClick: () => open(turn, idx),
-      cells: [
-        startedCell,
-        sessionCell,
-        variantCell,
-        polCell,
-        recCell,
-        modelCell,
-        tokStr,
-        statusBadge
-      ]
-    };
+    // Consolidated Session / Topic column
+    const topicCell = node("div", "", "metrics-topic-cell");
+    const userMsg = turn.conversation?.user_message;
+    const hasUserMsg = Boolean(userMsg);
+    const titleText = userMsg
+      || turn.conversation?.response_snippet
+      || (turn.session_name ? `${turn.session_name} · Startup` : "Agent Session Startup");
+    const topicTitle = node("div", titleText, "metrics-topic-title" + (hasUserMsg ? "" : " metrics-system-trigger"));
+    topicTitle.title = titleText;
+
+    const topicMeta = node("div", "", "metrics-topic-meta");
+    if (onSessionClick && turn.session_id) {
+      const filter = node("button", turn.session_name || shortSessionId(turn.session_id), "sess-name clickable-session");
+      filter.type = "button";
+      filter.title = "Filter lifecycle: " + turn.session_id;
+      filter.addEventListener("click", event => { event.stopPropagation(); onSessionClick(turn.session_id); });
+      topicMeta.append(filter);
+    }
+    const origin = conversationBadge(turn.conversation?.origin);
+    if (origin) topicMeta.append(origin);
+    if (turn.tool_count) {
+      topicMeta.append(node("span", `${turn.tool_count} tool calls`, "metrics-conversation-badge"));
+    }
+    topicCell.append(topicTitle, topicMeta);
+
+    const model = node("div", "", "cell-model-decision");
+    const rawModels = [...new Set((turn.invocations || []).map(item => item.model_selected || item.model_requested).filter(Boolean))];
+    const rawModel = rawModels.join(", ") || turn.model_selected || "—";
+    const displayModel = rawModel === "<synthetic>" ? "System / Local" : rawModel;
+    const badge = jevStatusBadge(turn);
+    model.append(node("code", displayModel, "table-code-model"), badge);
+
+    const total = turn.usage?.input_tokens != null && turn.usage?.output_tokens != null ? Number(turn.usage.input_tokens) + Number(turn.usage.output_tokens) : null;
+    const tokens = node("span", (total == null ? "—" : number(total) + " tok" + (turn.usage.is_estimated ? " est" : "")) + " · " + costText(turn.costs), "bobi-tnum");
+    tokens.title = "Input + output tokens. Cache and reasoning dimensions are shown separately in telemetry.";
+    return {turn, onClick: () => open(turn, index), cells: [identity, topicCell, model, confidenceCell(turn.confidence), tokens, turn.wall_duration_ms == null ? "—" : (turn.wall_duration_ms / 1000).toFixed(1) + "s"]};
   }));
 }
 
@@ -314,691 +495,308 @@ function matchToolsWithTranscript(tools, entries, turn) {
         resultText = entries[i + 1].text || "";
       }
       toolEntries.push({
+        index: toolEntries.length,
         tool: (e.tool || "").toLowerCase(),
         command: e.text || "",
         result: resultText,
         at: e.at ? Date.parse(e.at) : null,
+        used: false,
       });
     }
   }
 
-  const turnStart = turn.started_at_us ? turn.started_at_us / 1000 : null;
-  const turnEnd = turn.ended_at_us ? turn.ended_at_us / 1000 : null;
-
   return tools.map((t, idx) => {
     const tStart = t.started_at_us ? t.started_at_us / 1000 : null;
-    let match = null;
+    const tName = (t.tool_name || t.tool_kind || "").toLowerCase();
+    let bestMatch = null;
+    let bestDiff = Infinity;
+
     if (tStart) {
-      let bestDiff = Infinity;
       for (const te of toolEntries) {
-        if (!te.at) continue;
-        const diff = Math.abs(te.at - tStart);
-        if (diff < bestDiff && diff < 8000) {
-          bestDiff = diff;
-          match = te;
+        if (!te.used && te.at) {
+          const diff = Math.abs(te.at - tStart);
+          const nameMatches = !tName || !te.tool || te.tool.includes(tName) || tName.includes(te.tool);
+          if (diff < (nameMatches ? 15000 : 5000) && diff < bestDiff) {
+            bestDiff = diff;
+            bestMatch = te;
+          }
         }
       }
     }
-    if (!match && turnStart && turnEnd) {
-      const inWindow = toolEntries.filter(te => te.at && te.at >= turnStart - 2000 && te.at <= turnEnd + 2000);
-      if (inWindow[idx]) match = inWindow[idx];
+
+    if (!bestMatch) {
+      bestMatch = toolEntries.find(te => !te.used && (!tName || !te.tool || te.tool.includes(tName) || tName.includes(te.tool)));
     }
+    if (!bestMatch && toolEntries[idx] && !toolEntries[idx].used) {
+      bestMatch = toolEntries[idx];
+    }
+
+    if (bestMatch) bestMatch.used = true;
+
     return {
       tool: t,
-      command: match?.command || "",
-      result: match?.result || "",
+      command: bestMatch?.command || "",
+      result: bestMatch?.result || "",
     };
   });
 }
 
-function renderToolExecutionsList(container, tools, invocations, setTab, transcriptPromise = null, turn = {}) {
-  if (!tools || !tools.length) {
-    container.append(renderEmptyCard("🔧", "No Tool Executions Recorded", "No external tools or commands were invoked during this turn."));
-    return;
-  }
+function renderToolExecutionsList(container, tools, entries, turn) {
+  const matched = matchToolsWithTranscript(tools, entries, turn);
+  matched.forEach(({tool, command, result}, index) => {
+    const card = node("details", "", "metrics-tool-card");
+    const summary = node("summary", "", "metrics-tool-summary");
+    const latency = tool.started_at_us != null && tool.ended_at_us != null ? (tool.ended_at_us - tool.started_at_us) / 1000 : null;
+    summary.append(
+      node("span", `#${index + 1}`, "tool-idx-badge bobi-tnum"),
+      node("code", tool.tool_name || tool.tool_kind || "tool"),
+      node("span", tool.status || "—", "metrics-provenance"),
+      node("span", latency == null ? "—" : Math.round(latency) + "ms", "bobi-tnum")
+    );
+    card.append(summary);
 
-  const counts = {};
-  let totalDur = 0;
-  let errCount = 0;
-  let totalIn = 0;
-  let totalOut = 0;
-
-  tools.forEach(t => {
-    const name = t.tool_name || t.tool_kind || "tool";
-    counts[name] = (counts[name] || 0) + 1;
-    if (t.started_at_us && t.ended_at_us) totalDur += (t.ended_at_us - t.started_at_us) / 1000;
-    if (t.is_error || t.status === "failed" || t.status === "error") errCount++;
-    if (t.input_bytes) totalIn += t.input_bytes;
-    if (t.output_bytes) totalOut += t.output_bytes;
-  });
-
-  const summaryBar = node("div", "", "turn-summary-banner tool-summary-banner");
-  const pills = Object.entries(counts).map(([name, count]) =>
-    `<span class="tool-count-pill">${toolIcon(name)} ${name} ×${count}</span>`
-  ).join(" ");
-
-  const durDisplay = totalDur >= 1000 ? `${(totalDur / 1000).toFixed(2)}s` : `${Math.round(totalDur)}ms`;
-
-  summaryBar.innerHTML = `
-    <div class="ts-item"><span class="ts-lbl">Tools Fired</span><span class="ts-val">${pills}</span></div>
-    <div class="ts-item"><span class="ts-lbl">Total Latency</span><span class="ts-val bobi-tnum">${durDisplay}</span></div>
-    <div class="ts-item"><span class="ts-lbl">Payload Exchange</span><span class="ts-val bobi-tnum">${totalIn ? number(totalIn) + ' B in' : '0 B'} ➔ ${totalOut ? number(totalOut) + ' B out' : '0 B'}</span></div>
-    <div class="ts-item"><span class="ts-lbl">Reliability</span><span class="ts-val ${errCount > 0 ? 'text-failed' : 'text-success'}">${errCount === 0 ? '100% success' : `${errCount} error${errCount > 1 ? 's' : ''}`}</span></div>
-  `;
-  container.append(summaryBar);
-
-  const invMap = new Map();
-  invocations.forEach((inv, idx) => {
-    const step = `#${inv.invocation_index ? inv.invocation_index : idx + 1}`;
-    if (inv.invocation_id) invMap.set(inv.invocation_id, step);
-  });
-
-  const cardsContainer = node("div", "", "tec-cards-list");
-  container.append(cardsContainer);
-
-  function renderCards(matchedTools) {
-    cardsContainer.replaceChildren();
-    matchedTools.forEach(({ tool: t, command, result }, idx) => {
-      const card = node("div", "", "tec-card");
-      const icon = toolIcon(t.tool_name, t.tool_kind);
-      const trigStep = t.triggering_invocation_id ? invMap.get(t.triggering_invocation_id) : null;
-      const dur = (t.started_at_us && t.ended_at_us) ? `${Math.round((t.ended_at_us - t.started_at_us) / 1000)}ms` : "—";
-      const isErr = t.is_error || t.status === "failed" || t.status === "error";
-
-      card.innerHTML = `
-        <div class="tec-header">
-          <div class="tec-header-left">
-            <span class="tec-step">#${idx + 1}</span>
-            <span class="tec-tool-name"><span class="tool-icon">${icon}</span> <strong>${t.tool_name || "tool"}</strong></span>
-            <span class="tec-kind-pill kind-${t.tool_kind || 'generic'}">${t.tool_kind || 'tool'}</span>
-            <span class="tec-duration-pill">⏱️ ${dur}</span>
-            ${trigStep ? `<button type="button" class="tec-origin-pill" title="View triggering invocation ${trigStep}">Invoked by ${trigStep}</button>` : ''}
-          </div>
-          <div class="tec-header-right">
-            <span class="status-badge ${isErr ? 'failed' : t.status}">● ${isErr ? 'failed' : t.status}</span>
-          </div>
-        </div>
-        <div class="tec-body">
-          ${command ? `
-          <div class="tec-section">
-            <div class="tec-sec-head">
-              <span class="tec-sec-title">COMMAND / INPUT</span>
-              <button type="button" class="btn bobi-btn small quiet tec-copy-btn" title="Copy command">Copy</button>
-            </div>
-            <pre class="tec-code"><code>${escapeHtml(command)}</code></pre>
-          </div>` : ''}
-          ${result ? `
-          <div class="tec-section">
-            <div class="tec-sec-head">
-              <span class="tec-sec-title">OUTPUT / RESULT</span>
-            </div>
-            <pre class="tec-output"><code>${escapeHtml(result)}</code></pre>
-          </div>` : ''}
-          ${!command && !result ? `
-          <div class="tec-fallback-info">
-            <span>Input Payload: <strong>${t.input_bytes != null ? number(t.input_bytes) + ' B' : '—'}</strong></span>
-            <span>Output Payload: <strong>${t.output_bytes != null ? number(t.output_bytes) + ' B' : '—'}</strong></span>
-            <span>Call ID: <code>${t.provider_tool_call_id || 'none'}</code></span>
-          </div>` : ''}
-        </div>
-        <div class="tec-footer">
-          <span>Latency: <strong>${dur}</strong></span>
-          <span>Payload: <strong>${t.input_bytes != null ? number(t.input_bytes) + ' B' : '0 B'} in ➔ ${t.output_bytes != null ? number(t.output_bytes) + ' B' : '0 B'} out</strong></span>
-          ${t.provider_tool_call_id ? `<span>Call ID: <code>${t.provider_tool_call_id}</code></span>` : ''}
-        </div>
-      `;
-
-      const copyBtn = card.querySelector(".tec-copy-btn");
-      if (copyBtn && command) {
-        copyBtn.addEventListener("click", () => {
-          navigator.clipboard?.writeText(command);
-          copyBtn.textContent = "Copied! ✓";
-          setTimeout(() => { copyBtn.textContent = "Copy"; }, 1200);
-        });
-      }
-
-      const originBtn = card.querySelector(".tec-origin-pill");
-      if (originBtn) {
-        originBtn.addEventListener("click", () => {
-          if (setTab) setTab("routing");
-        });
-      }
-
-      cardsContainer.append(card);
-    });
-  }
-
-  // Initial render with DB data
-  renderCards(tools.map(t => ({ tool: t, command: "", result: "" })));
-
-  // If transcriptPromise provided, enrich cards once resolved
-  if (transcriptPromise) {
-    transcriptPromise.then(res => {
-      if (res && res.ok && res.data) {
-        const entries = res.data.entries || res.data.transcript?.entries || [];
-        if (entries.length) {
-          const matched = matchToolsWithTranscript(tools, entries, turn);
-          renderCards(matched);
-        }
-      }
-    }).catch(() => {});
-  }
-}
-
-export function renderTurnMetrics(container, data, section = "all", row = {}, onBack = null, onTabChange = null, agentName = "") {
-  container.replaceChildren();
-
-  const isSlab = container.classList.contains("transcript") || !!container.closest(".modal");
-  const head = node("div", "", "metrics-detail-head");
-  head.append(node("h3", `Turn Detail · ${data.turn.turn_id}`));
-  if (onBack) {
-    const backBtn = node("button", "← Back to turns list", "btn bobi-btn small back-turns-btn");
-    backBtn.type = "button";
-    backBtn.addEventListener("click", onBack);
-    head.append(backBtn);
-  } else if (!isSlab) {
-    const closeBtn = node("button", "✕ Close", "btn bobi-btn small");
-    closeBtn.type = "button";
-    closeBtn.addEventListener("click", () => { container.hidden = true; });
-    head.append(closeBtn);
-  }
-  container.append(head);
-
-  // Turn summary banner
-  const banner = node("div", "", "turn-summary-banner");
-  const durMs = data.turn.wall_duration_ms;
-  const durStr = durMs != null ? `${(durMs / 1000).toFixed(1)}s` : "—";
-  const sessName = row.session_name || (data.turn.session_id ? data.turn.session_id.slice(0, 16) + '…' : "session");
-  const targetSession = row.session_name || data.turn.session_name || data.turn.session_id;
-
-  const sessToLoad = targetSession || row.session_name || data.turn.session_id;
-  let transcriptPromise = null;
-  if (sessToLoad && agentName) {
-    transcriptPromise = api(`/api/agents/${encodeURIComponent(agentName)}/subagents/${encodeURIComponent(sessToLoad)}/transcript`);
-  }
-
-  const decisions = data.router_decisions || [];
-  const invocations = data.invocations || [];
-  const isJevRouted = decisions.length > 0;
-  const primaryDecision = decisions[0];
-  let routingBadgeHtml = `<span class="badge badge-direct">➡️ Direct</span>`;
-  if (isJevRouted) {
-    const pMode = (primaryDecision?.policy_mode || row.policy_mode || "").toLowerCase();
-    if (primaryDecision?.fallback_reason) {
-      routingBadgeHtml = `<span class="badge badge-jev-fallback">⚠️ JEV Fallback</span>`;
-    } else if (pMode === "enforce" || primaryDecision?.variant_id === "treatment_jev" || primaryDecision?.variant_id === "treatment") {
-      routingBadgeHtml = `<span class="badge badge-jev-enforce">⚡ JEV Enforce</span>`;
-    } else {
-      routingBadgeHtml = `<span class="badge badge-jev-shadow">👁️ JEV Shadow</span>`;
-    }
-  }
-
-  banner.innerHTML = `
-    <div class="ts-item"><span class="ts-lbl">Session</span><span class="ts-val"><strong>${sessName}</strong></span></div>
-    <div class="ts-item"><span class="ts-lbl">Routing Arm</span><span class="ts-val">${routingBadgeHtml}</span></div>
-    <div class="ts-item"><span class="ts-lbl">Duration</span><span class="ts-val bobi-tnum">${durStr}</span></div>
-    <div class="ts-item"><span class="ts-lbl">Invocations</span><span class="ts-val bobi-tnum">${(data.invocations || []).length} calls</span></div>
-    <div class="ts-item"><span class="ts-lbl">Status</span><span class="ts-val"><span class="status-badge ${data.turn.status}">● ${data.turn.status}</span></span></div>
-  `;
-  container.append(banner);
-
-  const routingCount = (data.router_decisions?.length || 0) + (data.invocations?.length || 0);
-  const toolCount = data.tool_executions?.length || 0;
-  const usageCount = data.usage_measurements?.length || 0;
-  const costCount = data.cost_measurements?.length || 0;
-
-  const tabDefs = [
-    { id: "all", label: "All" },
-    { id: "routing", label: `Routing & Calls (${routingCount})` },
-    { id: "tools", label: `Tools Executed (${toolCount})` },
-    { id: "transcript", label: "Transcript" },
-    { id: "usage", label: `Token Usage (${usageCount})` },
-    { id: "cost", label: `Cost (${costCount})` },
-  ];
-
-  const panelRouting = node("div", "", "detail-tab-panel panel-routing");
-  const panelTools = node("div", "", "detail-tab-panel panel-tools");
-  const panelTranscript = node("div", "", "detail-tab-panel panel-transcript");
-  const panelUsage = node("div", "", "detail-tab-panel panel-usage");
-  const panelCost = node("div", "", "detail-tab-panel panel-cost");
-
-  let transcriptLoaded = false;
-  async function loadTranscript() {
-    if (transcriptLoaded) return;
-    transcriptLoaded = true;
-    panelTranscript.replaceChildren(node("p", "Loading session transcript…", "metrics-note"));
-    const sessToLoad = targetSession || row.session_name || data.turn.session_id;
-    if (!sessToLoad || !agentName) {
-      panelTranscript.replaceChildren(node("p", "No transcript identifier recorded for this turn.", "metrics-note"));
-      return;
-    }
-    try {
-      const res = await api(`/api/agents/${encodeURIComponent(agentName)}/subagents/${encodeURIComponent(sessToLoad)}/transcript`);
-      if (!res.ok || !res.data) {
-        panelTranscript.replaceChildren(renderEmptyCard("📄", "No Transcript Recorded", "No session transcript was found on disk for this session."));
-        return;
-      }
-      panelTranscript.replaceChildren();
-      const headBar = node("div", "", "transcript-panel-head");
-      headBar.innerHTML = `<span class="tph-title">Session Transcript · <strong>${sessToLoad}</strong></span>`;
-      if (!isSlab) {
-        const fullLink = node("a", "Open in Agent Slab ↗", "btn bobi-btn small quiet td-slab-jump-btn");
-        fullLink.href = `#/agents/${encodeURIComponent(agentName)}?session=${encodeURIComponent(sessToLoad)}`;
-        headBar.append(fullLink);
-      }
-      panelTranscript.append(headBar);
-
-      const entries = res.data?.entries || res.data?.transcript?.entries || [];
-      if (!entries.length) {
-        panelTranscript.append(renderEmptyCard("📄", "No Transcript Entries", "The session transcript exists but contains no recorded events."));
-        return;
-      }
-      const list = node("div", "", "transcript-inline-list");
-      for (const entry of entries) {
-        const line = node("div", "", "tr-line" + (entry.kind === "tool" ? " tool" : "") + (entry.is_error ? " err" : ""));
-        line.append(node("span", entry.at ? new Date(entry.at).toLocaleTimeString() : "", "ts"));
-        const who = entry.kind === "message" ? entry.role : "tool";
-        line.append(node("span", who, "who " + who));
-        const text = entry.kind === "tool" && entry.tool
-          ? `${entry.tool}: ${entry.text}`
-          : entry.text + (entry.truncated ? " …" : "");
-        line.append(node("span", text, "txt"));
-        list.append(line);
-      }
-      panelTranscript.append(list);
-    } catch (err) {
-      console.error("loadTranscript error:", err);
-      panelTranscript.replaceChildren(node("p", "Could not load transcript.", "tr-empty bad"));
-    }
-  }
-
-  const tabsBar = node("div", "", "tabs detail-nav-tabs");
-  let currentTab = section === "usage" ? "usage" : (section === "routing" ? "routing" : "all");
-
-  const tabButtons = tabDefs.map(def => {
-    const btn = node("button", def.label, "tab");
-    btn.type = "button";
-    btn.dataset.tab = def.id;
-    btn.addEventListener("click", () => setTab(def.id));
-    return btn;
-  });
-
-  function setTab(tabId) {
-    currentTab = tabId;
-    tabButtons.forEach(btn => {
-      btn.classList.toggle("active", btn.dataset.tab === tabId);
-    });
-    container.classList.toggle("tab-all-active", tabId === "all");
-    panelRouting.hidden = !(tabId === "all" || tabId === "routing");
-    panelTools.hidden = !(tabId === "all" || tabId === "tools");
-    panelTranscript.hidden = !(tabId === "transcript");
-    panelUsage.hidden = !(tabId === "all" || tabId === "usage");
-    panelCost.hidden = !(tabId === "all" || tabId === "cost");
-    if (tabId === "transcript") loadTranscript();
-    if (container.scrollTo) container.scrollTo({ top: 0, behavior: "instant" });
-    if (typeof onTabChange === "function") onTabChange(tabId);
-  }
-
-  tabButtons.forEach(btn => tabsBar.append(btn));
-  container.append(tabsBar);
-  setTab(currentTab);
-
-  // Index tools and usages by invocation_id:
-  const toolMap = new Map();
-  (data.tool_executions || []).forEach(t => {
-    if (t.triggering_invocation_id) {
-      const list = toolMap.get(t.triggering_invocation_id) || [];
-      list.push(t);
-      toolMap.set(t.triggering_invocation_id, list);
-    }
-  });
-
-  const usageMap = new Map();
-  (data.usage_measurements || []).forEach(u => {
-    if (u.invocation_id) {
-      const existing = usageMap.get(u.invocation_id);
-      if (!existing) {
-        usageMap.set(u.invocation_id, u);
-      } else {
-        const score = (m) => (m.measurement_source === "claude_transcript" ? 10 : 0) + (m.output_tokens > 0 ? 5 : 0) + (m.input_tokens > 0 ? 1 : 0);
-        if (score(u) > score(existing)) {
-          usageMap.set(u.invocation_id, u);
-        }
-      }
-    }
-  });
-
-  // 1. Routing panel
-  panelRouting.append(createSectionHead("🧭", "Router Decisions & Policy", data.router_decisions?.length || null, "TypeSafe JEV routing policy evaluations, variant bindings, and provider selection."));
-  if (!decisions.length) {
-    const directCard = node("div", "", "direct-routing-notice");
-    const baselineModel = invocations[0]?.model_requested || invocations[0]?.model_selected || data.turn.model_selected || "baseline model";
-    directCard.innerHTML = `
-      <div class="dr-header">
-        <span class="dr-icon">➡️</span>
-        <div class="dr-title-wrap">
-          <h4>Direct Execution · Baseline Model</h4>
-          <p>This turn was executed directly using the configured model (<code>${baselineModel}</code>) without JEV policy intervention.</p>
-        </div>
-      </div>
-      <div class="dr-details">
-        <div class="dr-item"><span class="dr-lbl">Session Role</span><span class="dr-val"><code>${row.role || "director"}</code></span></div>
-        <div class="dr-item"><span class="dr-lbl">Routing Arm</span><span class="dr-val"><span class="badge badge-direct">Direct / Baseline</span></span></div>
-        <div class="dr-item"><span class="dr-lbl">Execution Reason</span><span class="dr-val">${row.session_fallback_reason ? `Fallback: ${row.session_fallback_reason}` : "Default direct routing (outside policy scope or JEV disabled)"}</span></div>
-      </div>
-    `;
-    panelRouting.append(directCard);
-  } else {
-    table(panelRouting, [
-      "Routing Arm", "Policy / State", "Recommendation", "Confidence", "Selected Model", "Fallback", "Latency"
-    ], decisions.map(decision => {
-      const mode = (decision.policy_mode || "").toLowerCase();
-      let armBadge;
-      if (decision.fallback_reason) {
-        armBadge = node("span", "⚠️ Fallback", "arm-tag arm-fallback");
-      } else if (mode === "enforce" || decision.variant_id === "treatment_jev" || decision.variant_id === "treatment") {
-        armBadge = node("span", "⚡ Enforce", "arm-tag arm-enforce");
-      } else {
-        armBadge = node("span", "👁️ Shadow", "arm-tag arm-shadow");
-      }
-
-      const polModeCell = node("div", "", "cell-mode-status");
-      const modeText = node("span", (decision.policy_mode || "—").toUpperCase(), `mode-text ${mode}`);
-      const polState = policyState({ ...row, ...decision });
-      const stateDot = node("span", "", `state-dot-tag state-${polState.toLowerCase().replace(/[^a-z0-9]/g, "-")}`);
-      stateDot.innerHTML = `<span class="state-dot">●</span> ${escapeHtml(polState)}`;
-      polModeCell.append(modeText, stateDot);
-
-      const recModel = decision.recommended_model
-        ? node("code", decision.recommended_model, "table-code-model")
-        : node("span", "—", "dash-empty");
-
-      let confCell;
-      if (decision.confidence != null) {
-        const cNum = Number(decision.confidence);
-        const pct = Math.round(cNum * 100);
-        confCell = node("span", `${pct}%`, `conf-pct bobi-tnum ${cNum < 0.6 ? "text-amber" : ""}`);
-        confCell.title = `Confidence score: ${cNum.toFixed(3)}`;
-      } else {
-        confCell = node("span", "—", "dash-empty");
-      }
-
-      const selModel = decision.model_selected
-        ? node("code", decision.model_selected, "table-code-model")
-        : node("span", "—", "dash-empty");
-
-      const fb = decision.fallback_reason || row.session_fallback_reason;
-      let fbCell;
-      if (fb) {
-        const cleanFb = fb.replace(/^policy_/, "").replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-        fbCell = node("span", cleanFb, "fb-reason-text");
-        fbCell.title = `Fallback triggered: ${fb}`;
-      } else {
-        fbCell = node("span", "—", "dash-empty");
-      }
-
-      const rLat = decision.router_latency_ms != null ? Math.round(decision.router_latency_ms) : null;
-      const pLat = decision.policy_latency_ms != null ? Math.round(decision.policy_latency_ms) : null;
-      let latText = "—";
-      if (rLat != null && pLat != null) {
-        latText = `${rLat}ms`;
-      } else if (rLat != null) {
-        latText = `${rLat}ms`;
-      } else if (pLat != null) {
-        latText = `${pLat}ms`;
-      }
-      const latCell = node("span", latText, "bobi-tnum lat-val");
-      if (rLat != null || pLat != null) {
-        latCell.title = `Router: ${rLat != null ? rLat + 'ms' : '—'}, Policy: ${pLat != null ? pLat + 'ms' : '—'}`;
-      }
-
-      return [
-        armBadge,
-        polModeCell,
-        recModel,
-        confCell,
-        selModel,
-        fbCell,
-        latCell
-      ];
-    }));
-  }
-
-  // LLM Invocations section
-  panelRouting.append(createSectionHead("🤖", "LLM Invocations", `${invocations.length} calls`, "Sequential model generation rounds within this turn (tool execution loop, thinking steps, and final response)."));
-
-  if (!invocations.length) {
-    panelRouting.append(renderEmptyCard("🤖", "No LLM Invocations Recorded", "No sequential model generation rounds were executed in this turn."));
-  } else {
-    table(panelRouting, [
-      "#", "Provider", "Model (selected / req)", "Latency", "Tokens (in / out)", "Tools / Stop Reason", "Status"
-    ], invocations.map((inv, idx) => {
-      const stepNum = `#${inv.invocation_index ? inv.invocation_index : idx + 1}`;
-      const lat = inv.provider_latency_ms ?? inv.wall_duration_ms;
-      const ttft = inv.time_to_first_token_ms;
-      const latStr = lat != null ? (lat >= 1000 ? `${(lat / 1000).toFixed(2)}s` : `${Math.round(lat)}ms`) : "—";
-      const ttftStr = ttft != null ? ` (${Math.round(ttft)}ms TTFT)` : "";
-      const u = usageMap.get(inv.invocation_id);
-      const tokStr = u ? `${number(u.input_tokens)} / ${number(u.output_tokens)}` : "—";
-      const tools = toolMap.get(inv.invocation_id);
-
-      const modelReq = inv.model_requested || "";
-      const modelSel = inv.model_selected || "";
-      const displayModel = modelReq || modelSel || "not recorded";
-      const modelCell = node("div", "", "cell-model");
-      modelCell.append(node("code", displayModel, "table-code-model"));
-      if (modelSel && modelReq && modelSel !== modelReq && !modelReq.endsWith("/" + modelSel)) {
-        const selSpan = node("span", ` (sel: ${modelSel})`, "routed-from-hint");
-        selSpan.title = `Provider selected ${modelSel}`;
-        modelCell.append(selSpan);
-      }
-
-      let actionCell;
-      if (tools && tools.length) {
-        const counts = {};
-        tools.forEach(t => {
-          const name = t.tool_name || t.tool_kind || "tool";
-          counts[name] = (counts[name] || 0) + 1;
-        });
-        const summaryParts = Object.entries(counts).map(([name, count]) =>
-          count > 1 ? `${name} ×${count}` : name
-        );
-        actionCell = node("span", summaryParts.join(", "), "tool-summary-text");
-      } else if (idx === invocations.length - 1 && inv.status === "completed") {
-        actionCell = node("span", "Final Response", "final-response-text");
-      } else {
-        actionCell = document.createTextNode(inv.stop_reason || "—");
-      }
-
-      const provBadge = node("span", inv.provider || "gateway", "provider-tag");
-      const statusBadge = node("span", inv.status || "completed", `status-badge ${inv.status || "completed"}`);
-      statusBadge.prepend(node("span", "", "status-dot"));
-
-      return [
-        stepNum,
-        provBadge,
-        modelCell,
-        `${latStr}${ttftStr}`,
-        tokStr,
-        actionCell,
-        statusBadge
-      ];
-    }));
-  }
-
-  // 2. Tool executions panel
-  panelTools.append(createSectionHead("🔧", "Tool Executions", toolCount, "Tools called by the agent during this turn (terminal commands, file reading/writing, web searches). Click any tool row to inspect detailed inputs, outputs, and execution results."));
-  renderToolExecutionsList(panelTools, data.tool_executions || [], invocations, setTab, transcriptPromise, data.turn);
-
-  // 3. Usage panel
-  panelUsage.append(createSectionHead("📊", "Token Usage & Cache Performance", data.usage_measurements?.length ? `${data.usage_measurements.length} records` : null, "Step-by-step token consumption, prompt cache hit rate, and total context footprint for this turn."));
-  if (data.usage_measurements && data.usage_measurements.length) {
-    const turnUsage = data.usage_measurements.find(u => u.scope === "turn") || {};
-    const totalIn = turnUsage.input_tokens || data.usage_measurements.reduce((acc, u) => u.scope === "invocation" ? acc + (u.input_tokens || 0) : acc, 0);
-    const totalOut = turnUsage.output_tokens || data.usage_measurements.reduce((acc, u) => u.scope === "invocation" ? acc + (u.output_tokens || 0) : acc, 0);
-    const cacheRead = turnUsage.cache_read_input_tokens || data.usage_measurements.reduce((acc, u) => u.scope === "invocation" ? acc + (u.cache_read_input_tokens || 0) : acc, 0);
-    const cachePct = totalIn ? ((cacheRead / totalIn) * 100).toFixed(1) : "0.0";
-    const totalTokens = totalIn + totalOut;
-
-    const kpiGrid = node("div", "", "quick-kpi-grid");
-    kpiGrid.innerHTML = `
-      <div class="kpi-card">
-        <span class="kpi-lbl">Total Input Tokens</span>
-        <span class="kpi-val bobi-tnum">${number(totalIn)}</span>
-      </div>
-      <div class="kpi-card">
-        <span class="kpi-lbl">Prompt Cache Hit</span>
-        <span class="kpi-val bobi-tnum text-green">${cachePct}% <small>(${number(cacheRead)} cached)</small></span>
-      </div>
-      <div class="kpi-card">
-        <span class="kpi-lbl">Total Output Tokens</span>
-        <span class="kpi-val bobi-tnum">${number(totalOut)}</span>
-      </div>
-      <div class="kpi-card">
-        <span class="kpi-lbl">Total Turn Tokens</span>
-        <span class="kpi-val bobi-tnum">${number(totalTokens)}</span>
-      </div>
-    `;
-    panelUsage.append(kpiGrid);
-
-    // Step-by-Step Invocation Usage Breakdown
-    const stepRows = invocations.map((inv, idx) => {
-      const stepNum = `#${inv.invocation_index ? inv.invocation_index : idx + 1}`;
-      const u = usageMap.get(inv.invocation_id) || {};
-      const inTok = u.input_tokens || 0;
-      const outTok = u.output_tokens || 0;
-      const cache = u.cache_read_input_tokens || 0;
-      const stepTotal = inTok + outTok;
-      const cacheRatio = inTok > 0 && cache > 0 ? ` (${((cache / inTok) * 100).toFixed(1)}%)` : "";
-      const tools = toolMap.get(inv.invocation_id);
-
-      const modelName = inv.model_requested || inv.model_selected || "—";
-      const modelCell = node("code", modelName, "table-code-model");
-
-      let actionDesc;
-      if (tools && tools.length) {
-        const counts = {};
-        tools.forEach(t => {
-          const name = t.tool_name || t.tool_kind || "tool";
-          counts[name] = (counts[name] || 0) + 1;
-        });
-        const summaryParts = Object.entries(counts).map(([name, count]) =>
-          count > 1 ? `${name} ×${count}` : name
-        );
-        actionDesc = node("span", summaryParts.join(", "), "tool-summary-text");
-      } else if (idx === invocations.length - 1 && inv.status === "completed") {
-        actionDesc = node("span", "Final Response", "final-response-text");
-      } else {
-        actionDesc = document.createTextNode(inv.stop_reason || "completed");
-      }
-
-      const cachedCell = cache > 0
-        ? node("span", `${number(cache)}${cacheRatio}`, "text-green")
-        : node("span", "—", "dash-empty");
-
-      return {
-        cells: [
-          stepNum,
-          modelCell,
-          number(inTok),
-          number(outTok),
-          cachedCell,
-          number(stepTotal),
-          actionDesc
-        ]
-      };
-    });
-
-    if (stepRows.length) {
-      const invModels = [...new Set(invocations.map(i => i.model_requested || i.model_selected).filter(Boolean))];
-      const totalTurnModel = invModels.length === 1
-        ? invModels[0]
-        : (invModels.length > 1
-           ? invModels.join(", ")
-           : (invocations[0]?.model_requested || invocations[0]?.model_selected || data.turn.model_selected || "—"));
-
-      const totalStatus = node("span", `${data.turn.status} (${invocations.length} calls)`, `status-badge ${data.turn.status}`);
-      totalStatus.prepend(node("span", "", "status-dot"));
-
-      stepRows.push({
-        className: "highlight-turn-row",
-        cells: [
-          node("strong", "Total (Turn)"),
-          node("code", totalTurnModel, "table-code-model"),
-          node("strong", number(totalIn)),
-          node("strong", number(totalOut)),
-          cacheRead > 0 ? node("span", `${number(cacheRead)} (${cachePct}%)`, "text-green") : node("span", "—", "dash-empty"),
-          node("strong", number(totalTokens)),
-          totalStatus
-        ]
+    let hasBody = false;
+    for (const [label, text] of [["Input", command], ["Result", result]]) {
+      if (!text) continue;
+      hasBody = true;
+      const block = node("div", "", "metrics-tool-body");
+      const copy = node("button", "copy", "btn bobi-btn small quiet");
+      copy.type = "button";
+      copy.setAttribute("aria-label", "Copy tool " + label.toLowerCase());
+      copy.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(text); copy.textContent = "copied"; }
+        catch { copy.textContent = "copy unavailable"; }
       });
-
-      table(panelUsage, [
-        "Step", "Model", "Input Tokens", "Output Tokens", "Prompt Cached", "Step Total", "Action / Outcome"
-      ], stepRows);
+      block.append(node("span", label), copy, node("pre", text));
+      card.append(block);
     }
+    if (!hasBody) {
+      const block = node("div", "", "metrics-tool-body");
+      const meta = [];
+      if (tool.input_bytes != null) meta.push(`Input payload: ${number(tool.input_bytes)} bytes`);
+      if (tool.output_bytes != null) meta.push(`Output payload: ${number(tool.output_bytes)} bytes`);
+      block.append(node("p", meta.join(" · ") || "Execution metadata recorded in telemetry.", "metrics-note"));
+      card.append(block);
+    }
+    container.append(card);
+  });
+}
 
-    // Expandable Raw Telemetry Records
-    const rawDrawer = node("details", "", "raw-measurements-drawer");
-    rawDrawer.innerHTML = `
-      <summary class="raw-drawer-summary">
-        <span>🔍 Inspect Raw Telemetry Records (${data.usage_measurements.length} database entries)</span>
-        <span class="raw-drawer-hint">Click to expand audit provenance & stream telemetry</span>
-      </summary>
-      <div class="raw-drawer-body"></div>
-    `;
-    const rawBody = rawDrawer.querySelector(".raw-drawer-body");
-    table(rawBody, [
-      "Scope", "Model", "Source", "Basis", "Input", "Output", "Cache Read", "Cache Write", "Reasoning"
-    ], data.usage_measurements.map(usage => ({
-      className: usage.scope === "turn" ? "highlight-turn-row" : "",
-      cells: [
-        node("span", usage.supersedes_measurement_id ? `${usage.scope} (#${usage.supersedes_measurement_id})` : usage.scope, `badge badge-scope ${usage.scope}`),
-        node("code", usage.model || "—", "table-code-model"),
-        node("span", (usage.measurement_source || "unknown").replace(/_/g, " "), "source-tag"),
-        node("span", usage.is_estimated ? "Estimated" : "Reported", `badge ${usage.is_estimated ? "badge-estimated" : "badge-reported"}`),
-        number(usage.input_tokens),
-        number(usage.output_tokens),
-        usage.cache_read_input_tokens > 0 ? node("span", number(usage.cache_read_input_tokens), "text-green") : "0",
-        number(usage.cache_write_input_tokens || 0),
-        number(usage.reasoning_output_tokens || 0)
-      ]
-    })));
-    panelUsage.append(rawDrawer);
-  } else {
-    panelUsage.append(renderEmptyCard("📊", "No Usage Measurements Recorded", "No step-by-step token consumption was reported for this turn."));
+export function renderTurnMetrics(container, data, section = "overview", row = {}, onBack = null, onTabChange = null, agentName = "", onFilterSession = null) {
+  try {
+    container.replaceChildren();
+    if (onBack) {
+      const back = node("button", "Back to turns", "btn bobi-btn small");
+      back.type = "button";
+      back.addEventListener("click", onBack);
+      container.append(back);
+    }
+    const decisions = data.router_decisions || [];
+    const invocations = data.invocations || [];
+    const primary = {...row, ...decisions[0], route_reused: row.route_reused ?? decisions[0]?.route_reused};
+    const totals = data.usage_totals || row.usage || {};
+    const costs = data.cost_measurements || [];
+    const banner = node("div", "", "turn-summary-banner metrics-kpi-strip");
+    pair(banner, "Model", invocations[0]?.model_selected || primary.model_selected || invocations[0]?.model_requested);
+    pair(banner, "Status", data.turn?.status || "—");
+    const totalTokens = totals.input_tokens != null && totals.output_tokens != null
+      ? Number(totals.input_tokens) + Number(totals.output_tokens) : null;
+    pair(banner, "Total tokens", totalTokens == null ? "—" : number(totalTokens) + (totals.is_estimated ? " est" : ""));
+    pair(banner, "Cost", costText(row.costs));
+    pair(banner, "Latency", data.turn?.wall_duration_ms == null ? "—" : (data.turn.wall_duration_ms / 1000).toFixed(1) + "s");
+  const confidence = node("div", "", "metrics-pair");
+  confidence.append(node("span", "Confidence"), confidenceCell(primary.confidence));
+  banner.append(confidence);
+  const overview = node("div", "", "detail-tab-panel panel-overview");
+  const technical = node("div", "", "detail-tab-panel panel-technical");
+  const tabs = node("div", "", "tabs detail-nav-tabs");
+  tabs.setAttribute("role", "tablist");
+  let active = ["technical", "usage", "cost", "transcript"].includes(section) ? "technical" : "overview";
+  function setTab(id) {
+    active = id === "technical" ? "technical" : "overview";
+    overview.hidden = active !== "overview";
+    technical.hidden = active !== "technical";
+    tabs.querySelectorAll("button").forEach(button => {
+      const selected = button.dataset.tab === active;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-selected", String(selected));
+    });
+    if (onTabChange) onTabChange(active);
+  }
+  for (const [id, label] of [["overview", "Overview & Execution"], ["technical", "Technical Telemetry"]]) {
+    const button = node("button", label, "tab");
+    button.type = "button";
+    button.dataset.tab = id;
+    button.setAttribute("role", "tab");
+    button.addEventListener("click", () => setTab(id));
+    tabs.append(button);
+  }
+  overview.append(banner, turnIO(data.conversation));
+  if (data.tool_executions?.length) {
+    const panelTools = node("div", "", "panel-tools");
+    panelTools.append(createSectionHead("", "Tool executions", data.tool_executions.length));
+    renderToolExecutionsList(panelTools, data.tool_executions, data.conversation?.entries || [], data.turn);
+    overview.append(panelTools);
+  }
+  const panelRouting = node("div", "", "panel-routing");
+  panelRouting.append(createSectionHead("", "Router Decisions & Policy"));
+  const routes = decisions.length ? decisions : [primary];
+  table(panelRouting, ["Model Used", "Routing Decision & Reason", "Confidence", "Latency"], routes.map(decision => {
+    const route = {...row, ...decision};
+    const model = node("div", "", "cell-model-decision");
+    model.append(node("code", invocations[0]?.model_selected || route.model_selected || invocations[0]?.model_requested || "—", "table-code-model"));
+    model.append(node("span", [invocations[0]?.provider, route.policy_mode].filter(Boolean).join(" · "), "metrics-provenance"));
+    const reason = node("div", "", "cell-decision-reason");
+    const [label, explanation] = routeExplanation(route);
+    reason.append(node("span", label, "arm-tag"), node("span", explanation, "decision-reason-text"));
+    const latency = route.router_latency_ms ?? route.policy_latency_ms;
+    return [model, reason, confidenceCell(route.confidence, true), latency == null ? "—" : Math.round(latency) + "ms"];
+  }));
+  overview.append(panelRouting);
+  const panelUsage = node("div", "", "panel-usage");
+  const usageMap = new Map();
+  for (const invocation of invocations) {
+    const candidates = (data.invocation_usage || []).filter(usage => usage.invocation_id === invocation.invocation_id);
+    const usage = candidates.find(item => item.model === invocation.model_selected)
+      || candidates.find(item => item.model === invocation.model_requested)
+      || (candidates.length === 1 ? candidates[0] : null);
+    const terminal = invocations.length === 1 ? (data.best_usage || []).find(item => item.scope === "turn") : null;
+    usageMap.set(invocation.invocation_id, terminal && (!usage || (!terminal.is_estimated && usage.is_estimated)) ? terminal : usage);
   }
 
-  // 4. Cost panel
-  panelCost.append(createSectionHead("💳", "Cost Accounting", data.cost_measurements?.length ? `${data.cost_measurements.length} records` : null, "Financial cost attribution per model pricing schedule."));
-  if (data.cost_measurements && data.cost_measurements.length) {
-    table(panelCost, [
-      "Scope", "Model", "Spend (USD)", "Measurement Source", "Pricing Basis"
-    ], data.cost_measurements.map(cost => {
-      const usdNum = Number(cost.amount_usd || 0);
-      const formattedUsd = `$${usdNum.toFixed(4)}`;
+  panelUsage.append(createSectionHead("", "Model Invocations & Token Breakdown", invocations.length,
+    "Canonical usage only. Reasoning is included in output. Reported turn totals can supersede invocation estimates; rows are not blindly summed."));
+  if (invocations.length) {
+    table(panelUsage, [
+      "#",
+      "Model",
+      "JEV Routing & Policy",
+      "Latency",
+      "Input Tokens",
+      "Output Tokens",
+      "Cache Read",
+      "Cache Write",
+      "Total Cached",
+      "Cost ($)"
+    ], invocations.map((invocation, index) => {
+      const usage = usageMap.get(invocation.invocation_id) || {};
+      
+      // 1. Model Cell
+      const modelCell = node("div", "", "cell-model-breakdown");
+      const executedModel = invocation.model_selected || invocation.model_requested || "not recorded";
+      const modelDisplay = executedModel === "<synthetic>" ? "System / Local" : executedModel;
+      const modelCode = node("code", modelDisplay, "table-code-model");
+      modelCell.append(modelCode);
+      if (invocation.status && invocation.status !== "completed") {
+        modelCell.append(node("span", invocation.status, "badge-status-warn"));
+      }
+
+      // 2. JEV Routing & Policy Cell
+      const decision = (data.router_decisions || []).find(d => d.turn_id === invocation.turn_id) || data.router_decisions?.[0] || row;
+      const jevCell = jevDetailBlock({...row, ...decision, ...invocation});
+
+      // 3. Latency Cell
+      const latencyMs = invocation.provider_latency_ms ?? invocation.wall_duration_ms;
+      const latencyCell = node("div", "", "token-cell");
+      const latText = latencyMs == null ? "—" : (latencyMs < 1000 ? Math.round(latencyMs) + "ms" : (latencyMs / 1000).toFixed(1) + "s");
+      latencyCell.append(node("span", latText, "bobi-tnum token-main-val"));
+
+      // 4. Input Tokens Cell
+      const inputCell = node("div", "", "token-cell");
+      inputCell.append(node("span", number(usage.input_tokens), "bobi-tnum token-main-val"));
+
+      // 5. Output Tokens Cell
+      const outputCell = node("div", "", "token-cell");
+      outputCell.append(node("span", number(usage.output_tokens), "bobi-tnum token-main-val"));
+      if (usage.reasoning_output_tokens) {
+        outputCell.append(node("span", `+${number(usage.reasoning_output_tokens)} reasoning`, "token-sub-val reasoning-sub"));
+      }
+
+      // 6. Cache Read Cell
+      const cacheReadCell = node("div", "", "token-cell");
+      cacheReadCell.append(node("span", number(usage.cache_read_input_tokens), "bobi-tnum token-main-val"));
+      if (usage.input_tokens > 0 && usage.cache_read_input_tokens != null && usage.cache_read_input_tokens > 0) {
+        const hitRate = (100 * usage.cache_read_input_tokens / usage.input_tokens).toFixed(1);
+        cacheReadCell.append(node("span", `${hitRate}% hit`, "token-sub-val hit-sub"));
+      }
+
+      // 7. Cache Write Cell
+      const cacheWriteCell = node("div", "", "token-cell");
+      cacheWriteCell.append(node("span", number(usage.cache_write_input_tokens), "bobi-tnum token-main-val"));
+
+      // 8. Total Cached Cell
+      const totalCached = (usage.cache_read_input_tokens != null || usage.cache_write_input_tokens != null)
+        ? (usage.cache_read_input_tokens || 0) + (usage.cache_write_input_tokens || 0) : null;
+      const totalCachedCell = node("div", "", "token-cell");
+      totalCachedCell.append(node("span", totalCached == null ? "—" : number(totalCached), "bobi-tnum token-main-val"));
+
+      // 9. Cost Cell
+      const terminalCost = invocations.length === 1 ? (data.cost_measurements || []).find(item => item.scope === "turn") : null;
+      const turnLevelCost = (data.cost_measurements || []).find(item => item.scope === "turn");
+      const cost = (data.cost_measurements || []).filter(item => item.invocation_id === invocation.invocation_id)
+        .sort((first, second) => first.is_estimated - second.is_estimated || second.observed_at_us - first.observed_at_us)[0] || terminalCost;
+      const amountCell = node("div", "", "token-cell");
+      if (cost?.amount_usd != null) {
+        amountCell.append(node("span", "$" + Number(cost.amount_usd).toFixed(6), "bobi-tnum token-main-val text-green"));
+        amountCell.append(node("span", cost.is_estimated ? "estimated list price" : (cost.scope === "turn" ? "turn total" : "provider reported"), "token-sub-val"));
+      } else if (turnLevelCost?.amount_usd != null && invocations.length > 1) {
+        amountCell.append(node("span", "—", "bobi-tnum token-main-val"));
+        amountCell.append(node("span", "billed per turn", "token-sub-val"));
+      } else {
+        amountCell.append(node("span", "not recorded", "bobi-tnum token-main-val"));
+      }
+
       return [
-        node("span", cost.scope || "turn", `badge badge-scope ${cost.scope}`),
-        node("code", cost.model || "—", "table-code-model"),
-        node("strong", formattedUsd, "bobi-tnum text-cost"),
-        node("span", (cost.measurement_source || "unknown").replace(/_/g, " "), "source-tag"),
-        node("span", cost.is_estimated ? "Estimated" : "Reported", `badge ${cost.is_estimated ? "badge-estimated" : "badge-reported"}`)
+        index + 1,
+        modelCell,
+        jevCell,
+        latencyCell,
+        inputCell,
+        outputCell,
+        cacheReadCell,
+        cacheWriteCell,
+        totalCachedCell,
+        amountCell
       ];
     }));
   } else {
-    panelCost.append(renderEmptyCard("💳", "No Cost Schedule Recorded", "No cost schedule or financial pricing rules were populated for this provider model."));
+    panelUsage.append(node("p", "No model invocations recorded for this turn.", "metrics-note"));
   }
+  const totalLine = node("div", "", "metrics-turn-totals");
+  pair(totalLine, "Turn input / output", `${number(totals.input_tokens)} / ${number(totals.output_tokens)}`);
+  pair(totalLine, "Cache read / write", `${number(totals.cache_read_input_tokens)} / ${number(totals.cache_write_input_tokens)}`);
+  const turnCostForTotal = (data.cost_measurements || []).find(item => item.scope === "turn") || (costs.length ? costs[0] : null);
+  if (turnCostForTotal?.amount_usd != null) {
+    pair(totalLine, "Turn cost", "$" + Number(turnCostForTotal.amount_usd).toFixed(6));
+  }
+  pair(totalLine, "Basis", totals.is_estimated == null ? null : totals.is_estimated ? "estimated" : "reported");
+  panelUsage.append(totalLine);
 
-  const metaFooter = node("div", "", "turn-meta-footer");
-  metaFooter.innerHTML = `
-    <span>Turn: <code>${data.turn.turn_id}</code></span>
-    ${targetSession ? `<span> · Session: <code>${targetSession}</code></span>` : ''}
-  `;
-
-  container.append(tabsBar, panelRouting, panelTools, panelTranscript, panelUsage, panelCost, metaFooter);
-  setTab(currentTab);
+  technical.append(panelUsage);
+  if (costs.length) {
+    const costPanel = node("div", "", "panel-cost");
+    costPanel.append(createSectionHead("", "Recorded costs (not additive)", costs.length,
+      "Official provider invoices or estimates recorded at the turn or session level. Rows are non-additive with invocation totals."));
+    table(costPanel, ["Scope", "Model", "USD", "Basis"], costs.map(cost => [
+      cost.scope,
+      cost.model,
+      node("span", "$" + Number(cost.amount_usd).toFixed(6), "bobi-tnum text-green"),
+      cost.is_estimated ? "Estimated" : "Reported"
+    ]));
+    technical.append(costPanel);
+  }
+  container.append(tabs, overview, technical);
+  setTab(active);
+  } catch (err) {
+    console.error("renderTurnMetrics failed:", err);
+    container.replaceChildren();
+    const errBox = node("div", "", "metrics-turn-empty-io");
+    errBox.style.color = "var(--bad, #ef4444)";
+    errBox.append(node("h4", "Unable to display turn telemetry"));
+    errBox.append(node("p", err?.message || String(err)));
+    container.append(errBox);
+  }
 }
-
 
 export async function renderRunMetrics(container, { api, name, row, section, signal }) {
   container.replaceChildren(node("p", "Loading metrics…"));
@@ -1028,7 +826,9 @@ export async function renderRunMetrics(container, { api, name, row, section, sig
       const detail = await api(`${base}/turns/${encodeURIComponent(turn.turn_id)}`, { signal });
       if (signal.aborted || request !== detailRequest) return;
       if (!detail.ok) { container.replaceChildren(node("p", detail.data?.error || "Could not read turn.")); return; }
-      renderTurnMetrics(container, detail.data, section, turn, () => load(), null, name);
+      renderTurnMetrics(container, detail.data, section, turn, () => load(), null, name, (sessionId) => {
+        location.hash = `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(sessionId)}`;
+      });
     }, name, (sessName) => {
       location.hash = `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(sessName)}`;
     });
@@ -1060,14 +860,14 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
   const ahRight = node("div", "", "ah-right");
   const collectorChip = node("span", "● collector: live", "chip");
-  const jevHeaderBtn = node("button", "⚙️ JEV: Loading…", "btn bobi-btn small jev-header-btn");
+  const jevHeaderBtn = node("button", " JEV: Loading…", "btn bobi-btn small jev-header-btn");
   jevHeaderBtn.type = "button";
   jevHeaderBtn.title = `Configure TypeSafe JEV dynamic model routing for ${name}`;
   jevHeaderBtn.addEventListener("click", openJevConfigModal);
   const refreshBtn = node("button", "refresh", "btn bobi-btn small");
   refreshBtn.type = "button";
   refreshBtn.addEventListener("click", () => load(true));
-  ahRight.append(collectorChip, jevHeaderBtn, refreshBtn);
+  ahRight.append(collectorChip, jevHeaderBtn);
 
   ahBody.append(ahName, ahRight);
   header.append(ahBody);
@@ -1079,28 +879,59 @@ export function mountMetrics(element, { api, name, session = "" }) {
   const statusBar = node("div", "", "metrics-status-bar");
   const note = node("p", "Loading metrics…", "metrics-note");
   note.setAttribute("role", "status");
-  statusBar.append(note);
 
-  // Active Session Filter Banner
-  const sessionFilterBar = node("div", "", "metrics-active-filter-bar");
+  // Active Session Filter Chip (positioned cleanly in status bar)
+  const sessionFilterBar = node("div", "", "metrics-session-chip");
   sessionFilterBar.hidden = true;
+  statusBar.append(note, sessionFilterBar);
 
   const filters = node("div", "", "metrics-toolbar-card");
   const modelInput = node("input", "", "metrics-search-input");
   modelInput.type = "text";
   modelInput.setAttribute("aria-label", "Provider model filter");
-  modelInput.placeholder = "Provider model filter";
+  modelInput.placeholder = "filter by model…";
   modelInput.addEventListener("change", () => load(true));
-  const sessionInput = node("input", "", "metrics-search-input");
-  sessionInput.type = "text";
-  sessionInput.setAttribute("aria-label", "Session name");
-  sessionInput.placeholder = "Session name or ID";
-  sessionInput.addEventListener("change", () => setSessionFilter(sessionInput.value.trim()));
-  const modelField = node("label", "Provider model", "metrics-search-box bobi-field");
-  const sessionField = node("label", "Session", "metrics-search-box bobi-field");
-  modelField.append(modelInput);
-  sessionField.append(sessionInput);
-  filters.append(modelField, sessionField);
+  const sessionInput = node("select", "", "metrics-search-input");
+  sessionInput.setAttribute("aria-label", "Session lifecycle");
+  sessionInput.append(node("option", "all sessions"));
+  sessionInput.firstChild.value = "";
+  sessionInput.addEventListener("change", () => {
+    if (sessionInput.value === "__more__") { loadMoreSessions(); return; }
+    setSessionFilter(sessionInput.value);
+  });
+  const modelField = node("label", "", "metrics-search-box bobi-field metrics-model-field");
+  const modelLabel = node("span", "Provider model", "field-label");
+  modelField.append(modelLabel, modelInput);
+
+  const sessionField = node("label", "", "metrics-search-box bobi-field metrics-session-field");
+  const sessionLabelSpan = node("span", "Session", "field-label");
+  sessionField.append(sessionLabelSpan, sessionInput);
+
+  const timeRange = node("select", "", "metrics-time-select");
+  timeRange.setAttribute("aria-label", "Time range");
+  for (const [value, label] of [["1", "Last 1h"], ["24", "24h"], ["168", "7d"], ["744", "All (up to 31d)"]]) {
+    const option = node("option", label); option.value = value; timeRange.append(option);
+  }
+  timeRange.value = "24";
+  timeRange.addEventListener("change", () => load(true));
+  const search = node("input", "", "metrics-search-input");
+  search.type = "search";
+  search.placeholder = "Search loaded turns…";
+  search.setAttribute("aria-label", "Search loaded turns");
+  search.addEventListener("input", () => drawTurns());
+  const searchBox = node("div", "", "metrics-search-box search-turns-box");
+  searchBox.append(search);
+
+  const auto = node("input");
+  auto.type = "checkbox";
+  auto.checked = true;
+  auto.addEventListener("change", () => { if (auto.checked) load(true, false); });
+  const autoLabel = node("label", "Auto-refresh", "metrics-auto-refresh");
+  autoLabel.prepend(auto);
+
+  const actions = node("div", "", "metrics-toolbar-actions");
+  actions.append(autoLabel, refreshBtn);
+  filters.append(timeRange, modelField, sessionField, searchBox, actions);
 
   // Summary sections
   const summary = node("section", "", "metrics-summary");
@@ -1139,7 +970,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
   const jevModalNavTabs = node("div", "", "tabs jev-modal-nav-tabs");
   jevModalNavTabs.innerHTML = `
-    <button type="button" class="tab active" data-jev-tab="status">⚡ Overview & Status</button>
+    <button type="button" class="tab active" data-jev-tab="status">⚙️ Overview & Status</button>
     <button type="button" class="tab" data-jev-tab="guide">📖 .env Configuration Guide</button>
   `;
 
@@ -1169,7 +1000,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
   jevConfirmOverlay.hidden = true;
   jevConfirmOverlay.innerHTML = `
     <div class="jev-confirm-card">
-      <div class="jev-confirm-icon">🔄</div>
+      <div class="jev-confirm-icon"></div>
       <div class="jev-confirm-body">
         <h4 class="jev-confirm-title">Agent Restart Required</h4>
         <p class="jev-confirm-text">
@@ -1215,47 +1046,65 @@ export function mountMetrics(element, { api, name, session = "" }) {
     if (e.target === jevModalBackdrop) closeJevConfigModal();
   });
 
-  content.append(statusBar, filters, sessionFilterBar, summary, turns, pager);
+  content.append(statusBar, filters, summary, turns, pager);
   page.append(header, content, drawerBackdrop, jevModalBackdrop);
   element.replaceChildren(page);
 
   let currentSessionFilter = session || "";
+  let recentSessions = [];
+  let sessionsCursor = "";
+  let sessionsRange = "";
 
-  function updateBreadcrumbs() {
-    breadcrumbs.replaceChildren();
-    const backLink = node("a", `← ${name}`, "metrics-back-link");
-    backLink.href = `#/agents/${encodeURIComponent(name)}`;
-    breadcrumbs.append(backLink, node("span", "/", "sep"));
-    if (currentSessionFilter) {
-      const allMetricsLink = node("a", "metrics & routing", "metrics-crumb-link");
-      allMetricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics`;
-      allMetricsLink.addEventListener("click", (e) => {
-        e.preventDefault();
-        setSessionFilter("");
-      });
-      breadcrumbs.append(allMetricsLink, node("span", "/", "sep"), node("span", `session: ${currentSessionFilter}`, "curr"));
-    } else {
-      breadcrumbs.append(node("span", "metrics & routing", "curr"));
+  function updateSessionPicker() {
+    const all = node("option", "all sessions");
+    all.value = "";
+    sessionInput.replaceChildren(all);
+    if (currentSessionFilter && !recentSessions.some(item => item.session_id === currentSessionFilter)) {
+      const legacy = node("option", `${currentSessionFilter} (${currentSessionFilter.startsWith("ses_") ? "outside recent window" : "all matching lifecycles"})`);
+      legacy.value = currentSessionFilter;
+      sessionInput.append(legacy);
     }
+    recentSessions.forEach(item => {
+      const option = node("option", sessionLabel(item));
+      option.value = item.session_id;
+      option.title = item.session_id;
+      sessionInput.append(option);
+    });
+    if (sessionsCursor) {
+      const more = node("option", "load older sessions…");
+      more.value = "__more__";
+      sessionInput.append(more);
+    }
+    sessionInput.value = currentSessionFilter;
+  }
+
+  async function loadMoreSessions() {
+    sessionInput.value = currentSessionFilter;
+    sessionInput.disabled = true;
+    const range = new URLSearchParams({from: params.get("from"), to: params.get("to"), cursor: sessionsCursor});
+    const result = await api(`${base}/sessions?${range}`, {signal: controller.signal});
+    if (stopped) return;
+    sessionInput.disabled = false;
+    if (!result.ok) { note.textContent = result.data?.error || "Could not read older sessions."; return; }
+    const known = new Set(recentSessions.map(item => item.session_id));
+    recentSessions.push(...(result.data.sessions || []).filter(item => !known.has(item.session_id)));
+    sessionsCursor = result.data.next_cursor || "";
+    updateSessionPicker();
   }
 
   function updateSessionFilterUI() {
-    sessionInput.value = currentSessionFilter;
+    updateSessionPicker();
     sessionFilterBar.hidden = !currentSessionFilter;
-    if (currentSessionFilter) {
-      sessionFilterBar.replaceChildren();
-      const mafbLabel = node("div", "", "mafb-label");
-      mafbLabel.append(
-        node("span", "🎯", "mafb-icon"),
-        document.createTextNode(" Filtered to session: "),
-        node("code", currentSessionFilter, "bobi-code mafb-code")
-      );
-      const clearBtn = node("button", "✕ View All Sessions", "btn bobi-btn small mafb-clear-btn");
-      clearBtn.type = "button";
-      clearBtn.addEventListener("click", () => setSessionFilter(""));
-      sessionFilterBar.append(mafbLabel, clearBtn);
-    }
-    updateBreadcrumbs();
+    sessionFilterBar.replaceChildren();
+    if (!currentSessionFilter) return;
+    const selected = recentSessions.find(item => item.session_id === currentSessionFilter);
+    const chip = node("span", "Session: " + shortSessionId(currentSessionFilter));
+    chip.title = selected ? sessionLabel(selected) : currentSessionFilter;
+    const clear = node("button", "×", "btn bobi-btn quiet small");
+    clear.type = "button";
+    clear.setAttribute("aria-label", "Clear session filter");
+    clear.addEventListener("click", () => setSessionFilter(""));
+    sessionFilterBar.append(chip, clear);
   }
 
   function setSessionFilter(sess) {
@@ -1283,17 +1132,25 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
   let activeTurnIndex = -1;
   let currentTurns = [];
-  let currentDrawerTab = "all";
+  let currentDrawerTab = "overview";
 
   function closeDrawer() {
     drawerBackdrop.hidden = true;
     drawerBackdrop.classList.remove("open");
     activeTurnIndex = -1;
+    turns.querySelector("tbody tr.turn-row-selected")?.focus();
     turns.querySelectorAll("tbody tr.turn-row-selected").forEach(r => r.classList.remove("turn-row-selected"));
     document.removeEventListener("keydown", handleDrawerKey);
   }
 
   function handleDrawerKey(e) {
+    if (e.key === "Tab") {
+      const controls = [...drawerModal.querySelectorAll('button:not(:disabled), a[href], summary, [tabindex="0"]')].filter(control => control.getClientRects().length);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+      return;
+    }
     if (e.key === "Escape") {
       e.preventDefault();
       closeDrawer();
@@ -1321,8 +1178,8 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
     // Highlight row in table
     const tableRows = turns.querySelectorAll("tbody tr");
-    tableRows.forEach((r, idx) => {
-      r.classList.toggle("turn-row-selected", idx === index);
+    tableRows.forEach(r => {
+      r.classList.toggle("turn-row-selected", r.dataset.turnId === turn.turn_id);
     });
 
     drawerBackdrop.hidden = false;
@@ -1330,12 +1187,16 @@ export function mountMetrics(element, { api, name, session = "" }) {
     document.addEventListener("keydown", handleDrawerKey);
 
     renderDrawerHead(turn, index, currentTurns.length);
+    drawerHead.querySelector(".td-head-right button").focus();
 
     detailController?.abort();
     detailController = new AbortController();
     const signal = detailController.signal;
 
-    drawerBody.replaceChildren(node("div", "Loading turn telemetry…", "tr-empty"));
+    const loading = node("div", "Loading turn telemetry…", "tr-empty metrics-loading");
+    loading.setAttribute("role", "status");
+    loading.setAttribute("aria-busy", "true");
+    drawerBody.replaceChildren(loading);
 
     const result = await api(`${base}/turns/${encodeURIComponent(turn.turn_id)}`, { signal });
     if (stopped || signal.aborted) return;
@@ -1344,27 +1205,62 @@ export function mountMetrics(element, { api, name, session = "" }) {
       return;
     }
 
-    renderTurnMetrics(drawerBody, result.data, currentDrawerTab || "all", turn, null, (tabId) => {
-      currentDrawerTab = tabId;
-    }, name);
+    try {
+      renderTurnMetrics(drawerBody, result.data, currentDrawerTab || "all", turn, null, (tabId) => {
+        currentDrawerTab = tabId;
+      }, name, (sessionId) => {
+        closeDrawer();
+        setSessionFilter(sessionId);
+      });
+    } catch (err) {
+      console.error("Failed to render turn metrics in drawer:", err);
+      drawerBody.replaceChildren();
+      const errBox = node("div", "", "metrics-turn-empty-io");
+      errBox.style.color = "var(--bad, #ef4444)";
+      errBox.append(node("h4", "Unable to display turn telemetry"));
+      errBox.append(node("p", err?.message || String(err)));
+      drawerBody.append(errBox);
+    }
   }
 
   function renderDrawerHead(turn, index, total) {
     drawerHead.replaceChildren();
 
     const left = node("div", "", "td-head-left");
-    const eyebrow = node("span", "Turn Detail", "td-badge-turn");
-    const turnIdChip = node("code", turn.turn_id, "td-id-chip");
-    turnIdChip.title = "Click to copy Turn ID";
+    const turnIndex = turn.turn_index != null ? turn.turn_index : index + 1;
+    const eyebrow = node("span", `Turn #${turnIndex}`, "td-badge-turn");
+    left.append(eyebrow);
+
+    const turnIdChip = node("code", shortSessionId(turn.turn_id), "td-id-chip");
+    turnIdChip.title = `Turn ID: ${turn.turn_id} (Click to copy)`;
     turnIdChip.addEventListener("click", () => {
       navigator.clipboard?.writeText(turn.turn_id);
       turnIdChip.textContent = "Copied! ✓";
-      setTimeout(() => { turnIdChip.textContent = turn.turn_id; }, 1200);
+      setTimeout(() => { turnIdChip.textContent = shortSessionId(turn.turn_id); }, 1200);
     });
-    left.append(eyebrow, turnIdChip);
+    left.append(turnIdChip);
+
+    if (turn.session_id) {
+      const sessGroup = node("div", "", "td-head-session");
+      sessGroup.append(node("span", "Session", "td-badge-session"));
+      const sessChip = node("code", shortSessionId(turn.session_id), "td-id-chip td-sess-chip");
+      sessChip.title = `Session: ${turn.session_id} (Click to copy)`;
+      sessChip.addEventListener("click", () => {
+        navigator.clipboard?.writeText(turn.session_id);
+        sessChip.textContent = "Copied! ✓";
+        setTimeout(() => { sessChip.textContent = shortSessionId(turn.session_id); }, 1200);
+      });
+      sessGroup.append(sessChip);
+      if (turn.session_name) {
+        const sessName = node("span", `(${turn.session_name})`, "td-sess-name");
+        sessName.title = "Session name: " + turn.session_name;
+        sessGroup.append(sessName);
+      }
+      left.append(sessGroup);
+    }
 
     const center = node("div", "", "td-head-nav");
-    const prevBtn = node("button", "↑ Earlier", "btn bobi-btn quiet small");
+    const prevBtn = node("button", "← Earlier", "btn bobi-btn quiet small td-nav-btn td-nav-prev");
     prevBtn.type = "button";
     prevBtn.disabled = index <= 0;
     prevBtn.title = "Previous turn in timeline";
@@ -1372,7 +1268,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
     const counter = node("span", `Turn ${index + 1} of ${total}`, "td-nav-counter");
 
-    const nextBtn = node("button", "↓ Later", "btn bobi-btn quiet small");
+    const nextBtn = node("button", "Later →", "btn bobi-btn quiet small td-nav-btn td-nav-next");
     nextBtn.type = "button";
     nextBtn.disabled = index >= total - 1;
     nextBtn.title = "Next turn in timeline";
@@ -1381,8 +1277,10 @@ export function mountMetrics(element, { api, name, session = "" }) {
     center.append(prevBtn, counter, nextBtn);
 
     const right = node("div", "", "td-head-right");
-    const closeBtn = node("button", "✕ Close", "btn bobi-btn small");
+    const closeBtn = node("button", "Close", "btn bobi-btn small td-close-btn");
     closeBtn.type = "button";
+    closeBtn.setAttribute("aria-label", "Close");
+    closeBtn.title = "Close (Esc)";
     closeBtn.addEventListener("click", closeDrawer);
     right.append(closeBtn);
 
@@ -1397,17 +1295,16 @@ export function mountMetrics(element, { api, name, session = "" }) {
     const reportedCost = data.totals.reported_cost_usd;
     const estCost = data.totals.estimated_cost_usd;
     const hasSpend = reportedCost != null || estCost != null;
-    let costDisplay = "$0.00";
+    let costDisplay = "—";
     let costSub = "no spend recorded";
     let costBadge = "";
     if (hasSpend) {
-      const sum = (reportedCost || 0) + (estCost || 0);
-      costDisplay = `$${sum.toFixed(4)}`;
+      costDisplay = costText(data.totals);
       if (reportedCost != null && estCost != null && estCost > 0) {
-        costSub = `$${reportedCost.toFixed(4)} exact + $${estCost.toFixed(4)} est`;
-        costBadge = "EXACT+EST";
+        costSub = "reported / estimated · kept separate";
+        costBadge = "MIXED";
       } else if (reportedCost != null) {
-        costSub = "provider stream · exact";
+        costSub = "provider-reported cost";
         costBadge = "EXACT";
       } else {
         costSub = "model pricing estimate";
@@ -1416,9 +1313,9 @@ export function mountMetrics(element, { api, name, session = "" }) {
     }
 
     const fields = [
-      ["input_tokens", "Input tokens", "clay", data.totals.cache_read_input_tokens ? `+ ${number(data.totals.cache_read_input_tokens)} cache read` : "canonical input", "tile-input", number(data.totals.input_tokens)],
-      ["output_tokens", "Output tokens", "accent", "provider stream · exact", "tile-output", number(data.totals.output_tokens)],
-      ["cache_read_input_tokens", "Prompt Cache Hits", "accent", data.totals.input_tokens ? `${((data.totals.cache_read_input_tokens || 0) / data.totals.input_tokens * 100).toFixed(1)}% cache hit ratio` : "prompt cache hits", "tile-cache-read", number(data.totals.cache_read_input_tokens)],
+      ["input_tokens", "Input tokens", "clay", data.totals.cache_read_input_tokens != null ? `${number(data.totals.cache_read_input_tokens)} cache read (included)` : "canonical input", "tile-input", number(data.totals.input_tokens)],
+      ["output_tokens", "Output tokens", "accent", "canonical output", "tile-output", number(data.totals.output_tokens)],
+      ["cache_read_input_tokens", "Prompt Cache Hits", "accent", data.totals.input_tokens > 0 && data.totals.cache_read_input_tokens != null ? `${(data.totals.cache_read_input_tokens / data.totals.input_tokens * 100).toFixed(1)}% cache hit ratio` : "cache usage not recorded", "tile-cache-read", number(data.totals.cache_read_input_tokens)],
       ["total_cost_usd", "Total Spend (USD)", costBadge, costSub, "tile-cost", costDisplay]
     ];
 
@@ -1518,6 +1415,15 @@ export function mountMetrics(element, { api, name, session = "" }) {
     summary.append(grid);
   }
 
+  function drawTurns() {
+    const query = search.value.trim().toLowerCase();
+    const visible = currentTurns.filter(turn => !query || [turn.conversation?.prompt_snippet, turn.conversation?.response_snippet, turn.session_id, turn.model_selected, turn.fallback_reason].filter(Boolean).join(" ").toLowerCase().includes(query));
+    turns.replaceChildren();
+    turns.append(createSectionHead("", "Recent turns", visible.length, "Individual turns, model execution lifecycle, and token consumption"));
+    turnRows(turns, visible, turn => openAtIndex(currentTurns.indexOf(turn)), name, setSessionFilter);
+    if (!visible.length) turns.append(node("p", "No recorded turns in this window.", "runs-empty"));
+  }
+
   async function load(reset = false, clearDetail = reset) {
     if (stopped) return;
     if (pending) {
@@ -1532,11 +1438,12 @@ export function mountMetrics(element, { api, name, session = "" }) {
       const end = new Date();
       // Default to 30-day window, no time buttons needed
       params = new URLSearchParams({
-        from: new Date(end.getTime() - 30 * 86400000).toISOString(),
+        from: new Date(end.getTime() - Number(timeRange.value) * 3600000).toISOString(),
         to: end.toISOString(),
       });
       if (currentSessionFilter) {
-        params.set("session", currentSessionFilter);
+        params.set(recentSessions.some(item => item.session_id === currentSessionFilter) || currentSessionFilter.startsWith("ses_")
+          ? "session_id" : "session", currentSessionFilter);
       }
       if (modelInput.value.trim()) params.set("model", modelInput.value.trim());
       if (clearDetail) { detailController?.abort(); closeDrawer(); }
@@ -1549,6 +1456,10 @@ export function mountMetrics(element, { api, name, session = "" }) {
       api(`${base}/summary?${params}`, { signal: controller.signal }),
       api(`${base}/turns?${query}`, { signal: controller.signal })
     ]);
+    if (!stopped && !queued && results.every(result => result.ok)) {
+      results.push(await api(`${base}/sessions?${new URLSearchParams({from: params.get("from"), to: params.get("to")})}`,
+        {signal: controller.signal}));
+    }
 
     pending = false;
     if (stopped) return;
@@ -1562,33 +1473,30 @@ export function mountMetrics(element, { api, name, session = "" }) {
       return;
     }
 
-    const failure = results.find(r => !r.ok);
+    const failure = results.slice(0, 2).find(r => !r.ok);
     if (failure) {
       note.textContent = `${failure.data?.error || "Could not read metrics."} Previous values, if any, are stale.`;
     } else {
+      if (results[2]?.ok) {
+        const range = `${params.get("from")}/${params.get("to")}`;
+        if (sessionsRange !== range) {
+          recentSessions = [];
+          sessionsRange = range;
+          sessionsCursor = results[2].data.next_cursor || "";
+        }
+        const known = new Set(results[2].data.sessions.map(item => item.session_id));
+        recentSessions = [...results[2].data.sessions, ...recentSessions.filter(item => !known.has(item.session_id))];
+        updateSessionFilterUI();
+      }
       renderSummary(results[0].data);
 
       const allTurns = results[1].data.turns || [];
+      const selectedTurnId = currentTurns[activeTurnIndex]?.turn_id;
       currentTurns = allTurns;
+      if (selectedTurnId) activeTurnIndex = currentTurns.findIndex(turn => turn.turn_id === selectedTurnId);
 
-      turns.replaceChildren();
-      const tHead = node("div", "", "metrics-table-head");
-      const titleText = currentSessionFilter
-        ? `Turns for session: ${currentSessionFilter} (${allTurns.length})`
-        : `Recent turns across fleet (${allTurns.length})`;
-      tHead.append(node("h3", titleText));
-      turns.append(tHead);
-
-      turnRows(turns, currentTurns, (turn, idx) => {
-        openAtIndex(idx);
-      }, name, (sess) => setSessionFilter(sess));
-
-      if (!currentTurns.length) {
-        turns.append(node("p", "No recorded turns in this window.", "runs-empty"));
-      }
-      note.textContent = currentSessionFilter
-        ? `Showing ${currentTurns.length} turn${currentTurns.length === 1 ? '' : 's'} for session ${currentSessionFilter} · Click any row to inspect turn details`
-        : `Showing ${currentTurns.length} turns across fleet · Click any row to inspect turn details`;
+      drawTurns();
+      note.textContent = "Read-only metrics · refreshed " + new Date().toLocaleTimeString();
 
       pager.replaceChildren();
       const nextCursor = results[1].data.next_cursor;
@@ -1607,7 +1515,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
     }
 
     clearTimeout(timer);
-    timer = setTimeout(() => { if (!document.hidden && !cursor) load(true, false); }, 10000);
+    timer = setTimeout(() => { if (auto.checked && !document.hidden && !cursor) load(true, false); }, 10000);
   }
 
   let currentRoutingConfig = null;

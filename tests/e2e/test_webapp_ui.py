@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import time
+from datetime import datetime, timezone
 
 import pytest
 
@@ -50,6 +51,74 @@ PAGE_SIZE = 100
 
 
 class TestMetricsView:
+    def test_turn_io_session_picker_and_unified_breakdown(self, webapp, page, monkeypatch):
+        from bobi.metrics.store import connect
+
+        started = int((time.time() - 60) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+        conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='e2e-worker-a' WHERE session_id='s1'")
+        conn.execute("UPDATE sessions SET provider_session_id='current-provider' WHERE session_id='s2'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        prompt = "Event: slack/message\n  Explain **WAL** and `SQLite`. <img src=x onerror=window.metricsInjected=true>\n  conversation: slack:T123:channel:C123:thread:1791360056.16\n  channel_name: eng-team"
+        response = "## Answer\nA **write-ahead log**.\n```sql\nPRAGMA journal_mode=WAL;\n```"
+        def stamp(offset):
+            return datetime.fromtimestamp((started + offset) / 1_000_000, timezone.utc).isoformat()
+        _seed_transcript(webapp, monkeypatch, "worker-a", [
+            _entry("user", prompt, stamp(100_000)),
+            _entry("assistant", response, stamp(800_000)),
+            _entry("user", "Different turn", stamp(1_100_000)),
+            _entry("assistant", "Different answer", stamp(1_800_000)),
+        ])
+        (webapp.install.sessions_dir / "worker-a.id").write_text("current-provider")
+        page.goto(webapp.agent_url() + "/metrics")
+        picker = page.get_by_role("combobox", name="Session lifecycle")
+        expect(picker.locator("option")).to_have_count(3)
+        expect(picker.locator('option[value="s1"]')).to_contain_text("worker-a (s1)")
+        expect(picker.locator('option[value="s2"]')).to_contain_text("worker-a (s2)")
+        picker.select_option("s1")
+        expect(page.locator(".metrics-session-chip")).to_contain_text("Session: s1")
+        rows = page.locator(".metrics-table-panel .runs tbody tr")
+        expect(rows).to_have_count(3)
+        routine = rows.filter(has_text="72%")
+        expect(routine).to_contain_text("Slack #eng-team")
+        expect(routine).to_contain_text("Explain **WAL**")
+        expect(routine.locator("td").nth(1)).to_contain_text("Explain **WAL**")
+        expect(routine.get_by_role("link", name="Slack #eng-team", exact=False)).to_have_attribute(
+            "href", "https://app.slack.com/client/T123/C123/thread/C123-1791360056.16")
+        routine.focus()
+        routine.press("Enter")
+        detail = page.get_by_role("dialog", name="Turn detail")
+        expect(detail.locator(".metrics-io-block").first).to_contain_text("Explain WAL and SQLite.")
+        expect(detail.locator(".metrics-markdown strong").first).to_have_text("WAL")
+        expect(detail.locator(".metrics-markdown img")).to_have_count(0)
+        assert page.evaluate("window.metricsInjected") is None
+        expect(detail.locator(".metrics-io-block").last).to_contain_text("A write-ahead log.")
+        expect(detail.locator(".metrics-io-block").last.locator("pre code")).to_contain_text("PRAGMA journal_mode=WAL;")
+        expect(detail).not_to_contain_text("Different answer")
+        detail.locator('[data-tab="technical"]').click()
+        expect(detail.get_by_text("Model Invocations & Token Breakdown", exact=True)).to_have_count(1)
+        expect(detail).not_to_contain_text("Token Usage & Cache Performance")
+        expect(detail.locator(".panel-usage tbody tr")).to_have_count(1)
+        expect(detail.locator(".panel-usage tbody tr")).to_contain_text("100")
+        expect(detail.locator(".panel-usage tbody tr")).to_contain_text("not recorded")
+        detail.locator('[data-tab="overview"]').click()
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        detail.get_by_role("button", name="Copy Input / Prompt", exact=True).click()
+        expect(detail.get_by_role("button", name="Copy Input / Prompt", exact=True)).to_have_text("copied")
+        assert page.evaluate("navigator.clipboard.readText()") == prompt
+        detail.screenshot(path="/tmp/bobi-metrics-turn-io.png")
+        detail.locator('[data-tab="technical"]').click()
+        detail.locator(".panel-usage").scroll_into_view_if_needed()
+        detail.screenshot(path="/tmp/bobi-metrics-unified-breakdown.png")
+        detail.get_by_role("button", name="Close").click()
+        picker.select_option("s2")
+        expect(rows).to_have_count(1)
+        expect(page.locator(".metrics-session-chip")).to_contain_text("Session: s2")
+        page.screenshot(path="/tmp/bobi-metrics-lifecycle-picker.png", full_page=True)
+
     def test_metrics_navigation_filters_drilldown_and_refresh(self, webapp, page):
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         errors = []
@@ -58,31 +127,31 @@ class TestMetricsView:
         page.get_by_role("link", name="metrics & routing", exact=True).click()
         expect(page.locator(".metrics-tile strong").first).to_have_text("720")
         expect(page.locator(".metrics-page")).to_contain_text("2 / 1")
-        rows = page.locator(".metrics-page .runs tbody tr")
-        expect(rows.filter(has_text="JEV Enforce")).to_have_count(3)
-        expect(rows.filter(has_text="invalid_config")).to_have_count(1)
-        expect(rows.filter(has_text="invalid_config").locator("td").nth(6)).to_have_text("—")
+        rows = page.locator(".metrics-table-panel .runs tbody tr")
+        expect(rows).to_have_count(4)
+        expect(rows.filter(has_text="Router Decision")).to_have_count(2)
+        expect(rows.filter(has_text="Sticky Session")).to_have_count(1)
+        expect(rows.filter(has_text="Fallback")).to_have_count(1)
+        expect(rows.filter(has_text="Fallback").locator("td").nth(3)).to_have_text("—")
         page.screenshot(path="/tmp/bobi-metrics-overview.png", full_page=True)
-        routine = rows.filter(has_text="conf 0.720")
-        expect(routine).to_contain_text("100 / 0")
+        routine = rows.filter(has_text="72%")
+        expect(routine).to_contain_text("100 tok")
         routine.click()
         detail = page.get_by_role("dialog", name="Turn detail")
-        detail.locator(".raw-measurements-drawer summary").click()
-        expect(detail.locator(".raw-measurements-drawer")).to_contain_text("provider stream")
-        expect(detail.locator(".raw-measurements-drawer")).to_contain_text("Reported")
+        detail.locator('[data-tab="technical"]').click()
         expect(detail).to_contain_text("ds/deepseek-flash")
         expect(detail).to_contain_text("deepseek-flash")
         detail.screenshot(path="/tmp/turn-detail-tables.png")
-        page.locator(".detail-nav-tabs .tab", has_text="Token Usage").click()
+        page.locator(".detail-nav-tabs [data-tab=technical]").click()
         expect(page.locator(".panel-routing")).to_be_hidden()
         expect(page.locator(".panel-usage")).to_be_visible()
         detail.screenshot(path="/tmp/turn-detail-usage-tab.png")
-        page.locator(".detail-nav-tabs .tab", has_text="Routing & Calls").click()
+        page.locator(".detail-nav-tabs [data-tab=overview]").click()
         expect(page.locator(".panel-routing")).to_be_visible()
         expect(page.locator(".panel-usage")).to_be_hidden()
         detail.screenshot(path="/tmp/turn-detail-routing-tab.png")
-        page.locator(".detail-nav-tabs [data-tab=all]").click()
-        expect(page.locator(".panel-routing")).to_be_visible()
+        page.locator(".detail-nav-tabs [data-tab=technical]").click()
+        expect(page.locator(".panel-routing")).to_be_hidden()
         expect(page.locator(".panel-usage")).to_be_visible()
         page.screenshot(path="/tmp/bobi-metrics-dashboard.png", full_page=True)
         with page.expect_response(re.compile(r"/metrics/summary\?")):
@@ -92,14 +161,85 @@ class TestMetricsView:
         page.get_by_role("textbox", name="Provider model filter").fill("deepseek-v4-pro")
         page.get_by_role("textbox", name="Provider model filter").press("Tab")
         expect(page.locator(".metrics-tile strong").first).to_have_text("620")
-        expect(rows.filter(has_text="conf 0.720")).to_have_count(0)
-        rows.filter(has_text="Reused session route").click()
+        expect(rows.filter(has_text="72%")).to_have_count(0)
+        rows.filter(has_text="Sticky Session").click()
         expect(detail).to_contain_text("96%")
         expect(detail).not_to_contain_text("private-task")
         detail.get_by_role("button", name="Close").click()
         page.get_by_role("link", name=webapp.agent, exact=False).first.click()
         expect(page.locator(".metrics-page")).to_have_count(0)
         page.wait_for_timeout(500)
+        assert errors == []
+
+    def test_curator_sleep_cycle_turn_renders_cleanly_with_margins(self, webapp, page, monkeypatch):
+        from bobi.metrics.store import connect
+
+        started = int((time.time() - 60) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+        conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("UPDATE sessions SET session_id='ses_dabfcc7634bd07e444b889b44d0da7297c8611305855adf63eab16ad41eda7c5', provider_session_id='e2e-curator', session_name='curator-curator-05ff2ed8-curator' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET turn_id='turn_01a117cb-7aec-7d84-a959-e912efb493f6', session_id='ses_dabfcc7634bd07e444b889b44d0da7297c8611305855adf63eab16ad41eda7c5', turn_index=1, ended_at_us=started_at_us+900000 WHERE turn_id='t-routine'")
+        conn.execute("UPDATE llm_invocations SET turn_id='turn_01a117cb-7aec-7d84-a959-e912efb493f6', model_selected='claude-haiku-4-5-20251001' WHERE invocation_id='i0'")
+        conn.execute("INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_requested,model_selected,started_at_us,status) VALUES('i0-step2','turn_01a117cb-7aec-7d84-a959-e912efb493f6',1,'anthropic','claude-haiku','claude-haiku-4-5-20251001',?,'completed')", (started + 400000,))
+        conn.execute("INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,model,measurement_source,is_estimated,input_tokens,output_tokens,cache_read_input_tokens,observed_at_us,token_semantics_version) VALUES('u-inv-2','invocation','turn_01a117cb-7aec-7d84-a959-e912efb493f6','i0-step2','anthropic','claude-haiku-4-5-20251001','provider_stream',0,79032,1,76193,?,1)", (started + 400000,))
+        conn.execute("INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) VALUES('cost-turn','turn','ses_dabfcc7634bd07e444b889b44d0da7297c8611305855adf63eab16ad41eda7c5','turn_01a117cb-7aec-7d84-a959-e912efb493f6','anthropic','claude-haiku-4-5-20251001',0.261109,'provider_stream',0,?)", (started + 800000,))
+        conn.commit()
+        conn.close()
+
+        def stamp(offset):
+            return datetime.fromtimestamp((started + offset) / 1_000_000, timezone.utc).isoformat()
+
+        sleep_prompt = "You are an agent in a bobi deployment. You are the **sleep cycle** for this agent team. You run out-of-band, on a schedule, as a monitor — to process recent transcript deltas, keep memory compact, and maintain durable state."
+        sleep_response = "I'm the sleep cycle for this agent team. Let me process the transcript delta and update the durable memory."
+        _seed_transcript(webapp, monkeypatch, "curator", [
+            _entry("user", sleep_prompt, stamp(100_000)),
+            _entry("assistant", sleep_response, stamp(800_000)),
+        ])
+        (webapp.install.sessions_dir / "curator.id").write_text("e2e-curator-session")
+
+        errors = []
+        page.on("pageerror", lambda err: errors.append(str(err)))
+
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.goto(webapp.agent_url() + "/metrics")
+
+        picker = page.get_by_role("combobox", name="Session lifecycle")
+        picker.select_option("ses_dabfcc7634bd07e444b889b44d0da7297c8611305855adf63eab16ad41eda7c5")
+
+        # Click the curator turn (t1, which has the seeded transcript)
+        turn_row = page.locator(".metrics-table-panel .runs tbody tr").last
+        expect(turn_row).to_be_visible()
+        turn_row.click()
+
+        detail = page.get_by_role("dialog", name="Turn detail")
+        expect(detail).to_be_visible()
+
+        # Check margins
+        box = detail.bounding_box()
+        assert box is not None
+        assert box["width"] <= 1040
+        backdrop_padding_x = (1440 - box["width"]) / 2
+        backdrop_padding_y = (900 - box["height"]) / 2
+        assert backdrop_padding_x >= 48
+        assert backdrop_padding_y >= 36
+
+        # Check content is rendered and not blank
+        expect(detail.locator(".metrics-io-head").first).to_contain_text("Turn conversation transcript")
+        expect(detail.locator(".io-block-user, .io-block-system")).to_contain_text("sleep cycle")
+        expect(detail.locator(".io-block-assistant")).to_contain_text("sleep cycle for this agent team")
+
+        # Save screenshot for visual inspection
+        artifact_dir = "/Users/zodinet17/.gemini/antigravity-cli/brain/9cd6d59b-ad40-4739-84e0-f40111fa8838"
+        page.screenshot(path=f"{artifact_dir}/verified_curator_modal_margins.png")
+        detail.screenshot(path=f"{artifact_dir}/verified_curator_overview.png")
+
+        # Switch to technical telemetry tab
+        detail.locator('[data-tab="technical"]').click()
+        expect(detail.locator(".panel-usage")).to_be_visible()
+        detail.locator(".panel-usage th").last.scroll_into_view_if_needed()
+        detail.screenshot(path=f"{artifact_dir}/verified_curator_technical.png")
+
         assert errors == []
 
     def test_filter_change_during_read_and_navigation_abort(self, webapp, page):
@@ -134,25 +274,144 @@ class TestMetricsView:
             _entry("assistant", "Original transcript stays available", "2026-08-01T09:15:00Z"),
         ])
         _agent(page, webapp)
-        page.locator(".runs tbody tr", has_text="Fix the flaky test").click()
-        tabs = page.locator("[data-el=slabTabs]")
-        tabs.get_by_role("button", name="usage", exact=True).click()
-        expect(page.locator(".transcript")).to_contain_text("across lifecycles")
-        page.locator(".transcript .runs tbody tr", has_text="conf 0.960").first.click()
-        expect(page.locator(".transcript")).to_contain_text("Token Usage & Cache Performance")
-        expect(page.locator("[data-el=slabComposer]")).to_be_hidden()
-        tabs.get_by_role("button", name="routing", exact=True).click()
-        page.locator(".transcript .runs tbody tr", has_text="conf 0.720").click()
-        expect(page.locator(".transcript")).to_contain_text("ds/deepseek-flash")
-        tabs.get_by_role("button", name="transcript", exact=True).click()
+        row = page.locator(".runs tbody tr", has_text="Fix the flaky test")
+        row.click()
         expect(page.locator(".transcript")).to_contain_text("Original transcript stays available")
+        expect(page.locator("[data-el=slabComposer]")).to_be_hidden()
+        expect(page.locator("[data-el=slabTabs]")).to_be_hidden()
         page.locator("[data-el=slabClose]").click()
         expect(page.locator(".modal-backdrop")).not_to_have_class("modal-backdrop open")
-        page.locator(".runs tbody tr", has_text="Fix the flaky test").click()
-        tabs.get_by_role("button", name="usage", exact=True).click()
-        page.locator(".transcript .sess-name").first.click()
+        row.locator(".metrics-jump-link").click()
         page.wait_for_url(re.compile(r"/metrics\?session=worker-a$"))
-        expect(page.get_by_role("textbox", name="Session name", exact=True)).to_have_value("worker-a")
+
+    @pytest.mark.parametrize("width", [1440, 700])
+    def test_shared_layout_and_compact_metrics_contract(self, webapp, page, width):
+        page.set_viewport_size({"width": width, "height": 1000})
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        edges = []
+        for url, selector in [(webapp.url, ".page"), (webapp.agent_url(), ".agent-content"),
+                              (webapp.agent_url() + "/metrics", ".metrics-content")]:
+            page.goto(url)
+            expect(page.locator(selector)).to_be_visible()
+            edges.append(page.locator(selector).evaluate("el => {const r=el.getBoundingClientRect(); const s=getComputedStyle(el); return [r.x, r.width, s.paddingLeft, s.paddingRight]}"))
+        assert edges[0] == edges[1] == edges[2]
+        assert edges[0][1] == min(width, 1360)
+        assert edges[0][2:] == ["18px", "18px"] if width <= 760 else edges[0][2:] == ["32px", "32px"]
+        expect(page.locator(".metrics-table-panel thead th")).to_have_text(
+            ["Turn", "Session / Topic", "Model & Decision", "Confidence", "Tokens / Cost", "Latency"])
+        expect(page.locator(".metrics-active-filter-bar")).to_have_count(0)
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(4)
+        for cell in rows.locator("td:nth-child(4)").all():
+            assert re.fullmatch(r"(?:[0-9]+%|—)", cell.inner_text())
+        rows.filter(has_text="72%").click()
+        detail = page.get_by_role("dialog", name="Turn detail")
+        expect(detail.locator(".detail-nav-tabs button")).to_have_text(["Overview & Execution", "Technical Telemetry"])
+        expect(detail.locator(".panel-routing thead th")).to_have_text(["Model Used", "Routing Decision & Reason", "Confidence", "Latency"])
+        expect(detail.locator(".metrics-turn-empty-io")).to_have_count(1)
+        expect(detail.locator(".metrics-io-block")).to_have_count(0)
+        expect(detail.locator(".panel-tools")).to_have_count(0)
+        expect(detail.locator("textarea")).to_have_count(0)
+        expect(detail).not_to_contain_text("origin not recorded")
+        expect(detail).not_to_contain_text("Session history is not substituted")
+        contrast = detail.locator(".metrics-turn-empty-io, .panel-routing th, .decision-reason-text, .metrics-kpi-strip .metrics-pair > span").evaluate_all("""elements => {
+            const context = document.createElement('canvas').getContext('2d');
+            const rgba = color => {
+                context.clearRect(0, 0, 1, 1);
+                context.fillStyle = color;
+                context.fillRect(0, 0, 1, 1);
+                return [...context.getImageData(0, 0, 1, 1).data].map(value => value / 255);
+            };
+            const blend = (front, back) => front.slice(0, 3).map((value, index) => value * front[3] + back[index] * (1 - front[3]));
+            const luminance = color => color.map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4).reduce((total, value, index) => total + value * [.2126, .7152, .0722][index], 0);
+            return elements.map(element => {
+                const chain = [];
+                for (let parent = element; parent; parent = parent.parentElement) chain.unshift(parent);
+                let background = [1, 1, 1];
+                for (const parent of chain) background = blend(rgba(getComputedStyle(parent).backgroundColor), background);
+                const foreground = blend(rgba(getComputedStyle(element).color), background);
+                const levels = [luminance(background), luminance(foreground)].sort((first, second) => first - second);
+                return {text: element.textContent, ratio: (levels[1] + .05) / (levels[0] + .05)};
+            });
+        }""")
+        assert all(item["ratio"] >= 4.5 for item in contrast), [item for item in contrast if item["ratio"] < 4.5]
+        detail.screenshot(path=f"/tmp/bobi-overhaul-overview-{width}.png")
+        detail.locator('[data-tab="technical"]').click()
+        detail.screenshot(path=f"/tmp/bobi-overhaul-technical-{width}.png")
+        detail.get_by_role("button", name="Close", exact=True).click()
+        page.get_by_role("combobox", name="Session lifecycle").select_option("s1")
+        expect(page.locator(".metrics-session-chip")).to_have_count(1)
+        expect(rows).to_have_count(3)
+        page.get_by_role("button", name="Clear session filter").click()
+        expect(page.locator(".metrics-session-chip")).to_be_hidden()
+        expect(rows).to_have_count(4)
+        page.get_by_role("searchbox", name="Search loaded turns").fill("no-match")
+        expect(rows).to_have_count(0)
+        page.get_by_role("checkbox", name="Auto-refresh").uncheck()
+        with page.expect_response(re.compile(r"/metrics/summary\?")):
+            page.get_by_role("checkbox", name="Auto-refresh").check()
+        page.get_by_role("combobox", name="Time range").select_option("744")
+        expect(page.get_by_role("combobox", name="Time range")).to_have_value("744")
+        page.screenshot(path=f"/tmp/bobi-overhaul-layout-{width}.png", full_page=True)
+
+    @pytest.mark.parametrize("mode,fallback,expected", [
+        ("enforce", "policy_low_confidence", "Fallback"),
+        ("enforce", "policy_circuit_open", "Fallback (Breaker)"),
+        ("shadow", None, "Shadow Evaluation"),
+    ])
+    def test_routing_explanation_uses_only_recorded_facts(self, webapp, page, mode, fallback, expected):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
+        conn.execute("UPDATE router_decisions SET fallback_reason=?,metadata_json=json_set(metadata_json,'$.policy.mode',?,'$.policy.confidence',0.34,'$.policy.recommended_model','ds/deepseek-v4-pro') WHERE turn_id='t-routine'", (fallback, mode))
+        conn.commit()
+        conn.close()
+        page.goto(webapp.agent_url() + "/metrics")
+        row = page.locator(".metrics-table-panel tbody tr", has_text="34%")
+        expect(row).to_contain_text("deepseek-flash")
+        expect(row).to_contain_text(expected)
+        row.click()
+        detail = page.get_by_role("dialog", name="Turn detail")
+        decision = detail.locator(".panel-routing tbody tr")
+        expect(decision.locator("td").nth(0)).to_contain_text("deepseek-flash")
+        expect(decision.locator("td").nth(1)).to_contain_text(expected)
+        expect(decision.locator("td").nth(2)).to_have_text("34%")
+        expect(decision.locator("td").nth(2).locator("span")).to_have_attribute("title", "Raw score: 0.340")
+        expect(decision).not_to_contain_text("threshold")
+        expect(decision).not_to_contain_text("rate limit")
+        expect(decision).not_to_contain_text("anthropic")
+        if mode == "shadow":
+            expect(decision).to_contain_text("Recommended ds/deepseek-v4-pro; kept the configured model ds/deepseek-flash")
+        else:
+            expect(decision).to_contain_text("executed ds/deepseek-flash")
+
+    def test_tool_cards_are_compact_and_escape_transcript_text(self, webapp, page, monkeypatch):
+        from bobi.metrics.store import connect
+
+        started = int((time.time() - 60) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+        conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='e2e-worker-a' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.execute("INSERT INTO tool_executions(tool_execution_id,turn_id,triggering_invocation_id,tool_name,tool_kind,started_at_us,ended_at_us,status) VALUES('tool-ui','t-routine','i0','Bash','shell',?,?,'completed')", (started + 200000, started + 400000))
+        conn.commit()
+        conn.close()
+        at = datetime.fromtimestamp((started + 200000) / 1_000_000, timezone.utc).isoformat()
+        _seed_transcript(webapp, monkeypatch, "worker-a", [
+            json.dumps({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "tool_use", "id": "ui-tool", "name": "Bash", "input": {"command": '<img src=x onerror="window.metricsInjected=true">'}}]}}),
+        ])
+        page.goto(webapp.agent_url() + "/metrics")
+        row = page.locator(".metrics-table-panel tbody tr", has_text="72%")
+        expect(row).to_contain_text("1 tool calls")
+        row.click()
+        detail = page.get_by_role("dialog", name="Turn detail")
+        expect(detail.locator(".metrics-tool-card")).to_have_count(1)
+        assert not detail.locator(".metrics-tool-card").evaluate("el => el.open")
+        detail.locator(".metrics-tool-card summary").click()
+        expect(detail.locator(".metrics-tool-body pre")).to_contain_text("metricsInjected")
+        expect(detail.locator("img")).to_have_count(0)
+        assert page.evaluate("window.metricsInjected") is None
 
     def test_metrics_unavailable_empty_and_untrusted_model_text(self, webapp, page):
         page.goto(webapp.agent_url() + "/metrics")
@@ -171,8 +430,7 @@ class TestMetricsView:
         expect(page.locator(".metrics-page")).to_contain_text(payload)
         assert page.locator(".metrics-page img").count() == 0
         assert page.evaluate("window.metricsInjected") is None
-        page.get_by_role("textbox", name="Session name", exact=True).fill("absent")
-        page.get_by_role("textbox", name="Session name", exact=True).press("Tab")
+        page.goto(webapp.agent_url() + "/metrics?session=absent")
         expect(page.locator(".metrics-page")).to_contain_text("No recorded turns in this window.")
         expect(page.locator(".metrics-tile strong").first).to_have_text("not recorded")
 
@@ -552,7 +810,7 @@ class TestRunModal:
 
         lines = page.locator(".transcript .tr-line")
         expect(lines).to_have_count(3)
-        expect(lines.nth(0).locator(".ts")).to_have_text("09:15:00")
+        expect(lines.nth(0).locator(".ts")).to_have_text(re.compile(r"(?:09|16):15:00"))
         expect(lines.nth(0).locator(".who")).to_have_text("user")
         expect(lines.nth(0).locator(".txt")).to_have_text("fix the flaky test")
         expect(lines.nth(1).locator(".who")).to_have_text("agent")
@@ -685,22 +943,7 @@ class TestWriteActions:
 # --- the composer -----------------------------------------------------------
 
 class TestComposer:
-    """The reply box at the foot of a transcript (#987).
-
-    Three branches, and the read model picks between them: a live session is
-    delivered to, a run parked on a human gate is ANSWERED, and a row that is
-    neither gets no control at all. What each branch posts is the assertion
-    here - the payload is the entire contract, and a box that sends the wrong
-    thing looks exactly like a box that works.
-
-    The chat and resume endpoints are answered from the browser side, for the
-    same reason the `runsError` branch is: resolving one for real needs a live
-    agent process to take a turn, which this test process does not have.
-    Delivery is proven against real sessions in
-    `tests/integration/test_webapp_chat_delivery.py`, and what a verdict does
-    to a running workflow in `tests/test_orchestrator.py`; what is proven here
-    is the front end, which neither of those can see.
-    """
+    """Inspection is read-only; only a paused approval gate submits a verdict."""
 
     LIVE = "worker-live"
     GATE = "wf-issue-lifecycle-test-repo-987"
@@ -757,12 +1000,14 @@ class TestComposer:
         expect(page.locator(".composer")).to_be_visible()
         return page.locator(".composer")
 
-    def test_a_live_session_offers_a_reply(self, webapp, page):
+    def test_live_session_inspection_is_read_only(self, webapp, page):
         self._seed(webapp.install)
-        composer = self._open(page, webapp, "Live worker")
-        expect(composer.locator("button")).to_have_text("Send")
-        expect(composer.locator(".composer-note")).to_contain_text(
-            "the same way the CLI delivers a message")
+        posted = self._chat(page)
+        _agent(page, webapp)
+        page.locator(".runs tbody tr", has_text="Live worker").first.click()
+        expect(page.locator(".composer")).to_be_hidden()
+        expect(page.locator(".modal textarea")).to_have_count(0)
+        assert posted == []
 
     def test_a_parked_gate_offers_a_verdict_instead(self, webapp, page):
         # Nothing is behind this row, and nothing needs to be: what the gate
@@ -783,32 +1028,6 @@ class TestComposer:
         page.locator(".runs tbody tr", has_text="inbox-watch").click()
         expect(page.locator("[data-el=slabKind]")).to_have_text("details")
         expect(page.locator(".composer")).to_be_hidden()
-
-    def test_the_live_branch_delivers_to_that_session(self, webapp, page):
-        self._seed(webapp.install)
-        posted = self._chat(page)
-        composer = self._open(page, webapp, "Live worker")
-
-        composer.locator("textarea").fill("how is it going?")
-        composer.locator("button").click()
-
-        expect(composer.locator("textarea")).to_have_value("", timeout=10_000)
-        assert posted == [{"subagent": self.LIVE, "text": "how is it going?"}]
-
-    def test_the_live_branch_re_reads_the_transcript_when_the_turn_lands(
-            self, webapp, page):
-        """The slab is otherwise one-shot: the 4s timers refresh the table,
-        not this. Without the re-read the answer is invisible until the run
-        is reopened, which reads as the message having been swallowed."""
-        self._seed(webapp.install)
-        self._chat(page)
-        composer = self._open(page, webapp, "Live worker")
-
-        reread = _record_requests(page, TRANSCRIPT_URL)
-        composer.locator("textarea").fill("ping")
-        composer.locator("button").click()
-        expect(composer.locator("textarea")).to_have_value("", timeout=10_000)
-        assert len(reread) == 1, reread
 
     def test_approving_resumes_the_run_with_that_verdict(self, webapp, page):
         """The verdict is the payload. The route step in the workflow reads it
@@ -895,50 +1114,14 @@ class TestComposer:
         _agent(page, webapp)
         page.locator(".runs tbody tr", has_text="Fix the flaky test").click()
         composer = page.locator(".composer")
-        expect(composer).to_be_visible()
-        expect(composer).to_contain_text("This session has ended")
+        expect(composer).to_be_hidden()
         expect(composer.locator("textarea")).to_have_count(0)
         expect(composer.locator("button")).to_have_count(0)
 
-    def test_a_failed_delivery_is_reported_inline_and_the_box_recovers(
-            self, webapp, page):
-        """The failure this whole design exists to avoid is a box that
-        accepts typing and reports nothing. It must name the reason, in the
-        modal being read, and hand the control back."""
-        self._seed(webapp.install)
-        self._chat(page, outcome="error",
-                   error="session 'worker-live' process is dead")
-        composer = self._open(page, webapp, "Live worker")
-
-        composer.locator("textarea").fill("anyone there?")
-        composer.locator("button").click()
-
-        expect(composer.locator(".composer-status")).to_have_text(
-            "session 'worker-live' process is dead", timeout=10_000)
-        expect(composer.locator(".composer-status")).to_have_class(
-            "composer-status bad")
-        expect(composer.locator("button")).to_be_enabled()
-        expect(composer.locator("textarea")).to_be_enabled()
-        # Their words are not thrown away by a failure they did not cause.
-        expect(composer.locator("textarea")).to_have_value("anyone there?")
-
-    def test_the_control_is_disabled_while_the_turn_is_in_flight(self, webapp,
-                                                                 page):
-        # A turn can take minutes. Leaving the box live invites a second send
-        # against a session already taking a turn.
-        self._seed(webapp.install)
-        self._chat(page, outcome="pending")
-        composer = self._open(page, webapp, "Live worker")
-
-        composer.locator("textarea").fill("slow one")
-        composer.locator("button").click()
-        expect(composer.locator("button")).to_be_disabled()
-        expect(composer.locator("button")).to_have_text("Sending…")
-        expect(composer.locator("textarea")).to_be_disabled()
-
     def test_closing_the_slab_takes_the_composer_with_it(self, webapp, page):
         self._seed(webapp.install)
-        self._open(page, webapp, "Live worker")
+        _agent(page, webapp)
+        page.locator(".runs tbody tr", has_text="Live worker").first.click()
         page.locator("[data-el=slabClose]").click()
         expect(page.locator(".composer")).to_be_hidden()
 

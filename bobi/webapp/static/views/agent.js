@@ -833,25 +833,9 @@ export function mountAgent(el, { api, name, session = "" }) {
     els.slabBody.appendChild(mk("div", "tr-empty", "Loading…"));
     els.slabComposer.hidden = true;
     els.slabComposer.innerHTML = "";
-    els.slabTabs.replaceChildren();
-    els.slabTabs.hidden = !row.session_id;
-    if (row.session_id) {
-      for (const key of ["transcript", "usage", "routing"]) {
-        const button = mk("button", "btn bobi-btn small", key);
-        button.type = "button";
-        button.setAttribute("aria-pressed", String(section === key));
-        button.addEventListener("click", () => openSlab(row, key));
-        els.slabTabs.append(button);
-      }
-      const fullMetricsLink = mk("a", "btn bobi-btn small slab-metrics-jump", "Full Metrics ↗");
-      fullMetricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(row.session_id)}`;
-      fullMetricsLink.title = "Open full-page Metrics & Routing dashboard for this session";
-      els.slabTabs.append(fullMetricsLink);
-      if (section !== "transcript") {
-        els.slabKind.textContent = section;
-        await renderRunMetrics(els.slabBody, { api, name, row, section, signal: slabAbort.signal });
-        return;
-      }
+    if (els.slabTabs) {
+      els.slabTabs.replaceChildren();
+      els.slabTabs.hidden = true;
     }
 
     // Rows with a session get a transcript; rows without get details.
@@ -943,50 +927,37 @@ export function mountAgent(el, { api, name, session = "" }) {
     const mode = composerMode(row);
     const box = els.slabComposer;
     box.innerHTML = "";
-    // Reset, never accumulate: one slab element is reused for every row.
     box.className = "composer " + mode;
 
-    box.hidden = false;
-    if (mode === "ended") {
-      box.appendChild(mk("p", "composer-note",
-        "This session has ended and it is not waiting on anything, so there "
-        + "is nothing here to reply to."));
+    if (mode !== "gate") {
+      box.hidden = true;
       return;
     }
+    box.hidden = false;
 
-    const gate = mode === "gate";
     const awaited = ((row.detail && row.detail.await_event) || "approval")
       .replaceAll("_", " ");
 
-    const label = gate ? "Approve" : "Send";
+    const label = "Approve";
     const input = mk("textarea");
     input.rows = 2;
-    input.placeholder = gate ? "Why? (optional, goes to the agent)"
-                             : "Reply to this session…";
-    input.setAttribute("aria-label",
-      gate ? "Reason for this decision" : "Reply to this session");
+    input.placeholder = "Why? (optional, goes to the agent)";
+    input.setAttribute("aria-label", "Reason for this decision");
 
     const foot = mk("div", "composer-foot");
-    foot.appendChild(mk("span", "composer-note", gate
-      ? `This run is awaiting ${awaited}. Approving resumes it into its next `
-        + "step; rejecting sends it back to rework in the same session."
-      : "Delivered to this session, the same way the CLI delivers a message."));
+    foot.appendChild(mk("span", "composer-note",
+      `This run is awaiting ${awaited}. Approving resumes it into its next `
+        + "step; rejecting sends it back to rework in the same session."));
 
-    // Reject sits before Approve, and is the quiet one: the advancing action
-    // is the one that should take the deliberate click.
-    let reject = null;
-    if (gate) {
-      reject = mk("button", "btn bobi-btn small", "Reject");
-      reject.type = "button";
-      foot.appendChild(reject);
-    }
+    const reject = mk("button", "btn bobi-btn small", "Reject");
+    reject.type = "button";
+    foot.appendChild(reject);
+
     const send = mk("button", "btn bobi-btn small primary", label);
     send.type = "button";
     foot.appendChild(send);
 
     const status = mk("p", "composer-status");
-    // The outcome arrives minutes later with no focus change, so a screen
-    // reader has to be told rather than left to notice.
     status.setAttribute("role", "status");
     status.hidden = true;
 
@@ -994,24 +965,9 @@ export function mountAgent(el, { api, name, session = "" }) {
     box.appendChild(foot);
     box.appendChild(status);
 
-    const ui = { input, send, reject, status, gate, label };
-    if (gate) {
-      send.addEventListener("click", () => resumeGate(row, ui, "approve"));
-      reject.addEventListener("click", () => resumeGate(row, ui, "reject"));
-      return;
-    }
-    send.addEventListener("click", () => sendComposer(row, ui));
-    input.addEventListener("keydown", (e) => {
-      // Enter sends and Shift+Enter breaks the line: the chat idiom, and the
-      // reason the control is a textarea rather than an input.
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendComposer(row, ui);
-      }
-    });
-    // No Enter-to-send on the gate branch: there are two verdicts, so there
-    // is no default one, and guessing which is meant is how a spec gets
-    // approved by a stray keystroke.
+    const ui = { input, send, reject, status, label };
+    send.addEventListener("click", () => resumeGate(row, ui, "approve"));
+    reject.addEventListener("click", () => resumeGate(row, ui, "reject"));
   }
 
   /** Say something under the box. Inline, never a toast: this modal is what

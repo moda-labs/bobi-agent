@@ -75,8 +75,9 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
 (`#/agents/<name>/metrics`). The existing run panel also has **transcript**,
 **usage**, and **routing** sections; these do not change chat or resume behavior.
 
-- Filter by a 24-hour, 7-day, or 31-day window, recorded provider model, and
-  session name. Model filtering selects turns with a matching invocation,
+- The recent-session picker shows each lifecycle's name, short telemetry ID, and start time.
+  Selecting a lifecycle filters by exact `session_id`; older name-based run links remain explicitly labeled as spanning all matching lifecycles.
+  Model filtering selects turns with a matching invocation,
   including canonical terminal usage whose model uses a provider alias.
 - Tiles and UTC buckets use canonical usage, not the sum of provenance rows.
   Missing dimensions read **not recorded**; estimated usage is labeled and
@@ -90,22 +91,33 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
 - Run drilldowns match the session **name** across telemetry lifecycles in the
   last 31 days. Names are not unique telemetry IDs; each turn shows its actual
   session and turn IDs. Provenance and superseded rows are explicitly nonadditive.
+- Turn detail has one **Model Invocations & Token Breakdown** table, with requested/resolved models, latency in milliseconds, input/output/reasoning tokens, cache reads/writes, provenance, and separately labeled costs.
+  Raw records stay in a collapsed **Raw debug / JSON** disclosure.
+- Input and response come from the recorded provider session's transcript, matched to the turn's timestamps, never the current session-name resume file.
+  The two drawer tabs are **Overview & Execution** (KPIs, turn input/response, nonempty tool cards, routing reasons) and **Technical Telemetry** (canonical token breakdown, separately labeled costs, recorded policy internals, collapsed raw JSON with copy).
+  Unavailable input and response produce one compact callout, never a substitute from another turn or two empty message boxes. Inspection remains read-only; workflow approval gates retain their verdict controls.
+  Assistant response is the recorded model text, not a delivery receipt for tool-mediated Slack replies.
+  Message previews are bounded to 32 KiB each and explicitly marked when truncated.
+  Transcript scans stop after 16 MiB or 250 ms per file, with a one-second overall enrichment budget; oversized or unavailable transcripts do not block the manager or alter telemetry.
+  The local authenticated turns endpoint adds 60-character prompt and response previews, tool counts, canonical reported/estimated cost totals, and recorded Slack conversation references when available; unknown origins fall back to the trigger kind.
+  Conversation content is not added to SQLite, Admin RPC, or supervisor MCP responses.
 
 Authenticated, read-only endpoints under `/api/agents/{name}/metrics`:
 
 | Endpoint | Parameters | Response |
 |---|---|---|
 | `summary` | Required ISO `from`, `to`; optional `model`, `session_name` | Canonical totals, coverage, UTC buckets, routing counts/models, collector health |
-| `turns` | Same range/filters; optional `session_id`, `limit`, `cursor` | Newest-first turns, usage, invocations, allowlisted policy fields, `next_cursor` |
+| `turns` | Same range/filters; optional `session_id`, `limit`, `cursor` | Newest-first turns, usage, invocations, allowlisted policy fields, local conversation previews, `next_cursor` |
+| `sessions` | Required `from`, `to`; optional `limit`, `cursor` | Distinct recent lifecycles (`session_id`, name, start/end timestamps, status), `next_cursor` |
 | `sessions/{id}` | Optional `limit`, `cursor` | Existing session detail and bounded turn page |
-| `turns/{id}` | None | Existing turn detail plus allowlisted policy fields |
+| `turns/{id}` | None | Turn detail, session identity, canonical `best_usage`/`invocation_usage`/`usage_totals`, allowlisted policy fields, local-only `conversation` (`input`, `response`, scoped `entries`, `origin`, `status`, `truncated`) |
 
 These use the app's existing token and loopback Host guard, `Cache-Control:
 no-store`, and filter-bound keyset cursors. Reads use short SQLite read-only WAL
 snapshots, a one-second query deadline, 200-row/512-KiB bounds, and at most four
 concurrent local readers. Invalid queries return 400/422; unknown records 404;
 busy/unavailable storage 503 with `Retry-After`. The view refreshes every ten
-seconds on the latest page, pauses in hidden tabs, and cancels reads on navigation.
+seconds on the latest page, pauses in hidden tabs, and cancels reads on navigation. One toolbar owns the time range, lifecycle picker/chip, provider filter, loaded-page search, refresh, and auto-refresh toggle. **All (up to 31d)** respects the existing query bound; it is not an all-history aggregation. Dashboard, agent, and metrics surfaces share a 1360px container with 32px desktop and 18px mobile gutters.
 It does not run migrations, checkpoints, models, or routing policies.
 
 Local and Docker-hosted `LocalRuntime` are supported. Hosted `EventBusRuntime`

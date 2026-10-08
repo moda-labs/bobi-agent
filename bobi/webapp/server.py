@@ -205,6 +205,12 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
                           "limit": limit, "cursor": cursor})
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
+    @app.get("/api/agents/{name}/metrics/sessions")
+    def metrics_sessions(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                         limit: int = Query(default=200, ge=1, le=200), cursor: str = "") -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "sessions", {"from": start, "to": end, "limit": limit,
+                            "cursor": cursor}), headers={"Cache-Control": "no-store"})
+
     @app.get("/api/agents/{name}/metrics/sessions/{session_id}")
     def metrics_session(name: str, session_id: str, cursor: str = "",
                         limit: int = Query(default=50, ge=1, le=200)) -> JSONResponse:

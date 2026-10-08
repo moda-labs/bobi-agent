@@ -17,15 +17,122 @@ handlers.
 
 from __future__ import annotations
 
+import re
 import threading
+import time
 import uuid
 from abc import ABC, abstractmethod
+from datetime import datetime
 from pathlib import Path
 
 from bobi import paths
 from bobi.chat_history import read_chat, read_transcript_messages
 
 DEFAULT_CHAT_TIMEOUT = 300
+
+def _clean_event_text(text: str) -> str:
+    lines = text.strip().splitlines()
+    content_lines = []
+    in_meta = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("Event:"):
+            continue
+        if re.match(r"^(?:conversation|channel|user_id|repo|action|sender|thread_ts|event_ts|channel_name|chat_id|thread_id):\s*", stripped):
+            in_meta = True
+            continue
+        if not in_meta and stripped:
+            content_lines.append(stripped)
+    return "\n".join(content_lines).strip()
+
+
+def _clean_user_message(raw: str) -> str:
+    if not raw:
+        return ""
+    # Filter out system prompts and agent bootstrap instructions
+    if any(sig in raw for sig in ["You are an agent in a bobi deployment", "You are a bobi director", "# Bobi Agent", "How you receive events"]):
+        parts = re.split(r"(?m)^(?=Event:\s*[\w\-\./]+)", raw)
+        if len(parts) > 1:
+            last_part = parts[-1].strip()
+            if "slack:T0952RZRZ0X" not in last_part and "moda-labs/jobtack" not in last_part:
+                return _clean_event_text(last_part)
+        return ""
+
+    if "Event:" in raw:
+        return _clean_event_text(raw)
+
+    # Detect workflow background execution prompts and extract the concise task objective
+    if "Workflow " in raw and ("background for run" in raw or "steps:" in raw):
+        m_step = re.search(r"Workflow `?[^`\n]+`? steps:[^\n]+\n\n([\s\S]+)$", raw)
+        if m_step and m_step.group(1).strip():
+            return m_step.group(1).strip()
+        m_task = re.search(r"(?m)^\s*task:\s*([^\n]+(?:\n\s{4,}[^\n]+)*)", raw)
+        if m_task:
+            return re.sub(r"\s+", " ", m_task.group(1).strip())
+
+    return raw.strip()
+
+
+def _turn_conversation(turn: dict, entries: list[dict], next_started: int | None = None) -> dict:
+    end = turn.get("ended_at_us")
+    if end is None and next_started is None and turn.get("status") != "running":
+        entries = []
+    selected = []
+    for entry in entries:
+        try:
+            at = datetime.fromisoformat(entry.get("at", "").replace("Z", "+00:00"))
+            if at.tzinfo is None:
+                continue
+            at_us = int(at.timestamp() * 1_000_000)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if at_us < turn["started_at_us"] or (end is not None and at_us > end):
+            continue
+        if next_started is not None and at_us >= next_started:
+            continue
+        selected.append(entry)
+    inputs = [entry["text"] for entry in selected if entry["kind"] == "message" and entry["role"] == "user"]
+    responses = [entry["text"] for entry in selected if entry["kind"] == "message" and entry["role"] == "agent"]
+    prompt = "\n\n".join(inputs)
+    response = "\n\n".join(responses)
+    prompt_bytes = prompt.encode("utf-8")
+    response_bytes = response.encode("utf-8")
+    user_message = _clean_user_message(prompt)
+    origin = {"source": turn.get("trigger_kind") or "agent"}
+    reference = re.search(r"(?m)^\s*conversation:\s*(\S+)", prompt)
+    if reference:
+        from bobi.conversation import parse_conversation
+
+        conversation = parse_conversation(reference[1])
+        if conversation and conversation.source == "slack":
+            channel = re.search(r"(?m)^\s*channel_name:\s*([^\n]+)", prompt)
+            origin = {"source": "slack", "channel_id": conversation.chat_id,
+                      "channel_name": channel[1].strip() if channel else None, "thread_id": conversation.thread_id,
+                      "url": None}
+            if (re.fullmatch(r"T[A-Z0-9]+", conversation.scope)
+                    and re.fullmatch(r"[CDG][A-Z0-9]+", conversation.chat_id)
+                    and re.fullmatch(r"\d+\.\d+", conversation.thread_id)):
+                origin["url"] = (f"https://app.slack.com/client/{conversation.scope}/{conversation.chat_id}"
+                                 f"/thread/{conversation.chat_id}-{conversation.thread_id}")
+    preview = []
+    preview_bytes = 0
+    for entry in selected[:200]:
+        text = entry.get("text", "")
+        # Cap single entry output in preview to 4KB so large outputs don't starve other tools
+        if len(text) > 4096:
+            entry = dict(entry)
+            entry["text"] = text[:4096] + "\n… [preview truncated]"
+        preview_bytes += len(entry["text"].encode("utf-8"))
+        if preview_bytes > 262144:
+            break
+        preview.append(entry)
+    return {"status": "matched" if inputs and responses else "partial" if selected else "unavailable",
+            "input": prompt_bytes[:32768].decode("utf-8", errors="ignore") or None,
+            "user_message": user_message or None,
+            "response": response_bytes[:32768].decode("utf-8", errors="ignore") or None,
+            "truncated": len(prompt_bytes) > 32768 or len(response_bytes) > 32768 or len(preview) < len(selected),
+            "entries": preview, "origin": origin,
+            "prompt_snippet": prompt[:60] or None, "response_snippet": response[:60] or None}
 
 
 # --- Errors -----------------------------------------------------------------
@@ -638,8 +745,39 @@ class LocalRuntime(TeamRuntime):
             raise MetricsQueryError("metrics readers are busy", "metrics_busy", retry_after_ms=250)
         try:
             queries = MetricsQueries(root)
-            data = {"summary": queries.summary, "turns": queries.turns,
-                    "session": queries.session, "turn": queries.turn}[view](args)
+            data = {"summary": queries.summary, "turns": queries.turns, "sessions": queries.sessions,
+                    "session": queries.session, "turn": queries.turn}[view](
+                        {**args, "include_breakdown": True} if view == "turn" else args)
+            if view in {"turn", "turns"}:
+                from bobi.chat_history import read_transcript_detail
+
+                transcripts = {}
+                turns = data["turns"] if view == "turns" else [data["turn"]]
+                transcript_deadline = time.monotonic() + 1.0
+                for turn in turns:
+                    session = turn if view == "turns" else data["session"]
+                    provider_id = session.get("provider_session_id")
+                    if not isinstance(provider_id, str) or not safe_name(provider_id):
+                        provider_id = None
+                    next_started = turn.get("next_started_at_us") if view == "turns" else data["next_started_at_us"]
+                    key = (provider_id, session.get("brain"))
+                    if key not in transcripts:
+                        try:
+                            group = [item for item in turns if item["session_id"] == turn["session_id"]]
+                            ends = [item.get("ended_at_us") or item.get("next_started_at_us") for item in group]
+                            before = max(ends) + 1 if all(value is not None for value in ends) else None
+                            if any(item.get("status") == "running" for item in group):
+                                before = None
+                            transcripts[key] = read_transcript_detail(provider_id, limit=len(group) * 200 + 1,
+                                brain=key[1], after_us=min(item["started_at_us"] for item in group), before_us=before
+                            ) if provider_id and time.monotonic() < transcript_deadline else []
+                        except (OSError, UnicodeError):
+                            transcripts[key] = []
+                    conversation = _turn_conversation(turn, transcripts[key], next_started)
+                    if view == "turns":
+                        turn["conversation"] = {key: conversation[key] for key in ("status", "origin", "prompt_snippet", "response_snippet", "user_message")}
+                    else:
+                        data["conversation"] = conversation
             if view == "summary":
                 try:
                     health = json.loads((root / "state/metrics/collector.state.json").read_text())
@@ -651,6 +789,10 @@ class LocalRuntime(TeamRuntime):
                     "status", "db_ready", "import_lag_ms", "last_success_at_us",
                     "reconciliation_errors", "uncovered_turns", "telemetry_events_dropped",
                 )}
+            from bobi.metrics.query import MAX_RESPONSE_BYTES
+
+            if len(json.dumps(data, ensure_ascii=True).encode()) > MAX_RESPONSE_BYTES:
+                raise MetricsQueryError("response exceeds 512 KiB; narrow the query", "query_too_large")
             return data
         finally:
             self._metrics_reads.release()

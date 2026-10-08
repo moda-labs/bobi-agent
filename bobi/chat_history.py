@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 CHAT_HISTORY_LIMIT = 200
@@ -252,9 +254,25 @@ def _tool_input_summary(payload) -> str:
             return value.strip()[:200]
     return ", ".join(sorted(payload)[:6])
 
+def _transcript_records(path: Path, *, bounded: bool = False):
+    deadline = time.monotonic() + 0.25
+    scanned = 0
+    with path.open() as transcript:
+        for line in transcript:
+            scanned += len(line.encode("utf-8"))
+            if bounded and (scanned > 16 * 1024 * 1024 or time.monotonic() >= deadline):
+                raise OSError("transcript preview exceeded its read budget")
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                yield record
+
 
 def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
-                           *, brain: str | None = None) -> list[dict]:
+                           *, brain: str | None = None, after_us: int | None = None,
+                           before_us: int | None = None) -> list[dict]:
     """The transcript as timestamped lines, tool calls included.
 
     Each entry is ``{"kind", "role", "text", "at", "tool"}``; ``at`` is the
@@ -262,14 +280,26 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
     names the tool on a ``tool``/``tool_result`` line. Newest last, capped at
     *limit* entries from the end - the tail is what a debugger reads.
 
-    Claude transcripts only. A Codex rollout does not record per-entry
-    timestamps in the same shape, so rather than synthesize them this returns
-    the chat view's entries with an empty ``at``: fewer columns, no invented
-    ones. The caller renders what is there.
+    Claude and Codex timestamps come from their own records, never inferred.
+    Optional time bounds are applied before the tail limit, so old turns do
+    not disappear behind a busy session's newest entries.
     """
+    def in_window(entry: dict) -> bool:
+        if after_us is None and before_us is None:
+            return True
+        try:
+            at = datetime.fromisoformat(entry["at"].replace("Z", "+00:00"))
+            if at.tzinfo is None:
+                return False
+            at_us = int(at.timestamp() * 1_000_000)
+        except (ValueError, TypeError):
+            return False
+        return (after_us is None or at_us >= after_us) and (before_us is None or at_us < before_us)
+
     def _from_codex() -> list[dict]:
-        return [_entry(KIND_MESSAGE, m["role"], m["text"], "")
-                for m in read_codex_transcript_messages(session_id, limit)]
+        return [_entry(KIND_MESSAGE, m["role"], m["text"], m["at"])
+                for m in read_codex_transcript_messages(session_id, limit, include_timestamps=True,
+                    after_us=after_us, before_us=before_us)]
 
     if brain in ("codex", "gateway-openai"):
         return _from_codex()
@@ -280,15 +310,13 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
         # so an unrecorded-brain session still renders something.
         return _from_codex() if brain in (None, "") else []
 
-    out: list[dict] = []
-    for line in path.read_text().splitlines():
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
+    out = deque(maxlen=limit)
+    for obj in _transcript_records(path, bounded=after_us is not None or before_us is not None):
         if obj.get("type") not in ("human", "user", "assistant"):
             continue
         at = str(obj.get("timestamp", "") or "")
+        if ((after_us is not None or before_us is not None) and obj.get("isSidechain")) or not in_window({"at": at}):
+            continue
         role = "agent" if obj.get("type") == "assistant" else "user"
         content = obj.get("message", {}).get("content", "")
 
@@ -296,7 +324,7 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
         if text:
             out.append(_entry(KIND_MESSAGE, role, text, at))
         out.extend(_tool_blocks(content, role=role, at=at))
-    return out[-limit:]
+    return list(out)
 
 
 # --- Codex rollout replay ------------------------------------------------
@@ -350,7 +378,8 @@ def _codex_injected(text: str) -> bool:
 
 
 def read_codex_transcript_messages(session_id: str,
-                                   limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
+                                   limit: int = CHAT_HISTORY_LIMIT, *, include_timestamps: bool = False,
+                                   after_us: int | None = None, before_us: int | None = None) -> list[dict]:
     """Replay a Codex rollout as ``{role, text}`` chat messages.
 
     Codex records a session as an NDJSON *rollout* rather than a Claude
@@ -364,14 +393,20 @@ def read_codex_transcript_messages(session_id: str,
     if not path:
         return []
 
-    out = []
-    for line in path.read_text().splitlines():
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
+    out = deque(maxlen=limit)
+    for obj in _transcript_records(path, bounded=after_us is not None or before_us is not None):
         if obj.get("type") != "response_item":
             continue
+        if after_us is not None or before_us is not None:
+            try:
+                at = datetime.fromisoformat(str(obj.get("timestamp") or "").replace("Z", "+00:00"))
+                if at.tzinfo is None:
+                    continue
+                at_us = int(at.timestamp() * 1_000_000)
+            except (ValueError, TypeError):
+                continue
+            if (after_us is not None and at_us < after_us) or (before_us is not None and at_us >= before_us):
+                continue
         payload = obj.get("payload") or {}
         if payload.get("type") != "message":
             continue
@@ -383,4 +418,6 @@ def read_codex_transcript_messages(session_id: str,
             continue
         out.append({"role": "agent" if role == "assistant" else "user",
                     "text": text})
-    return out[-limit:]
+        if include_timestamps:
+            out[-1]["at"] = str(obj.get("timestamp") or "")
+    return list(out)

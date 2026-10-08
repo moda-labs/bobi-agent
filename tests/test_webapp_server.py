@@ -88,6 +88,79 @@ class TestMetrics:
             TeamRuntime.metrics(runtime, bobi_install.agent_name, "summary", self.RANGE)
         assert error.value.code == "metrics_unsupported"
 
+    def test_metrics_turn_io_is_lifecycle_scoped_and_web_only(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.query import MetricsQueries
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        prompt = "Event: slack/message\n  Please explain **WAL**.\n  conversation: slack:T123:channel:C123:thread:1791360056.16\n  channel_name: eng-team"
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at,
+            "message": {"content": text}}) for kind, at, text in [
+                ("user", "1970-01-01T00:00:01.100Z", prompt),
+                ("assistant", "1970-01-01T00:00:01.800Z", "A **write-ahead log**."),
+                ("user", "1970-01-01T00:00:02.100Z", "Different turn"),
+                ("assistant", "1970-01-01T00:00:02.800Z", "Different answer"),
+        ]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        result = _client().get(base + "/turns/t-routine")
+        assert result.status_code == 200
+        io = result.json()["conversation"]
+        assert io["input"] == prompt
+        assert io["response"] == "A **write-ahead log**."
+        assert io["status"] == "matched"
+        assert io["origin"] == {"source": "slack", "channel_id": "C123", "channel_name": "eng-team",
+                                "thread_id": "1791360056.16", "url": "https://app.slack.com/client/T123/C123/thread/C123-1791360056.16"}
+        assert "Different" not in json.dumps(io)
+        turns = _client().get(base + "/turns", params=self.RANGE).json()["turns"]
+        routine = next(turn for turn in turns if turn["turn_id"] == "t-routine")
+        assert routine["conversation"]["prompt_snippet"] == prompt[:60]
+        assert routine["conversation"]["response_snippet"] == "A **write-ahead log**."
+        assert "entries" not in routine["conversation"]
+        assert "conversation" not in MetricsQueries(bobi_install.repo_path).turn({"turn_id": "t-routine"})
+        assert _client().get(base + "/turns/t-unknown").json()["conversation"]["status"] == "unavailable"
+        sessions = _client().get(base + "/sessions", params=self.RANGE)
+        assert sessions.status_code == 200
+        assert {session["session_id"] for session in sessions.json()["sessions"]} == {"s1", "s2"}
+
+    @pytest.mark.parametrize("brain", ["claude", "codex"])
+    def test_metrics_old_turn_uses_timestamp_window_before_tail_limit(self, bobi_install, monkeypatch, tmp_path, brain):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider',brain=? WHERE session_id='s1'", (brain,))
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        transcript = tmp_path / "old-provider.jsonl"
+        entries = [("user", "1970-01-01T00:00:01.100Z", "Original prompt"),
+                   ("assistant", "1970-01-01T00:00:01.900Z", "Original answer")]
+        entries.extend(("assistant", "1970-01-01T00:00:03.000Z", "Later answer") for _ in range(250))
+        entries.append(("user", "", "Missing timestamp must not match"))
+        if brain == "claude":
+            rows = [{"type": role, "timestamp": at, "message": {"content": text}} for role, at, text in entries]
+        else:
+            rows = [{"type": "response_item", "timestamp": at, "payload": {"type": "message", "role": role,
+                     "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}]}}
+                    for role, at, text in entries]
+        transcript.write_text("\n".join(map(json.dumps, rows)))
+        monkeypatch.setattr(f"bobi.chat_history.find_{brain}_{'transcript' if brain == 'claude' else 'rollout'}",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        io = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/turns/t-routine").json()["conversation"]
+        assert io["input"] == "Original prompt"
+        assert io["response"] == "Original answer"
+        assert io["origin"] == {"source": "user"}
+        assert "Later answer" not in json.dumps(io)
+        assert "Missing timestamp" not in json.dumps(io)
+
 
 def _add_design_slot(agents_dir, name, description="An idea, not installed."):
     src = agents_dir / name / "src"
@@ -1097,4 +1170,3 @@ class TestRoutingConfig:
         r_disable = c.post(f"/api/agents/{name}/routing/config", json={"enabled": False})
         assert r_disable.status_code == 200
         assert r_disable.json()["enabled"] is False
-
