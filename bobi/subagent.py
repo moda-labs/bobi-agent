@@ -1809,9 +1809,6 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     # runs the auto-dispatch reactor; an inbox-only worker skips both. Computed
     # up front because #488 resource authorization (below) runs BEFORE register.
     has_external = any(not k.startswith("inbox/") for k in subscribe)
-    state = load_deployment_state(project_path, session_name)
-    es_key = state.get("api_key", "")
-    es_deployment = state.get("deployment_id", "")
     cursor_path = session_cursor_path(project_path, session_name)
     active_subscriptions = list(subscribe)
 
@@ -2005,6 +2002,11 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
 
+    # Launching our own new local broker retires the previous process's
+    # transport state. Read after startup so we do not PUT a captured stale id.
+    state = load_deployment_state(project_path, session_name)
+    es_key = state.get("api_key", "")
+    es_deployment = state.get("deployment_id", "")
     if not (es_deployment and es_key):
         es_deployment, es_key = _register_with_retry(es_url)
     else:

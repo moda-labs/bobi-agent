@@ -448,6 +448,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 		return json(res, {
 			status: "ok",
 			mode: "local",
+			process_id: process.pid,
 			deployments: deployments.size,
 			auth: "hmac",
 			protocol: EVENT_PROTOCOL,

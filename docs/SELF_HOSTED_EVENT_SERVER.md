@@ -255,10 +255,14 @@ buffer of the last 10,000 events per deployment) lives in process memory.
   catches up from its cursor on reconnect.
 - **When the server restarts**, webhooks flow again immediately but every
   registration is gone. Running sessions cannot receive events until they
-  restart; on its next start an agent detects the lost bubble, re-mints, and
-  re-registers automatically. So the operational rule is: **if you restart
+  restart.
+  When Bobi launches a replacement embedded local server, it archives old transport credentials and cursors under `state/event-transport-backups/`, then re-registers sessions without clearing their conversations.
+  The local `/health` response includes `process_id`, which the launcher matches to its child before retiring transport state.
+  Attaching to an existing server preserves saved transport state; a 403 alone never triggers a reset because missing registrations and invalid credentials are indistinguishable.
+  So the operational rule for a separately managed server is: **if you restart
   the event server, restart the agents pointed at it.** Events delivered to
   the server between those two restarts are dropped.
+  If agents retain rejected credentials after a separately managed server restart, verify the server lost its state before deliberately resetting their transport credentials and cursors.
 
 If you need durable replay across server restarts, run the **Cloudflare Worker
 variant** instead — it is a self-host option like the rest, not a paid tier.

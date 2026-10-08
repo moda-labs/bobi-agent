@@ -21,7 +21,7 @@ import httpx
 
 from bobi import launch_stamp
 from bobi.events import artifact as event_server_artifact
-from bobi.fsutil import atomic_write_text
+from bobi.fsutil import atomic_write_text, file_lock
 
 log = logging.getLogger(__name__)
 
@@ -500,6 +500,33 @@ def _run_npm(
     return result
 
 
+def _archive_local_transport_state(project_path: Path | None) -> None:
+    """Retire credentials and cursors when we launch a new volatile broker.
+
+    A server we just spawned cannot hold the previous process's replay buffer.
+    Keep that transport state for inspection without resetting conversations.
+    Never call this when attaching to an existing or remote server.
+    """
+    from bobi import paths
+
+    state = paths.state_dir(project_path)
+    with file_lock(state / "event-transport.lock"):
+        stale = [state / name for name in (
+            "bubble.json", "deployments", "cursors", "cursor.json", "admin-cursor.json",
+        ) if (state / name).exists()]
+        if not stale:
+            return
+        backup = state / "event-transport-backups" / str(time.time_ns())
+        backup.mkdir(parents=True, mode=0o700)
+        for path in stale:
+            path.rename(backup / path.name)
+        log.warning(
+            "New local event-server process has no previous replay buffer; "
+            "archived old credentials and cursors in %s; sessions will re-register",
+            backup,
+        )
+
+
 def ensure_running(port: int, webhook_secret: str | None = None,
                    slack_signing_secret: str | None = None,
                    linear_webhook_secret: str | None = None,
@@ -610,7 +637,12 @@ def ensure_running(port: int, webhook_secret: str | None = None,
 
     for _ in range(30):
         time.sleep(0.5)
-        if health(f"http://localhost:{port}"):
+        ready = health(f"http://localhost:{port}")
+        if ready:
+            if (ready.get("mode") == "local"
+                    and ready.get("process_id") == proc.pid
+                    and proc.poll() is None):
+                _archive_local_transport_state(project_path)
             atomic_write_text(local_port_file(project_path), str(port))
             log.info(f"Event server started on port {port} (pid {proc.pid})")
             return "started"
