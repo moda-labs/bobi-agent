@@ -8,7 +8,7 @@
 > That plan posted the device code immediately and treated the brain flow and the tool flow as separate shapes.
 > Zach's 2026-10-09 decisions replace both halves of that: ask first, and one shared behaviour.
 >
-> **Size:** ~45 lines across 5 files in `bobi-agent`, plus ~25 lines of prompt/doc text in `moda-agents`.
+> **Size:** ~50 lines across 5 files in `bobi-agent`, plus ~25 lines of prompt/doc text in `moda-agents`.
 >
 > Every file:line below was read from a grep run against `origin/main` at `83bebe49` on 2026-10-09.
 > [Appendix A](#appendix-a-verification-record-2026-10-09) is the verification record, including what was executed live.
@@ -90,9 +90,20 @@ It is not a risk: `login-bootstrap` already does its own waiting today.
 And the boot ordering makes the brain's absence irrelevant: `login-bootstrap` runs in entrypoint section 4 (`docker/docker-entrypoint.sh:565-577`), and the manager is not `exec`'d until section 5 (`:590-640`).
 The waiter is `login-bootstrap`'s own process.
 
+**The on-demand trigger also works, because delivery is fan-out, not competing consumers.**
+This is the one place the two triggers genuinely differ: on demand, the manager is already running and subscribed to the same chat topic, so a competing-consumer bus would let the manager swallow the reply and starve the `login-bootstrap` listener forever.
+It does not: `admittedDeploymentIds` (`event-server/core/src/core.ts:1939-1961`) accumulates every admitted subscriber into a `Set` and the runtime delivers to all of them (`docs/EVENT_SERVER.md:417-419`, "Admitted deployments are then delivered to ... locally, by direct `ws.send()`"; non-global keys "admit every indexed subscriber", `:414-415`).
+So the manager and the `login-bootstrap` listener both receive the human's reply.
+
+One consequence of that, for the companion prompt change: **the director will also see the reply**, as an ordinary thread message.
+It must not re-handle it or answer it; `login-bootstrap` owns that thread until it posts its outcome.
+The delivery circuit breaker is not a risk here, because it trips only on an agent's own output looping back "without a human event in between" (`docs/EVENT_SERVER.md:419-421`), and the reply is a human event.
+
 **So no new polling loop is needed.**
 The task brief suggested polling Slack `conversations.replies` with the bot token as a candidate mechanism.
-Pushing back with evidence: `conversations.replies` appears nowhere in `bobi/` on main (`grep -rn 'conversations.replies' --include=*.py .` matches only `tests/integration/test_channel_gateway.py:86` and `:251`, which are a stub's dispatch table, plus `docs/RELEASE_RUNBOOK.md:389`, an operator `venn` invocation).
+Pushing back with evidence: `conversations.replies` appears nowhere in `bobi/` on main.
+`grep -rn 'conversations\.replies' .` over the whole tree matches exactly two lines, `tests/integration/test_channel_gateway.py:86` and `:251`, both a test stub's dispatch table.
+(`docs/RELEASE_RUNBOOK.md:389` reads `conversations_replies` with an underscore, which is a `venn` tool name in an operator recipe, not a Slack API call from this codebase.)
 Adding a direct Slack poll would be a second way to read a reply, which Z3 forbids, and it would work only on Slack, where the event-bus path already works on Slack, Discord and WhatsApp.
 A gateway polling primitive does exist as a fallback (`channels_history`, `bobi/events/gateway.py:96`), and is rejected for the same reason: the push path is already there.
 
@@ -160,8 +171,14 @@ That site is an injection point (`spawn_login = spawn_login or _spawn_login`, `:
 The env override leaves `:660` byte-identical - confirmed in the same probe run - so no fake breaks.
 `_spawn_login` re-reads `_active_spec()` internally (`:213`), so it picks the target up for free.
 
-Two small edges:
+Three small edges:
 
+- **The target's shadow env var refuses the login, and that is correct.**
+  `run_bootstrap` raises when `os.environ[spec.shadow_env]` is set (`bobi/auth_bootstrap.py:635-639`), and the override makes that `OPENAI_API_KEY` for a codex target.
+  So a team with `OPENAI_API_KEY` in its runtime env cannot log codex in by subscription, and gets a named error instead.
+  That is the right behaviour, because the key genuinely outranks subscription auth for codex, and the entrypoint already materializes it into `auth.json` in `api_key` mode (`docker/docker-entrypoint.sh:535-551`).
+  It is stated here because it is a user-visible refusal nobody asked for and it would otherwise read as a bug.
+  No change; `OPENAI_API_KEY` is unset on eng-team today.
 - **Scope the gateway refusal to the brain.** The guard at `:613-624` raises for a gateway brain that is not Claude, or a Claude gateway with `ANTHROPIC_AUTH_TOKEN` set. It is an argument about the *brain's* credential path and must not block a *tool* login. Gate it on `target is None`.
 - **Make `cli.py`'s pre-check target-aware.** `bobi/cli.py:733` calls `auth_bootstrap.credentials_exist()` before `run_bootstrap` (`:737`). On a Claude brain with a `codex` target it would check Claude's credential and print "already present - nothing to do". The CLI argument is added at `:713-716`.
 
@@ -178,13 +195,33 @@ Without this, a login that succeeds is lost on the next roll, and the 8 workers 
 New section 3c in `docker/docker-entrypoint.sh`, placed **after** the codex-brain block ends at `:532`:
 
 ```sh
-# --- 3c. Codex's durable config dir for non-codex brains (#958) -------------
+# --- 3c. Codex's durable config dir, both brains (#958) ---------------------
+# A codex BRAIN already owns ${DATA_DIR}/codex via section 3b, including a real
+# skills directory. Only a non-codex brain needs the skills link, and it must
+# not be created on top of 3b's directory. The export is unconditional so
+# CODEX_HOME names the same path on either brain.
 mkdir -p "${DATA_DIR}/codex"
 chown "${APP_USER}:${APP_USER}" "${DATA_DIR}/codex"
-[ -e "${DATA_DIR}/codex/skills" ] \
-  || ln -sT "${HOME}/.codex/skills" "${DATA_DIR}/codex/skills"
+if [ "${ENTRYPOINT_ENGINE}" != "codex" ]; then
+  { [ -e "${DATA_DIR}/codex/skills" ] || [ -L "${DATA_DIR}/codex/skills" ]; } \
+    || ln -sT "${HOME}/.codex/skills" "${DATA_DIR}/codex/skills"
+fi
 export CODEX_HOME="${DATA_DIR}/codex"
 ```
+
+and one line inside the codex-brain block, before `:491`, to drop a link a previous non-codex boot may have left on the volume:
+
+```sh
+# Section 3c may have left this as a symlink into the image HOME on a previous
+# non-codex boot; a codex brain needs a real directory here.
+[ -L "${BRAIN_CRED_DIR}/skills" ] && rm -f "${BRAIN_CRED_DIR}/skills"
+```
+
+Three details in that block are each load-bearing, and the simplest-looking version of it aborts boot.
+
+- **`-L` as well as `-e`.** `[ -e ]` is **false** for a symlink that does not resolve, so an `-e`-only guard tries to create a link that already exists and `ln` fails "File exists".
+- **The `!= "codex"` gate.** Without it, 3c's symlink and 3b's real directory fight over the same path.
+- **The cleanup line in 3b.** Without it, a stale 3c symlink survives a brain switch and loops.
 
 The export reaches every process.
 `as_app` and the final `exec` use `gosu ... env VAR=... cmd` (`:416`, `:637`), and `env` **adds** to the inherited environment rather than replacing it.
@@ -198,17 +235,28 @@ That plan proposed `ln -sfnT "${HOME}/.codex/skills" "${DATA_DIR}/codex/skills"`
 | After the codex-brain block | `ln: /tmp/.../data/codex/skills: cannot overwrite directory`, harness **exit 1**. The block creates that path as a real directory at `:491`. With `set -euo pipefail` (`:14`) this aborts boot. |
 | Before the codex-brain block | **Symlink loop.** `:528-530` then repoints `~/.codex` at `/data/codex`, so `/data/codex/skills -> ~/.codex/skills -> /data/codex/skills`. `readlink -f` exits 1, `ls` reports "Too many levels of symbolic links", and the baked skills become unreachable. |
 
-With the `[ -e ]` guard **and** the after-placement, both brains boot clean and the link resolves, idempotently across two boots:
-
-```
-brain=claude boot=1 exit=0  skills->/tmp/eloop958/home/.codex/skills
-brain=claude boot=2 exit=0  skills->/tmp/eloop958/home/.codex/skills
-brain=codex  boot=1 exit=0  skills->/tmp/eloop958/data/codex/skills
-brain=codex  boot=2 exit=0  skills->/tmp/eloop958/data/codex/skills
-```
-
 The guard alone is not enough: at the before-placement it still loops.
-Both are required, in writing, before anyone implements this.
+
+**And a guard plus the after-placement is still not enough, because the volume outlives the brain choice.**
+`/data` persists across a redeploy, so a machine can boot claude and later boot codex on the same volume.
+A first version of this spec proposed exactly `[ -e ] || ln -sT`, unconditional, after the codex block, and it aborts boot on that switch: boot 1 creates `/data/codex/skills` as a symlink to `~/.codex/skills`, then boot 2's codex block repoints `~/.codex` at `/data/codex` (`:527-530`) so the symlink loops, `[ -e ]` reads false, and `ln` fails "File exists".
+The shape above was tested against every boot order on one simulated volume:
+
+```
+                          spec's first shape            shape above
+claude, claude            ALL BOOTS OK                  ALL BOOTS OK
+codex,  codex             ALL BOOTS OK                  ALL BOOTS OK
+claude, codex             boot2: ABORT + LOOP           ALL BOOTS OK
+codex,  claude            ALL BOOTS OK                  ALL BOOTS OK
+claude, codex, claude     boot2: ABORT, boot3: ABORT    ALL BOOTS OK
+codex,  claude, codex     (not run)                     ALL BOOTS OK
+```
+
+All three details are required, in writing, before anyone implements this.
+
+One accepted consequence of a brain switch, not a defect: after a codex boot, `/data/codex/skills` is 3b's real directory of `/opt/bobi/skills` links, so a later claude boot sees that population rather than the image's `~/.codex/skills` one.
+Boot is clean and codex is authenticated either way.
+Switching a live machine's brain is already a deliberate, rare operation.
 
 Four follow-on edits the export forces:
 
@@ -232,8 +280,9 @@ Prompt and doc text only. No framework code. Not a blocker for the bobi-agent PR
 - A worker that hits a codex 401 reports "codex needs login" and **proceeds**, disclosing the gap in its output. It does not block, retry, or fail silently.
 - The **director** - and only the director - runs `login-bootstrap codex` in the background. This is a recommendation, not a certainty; see [Q2](#5-open-questions-for-zach).
 - One pending ask per tool, deduped across workers. While an ask is open, workers keep disclosing the gap and no second ask is posted.
+- The director will receive the human's "ready" reply itself, because delivery is fan-out (3.1). It must not answer it or re-handle the thread; `login-bootstrap` owns that thread until it posts the outcome.
 
-**(c) Runbook line** in `bobi-deploy/docs/CONTAINERIZED_DEPLOYMENT.md`: `codex` is logged in once per machine via `login-bootstrap codex`, and the `fly ssh console` + `codex login --device-auth` path remains the fallback for an operator who has a shell.
+**(c) Runbook line** in `moda-labs/moda-agents:bobi-deploy/docs/CONTAINERIZED_DEPLOYMENT.md` (the standalone `moda-labs/bobi-deploy` repo is archived; the live copy lives under `moda-agents`): `codex` is logged in once per machine via `login-bootstrap codex`, and the `fly ssh console` + `codex login --device-auth` path remains the fallback for an operator who has a shell.
 
 ## 4. What was cut, and why
 
@@ -319,11 +368,12 @@ Docker lane, `tests/integration/test_container_image.py` (`-m docker`, needs a b
 
 12. **Claude brain, subscription.** `/data/codex` exists and is bobi-owned, `CODEX_HOME` resolves to it in the manager's environment, the skills link resolves, and it all survives a restart.
 13. **Codex brain boots clean.** Boot succeeds, the brain credential is intact, and the baked skills are reachable (`readlink -f` on `/data/codex/skills` exits 0). This is the regression pin for the abort/loop reproduced in 3.4.
+14. **A brain switch on a persisted volume boots clean.** Boot claude, then boot codex on the same `/data`, then claude again. Every boot exits 0 and `/data/codex/skills` resolves. This is the regression pin for the brain-switch abort in 3.4, and it is the leg a same-brain two-boot test misses.
 
 Live, post-merge, owed on the issue as proof of work.
 
-14. **One real login end to end.** `login-bootstrap codex`, a human reply in the thread, a real device code, authorize, then `codex exec -s read-only` returning 0 from a worker.
-15. **Survives a restart.** Same credential after a machine restart, with no second login.
+15. **One real login end to end.** `login-bootstrap codex`, a human reply in the thread, a real device code, authorize, then `codex exec -s read-only` returning 0 from a worker.
+16. **Survives a restart.** Same credential after a machine restart, with no second login.
 
 ## 8. Implementation plan
 
@@ -332,11 +382,11 @@ Not to be started until Gate 1 is approved, and not before Q1 and Q3 are answere
 1. Tests 1-5 (ask-first, human-only, thread-scoped) against the current `run_bootstrap`, failing.
 2. Change 1 (3.2), including the `_wait_for_chat_event` factoring. Tests 1-5 green, and the 78 existing tests stay green.
 3. Tests 6-9, failing. Then change 2 (3.3). Test 7 is the F11 pin.
-4. Change 3 (3.4): section 3c with the guard and the placement, the two re-pointed writers, `tool.yaml`, the two stale comments. Then tests 12-13.
+4. Change 3 (3.4): section 3c with the guard and the placement, the two re-pointed writers, `tool.yaml`, the two stale comments. Then tests 12-14.
 5. Q3's lock and test 10, if Q3 resolves that way.
 6. Review gate, full test run, PR.
 7. The `moda-agents` companion PR (3.5).
-8. Post-roll: tests 14-15 on the issue.
+8. Post-roll: tests 15-16 on the issue.
 
 ## Appendix A: verification record, 2026-10-09
 
@@ -356,13 +406,15 @@ Everything that executed code ran with `GH_TOKEN=invalid`, `GITHUB_TOKEN=invalid
 | Brain override retargets the flow | `claude /data/claude/.credentials.json` -> `codex /data/codex/auth.json` on one assignment; `spawn_login(home)` call site unchanged |
 | Superseded skills link aborts boot | after-placement: `ln: ... cannot overwrite directory`, exit 1 |
 | Superseded skills link loops | before-placement: `readlink -f` exit 1, `Too many levels of symbolic links`, baked skills unreachable |
-| Guard + after-placement is correct | both brains, two boots, exit 0, link resolves |
+| Guard + after-placement is correct for same-brain boots | both brains, two boots, exit 0, link resolves |
+| Guard + after-placement ABORTS on a brain switch | claude then codex on one volume: `ln: failed to create symbolic link ...: File exists`, exit 1, link loops; still broken on boot 3 |
+| The shape in 3.4 is correct on every boot order | 6 sequences incl. claude/codex/claude and codex/claude/codex: all boots exit 0, link resolves |
 | Baseline suite | `pytest tests/test_auth_bootstrap.py -q` -> 78 passed in 2.51s |
 | Live env | `BOBI_AUTH=subscription`, `BOBI_BRAIN=claude`, `BOBI_LOGIN_CHANNEL=#bobi-eng-team` (the legacy channel-name path), `CODEX_HOME` unset, `OPENAI_API_KEY` unset |
 
 **Could not verify.**
 
-- **An end-to-end login.** Needs a human to authorize a real device code. Each link is verified separately; the chain is not. This is verification 14.
+- **An end-to-end login.** Needs a human to authorize a real device code. Each link is verified separately; the chain is not. This is verification 15.
 - **The docker lane.** `-m docker`, needs a built image. No image build in this session.
 - **That `/data/codex` behaves on the real volume.** Not created - that would be a live mutation during a spec step. The durability argument rests on `~/.claude -> /data/claude` on the same `/dev/vdc`.
 - **Exact line counts.** Derived from the diffs this spec describes, not from an implementation.
