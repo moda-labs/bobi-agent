@@ -3,7 +3,8 @@
 > **Status:** Draft, awaiting Gate 1 approval from Zach. No implementation until approved.
 > **Tracking issue:** moda-labs/bobi-agent#958 · **Spec PR:** #959 (draft) · **Written:** 2026-10-09
 >
-> **Size:** ~95 lines across 8 files in `bobi-agent`, plus ~25 lines of prompt and doc text in `moda-agents`.
+> **Size:** ~120 lines across 10 files in `bobi-agent`, plus ~25 lines of prompt and doc text in `moda-agents`.
+> One open fork is posed in [8](#8-open-question); everything else is decided.
 >
 > Every `file:line` below was read from a grep run against `origin/main` at `70db2e1059fdf8f35751b17806496cb91f427b09`.
 > [Appendix A](#appendix-a-verification-record) is the verification record, including what was executed live.
@@ -57,11 +58,11 @@ Zach ruled on eight design questions the same day. These are decided, not open.
 | **D1** | Boot waits on a long bounded timeout and **never re-posts**. One ask ever. On timeout, exit non-zero as today; the next boot silently re-attaches to the stored ask and does one catch-up read of its thread before blocking. Clear the stored id on success. **No supervisor changes.** | [4](#4-boot-behaviour-when-nobody-replies) |
 | **D2** | The tool trigger is **director-only**, as prompt policy. | [3.6](#36-companion-change-in-moda-labsmoda-agents) |
 | **D3** | One pending ask per tool is **prompt-only dedup. No lock.** | [5](#5-scope), accepted and stated |
-| **D4** | `CODEX_HOME` moves codex's **whole config dir** to the volume, not just the credential file. | [3.4](#34-change-3-codex_home-on-the-durable-volume) |
-| **D5** | **One correlation rule for all transports**: a channel destination requires the thread anchor, a DM accepts any human message. Discord guild channels are out of scope. | [3.2](#32-change-1-ask-first-in-run_bootstrap) |
+| **D4** | `CODEX_HOME` moves codex's **whole config dir** to the volume, not just the credential file. | [3.4](#34-change-3---codex_home-on-the-durable-volume) |
+| **D5** | **One correlation rule for all transports**: a channel destination requires the thread anchor, a DM accepts any human message. Discord guild channels are out of scope. | [3.2](#32-change-1---ask-first-in-run_bootstrap) |
 | **D6** | **No new guard** for a gateway-brained team minting a direct provider credential. State it as a limitation. | [5](#5-scope), accepted and stated |
-| **D7** | **Yes to a human-gated in-flight rebind in v1**, so a revoked or wrong-account credential heals without `fly ssh`. Quarantine happens there and only there. | [3.5](#35-change-4-human-gated-rebind) |
-| **D8** | The boot sweep stays **conservative**: recognized API-key shape only. The `--device-auth` fixture is observed, so nothing blocks on it. | [3.4](#34-change-3-codex_home-on-the-durable-volume) |
+| **D7** | **Yes to a human-gated in-flight rebind in v1**, so a revoked or wrong-account credential heals without `fly ssh`. Quarantine happens there and only there. | [3.5](#35-change-4---human-gated-rebind) |
+| **D8** | The boot sweep stays **conservative**: recognized API-key shape only. The `--device-auth` fixture is observed, so nothing blocks on it. | [3.4](#34-change-3---codex_home-on-the-durable-volume) |
 
 Standing bar: simplest practical solution, no cruft.
 
@@ -75,11 +76,12 @@ One primitive, ask-first, used by both triggers.
 2. Short-circuit if the credential is already valid, unless `--rebind` was passed.
 3. Resolve the login channel from `$BOBI_LOGIN_CHANNEL`. Destination stays configuration, never a caller's argument (#1009).
 4. Register the event listener and wait for its socket to go live.
-5. Re-attach or ask, exactly one of the two:
-   - A stored ask for this login kind exists: do one catch-up read of its thread and post nothing.
-   - No stored ask: post the ask, keep the posted message's id, persist it.
+5. Re-attach or ask, exactly one of the three:
+   - A stored ask with an id: do one catch-up read of its thread (Slack only) and post nothing.
+   - A stored marker with no id: recover the id from the destination's history (Slack only) and post nothing.
+   - No stored state: write the marker, post the ask, then record the posted message's id.
      *"Reply to this message in a thread when you are ready, and then I will begin the login flow."*
-6. Block until a **human** replies.
+6. Block until a **human** replies, remembering which message that was.
 7. Spawn the login CLI, scrape the sign-in URL (and, for `device_poll`, the one-time code), and post them **into that thread**.
 8. Claude `paste_back`: wait in the same thread for the code, write it into the pty.
    Codex `device_poll`: wait for the CLI to exit as the human authorizes.
@@ -156,8 +158,15 @@ Reuse it:
 
 | Destination | Ready when | Why |
 |---|---|---|
-| **Channel** (`is_channel` true) | `fields.thread_ts == <the ask's ts>` | The channel sees unrelated traffic, so the thread anchor is the only correlation. |
+| **Channel** (`is_channel` true) | `fields.thread_ts == <the ask's anchor>` | The channel sees unrelated traffic, so the thread anchor is the only correlation. |
 | **DM** (`is_channel` false) | any human message that passes the existing source and conversation filters | A 1:1 DM has nothing to correlate against. The conversation is the correlation. |
+
+**The anchor is the destination's own thread id when it has one, and the ask's `ts` otherwise.**
+`$BOBI_LOGIN_CHANNEL` may legitimately be a six-part threaded ref: `parse_conversation` accepts the `:thread:<id>` trailer (`bobi/conversation.py:47`, `:55-58`), `_resolve_login_channel` passes it through unchanged, and `tests/test_auth_bootstrap.py:1364-1378` pins that such a ref must still resolve.
+Posting the ask to that destination puts it **inside** the existing thread, and Slack has no nested threads, so every human reply carries `thread_ts == <the destination's thread id>` and never the ask's own `ts`.
+An ask-`ts` predicate would therefore wait to timeout forever on a supported and tested configuration.
+One expression fixes it, `parse_conversation(destination).thread_id or <the ask's ts>`, and the consumed-reply watermark in [4](#4-boot-behaviour-when-nobody-replies) is what separates "after the ask" from the thread's pre-existing traffic.
+A threaded **DM** ref takes the DM branch, where the conversation filter already scopes to that thread, so it needs nothing extra.
 
 Human-only, on both branches: reject an event carrying `fields.bot_id`.
 The Slack adapter sets `fields.bot_id` for any bot-authored message (`event-server/core/src/adapters/chat-sdk-slack.ts:154`, `:168`) and already drops messages from *our own* bots (`:99-100`), so this only adds third-party bots.
@@ -315,6 +324,9 @@ The in-repo references to `~/.codex/skills` are gstack's installer (`bobi/tool_l
    `materialize_codex_api_key_auth` writes unconditionally, and under the export its target on a non-codex brain is the durable file.
    So in `api_key` mode, skip the write when a usable OAuth credential is already there.
    Reuse `python -m bobi.auth_bootstrap credential-status codex <path>`, which the script already calls at `:569-571`; **no new shell predicate**.
+   **The guard goes on the call site at `:547`, not inside `materialize_codex_api_key_auth`.**
+   The function is shared by both arms (`:544` for a codex brain, `:547` for codex-as-a-tool on any other brain), so a guard inside it would also stop a codex-brained `api_key` team from rewriting its own credential, which is the behaviour this spec declares out of scope and leaves authoritative in [5](#5-scope).
+   A guard inside the function and a guard on the call site are indistinguishable to a credential-shape test; only a brain-kind axis separates them, which is why verification item 24 carries one.
    Add the same lstat refusal in front of the write itself: it runs as root (`:324-331`) and `path.write_text` and `path.chmod` both dereference, and its cleanup `chown -R "${APP_USER}:${APP_USER}" "${cred_dir}"` (`:333`) dereferences its top-level argument.
    `chown -h` is **not** an acceptable substitute: it retitles the link inode and the following root write still lands on the target.
 2. **Re-point the subscription sweep** (`:557`), from `${HOME}/.codex` to `${CODEX_HOME}`, which is where the file now lives.
@@ -332,6 +344,8 @@ The in-repo references to `~/.codex/skills` are gstack's installer (`bobi/tool_l
    `bobi/brain/codex_config.py:46-47` ("The entrypoint symlinks ~/.codex at the durable volume") is true only on a codex brain; this change makes it unconditionally true for the config dir.
    `bobi/tool_library/codex/guide.md:42` claims the runtime "materializes `~/.codex/auth.json` from `OPENAI_API_KEY`", which the export falsifies.
    `bobi/tool_library/gstack/guide.md:7-8` claims skills are linked under `~/.codex/skills/`, which is false on a non-codex brain once 3c creates no such link.
+   And two **unscoped** statements that codex reads `~/.codex/config.toml` become false on a non-codex brain, where it now reads `${CODEX_HOME}/config.toml`: `docs/TOOL_LIBRARY.md:391-393` (user-facing) and `bobi/mcp_handshake.py:6` (about `codex exec` generally, which is the tool path).
+   Two further statements of the same shape stay **true** and are deliberately left alone, because they are scoped to the codex brain, where 3b already points `~/.codex` at the volume: `bobi/brain/codex.py:365-366` (inside `CodexBrain`) and `bobi/tool_library/__init__.py:289-290` (a comment about "the codex brain").
 
 **The export is a process-wide switch, so here is everyone who flips with it.**
 `codex_home()` (`bobi/brain/codex_config.py:51-56`) has five callers beyond `credentials_path()`:
@@ -393,10 +407,19 @@ Prompt and doc text only. No framework code. Not a blocker for the bobi-agent PR
 
 ## 4. Boot behaviour when nobody replies
 
-D1. **One ask ever. The ask is never re-posted.**
+D1. **One ask per login kind. The ask is never re-posted while its state file survives.**
 
 Boot blocks on the ready reply for `ask_timeout`, then exits non-zero exactly as today, so the machine restarts and `fly logs` keeps showing life.
 The next boot does **not** post a second ask. It reads the stored ask id and silently re-attaches to the same thread.
+
+**The guarantee is stated that way deliberately, because "one ask ever" is not implementable.**
+The post is a remote call and the state write is a later local rename, and nothing makes the pair atomic: `channels_send` takes no caller-supplied idempotency key and returns the platform's own id (`bobi/events/gateway.py:61-70`), and `atomic_write_text` only keeps the local file parseable (`bobi/fsutil.py:100`).
+A death between a post the platform accepted and the write that records it would leave a visible ask with no stored id, and the next boot would post a second one.
+Closing that window with platform-level idempotency means a caller-generated key the gateway does not have, which is an event-server change for a one-round-trip window.
+**Two cheap measures close it instead, with no event-server change.**
+
+1. **Write an in-flight marker before posting, not after.** The state file is created with the destination and an empty id immediately before the post, and updated with the id immediately after. A marker with no id tells the next boot that an ask may exist.
+2. **Recover the id from the channel, not from the marker.** On a marker with no id, read the destination's own history once (an unanchored ref reads channel history rather than thread replies, `event-server/core/src/channels.ts:382-390`) and adopt the newest ask-shaped message authored by this bot. A real duplicate then requires the post to have failed *and* the history read to miss it.
 
 **State: one file per login kind.**
 `${DATA_DIR}/codex/.login-ask-<kind>`, holding the ask's destination and its message id.
@@ -406,7 +429,11 @@ The next boot does **not** post a second ask. It reads the stored ask id and sil
   Every access is a whole-document read **or** a whole-document write, never a load-mutate-save, so the companion `file_lock` that `CLAUDE.md` requires for read-modify-write state does not apply here and is not taken.
   That is a separate question from D3: a lock here would protect one file's bytes, not dedup two asks, and D3 forbids the latter.
 - Named by `${DATA_DIR}/codex` rather than by `${CODEX_HOME}` so one directory, and therefore one lstat guard (3.4), covers both the credential and the ask state.
-- **Invalidated, not trusted.** The stored destination must equal the currently resolved one, or the entry is treated as absent, otherwise an edited `$BOBI_LOGIN_CHANNEL` re-attaches to a thread in a channel the config no longer names. A post into a stored thread that fails is likewise treated as absent.
+- **Invalidated only by a destination change.** The stored destination must equal the currently resolved one, or the entry is treated as absent, otherwise an edited `$BOBI_LOGIN_CHANNEL` re-attaches to a thread in a channel the config no longer names.
+- **A failed post into the stored thread leaves the state intact and fails the run.**
+  Treating it as absent would authorize a second ask on the next boot, which is precisely what D1 forbids, and a client-side post failure does not even prove the message was not delivered (`bobi/events/gateway.py:29-59`).
+  So the run exits non-zero, the machine restarts, and the next boot re-attaches to the same ask.
+  A genuinely destroyed ask message is a human recovery action: delete `${DATA_DIR}/codex/.login-ask-<kind>` and the next boot asks again. The spec names the path for that reason.
 - **Cleared on success**, so a login months later does not reply into a dead thread.
 
 **One catch-up read, so a reply in the restart gap is not lost.**
@@ -414,34 +441,53 @@ This is the one real defect that "do not re-post" introduces and that re-posting
 Replay cannot cover it, because each `register` mints a fresh deployment with an empty buffer (`event-server/core/src/core.ts:1453`, `:1471`).
 So on re-attach, after the listener is live and before blocking, read the ask's thread once through `channels_history` (`bobi/events/gateway.py:96-103`).
 
-The read is one call and the predicate is derivable from its result alone, with no extra state.
 `/channels/history` returns `{user, text, ts}` per message, oldest-first, for the thread the ref anchors (`event-server/core/src/core.ts:2417-2419`, `event-server/core/src/channels.ts:379-409`, `ConversationMessage` at `:119-124`).
 A reply is fresh when its `ts` is greater than the newest message in the thread whose `user` **is** the bot's own user id, which `require_app_identity` already returns (`bobi/slack.py:302-303`).
 A message with an empty `user` is not treated as human, so the rule fails closed.
 That matters: without it, a boot that already consumed the reply and then timed out mid-login would re-consume it on every restart and re-post a device code each time, which is the Slack noise D1 exists to prevent.
 
-The ref for that read is assembled on both post paths, so this is one code path.
+**The catch-up read is Slack-only, and that is a property of the adapters rather than a choice.**
+It is the one piece of this design that is not transport-neutral, so it is scoped explicitly instead of being claimed to work everywhere:
+
+- **WhatsApp has no history at all.** Its channel adapter implements `send` and `uploadFiles` only (`event-server/core/src/channels.ts:471-571`), and `/channels/history` rejects an adapter with no `fetchConversation` outright (`event-server/core/src/core.ts:2437-2439`).
+- **Discord has history but no usable bot identity.** `discordConversationMessage` sets `user` to `author.username` and only falls back to `author.id` (`event-server/core/src/channels.ts:612-618`), while `require_app_identity` resolves Slack identifiers (`bobi/slack.py:302-316`), so the "newest message authored by this bot" baseline cannot be established.
+
+On a non-Slack destination the catch-up read is **skipped**, and the F1 channel-scan recovery with it.
+The degradation is bounded and not a lost credential: the ask message still exists, the next boot still re-attaches and still blocks on the live listener, so a reply that landed in the restart gap simply has to be sent again.
+That is strictly better than today, which re-posts the ask on every cycle.
+Making it transport-neutral means `fetchConversation` for WhatsApp plus a stable author id on `ConversationMessage`, which is an event-server change for transports no team in the fleet uses.
+
+The Slack ref for the read is assembled on both post paths, so the Slack path itself is one code path.
 On the gateway path the destination is already a conversation ref.
 On the legacy Slack channel-id path the team id is available from the same `require_app_identity` call that `_slack_topic` makes (`bobi/auth_bootstrap.py:278-283`), giving `slack:<team>:channel:<C...>:thread:<ts>`.
 The channel credential the read needs is registered by `_register_login_channel` (`:316-379`, `register_slack_workspaces` at `:348`), which runs on both paths before the listener JOINs.
 
-**Five phase budgets, not one shared timeout.**
+**The consumed ready reply is remembered, so it cannot be re-read as the pasted code.**
+One client and one queue serve every phase, and the live client enqueues each event as it arrives (`bobi/events/client.py:453-462`) while the catch-up read is a separate HTTP request.
+So a reply that lands after the listener connects but before the history read is satisfied is visible in **both**, and the live copy stays in the queue because phase 1 was satisfied without draining it.
+That is not merely untidy on the Claude path: `_extract_code` accepts any non-empty text and returns its last whitespace-delimited token (`bobi/auth_bootstrap.py:504-510`), so phase 3a would write the last word of "ready when you are" into the pty as the OAuth code.
+The fix is one value, not a mechanism: carry the consumed reply's message id (`fields.ts`, set by the adapter at `event-server/core/src/adapters/chat-sdk-slack.ts:165`, and `ConversationMessage.ts` on the history side) and have phase 3a reject that id.
+Equality is enough; no ordering assumption across `ts` formats is needed.
+
+**Four phase budgets, not one shared timeout.**
 Today a single 600s budget spans the ask wait, the URL scrape and the device authorization, so a human who authorizes at minute eleven loses even though the device code is valid for fifteen.
-The flow has five waits, and the Claude path has a second human wait the codex path does not (`flow="paste_back"` at `:98` versus `flow="device_poll"` at `:108`):
+The two flows then diverge, because the Claude path has a second human wait the codex path does not (`flow="paste_back"` at `:98` versus `flow="device_poll"` at `:108`):
 
 | Phase | Applies to | Budget | Source |
 |---|---|---|---|
 | 1. Ready-reply wait (the ask) | both | `ask_timeout`, 1800s | new |
 | 2. URL and device-code scrape | both | `url_timeout`, 120s | exists (`:588`), unchanged |
-| 3a. Pasted-code reply wait | `paste_back` | `timeout`, 600s | exists; this is what `--timeout`'s help already describes (`bobi/cli.py:808-809`) |
-| 3b. Device authorization | `device_poll` | `device_timeout`, 900s, the device code's own lifetime | new |
-| 4. Post-code process exit | both | 60s, as the paste_back path already does (`:680`) | exists on one path, extended to the other |
+| 3a. Pasted-code wait, then a bounded exit | `paste_back` | `timeout`, 600s, then 60s | exists (`:677`, `:680`), unchanged |
+| 3b. Device authorization, which **is** process exit | `device_poll` | `device_timeout`, 900s, the device code's own lifetime | widens the existing `proc.wait` (`:702`) |
+
+There is deliberately no fifth "post-code exit" phase on the codex path.
+`proc.wait` is the only signal the device flow has (`:701-705`): authorization finishing and the CLI exiting are the same event, so a further bounded exit wait after it would be vacuous unless a credential-file poll were added, and nothing needs one.
 
 `--timeout` keeps its current documented meaning, phase 3a, so the flag's help text stays true.
 It must not be silently reused as the phase-1 budget.
 `ask_timeout` is a keyword argument with no CLI flag, because nothing needs to set it per invocation.
 
-**Why 1800s and not hours.** The catch-up read makes a restart lossless, so a long wait buys nothing and a short cycle costs nothing in Slack noise.
+**Why 1800s and not hours.** On Slack the catch-up read makes a restart lossless, so a long wait buys nothing and a short cycle costs nothing in Slack noise.
 What the value trades is observability: the manager is not started while boot waits (section 4 of the entrypoint precedes section 5, `:565-577` before `:590-640`), so a credential-less machine has no health surface for the length of the wait.
 1800s bounds that dark window to half an hour and lets the restart show up in `fly logs` roughly twice an hour, while still being three times today's budget.
 This is the one number in the spec a reader might reasonably set differently; the shape is D1's and the trade is stated.
@@ -480,7 +526,7 @@ It also names a thread only when the destination is a channel, reusing the same 
 - `bobi/cli.py` - the optional `<tool>` argument, `--rebind`, and a target-aware pre-check.
 - `docker/docker-entrypoint.sh` - section 3c with its lstat refusal, the re-pointed sweep, the non-clobber guard and lstat refusal on the api-key materialization, the stale comment at `:484`.
 - `bobi/tool_library/codex/tool.yaml` - honour `CODEX_HOME`, and skip the `elif` write when a usable OAuth credential is present.
-- `bobi/tool_library/codex/guide.md:42`, `bobi/tool_library/gstack/guide.md:7-8`, `bobi/brain/codex_config.py:46-47` - stale claims this change falsifies.
+- `bobi/tool_library/codex/guide.md:42`, `bobi/tool_library/gstack/guide.md:7-8`, `bobi/brain/codex_config.py:46-47`, `docs/TOOL_LIBRARY.md:391-393`, `bobi/mcp_handshake.py:6` - stale claims this change falsifies.
 - `moda-labs/moda-agents` - the false preflight claim, the on-demand trigger prompt, the runbook line.
 
 **Out of scope.**
@@ -498,6 +544,7 @@ It also names a thread only when the destination is a channel, reusing the same 
 - **A codex tool login is permitted alongside an ambient `OPENAI_API_KEY`** (3.3). The on-disk OAuth file wins, because codex reads only that file (`docker/docker-entrypoint.sh:535-536`), and the non-clobber guard keeps that true across boots on a non-codex brain. On a codex-brained `api_key` team the pre-existing `:544` arm still rewrites its one credential every boot; that arm is out of scope here.
 - **Concurrent runs are prevented by prompt policy only** (D3). If the policy is violated, two asks post and two login CLIs race to write one file. The unique deployment name means both listeners still receive their own replies, and codex writes `auth.json` by replacement, so the outcome is one valid credential rather than a corrupt one. The residual cost is duplicate Slack messages. The cheap local fix if that ever matters is a pidfile in the agent's run dir, not a new mode on `file_lock`, which takes `fcntl.LOCK_EX` unconditionally (`bobi/fsutil.py:180`).
 - **An unclassifiable `${CODEX_HOME}/auth.json` survives every boot untouched and silently.** That is main's behaviour today (`:336-355` exits 1 on anything it cannot parse) and D8 keeps it. No boot diagnostic is emitted for a non-brain tool credential, because section 4's `credential-status` call checks the **brain's** path (`:567-571`); the reason is reported by `login-bootstrap codex` when the director fires it.
+- **The catch-up read cannot prove a human wrote the message it finds.** The live path rejects `fields.bot_id`, which the Slack adapter preserves (`event-server/core/src/adapters/chat-sdk-slack.ts:168`), but the history path has no authorship field at all: `toConversationMessage` keeps `{user, text, ts, files}` and discards `bot_id` and `subtype` (`event-server/core/src/channels.ts:280-295`, the interface at `:119-124`). A non-empty `user` is the strongest available signal, so a **third-party** bot posting in the ask's thread during a restart gap would satisfy the re-attach predicate where it would be rejected live. The blast radius is one spurious device URL and code posted into that thread plus a login that times out: no credential is minted, because minting still requires a human authorizing at the provider's own device page. Our own bots are excluded on both paths, live by `:99-100` and on history by the bot-user-id baseline. Closing it properly means `is_bot` on `ConversationMessage`, preserved by each adapter, which is an event-server change; see [8](#8-open-question).
 - **The listener shares the manager's `cursor.json`.** `EventServerClient` is constructed with no `cursor_path` (`:561`), which the client's own comment warns against across deployments. Benign and pre-existing: only `bobi/events/drain.py` ever acks, so nothing is written back, and a fresh deployment's replay buffer is empty regardless.
 - **On a claude-brained machine that has never booted codex, `codex exec` does not see gstack's codex-side skill links** (3.4). Nothing in this repo reads `${CODEX_HOME}/skills`, codex creates its own `skills/.system` there on first invocation, and the baked team skills never reached `~/.codex/skills` in the first place.
 - **`CODEX_HOME` moves codex's state to the volume.** Measured on a fresh `CODEX_HOME` after one `codex exec`: ~105 MB, of which ~103 MB is a plugins git clone under `.tmp/`, plus four sqlite databases with WALs, `sessions/`, `shell_snapshots/` and `skills/.system`. Live `~/.codex` is 107 MB and `/data` has 8.9 GB free of 15 GB.
@@ -529,11 +576,24 @@ Unit, `tests/test_auth_bootstrap.py` (baseline today: 78 passed in 2.35s).
 9. **`target` retargets everything.** With a `claude` brain and `target="codex"`, the spawned command is `codex login --device-auth` and the credential path resolves under the codex spec's credential dir.
 10. **`spawn_login` is still called with exactly one argument.** A fake with a `(home)`-only signature still binds when `target="codex"`.
 11. **Target validation, by named case.** `stub` is rejected (it is a known *brain* kind, so a generic typo case passes while this one does not), `gateway-openai` resolves to codex, an unknown value is rejected with the accepted values named, and `claude` is accepted.
-12. **Guard scoping by resolved provider.** A Claude-gateway config with `ANTHROPIC_AUTH_TOKEN` set refuses `target=None` **and** `target="claude"`, and permits `target="codex"`; `OPENAI_API_KEY` set refuses `target="claude"` and permits `target="codex"`. `tests/test_auth_bootstrap.py:1221-1227` passes unchanged.
+12. **Guard scoping by resolved provider.** Four legs, written against the right env var for each spec, because the guard reads `spec.shadow_env` (`:635-639`) and that is `ANTHROPIC_API_KEY` for claude (`:97`) and `OPENAI_API_KEY` for codex (`:107`):
+
+    | Config | `target` | Expected |
+    |---|---|---|
+    | Claude gateway + `ANTHROPIC_AUTH_TOKEN` | `None`, then `"claude"` | **refused**, both |
+    | Claude gateway + `ANTHROPIC_AUTH_TOKEN` | `"codex"` | permitted (D6's stated limitation) |
+    | `ANTHROPIC_API_KEY` set | `"claude"` | **refused** |
+    | `OPENAI_API_KEY` set | `"claude"` | permitted; it is not Claude's shadow var and must not be read as one |
+    | `OPENAI_API_KEY` set | `"codex"` | permitted (3.3) |
+
+    `tests/test_auth_bootstrap.py:1221-1227` passes unchanged: it drives `BRAIN_ENV` directly, so `resolved_kind is None` and the codex-brain refusal is still pinned.
 13. **D6's limitation is asserted as documented behaviour**, not as a guard: on a gateway-brained config, `login-bootstrap codex` is permitted and resolves the codex spec. The test's docstring states that this mints a direct provider credential and names the per-team policy knob as the future control, so the limitation cannot be deleted silently.
 14. **`cli.py`'s pre-check is target-aware.** With Claude credentials present and `codex` requested, it proceeds instead of printing "already present".
-15. **Re-attach posts nothing and sees a gap reply.** With a stored ask id and a thread whose newest message is a human one, no ask is posted and the login proceeds. With a thread whose newest message is the bot's own, the catch-up read yields nothing and the run blocks. A message with an empty `user` is not treated as human.
-16. **Stored-ask invalidation.** A stored destination that no longer matches the resolved one is treated as absent. A failed post into a stored id is treated as absent. The id is cleared on success and only on success.
+15. **Re-attach posts nothing and sees a gap reply.** With a stored ask id and a thread whose newest message is a human one, no ask is posted and the login proceeds. With a thread whose newest message is the bot's own, the catch-up read yields nothing and the run blocks. A message with an empty `user` is not treated as human. On a **non-Slack** destination the catch-up read is skipped entirely and the run blocks on the live listener, with no history call attempted: assert the skip, not a faked history response, or the test passes against a transport whose endpoint would reject the call.
+16. **The in-flight marker and the id recovery.** A marker written before the post with no id, plus a channel history containing this bot's ask, recovers that id and posts nothing. A marker with no id on a non-Slack destination posts nothing and blocks. **A failed post into a stored id leaves the state file byte-identical and exits non-zero**, which is the pin for D1: an implementation that clears it would post a second ask on the next boot. The id is cleared on success and only on success.
+16a. **A destination change invalidates.** A stored destination that no longer matches the resolved one is treated as absent and a fresh ask is posted.
+16b. **The consumed reply is not re-read as the code.** The same human reply present in both the catch-up history and the live queue satisfies phase 1 once, and phase 3a rejects it by message id rather than writing its last word into the pty.
+16c. **A pre-threaded destination still correlates.** With `$BOBI_LOGIN_CHANNEL` set to a six-part `slack:...:channel:...:thread:<root>` ref, a human reply carrying `thread_ts == <root>` is ready. The ask-`ts` predicate this replaces would hang; assert readiness, not merely that no exception was raised.
 17. **Phase budgets do not share.** A phase-1 wait that consumes its whole budget does not reduce phase 3b's, and a ready reply arriving one tick after the phase-1 deadline does not rescue the run: it is dropped, and the thread carries the expired outcome post.
 18. **Reaping.** A fake login process that ignores `terminate` is signalled by process group, waited with a bound, escalated to `kill`, and reaped.
 19. **Rebind.** With a structurally valid credential present: bare `login-bootstrap codex` short-circuits, `--rebind` posts the ask, and the human reply quarantines the credential to a collision-free name before the fresh login runs. A second rebind in the same second does not overwrite the first quarantine file. An `auth.json` that is a symlink is refused rather than renamed.
@@ -544,7 +604,7 @@ Shell lane, runnable without docker.
 
 22. **Boot-order matrix, with real assertions.** claude, codex, claude on one persisted `${DATA_DIR}`, and the mirror, with `/opt/bobi/skills` present and absent, and with `${HOME}` persisted across boots as well as recreated. The harness **must** persist `${HOME}`: a per-boot-fresh `${HOME}` is a `fly deploy`, not a same-machine restart, and that axis is what hid an earlier blocker. Each boot asserts exit 0 **and** that `CODEX_HOME` is exported as `${DATA_DIR}/codex`, that the path is a real directory owned by `${APP_USER}`, and that both hold across a brain switch. Exit 0 alone passes with section 3c omitted entirely, which is not a regression pin.
 23. **Planted symlinks, one outcome.** `${DATA_DIR}/codex -> /etc` and `${CODEX_HOME}/auth.json -> /etc/passwd`, separately. Boot exits non-zero with the diagnostic, **and** the protected target's ownership, mode and content are untouched. Fail, not repair: neither state is one any boot path creates, so repairing it silently discards the only signal that something planted it. The `[ -L "${HOME}/.codex" ] && rm -f` line at `:332` is not this case and is unaffected, because that path is one the entrypoint itself creates.
-24. **The credential guard and the conservative sweep, five states x both auth modes.** One table, because the two arms are the same decision read in opposite directions.
+24. **The credential guard and the conservative sweep, five states x both auth modes x both brain kinds.** One table, because the two arms are the same decision read in opposite directions. The brain-kind axis is not padding: it is the only axis that distinguishes a guard on the `:547` call site from a guard inside the shared function, and the second one would wrongly stop a codex-brained `api_key` team from rewriting its own credential. On a **codex** brain every cell below is main's behaviour, unguarded.
 
     | `${CODEX_HOME}/auth.json` | `api_key` + `OPENAI_API_KEY` set | `subscription` |
     |---|---|---|
@@ -555,6 +615,8 @@ Shell lane, runnable without docker.
     | OAuth, refresh token present | **left intact**, with a log line | **left intact** |
 
     The absent row's "no log line" and the two left-intact rows are the pins for keeping the predicate conservative: a widened "delete anything `credential-status` rejects" would log on every pre-login boot of every subscription machine and would delete an unobserved schema.
+24a. **The catch-up read works against a real event server, not a fake.** Drive the Slack-destination re-attach through the local event server and its real channel adapter, so a `/channels/history` contract change is caught here rather than post-merge. The unit lane fakes the chat transport wholesale (`tests/test_auth_bootstrap.py:3-6` says so itself: "The pty spawn, Slack post, and event-bus wait are injected as fakes"), which is correct for the orchestration but cannot see an adapter that answers 400.
+24b. **The non-Slack skip is asserted against the real adapter set.** A WhatsApp destination must take the skip path, pinned against the fact that its adapter has no `fetchConversation` (`event-server/core/src/channels.ts:471-571`) rather than against a stub that invents one. This is the item that fails loudly the day someone adds WhatsApp history, which is the signal to widen the design.
 25. **The export reaches the manager.** An exported `CODEX_HOME` survives `gosu "${APP_USER}" env "HOME=..." ... bobi ...` (`:416`, `:637`), because `env` without `-i` inherits. Pinned because an `env`-allowlist reading of those lines would wrongly conclude the variable needs adding to four call sites.
 
 Docker lane, `tests/integration/test_container_image.py` (`-m docker`, needs a built image).
@@ -571,15 +633,31 @@ Live, post-merge, owed on the issue as proof of work.
 
 Not to be started until Gate 1 is approved.
 
-1. Tests 1-8 (ordering, human-only, the one correlation rule, both post paths, the outcome post, the Discord refusals) against the current `run_bootstrap`, failing.
-2. Change 1 (3.2), including the connect/wait split. Tests 1-8 green, and the 78 existing tests stay green.
+1. Tests 1-8 and 16c (ordering, human-only, the one correlation rule including a pre-threaded destination, both post paths, the outcome post, the Discord refusals) against the current `run_bootstrap`, failing.
+2. Change 1 (3.2), including the connect/wait split. Those tests green, and the 78 existing tests stay green.
 3. Tests 9-14, failing. Then change 2 (3.3). Test 10 is the pin that the `spawn_login` call site stayed `(home)`-only.
-4. Tests 15-18 and 20-21, failing. Then the re-attach, the catch-up read, the phase budgets, the reaping and the unique deployment name (4).
+4. Tests 15, 16, 16a, 16b, 17, 18, 20 and 21, failing. Then the re-attach with its marker and id recovery, the Slack-only catch-up read, the consumed-reply watermark, the phase budgets, the reaping and the unique deployment name (4). Test 16 is the D1 pin: an implementation that clears the state on a failed post fails it.
 5. Test 19, failing. Then `--rebind` (3.5).
-6. Change 3 (3.4): section 3c, the re-pointed sweep, the non-clobber guard and the lstat refusals, the `tool.yaml` retarget plus its own guard, and the four stale claims. Then tests 22-27.
-7. Review gate, full test run, PR.
-8. The `moda-agents` companion PR (3.6).
-9. Post-roll: tests 28-29 on the issue.
+6. Change 3 (3.4): section 3c, the re-pointed sweep, the non-clobber guard on the `:547` call site, the lstat refusals, the `tool.yaml` retarget plus its own guard, and the stale claims. Then tests 22-25.
+7. Tests 24a and 24b against the local event server and the real adapters. These are the items that would otherwise defer an adapter contract break to post-merge.
+8. Review gate, full test run, PR.
+9. The `moda-agents` companion PR (3.6).
+10. Post-roll: tests 28-29 on the issue.
+
+## 8. Open question
+
+One question this fold raises is a genuine fork rather than a defect, so it is posed instead of decided.
+Everything above is written to the first option, so silence means take the spec as written.
+
+**Q. Should the catch-up read be able to prove human authorship, at the cost of an event-server change?**
+
+The re-attach path reads chat history, and history carries no authorship field: `toConversationMessage` discards `bot_id` and `subtype` (`event-server/core/src/channels.ts:280-295`), so the predicate can only ask whether `user` is non-empty and is not this bot's own id.
+The live path does better, because the adapter preserves `fields.bot_id` (`adapters/chat-sdk-slack.ts:168`) and the spec rejects it.
+
+- **Option A, as written.** Accept the asymmetry and state it (`5`). A third-party bot posting in the ask's thread during a restart gap can start a login. It cannot finish one: no credential exists until a human authorizes at the provider's device page, so the cost is a spurious device code in a private channel and a timed-out run.
+- **Option B.** Add `is_bot` (or an authoritative `author_id`) to `ConversationMessage` and preserve it in each adapter, then apply one human-only rule on both paths. This is correct rather than bounded, and it is also what would make the catch-up read work on Discord, whose history reports `author.username` as `user` (`event-server/core/src/channels.ts:612-618`). It is a change in the event-server tier with its own deploy, for a precondition that needs a third-party bot in a private login channel.
+
+The reason this is Zach's and not mine: it trades a small, bounded trust gap on a credential-minting path against scope in another tier, and "how much trust gap is acceptable on an auth flow" is a judgment call, not a measurement.
 
 ## Appendix A: verification record
 
