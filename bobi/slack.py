@@ -15,6 +15,7 @@ how to handle failures.
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 from bobi import http as pooled
@@ -490,3 +491,34 @@ def post_slack_message(
         payload["thread_ts"] = thread_ts
 
     return _slack_api("chat.postMessage", token, payload, timeout=timeout)
+
+
+def post_operator_alert(message: str, *, what: str = "operator",
+                        timeout: float = 10) -> bool:
+    """Post an operator alert to the fleet alert channel; True when delivered.
+
+    The one non-LLM path a system alert takes to a human, shared by every
+    caller that must reach an operator when the agent itself cannot report
+    (a crash loop, a budget exhaustion, an unavailable brain). Gated on
+    ``WATCHDOG_ALERT_CHANNEL`` plus a Slack bot token.
+
+    With either unset this degrades to a log-only warning and returns False,
+    never an error: every caller is on a path - a restart decision, a brain
+    turn's result - whose outcome must not change because alerting is
+    unconfigured. Transport failures raise, per this module's contract;
+    callers decide how loud that is.
+
+    ``what`` names the caller in the log-only warning. It is the grep handle an
+    operator uses to answer "why did no alert arrive?", so it replaces the
+    per-call-site wording the two supervisor callers had before they shared
+    this path.
+    """
+    token = (os.environ.get("BOBI_SLACK_BOT_TOKEN")
+             or os.environ.get("SLACK_BOT_TOKEN"))
+    channel = os.environ.get("WATCHDOG_ALERT_CHANNEL")
+    if not (token and channel):
+        log.warning("%s: WATCHDOG_ALERT_CHANNEL / Slack token not set - "
+                    "alert is log-only: %s", what, message)
+        return False
+    post_slack_message(token, channel, message, timeout=timeout)
+    return True
