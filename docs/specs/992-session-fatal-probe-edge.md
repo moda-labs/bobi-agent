@@ -27,8 +27,8 @@ What changed is citations, measurements, and the evidence behind two guards.
 | W4 | `bobi/sdk.py`, `subagent.py`, `orchestrator.py`, `session.py` grew (#1081, #1091, #1095, #1099, #1101, #1105, #1111) | Line cites moved, semantics did not. §6.3's inventory is the same ten writers, re-derived |
 | W5 | **The restart-reap false positive has a live instance.** 2026-08-03 21:09:09-19: **five** sessions reaped `crashed` with one byte-identical `DIED_WITHOUT_TERMINAL` inside **10.1 seconds** | §6.2's restart grace and test 10 move from review hypothesis to measured. Round 2 then found the grace as drafted does not close it. See §3.1 and §14.6 F1 |
 | W6 | **A new shared-signature cluster exists and never reaches the condition.** 154 `turn failed (kind=unknown, api_status=none)` entries across 154 separate curator dispatches, 2026-08-02 to 2026-10-01 | The 1h lookback alone excludes it: at most **2** land inside any one-hour window. Recorded as FP2 in §6.2, with the credit corrected in round 2 |
-| W7 | Registry grew to **1020 session directories** / **3708** top-level entries; `state.json` files 510 -> **857**; full parse 12.6 -> **20.0 ms** | §6.4 re-measured, and the earlier "3684 directories" relabelled: it was an `os.listdir` count, not a directory count. The bounded read is the growth-proofing; the 500-entry cap was cut in round 2 |
-| W8 | **Simplicity pass: two config knobs and two spec components cut.** | Smaller surface, same behaviour. See §1.3, then §1.4 for the six more that round 2 cut |
+| W7 | Registry grew to **1020 session directories** / **3708** top-level entries; `state.json` files 510 -> **857**; full parse 12.6 -> **20.0 ms** | §6.4 re-measured, and the earlier "3684 directories" relabelled: it was an `os.listdir` count, not a directory count. The bounded read is the growth-proofing; the 500-entry cap was cut in review round 1 |
+| W8 | **Simplicity pass: two config knobs and two spec components cut.** | Smaller surface, same behaviour. See §1.3, then §1.4 and §1.5 for the seven more the two review rounds cut |
 
 ### 1.2 2026-08-21 pass (`7025981` -> `ac2471e6`), unchanged and still true
 
@@ -462,8 +462,8 @@ shape. Requiring a success demotes them to `unknown`, which is honest and which
 is what makes §7.1's ABANDON path reachable.
 
 Three fields beyond `state`, each with a named consumer: `failures` and `error`
-are quoted verbatim in the alert (§7.3), and `since` dates the current streak
-(see below).
+are quoted verbatim in the alert (§7.3), and `since` dates the current streak.
+
 **`since` is the streak's date, not the incident's.** The detector is
 memoryless, so its `since` is re-derived every poll as the `terminal_at` of the
 **oldest failure in the current streak**. The alerter's incident carries its own
@@ -475,7 +475,7 @@ computing from the block would understate the outage by 44.2 minutes. Sourcing
 it the other way, telemetry reading the alerter's state file, would break both
 §6.4's single observation and §7.2's separation of the two files.
 
-`last_ok_at` was cut in round 2: nothing reads it, the recovery rule compares
+`last_ok_at` was cut in review round 1: nothing reads it, the recovery rule compares
 against the incident's own `opened_at` rather than against it, and it costs the
 detector an extra pass over the lookback to find the most recent success.
 `terminal_at` in the registry already answers "when did a dispatch last work",
@@ -497,7 +497,7 @@ That pair is the diagnosis. Either alone is not.
 **No new lifecycle events.** An earlier draft added a `sessions_failing` /
 `sessions_recovered` pair mirroring `probe_failing` / `probe_recovered`, and the
 previous pass kept it for consistency with load grace's `load_grace_active` /
-`load_grace_cleared`. Round 2 cut it (§14.6 S1): nothing in the repo consumes
+`load_grace_cleared`. Review round 1 cut it (§14.6 S1): nothing in the repo consumes
 any episode event, so a shipped unconsumed pair is not an argument for a second
 one, and adding a lifecycle edge later is two lines in `telemetry.py` plus a doc
 row with no migration and no consumer breakage. The heartbeat block carries the
@@ -780,7 +780,7 @@ for a knob: N=2 buys 4 minutes and doubles the false-positive surface, and
 §3.1's three further 2-session reap clusters would all reach the condition at
 N=2.
 
-Round 2 cut the knob (§14.6 S3). §1.3's own reasoning for cutting the lookback
+Review round 1 cut the knob (§14.6 S3). §1.3's own reasoning for cutting the lookback
 knob applies verbatim: nobody has asked to tune it, and promoting a constant to
 an env knob later is additive and free. An arguable default is a reason to pick
 the default carefully, not a reason to ship a dial, and the entire span of the
@@ -1147,7 +1147,7 @@ Absence of signal is not a signal, matching `is_wedged`'s stated discipline
 | `WATCHDOG_SESSION_FATAL_ENABLED` | `1` | Kill switch |
 
 Down from four in the 2026-08-21 draft: §1.3 cut the lookback and restart-grace
-knobs, and round 2 cut the streak knob (§14.6 S3). Everything else is a module
+knobs, and review round 1 cut the streak knob (§14.6 S3). Everything else is a module
 constant: N=3, the lookback (3600s), and the restart exclusion window (300s).
 
 - N has no requester, and §6.2 shows the whole argument is four minutes of
@@ -1276,7 +1276,7 @@ for a new sidecar signal's test shape. Counts re-derived 2026-10-09 with
 (d) A single `ok` observation closes the incident through RECOVERED instead, since `ok` requires a success in the window (§5.2). Pins that the two close paths cannot both fire.
 
 Cut from this list: "a raising `post_fn` does not propagate" (§1.3) and "one
-scan per poll" (round 2, §14.6 S5). The first is covered by the existing suite
+scan per poll" (review round 1, §14.6 S5). The first is covered by the existing suite
 through the shared `_post`. The second has nothing left to assert once the
 observation is computed once per cycle and carried on `SupervisorState` rather
 than memoized behind a call the test would have to count.
@@ -1352,7 +1352,7 @@ moved the balance; it only removed reasons to re-derive it.
   2-session reap clusters would all reach the condition at N=2, so 3 is the
   conservative read of a shared on-disk surface. Changing it is a one-line
   constant edit, not a design change.
-- **The lifecycle episode pair.** Round 2 cut `sessions_failing` /
+- **The lifecycle episode pair.** Review round 1 cut `sessions_failing` /
   `sessions_recovered` as unconsumed (§5.2, §14.6 S1). If Gate 1 wants the
   episode record on `fleet/lifecycle` for symmetry with `probe_failing` and
   `load_grace_active`, it is two lines in `telemetry.py` plus a doc row. Say so
@@ -1524,7 +1524,7 @@ any part of it. The design surface is byte-identical.
 | X7 | Registry sweep up 75% in seven weeks (2125 -> 3708 `listdir` entries), parse set 510 -> 857, parse 12.6 -> 20.0 ms. Round 2 relabelled the count and cut the 500 cap | §6.4, §10, §14.6 F4/F7 |
 | X8 | No new session-limit or auth burst since 2026-07-31. Three isolated singles, no streak. One burst in 14 weeks | §3.3 |
 | X9 | Terminal-writer inventory re-derived: same ten writers, every line moved, no semantics changed | §6.3 |
-| X10 | **Simplicity pass:** two knobs and two spec components cut, no capability lost | §1.3, §9, §6.2, §11. Round 2 cut six more (§14.6 S1-S6) |
+| X10 | **Simplicity pass:** two knobs and two spec components cut, no capability lost | §1.3, §9, §6.2, §11. Round 1 cut six more (§14.6 S1-S6), round 2 one more (§14.7) |
 
 **Not folded, and why.** This pass found nothing that required a design change.
 Its one judgement call was whether to cut the `sessions_failing` /
