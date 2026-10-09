@@ -5,7 +5,9 @@ real ~/.bobi directory or any production state.
 """
 
 import os
+import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -208,6 +210,7 @@ def claude_bobi_env(tmp_path_factory):
     try:
         yield env
     finally:
+        _cleanup_bobi_env(env)
         if old_home is None:
             os.environ.pop("BOBI_HOME", None)
         else:
@@ -255,6 +258,7 @@ def stub_bobi_env(tmp_path_factory):
     try:
         yield env
     finally:
+        _cleanup_bobi_env(env)
         if old_home is None:
             os.environ.pop("BOBI_HOME", None)
         else:
@@ -422,18 +426,181 @@ def dual_brain_cli_run(dual_brain_env):
     return _make_cli_run(dual_brain_env)
 
 
+def _reap_process_group(pid: int, grace: float = 5.0) -> None:
+    """Terminate the process group led by *pid*, then WAIT for it to empty.
+
+    A launch is detached with ``start_new_session=True``
+    (``bobi/subagent.py::_launch_detached``), so the agent leads its own
+    process group and ``killpg`` takes its node children with it. The wait is
+    the load-bearing part, and it is why ``cancel_agent`` is not enough here:
+    that SIGTERMs and returns immediately, leaving the agent free to keep
+    writing while the caller removes its directory.
+
+    Bounded and best effort. SIGKILL after the grace period, and return
+    regardless once it expires: a process that took SIGKILL cannot execute
+    another instruction, which is the property the caller actually needs.
+
+    Never signals this process or the group it belongs to. The in-process
+    execution path records the RUNNING process's pid (``bobi/subagent.py``:
+    ``registry.update(session_name, pid=os.getpid())``), so a session dropped
+    from inside that process hands us our own pid - under pytest, the test
+    runner's. ``killpg`` on it SIGTERMs the whole suite, which dies mid-file
+    with no failure report and reads as infrastructure flake rather than a
+    defect. Such a pid is by construction not a detached agent, so there is
+    nothing here to reap; the rmtree retry in the caller absorbs whatever that
+    session is still writing.
+    """
+    if pid <= 0 or pid == os.getpid() or pid == os.getpgid(0):
+        return
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 2.0)):
+        try:
+            os.killpg(pid, sig)
+        except OSError:
+            return  # no such group: already gone, or not ours to signal
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pid, 0)
+            except OSError:
+                return
+            time.sleep(0.02)
+
+
+def _process_command(pid: int) -> str:
+    """Best-effort full command line for PID identity checks."""
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        raw = b""
+    if raw:
+        return raw.replace(b"\0", b" ").decode(errors="replace")
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _process_matches_home(pid: int, home_dir: Path) -> bool | None:
+    """Whether PID belongs to this isolated BOBI_HOME, or unknown."""
+    try:
+        raw = (Path("/proc") / str(pid) / "environ").read_bytes()
+    except OSError:
+        raw = None
+    if raw is not None:
+        prefix = b"BOBI_HOME="
+        value = next((entry[len(prefix):] for entry in raw.split(b"\0")
+                      if entry.startswith(prefix)), None)
+        return value == os.fsencode(home_dir) if value is not None else None
+
+    try:
+        result = subprocess.run(
+            ["ps", "eww", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+
+    prefix = r"(?:^| )BOBI_HOME="
+    if re.search(prefix, result.stdout) is None:
+        return None
+    exact = prefix + re.escape(str(home_dir)) + r"(?= [A-Za-z_][A-Za-z0-9_]*=|$)"
+    return re.search(exact, result.stdout) is not None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return pid > 0
+
+
+def _cleanup_bobi_env(
+    env: BobiEnv, *, include_event_server: bool = True
+) -> None:
+    """Reap every detached daemon owned by an isolated integration env."""
+    # Deliberately literal, and deliberately NOT derived from the production
+    # launch commands. This is the pinned expectation; the tests that exercise
+    # it build their stub daemons from `bobi.service.manager_launch_argv` and
+    # `bobi.events.artifact.bundle_path`, so an argv change in production fails
+    # those tests here rather than quietly leaving the reaper matching nothing.
+    identities = {
+        "manager.pid": (
+            f"-m bobi.cli agent {env.agent_name} start --foreground"
+        ),
+    }
+    if include_event_server:
+        identities["event-server.pid"] = "dist/local.js"
+    lifecycle_files = {
+        "manager.pid": ("manager-health.port", "manager.launch.json"),
+        "event-server.pid": ("event-server.port", "event-server.launch.json"),
+    }
+    for name, identity in identities.items():
+        pid_file = env.state_dir / name
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            pid = 0
+        command = _process_command(pid) if pid > 0 else ""
+        if pid > 0 and _pid_alive(pid) and not command:
+            continue
+        if identity in command:
+            matches_home = _process_matches_home(pid, env.home_dir)
+            if matches_home is None:
+                continue
+            if matches_home:
+                _reap_process_group(pid)
+        pid_file.unlink(missing_ok=True)
+        for stale_name in lifecycle_files[name]:
+            (env.state_dir / stale_name).unlink(missing_ok=True)
+
+
 def _drop_session(name):
     """Retire *name* from whichever install this process is bound to.
+
+    Reap, THEN remove. A launch is detached by design, so the agent is still
+    writing into its session directory when the test that launched it cleans
+    up. Removing first raced that writer and raised ``OSError: [Errno 39]
+    Directory not empty`` on roughly 3% of CI runs; killing the writer removes
+    the race outright instead of narrowing it.
+
+    It does NOT close the suite's orphaned-node leak. The CI runner still
+    terminates the same 5 orphan ``node`` processes after this change, so those
+    come from launches that never reach this fixture, not from the sessions it
+    drops. Measured on the run for PR #1076, not assumed.
 
     The registry is resolved per call, never cached: the bound root is pinned
     per test, so a registry captured at fixture setup would outlive its env.
     """
     from bobi.sdk import get_registry
     registry = get_registry()
+    entry = registry.get(name)
+    _reap_process_group(entry.pid if entry else 0)
     registry.mark_done(name)
     session_dir = registry.session_dir(name)
     if session_dir.exists():
-        shutil.rmtree(session_dir)
+        # Retries close the rmtree race on Linux when a dying child process is
+        # still flushing its final buffers into session_dir.
+        for attempt in range(10):
+            try:
+                shutil.rmtree(session_dir)
+                break
+            except OSError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.1)
 
 
 def _clean_session():

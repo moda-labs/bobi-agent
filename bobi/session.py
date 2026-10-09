@@ -339,7 +339,7 @@ class Session:
         # Extra event topics beyond this session's own inbox/<self> (e.g. the
         # manager's external resource topics). inbox/<self> is always added.
         self._subscribe = list(subscribe or [])
-        self.inbox = Inbox(name)
+        self.inbox = Inbox(name, stats_callback=self._record_inbox_stats)
         self._system_prompt = system_prompt or {
             "type": "preset",
             "preset": "claude_code",
@@ -406,9 +406,20 @@ class Session:
     def detect_state(self) -> str:
         return self._state
 
+    def _record_inbox_stats(self, depth: int, oldest_age: float) -> None:
+        """Persist queue telemetry without treating queue movement as progress."""
+        try:
+            get_registry().update_inbox_stats(
+                self.name, depth=depth, oldest_age=oldest_age)
+        except Exception:
+            log.debug("Could not persist inbox stats for '%s'", self.name,
+                      exc_info=True)
+
     def _set_state(self, state: str) -> None:
         """Update state and wake any waiter when the session becomes idle or terminal."""
         self._state = state
+        if state == "error":
+            self.inbox.mark_unreadable()
         if state in ("waiting_input", "stopped", "error") and self._input_ready:
             self._input_ready.set()
 
@@ -1291,7 +1302,11 @@ class Session:
             if response is None:
                 log.error(
                     "Inbox message %s for '%s' did not reach a terminal result; "
-                    "leaving it unacknowledged for replay (state=%s)",
+                    "leaving it unacknowledged (state=%s). Brain replacement does not "
+                    "replay this message in the current process. An ordinary manager "
+                    "restart may recover it only while the deployment and server "
+                    "history survive. Review prior side effects before resending; "
+                    "do not use --fresh to preserve pending replay.",
                     msg.id,
                     self.name,
                     self._state,
@@ -1476,6 +1491,18 @@ class Session:
                     )
                 continue
 
+            from bobi.events.client import stale_event_annotation
+            stale_notes = [
+                note for timestamp in msg.event_timestamps
+                if (note := stale_event_annotation(timestamp)) is not None
+            ]
+            if stale_notes:
+                msg.text += "\n" + "\n".join(stale_notes)
+            queued_for = max(0.0, time.monotonic() - msg.enqueued_at)
+            log.info(
+                "Consuming inbox message for %s (queued %.1fs, depth=%d)",
+                self.name, queued_for, self.inbox.depth(),
+            )
             await self._process_message(msg)
             if self._state == "error":
                 return
@@ -1643,13 +1670,20 @@ class Session:
             # blocking start() for tens of seconds on a slow event server would
             # stall the manager's boot and trip liveness probes. The background
             # loop below owns the patient, backed-off retries instead.
-            self._subscription = _start_event_subscription(
+            subscription = _start_event_subscription(
                 self.name, keys, bobi_root(), register_attempts=1)
+            with self._sub_lock:
+                shutting_down = self._sub_retry_stop.is_set()
+                if not shutting_down:
+                    self._subscription = subscription
+            if shutting_down:
+                subscription.stop()
         except Exception:
             log.warning(
                 "Event subscription registration failed for '%s' — booting "
                 "anyway and retrying in the background; queued events resume "
-                "on reconnect", self.name, exc_info=True,
+                "on reconnect only while deployment and server history survive",
+                self.name, exc_info=True,
             )
             self._retry_subscription_in_background(keys)
 

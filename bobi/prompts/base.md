@@ -65,6 +65,50 @@ conversation's history, use
 
 ## CLI tools
 
+### Filing Bobi feedback
+
+When the user explicitly asks you to file Bobi feedback, or a workflow directs
+you to do so, use `bobi feedback bug` or `bobi feedback feature`. If the user
+has not asked you to file it, summarize the proposed title and body first and
+ask for confirmation. Never include secrets, credentials, raw transcripts,
+stack traces, absolute paths, or private user data. Prefer linking an existing
+issue when one is already known.
+
+### Bugs in bobi itself
+
+When bobi misbehaves while you are working - a `bobi` command crashes, a
+workflow step wedges, an event never arrives, the framework raises a traceback
+that is not your task's code - do not just route around it. Root-cause it:
+
+```bash
+bobi feedback rca --error "one line: what broke"
+```
+
+It prints the procedure to follow. Hand that text to a sub-agent so the
+analysis does not derail your own task:
+
+```bash
+BOBI_FRAMEWORK_RCA_ACTIVE=1 bobi agent <agent> subagents launch -w adhoc \
+  --role engineer --id framework-rca \
+  --task "$(bobi feedback rca --error 'one line: what broke')"
+```
+
+The fixed `--id` is deliberate: one RCA at a time, so a bug that fires
+repeatedly cannot become a storm of analyses. `BOBI_FRAMEWORK_RCA_ACTIVE=1`
+stops the sub-agent from opening an RCA on its own failure.
+
+The procedure ends by filing with `bobi feedback bug --rca`, which searches the
+destination repo first and comments on an existing report rather than opening a
+duplicate. Keep the title and body SHORT: that command enforces hard limits and
+truncates anything longer.
+
+Two rules bound all of this:
+
+- RCA is best effort. If it fails, note it in one line and get back to your
+  task. It must never block, retry, or fail the work that triggered it.
+- If `bobi feedback rca` prints nothing, the operator disabled it with
+  `BOBI_FRAMEWORK_RCA=off`. File nothing and carry on.
+
 ### Launch agents
 
 ```bash
@@ -126,25 +170,6 @@ cat build.log | aichat "What failed and why?"   # pipe input in
 Requires a configured gateway (`OPENROUTER_API_KEY` + `AICHAT_PLATFORM` in the
 environment). An auth error means it isn't configured for this instance —
 surface that, don't pass a key inline.
-
-### Generate images
-
-Generate images by calling the OpenAI Images API with `curl` — a direct
-capability call, not delegation. The API returns base64, so the convention is
-**generate → decode the bytes to `/tmp/*.png` → `Read` the path** (never let
-base64 land in your context); reuse that file downstream (Slack upload, PR
-attachment).
-
-```bash
-curl -fsS https://api.openai.com/v1/images/generations \
-  -H "Authorization: Bearer $OPENAI_API_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"gpt-image-1","prompt":"...","n":1,"size":"1024x1024"}' \
-  | jq -e -r '.data[0].b64_json' | base64 --decode > /tmp/img-$RANDOM.png
-```
-
-`OPENAI_API_KEY` comes from the environment at call time — never baked, never on
-the command line. A 401 means it isn't configured for this instance; surface
-that rather than improvising. Full details: your team's `tools/image.md`.
 
 ## Your working directory
 

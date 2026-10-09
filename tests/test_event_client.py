@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 from bobi.events.client import (
     format_event_for_manager,
     event_queue,
+    stale_event_annotation,
     _log_event,
 )
 
@@ -140,6 +141,27 @@ class TestFormatEventForManager:
         }
         text = format_event_for_manager(event)
         assert "thread_ts" not in text
+
+    def test_stale_annotation_is_calculated_at_consumption_time(self):
+        timestamp = "2026-08-21T19:58:47+00:00"
+        with patch("bobi.events.client.epoch_seconds", return_value=1000.0):
+            assert stale_event_annotation(timestamp, now=1119.0) is None
+            note = stale_event_annotation(timestamp, now=3760.0)
+
+        assert note is not None
+        assert "[STALE: queued 2026-08-21T19:58:47+00:00" in note
+        assert "age 46m" in note
+
+    def test_recent_event_is_not_marked_stale(self):
+        event = {
+            "v": 2, "source": "slack", "type": "slack.dm",
+            "timestamp": "2026-08-21T19:58:47+00:00",
+            "text": "current question", "fields": {},
+        }
+        with patch("bobi.events.client.epoch_seconds", return_value=1000.0):
+            text = format_event_for_manager(event)
+
+        assert "STALE" not in text
 
     def test_renders_requested_by_from_data(self):
         event = {
@@ -451,6 +473,50 @@ class TestRecordDisconnect:
         # One good long-lived connection clears the streak.
         assert c._record_disconnect(c._STABLE_AFTER_S + 1) == "routine"
         assert c._short_drop_streak == 0
+
+
+class TestDeafReconnectResubscribe:
+    def _client(self, tmp_path):
+        from bobi.events.client import EventServerClient
+        return EventServerClient(
+            server_url="http://localhost:9999",
+            deployment_id="dep-1",
+            api_key="key-1",
+            cursor_path=tmp_path / "cursor.json",
+        )
+
+    def test_protocol_failure_stops_client_and_clears_liveness(
+            self, tmp_path, caplog):
+        from bobi.events.protocol import IncompatibleEventProtocol
+
+        client = self._client(tmp_path)
+        client._connected.set()
+        client._ws = MagicMock()
+
+        def incompatible():
+            raise IncompatibleEventProtocol("event protocol ranges do not overlap")
+
+        with caplog.at_level("ERROR", logger="bobi.events.client"):
+            client._safe_resubscribe(incompatible)
+
+        assert client._stop.is_set()
+        assert not client._connected.is_set()
+        client._ws.close.assert_called_once_with()
+        assert "Event protocol negotiation failed" in caplog.text
+
+    def test_generic_failure_remains_best_effort(self, tmp_path):
+        client = self._client(tmp_path)
+        client._connected.set()
+        client._ws = MagicMock()
+
+        def transient_failure():
+            raise RuntimeError("temporary failure")
+
+        client._safe_resubscribe(transient_failure)
+
+        assert not client._stop.is_set()
+        assert client._connected.is_set()
+        client._ws.close.assert_not_called()
 
 
 class TestEventQueue:

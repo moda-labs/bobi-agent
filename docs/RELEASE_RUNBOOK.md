@@ -19,24 +19,14 @@ Fly-hosted agents.
 > the recipe, so a released image tag is a hard dependency of every deploy,
 > not just of a first install.
 >
-> **The canary gates the fleet ROLL, not the publish — and that is now
-> structural, not a gap awaiting repair.** Pre-reorg, `release.yml` had an
-> `image` job gated on the private fleet canary's `smoked` output. The split
-> removed that coupling, and D7 settled it the other way: the canary builds
-> `FROM ghcr.io/moda-labs/bobi:<version>`, the same base the fleet deploys, so
-> **the image must exist before the canary can run at all**. A gate cannot
-> precede the artifact it consumes.
+> **Final GHCR tags require a proven candidate (#930).** Publish the wheel,
+> build attempt-specific candidate images, let the private fleet canary consume
+> the candidate digest, then promote those exact bytes through the trusted
+> `repository_dispatch` callback. Candidate publication does not change final
+> version tags or `latest`. PyPI retains its independent trusted-publisher gate.
 >
-> So the sequence is: publish the wheel, publish the image, run the fleet gate
-> from `moda-agents`, and **do not roll the fleet until it is green**. A bad
-> image tag is adopted by every team's next deploy. Since 2026-08-01 that last
-> step is mechanical rather than a matter of remembering — `version-gate.yml`
-> in `moda-agents` proves a candidate version on `ci-canary` and only then opens
-> the `BOBI_VERSION` bump PR.
->
-> PyPI keeps its own external backstop (trusted publishing). GHCR is ungated,
-> which is the accepted cost of the split; re-coupling it would need a
-> cross-repo `repository_dispatch` into this repo's `release-image.yml`.
+> The private `version-gate.yml` still separately gates the fleet pin bump and
+> roll. Candidate proof must not deploy the production Worker or roll teams.
 
 > **Dev channel (#740 Track A):** every fully-green push to `main`
 > fast-forwards the `dev` branch (the `promote-dev` job in `ci.yml`). This is
@@ -132,9 +122,13 @@ The public release workflow must go green:
 - PyPI publish
 - Homebrew formula bump + bottle-URL smoke
 
-Then publish the reference image from THIS repo (`release-image.yml`): multi-arch
-build + the `:latest` move when this is the newest non-prerelease release. It
-installs `bobi==<version>` from PyPI, so it must run after the publish above.
+Then create the reference-image candidate from THIS repo (`release-image.yml`).
+It builds native multi-arch candidate tags after the PyPI publish. The private
+fleet canary consumes that candidate and dispatches a proof callback; only then
+does the public workflow promote the exact candidate digest to the version tag
+and move `:latest` for the newest non-prerelease release. A failed or skipped
+canary leaves consumer tags unchanged. The image installs `bobi==<version>`
+from PyPI, so candidate creation still runs after the publish above.
 
 It needs `claude-version` as well as the version — the exact claude CLI the
 release resolved from the floating `stable` channel, so every arch bakes the
@@ -162,9 +156,9 @@ Then run the fleet train in `moda-labs/moda-agents` (its own workflows):
 dispatch `release.yml` there with the version. It verifies the wheel and the
 image are both actually published, deploys the event-server Worker and waits for
 `/health` to report that exact version@sha, then deploys `ci-canary` from the
-just-published base image and asserts it answers `CANARY-OK`. **Sequence this by
-hand, and note the direction: the canary runs AFTER the image publish because it
-consumes it** (see the notice at the top). Do not continue to the Moda fleet pin
+promoted base image and asserts it answers `CANARY-OK`. This release train
+runs after candidate promotion; it is distinct from the candidate proof that
+authorized the public tags. Do not continue to the Moda fleet pin
 until it is green: the public train alone carries no functional fleet proof, and
 the image is now on the path of every team deploy, not just first installs.
 
@@ -173,29 +167,32 @@ the version — it re-proves the canary and opens the `BOBI_VERSION` PR only on 
 gate that genuinely RAN (`smoked=true`, not merely a green job). Merging that PR
 does not roll the fleet; a `deploy-*` tag or a `rebuild: true` dispatch does.
 
-Two hazards worth re-reading before dispatching `release-image.yml`:
+Image gate prerequisites and recovery:
 
-- It has no dry-run: `push: true` is unconditional and there is no tag-suffix
-  input, so a dispatch against an already-published version OVERWRITES that tag,
-  and moves `:latest` too when the version is the newest release. That is
-  occasionally what you want (a corrective re-publish) but never something to
-  do absent-mindedly.
-- This repo's `release` environment has NO protection rules, and that is now a
-  DECISION rather than an omission (2026-08-03, Zach). A required-reviewers rule
-  had been added at some point with a single reviewer — the same account that
-  dispatches the release — and `prevent_self_review: false`. That is a
-  self-approval gate: it cost a click per arch job and bought no second pair of
-  eyes, so it was removed. Do not re-add one naming only the releaser. If this
-  path is ever to be genuinely gated, the reviewer must be someone who is not
-  the dispatcher, or the gate belongs upstream (a cross-repo
-  `repository_dispatch` from the fleet canary, per the note at the top of this
-  file).
-
-  While removing it, note the operational trap that bit the 0.52.0 release:
-  **editing the environment while a run is waiting on it FAILS the pending
-  deployment** rather than releasing it. The `publish-manifest` job died with
-  zero steps and had to be re-run. Approve or cancel the in-flight run first,
-  then edit.
+- Deploy the companion private candidate/callback workflows before activating
+  this publisher. Missing private support or PAT access fails closed;
+  it does not fall back to ungated publication.
+- Configure `CROSS_REPO_PAT` as an Actions secret in both repositories. It needs
+  Contents write for repository dispatches and Actions read for run/artifact
+  verification in both repos. Workflow `permissions` scopes GITHUB_TOKEN, not
+  this PAT; restrict its repository selection and manage its expiration on
+  GitHub. No App installation or bot-user-ID configuration is needed.
+  Missing or expired access fails closed. GHCR writes retain GITHUB_TOKEN.
+- Use `-f dry-run=true` for native local build checks without a registry push or
+  canary dispatch. A normal manual run creates a candidate, not final tags.
+- Candidate and proof artifacts are retained for 30 days. An expired proof must
+  be re-created by another real canary run. A lost callback may be retried using
+  the same bound run/attempt and artifact IDs; the promotion is idempotent.
+- Corrective republishing needs a new candidate and proof. The promotion checks
+  the final version digest still equals the one seen before candidate creation;
+  stale callbacks cannot overwrite an intervening corrective release.
+- Registry tags are not a transaction. An interrupted promotion can leave only
+  some of its already-proven tags updated. Retry that same proof to reconcile;
+  never rebuild between proof and promotion. Check the promotion run and final
+  digest readback before declaring the image published.
+- Audit old workflow/ref dispatch paths during cutover. Do not rerun pre-gate
+  image jobs: current YAML cannot retroactively protect old workflow revisions.
+  Keep the existing release environment; self-approval is not canary proof.
 
 If PyPI was just published, allow a short propagation delay before installing
 the new version from another repo.

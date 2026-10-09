@@ -37,6 +37,10 @@ DEPLOY_ROUNDTRIP = "test_deployed_worker_publish_subscribe_roundtrip"
 # flags. Drop this from the lane and the flag goes back to being unproven.
 DEPLOY_MCP_CALL = "test_deployed_worker_mcp_tool_call"
 DEPLOY_MCP_CLOSED = "test_deployed_worker_mcp_route_is_closed_without_a_token"
+SELF_HOST_AUTH = "test_self_hosted_fleet_api_fails_closed_without_the_operator_token"
+SELF_HOST_RESTART = (
+    "test_kubernetes_sidecar_heartbeats_and_restarts_from_outside_the_cluster"
+)
 # The OTLP lane (#978) spends no credentials, but it is gated the same way -
 # every test skips without a collector - so it carries the same ran-assertion.
 OTEL_METRIC = "test_collector_accepts_metric"
@@ -156,6 +160,14 @@ def test_live_lane_installs_the_wrangler_harness_it_needs():
             4,
             (OTEL_METRIC, OTEL_LOG, OTEL_WRONG_TYPE, OTEL_CLI),
         ),
+        (
+            "self-hosted-consumer.yml",
+            "consumer-proof",
+            "Assert the consumer proof actually ran",
+            "self-hosted-consumer.xml",
+            2,
+            (SELF_HOST_AUTH, SELF_HOST_RESTART),
+        ),
     ],
 )
 def test_each_live_lane_asserts_it_ran(workflow, job, step_name, junit, expect_passed, required):
@@ -191,6 +203,12 @@ def test_each_live_lane_asserts_it_ran(workflow, job, step_name, junit, expect_p
             "Fail fast when the Cloudflare configuration is missing",
             ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CI_SMOKE_KV_NAMESPACE_ID"),
         ),
+        (
+            "self-hosted-consumer.yml",
+            "consumer-proof",
+            "Fail fast when the Cloudflare configuration is missing",
+            ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"),
+        ),
     ],
 )
 def test_each_live_lane_fails_fast_on_a_missing_credential(
@@ -215,6 +233,12 @@ def test_required_test_names_exist_in_the_suites_they_gate():
     for name in (DEPLOY_HEALTH, DEPLOY_ROUNDTRIP):
         assert f"def {name}(" in smoke
 
+    consumer = (
+        REPO_ROOT / "tests" / "integration" / "test_self_hosted_consumer.py"
+    ).read_text()
+    for name in (SELF_HOST_AUTH, SELF_HOST_RESTART):
+        assert f"def {name}(" in consumer
+
     collector = (REPO_ROOT / "tests" / "integration" / "test_otel_collector.py").read_text()
     for name in (OTEL_METRIC, OTEL_LOG, OTEL_WRONG_TYPE, OTEL_CLI):
         assert f"def {name}(" in collector
@@ -234,7 +258,11 @@ def test_live_marker_is_still_defined():
 
 @pytest.mark.parametrize(
     "workflow,job",
-    [("container.yml", "container-image"), ("worker-deploy-smoke.yml", "deploy-smoke")],
+    [
+        ("container.yml", "container-image"),
+        ("worker-deploy-smoke.yml", "deploy-smoke"),
+        ("self-hosted-consumer.yml", "consumer-proof"),
+    ],
 )
 def test_live_lanes_are_inert_on_fork_pull_requests(workflow, job):
     gate = _step(_steps(workflow, job), "Decide whether the live lane runs")

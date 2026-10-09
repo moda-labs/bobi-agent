@@ -77,10 +77,15 @@ bobi build <team> --tag <ref> [--push]  # render a team into a ready-to-run
 
 ## Runtime Commands
 
+Ordinary restart preserves saved event replay identity. Replay still requires the
+deployment and server history to survive. `restart --fresh` deliberately clears
+deployment/cursor state and conversation identity; do not use it to recover pending
+events.
+
 ```bash
 bobi agent <name> start
-bobi agent <name> stop
-bobi agent <name> restart
+bobi agent <name> stop         # run from a shell outside the runtime
+bobi agent <name> restart      # run from a shell outside the runtime
 bobi agent <name> start --fresh
 bobi agent <name> status
 bobi agent <name> doctor
@@ -126,6 +131,10 @@ bobi read-conversation <conversation> [-n 50] [--json-output]
 Use `bobi reply` and `bobi read-conversation` for Slack and any other
 chat channel delivered through the channel gateway.
 
+Run `stop` and `restart` only from a shell outside the target runtime. Bobi
+refuses either command when the caller is a descendant of that runtime's
+manager, and prints the exact external command to run instead.
+
 ## Upgrading Bobi In Place
 
 A local upgrade replaces bobi's files underneath whatever is already
@@ -154,10 +163,20 @@ them for delegated work and workflow steps.
 bobi agent <name> subagents launch -w adhoc --role engineer --task "Fix CI"
 bobi agent <name> subagents launch -w adhoc --role engineer --wait --task "Fix CI"
 bobi agent <name> subagents launch -w adhoc --role monitor --as-check --task "Check prod"
+bobi agent <name> subagents launch -w issue-lifecycle --id 42 --task "Fix #42"
+bobi agent <name> subagents launch -w pr-closed --role engineer \
+  --input repo=moda-labs/bobi-agent --input pr_number=123 \
+  --input head_branch=agent/123 --task "Recover PR cleanup"
 bobi agent <name> subagents list
 bobi agent <name> subagents show <id>
 bobi agent <name> subagents cancel <id>
 ```
+
+`--role` pins every step of the workflow to that role. Omit it to run a
+multi-role workflow as written - each step as its own `agent:` - which is
+allowed only when every prompt step of the workflow names one (so `-w adhoc`
+normally still needs `--role`). A persistent launch (`--persistent` /
+`--subscribe`) always needs `--role`.
 
 ### Run keys and duplicate suppression
 
@@ -169,8 +188,9 @@ not.
 - `--id <key>` sets it explicitly. Use it for work with a natural identity - an
   issue number, a checklist unit. Relaunching that key resumes that run.
 - With no `--id` the key is **derived** from the launch itself - workflow,
-  project, role, model, effort and the task text - so relaunching an identical
-  one while the first is still running is refused. That is the guardrail
+  project, role, model, effort, workflow inputs and the task text - so
+  relaunching an identical one while the first is still running is refused.
+  That is the guardrail
   against a dispatch chain that keeps launching itself; rewording the task to
   get past it defeats it. Fanning one task across two roles is fine: they
   derive different keys.
@@ -187,6 +207,12 @@ Relaunching a key whose previous run **failed** resumes from its step
 checkpoint rather than replaying completed steps, with the new `--task` and
 `--input` values taking effect from the resumed step onward. `--fresh`
 replays from step 0.
+
+Workflow inputs are supplied as repeatable `--input KEY=VALUE` options or one
+`--input-json '{"key":"value"}'` object. They are available as
+`${{input.key}}` alongside the built-in `task`, `repo`, and `run_key` values.
+Deterministic native actions reject a launch that omits an input they require,
+instead of silently completing without doing work.
 
 A derived key also implies `--fresh`: it is an inference about the launch, not a
 caller pointing at a run to continue. It additionally refuses to land on a
@@ -270,6 +296,53 @@ credentials live under `run/` and should not be edited into package
 source.
 
 ## Common Tasks
+
+### File feedback
+
+Create a GitHub issue for an explicit Bobi bug report or feature request:
+
+```bash
+bobi feedback bug --title "Short failure summary" --body "What happened, expected behavior, and repro steps"
+bobi feedback feature --title "Short request summary" --body-file report.md
+```
+
+Use `--repo owner/repo` to override the destination, `--label name` for one or
+more labels, `--json` for machine-readable output, and `--dry-run` to preview
+the privacy-safe body without a network write. Destination resolution is
+`--repo`, `BOBI_FEEDBACK_REPO`, `feedback.repo` in `agent.yaml`, then the
+default `moda-labs/bobi-agent`; Bobi never infers a destination from the
+current git remote. Authentication uses the configured GitHub service token,
+then `GITHUB_TOKEN`, `GH_TOKEN`, or the local `gh` auth store.
+
+Every filing searches the destination repo for an existing report first and
+comments on the match instead of opening a duplicate. Pass `--no-dedupe` to
+force a new issue. When the search itself fails, an interactive filing warns and
+proceeds so a person's report is not lost to a rate limit.
+
+### Self-diagnose a framework bug
+
+When Bobi itself misbehaves during normal operation, an agent root-causes it and
+files the finding through the same command:
+
+```bash
+bobi feedback rca --error "one line: what broke"   # prints the procedure
+bobi feedback bug --rca --title "..." --body-file report.md --json
+```
+
+`--rca` marks a filing as machine-generated, which changes three things: the
+title and body are clamped to 120 and 1200 characters so a report stays short
+and clear, deduplication is mandatory (a failed search aborts the filing rather
+than opening a blind duplicate), and no failure is fatal, so an RCA can never
+take down the task that triggered it.
+
+Two environment variables control it:
+
+| Variable | Effect |
+|---|---|
+| `BOBI_FRAMEWORK_RCA=off` | Operator off switch. `bobi feedback rca` prints no procedure and `--rca` files nothing, both before any analysis starts. |
+| `BOBI_FRAMEWORK_RCA_ACTIVE=1` | Set on the RCA sub-agent's own environment so it cannot open an RCA on its own failure. It can still file what it found. |
+
+`BOBI_GITHUB_API_URL` overrides the REST base for a GitHub Enterprise host.
 
 ```bash
 # Create a new Bobi Agent interactively

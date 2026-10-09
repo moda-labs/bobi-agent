@@ -52,7 +52,9 @@ class TestReplyCommand:
                 "reply", "slack:T0952RZRZ0X:dm:D0B51JP1N4C", "**Hello** there",
             ])
         assert result.exit_code == 0, result.output
-        assert "Sent to slack:T0952RZRZ0X:dm:D0B51JP1N4C" in result.output
+        assert result.output.strip() == (
+            "Sent to slack:T0952RZRZ0X:dm:D0B51JP1N4C (ts=99.1)"
+        )
 
         req = reqs[0]
         assert str(req.url).endswith("/channels/send")
@@ -77,10 +79,25 @@ class TestReplyCommand:
                 "--edit", "171.99", "Real response",
             ])
         assert result.exit_code == 0, result.output
-        assert "Updated 171.99" in result.output
+        assert result.output.strip() == (
+            "Updated 99.1 in slack:T1:channel:C123:thread:171.42"
+        )
         body = json.loads(reqs[0].content)
         assert body["mode"] == "final"
         assert body["edit_ref"] == "171.99"
+
+    def test_missing_post_ts_keeps_legacy_output(self, tmp_path, monkeypatch):
+        _setup_project(tmp_path, monkeypatch)
+
+        def handler(request):
+            return httpx.Response(200, json={"ok": True})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            result = CliRunner().invoke(
+                main, ["reply", "slack:T1:dm:D1", "hello"])
+
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == "Sent to slack:T1:dm:D1"
 
     def test_file_upload_sends_b64_payload(self, tmp_path, monkeypatch):
         _setup_project(tmp_path, monkeypatch)

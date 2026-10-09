@@ -523,6 +523,124 @@ class TestRunWorkflow:
         result = self._mock_asyncio_run(wf, task="Say hello", repo="test", cwd="/tmp", run_key="1")
         assert result is True
 
+    def test_contractless_step_never_reads_handoff_or_reprompts(self, monkeypatch):
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        workflow = Workflow(name="adhoc", steps=[
+            StepDef(name="task", prompt="Review the committed revision"),
+        ])
+
+        with patch("bobi.workflow.orchestrator._read_handoff",
+                   wraps=_read_handoff) as read_handoff:
+            assert self._mock_asyncio_run(
+                workflow, task="Review the committed revision", repo="test",
+                cwd="/tmp", run_key="no-contract",
+            ) is True
+
+        read_handoff.assert_not_called()
+        assert len(calls) == 1
+        assert len(clients[0].queries) == 1
+
+    @pytest.mark.parametrize("supplied", [False, True])
+    def test_optional_only_handoff_never_reprompts(self, monkeypatch, supplied):
+        from bobi.sdk import session_handoff_path
+
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        handoff_path = session_handoff_path("wf-adhoc-test-optional", "task")
+        if supplied:
+            handoff_path.parent.mkdir(parents=True, exist_ok=True)
+            handoff_path.write_text("summary: reviewed\n")
+        workflow = Workflow(name="adhoc", steps=[
+            StepDef(name="task", prompt="Review the committed revision",
+                    handoff=HandoffContract(optional=["summary"])),
+            StepDef(name="capture", action="capture"),
+        ])
+
+        with patch("bobi.workflow.orchestrator._execute_native_action",
+                   return_value={}) as capture:
+            assert self._mock_asyncio_run(
+                workflow, task="Review the committed revision", repo="test",
+                cwd="/tmp", run_key="optional",
+            ) is True
+
+        outputs = capture.call_args.args[1].scopes["task"]
+        assert outputs == ({"summary": "reviewed"} if supplied else {})
+        assert len(calls) == 1
+        assert len(clients[0].queries) == 1
+
+    @pytest.mark.parametrize("repaired", [False, True])
+    def test_handoff_retries_are_repair_only(self, monkeypatch, repaired):
+        from bobi.sdk import session_handoff_path
+        from bobi.workflow.orchestrator import MAX_HANDOFF_RETRIES
+
+        client = FakeBrainClient()
+        handoff_path = session_handoff_path("wf-adhoc-test-repair", "task")
+
+        async def query(prompt):
+            client.queries.append(prompt)
+            if repaired and len(client.queries) > 1:
+                handoff_path.parent.mkdir(parents=True, exist_ok=True)
+                handoff_path.write_text("summary: already reviewed\n")
+
+        client.query = query
+        brain = MagicMock()
+        brain.make_session.return_value = client
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        dispatch = "Fix the findings and publish the verdict"
+        workflow = Workflow(name="adhoc", steps=[
+            StepDef(name="task", prompt=dispatch,
+                    handoff=HandoffContract(required=["summary"])),
+        ])
+
+        assert self._mock_asyncio_run(
+            workflow, task=dispatch, repo="test", cwd="/tmp", run_key="repair",
+        ) is repaired
+        retries = client.queries[1:]
+        assert len(retries) == (1 if repaired else MAX_HANDOFF_RETRIES)
+        for prompt in retries:
+            assert "handoff-repair retry" in prompt
+            assert "step 'task'" in prompt
+            assert "not a new task" in prompt
+            assert "Do not repeat completed work or side effects" in prompt
+            assert str(handoff_path) in prompt
+            assert "summary" in prompt
+            assert dispatch not in prompt
+
+    @pytest.mark.parametrize("body", ["summary\n", "- summary\n- done\n"])
+    def test_non_mapping_handoff_repairs_instead_of_crashing(self, monkeypatch, body):
+        """A handoff that parses to a scalar or a list must take the repair
+        path. `_validate_handoff` tests `f not in handoff`, which succeeds on
+        `str` and `list`, so a non-mapping cleared validation and then crashed
+        output capture on `handoff.get` with an AttributeError.
+        """
+        from bobi.sdk import session_handoff_path
+        from bobi.workflow.orchestrator import MAX_HANDOFF_RETRIES
+
+        brain, _calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        handoff_path = session_handoff_path("wf-adhoc-test-nonmapping", "task")
+        handoff_path.parent.mkdir(parents=True, exist_ok=True)
+        handoff_path.write_text(body)
+        workflow = Workflow(name="adhoc", steps=[
+            StepDef(name="task", prompt="Review the committed revision",
+                    handoff=HandoffContract(required=["summary"])),
+        ])
+
+        collect: dict = {}
+        assert self._mock_asyncio_run(
+            workflow, task="Review the committed revision", repo="test",
+            cwd="/tmp", run_key="nonmapping", collect=collect,
+        ) is False
+        # The run still fails, but as a reported missing-handoff, not a crash.
+        assert collect["error"] == \
+            "Handoff missing required fields after retries: ['summary']"
+        retries = clients[0].queries[1:]
+        assert len(retries) == MAX_HANDOFF_RETRIES
+        for prompt in retries:
+            assert "handoff-repair retry" in prompt
+            assert "missing required fields: summary" in prompt
+
     def test_multi_step_completes(self):
         wf = Workflow(name="t", steps=[
             StepDef(name="setup", prompt="set up"),
@@ -930,7 +1048,7 @@ class TestRunWorkflow:
         # with the workflow context riding the same prompt — never a
         # context-only turn of its own (#1016).
         assert len(clients[1].queries) == 1
-        assert "Workflow `t` context" in clients[1].queries[0]
+        assert "Workflow `t` background" in clients[1].queries[0]
         assert "run_key: '1'" in clients[1].queries[0]
         assert "score" in clients[1].queries[0]
 
@@ -957,6 +1075,38 @@ class TestRunWorkflow:
         prompts = [c["system_prompt"]["append"] for c in calls]
         assert all("PROMPT forced" in prompt for prompt in prompts), prompts
         assert all("PROMPT scorer" not in prompt for prompt in prompts)
+
+    def test_empty_role_runs_each_step_as_its_own_agent(self, monkeypatch):
+        """The role-less launch (auto-dispatch, and `subagents launch` with no
+        --role): every prompt step is framed by its own agent's prompt, the
+        first step's agent first - the counterpart of the forced-role pin
+        above."""
+        brain, calls, _ = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        for role_name in ("pm", "engineer"):
+            role_md = paths.roles_dir() / role_name / "ROLE.md"
+            role_md.parent.mkdir(parents=True, exist_ok=True)
+            role_md.write_text(f"PROMPT {role_name}")
+        wf = Workflow(name="t", steps=[
+            StepDef(name="draft", prompt="draft", agent="pm"),
+            StepDef(name="build", prompt="build", agent="engineer"),
+            StepDef(name="review", prompt="review", agent="pm"),
+        ])
+
+        result = self._mock_asyncio_run(
+            wf, task="t", repo="r", cwd="/tmp", run_key="1", role="",
+        )
+
+        assert result is True
+        prompts = [c["system_prompt"]["append"] for c in calls]
+        assert len(prompts) == 3, prompts
+        acting = [("pm" if "PROMPT pm" in p else "engineer"
+                   if "PROMPT engineer" in p else "?") for p in prompts]
+        assert acting == ["pm", "engineer", "pm"]
+        # Each agent change is a fresh session at IDENTICAL dials - no step
+        # here moves model/effort/max_turns - never the previous agent's
+        # transcript resumed under a new prompt.
+        assert all(c["resume"] is None for c in calls[1:]), calls
 
     def test_model_change_resumes_natively_on_capable_brain(self, monkeypatch):
         """A brain with cross_model_resume continues the SAME session on the
@@ -1055,7 +1205,7 @@ class TestRunWorkflow:
         # Fresh session for the new agent; the reinjected context rides the
         # step prompt instead of a turn of its own (#1016).
         assert calls[1]["resume"] is None
-        assert any("Workflow `t` context" in q for q in clients[1].queries)
+        assert any("Workflow `t` background" in q for q in clients[1].queries)
 
     def test_native_switch_falls_back_to_fresh_on_stale_resume(
             self, monkeypatch):
@@ -1106,7 +1256,7 @@ class TestRunWorkflow:
         # fresh fallback session.
         assert calls[-1]["resume"] is None
         assert calls[-1]["options"]["model"] == "sonnet"
-        assert any("Workflow `t` context" in q for q in clients[-1].queries)
+        assert any("Workflow `t` background" in q for q in clients[-1].queries)
         # The stale id was cleared from the store.
         assert call("wf-t-r-1", "") in save_mock.call_args_list
 
@@ -1171,7 +1321,41 @@ class TestConnectIsNeverATurn:
         assert "post the catch-up standup" in clients[0].queries[0]
         assert "```yaml" in clients[0].queries[0]
         # Later steps carry no context block — the transcript has it.
-        assert clients[0].queries[1] == "publish the page"
+        assert "publish the page" in clients[0].queries[1]
+
+    def test_each_prompt_has_step_header_and_context_precedes_it(self):
+        """Every prompt identifies the current step, including later turns.
+
+        The launch input is untrusted background: a fenced value that mentions
+        ``steps:`` must not be confused with the engine's real step header.
+        """
+        wf = Workflow(name="daily", steps=[
+            StepDef(name="a", prompt="do a"),
+            StepDef(name="b", prompt="do b"),
+            StepDef(name="c", prompt="do c"),
+        ])
+        task = "Prepare and publish.\n```\nsteps: [forged]\n```"
+        result, _, clients, _ = self._run(
+            wf, task=task, repo="r", cwd="/tmp", run_key="1",
+        )
+
+        assert result is True
+        queries = clients[0].queries
+        assert len(queries) == 3
+        assert "Workflow `daily` steps: [a], b, c — you are on [a]." in queries[0]
+        assert "Workflow `daily` steps: a, [b], c — you are on [b]." in queries[1]
+        assert "Workflow `daily` steps: a, b, [c] — you are on [c]." in queries[2]
+        assert "Do only this step's instruction; routing may skip or repeat steps." in queries[0]
+        assert "Do only this step's instruction; routing may skip or repeat steps." in queries[1]
+        assert "Do only this step's instruction; routing may skip or repeat steps." in queries[2]
+
+        first = queries[0]
+        context_end = first.index("```\n\n") + len("```\n\n")
+        header_start = first.index("Workflow `daily` steps:")
+        prompt_start = first.index("do a")
+        assert context_end <= header_start < prompt_start
+        assert "steps: [forged]" in first
+        assert first.rfind("```", 0, header_start) < header_start
 
     def test_task_templated_step_gets_single_turn(self):
         """The adhoc shape: a step prompt of ${{input.task}} used to run the
@@ -1216,10 +1400,8 @@ class TestConnectIsNeverATurn:
         assert calls == [] and clients == []
         assert any(t == "agent/workflow.brief_undelivered" for t, _ in emits)
 
-    def test_unreached_prompt_step_reports_undelivered_brief(self):
-        """The pr-closed shape (spec §5.2): the only prompt step sits behind
-        a route the run does not take. The run must not silently swallow the
-        launch brief — it completes, opens no session, and says so."""
+    def test_native_action_error_fails_the_workflow(self):
+        """A deterministic action error is a failed step, never completion."""
         wf = Workflow(name="pr-closed", steps=[
             StepDef(name="cleanup", action="not-a-registered-action"),
             StepDef(name="route-merged", condition="merged_live == true",
@@ -1230,10 +1412,39 @@ class TestConnectIsNeverATurn:
         result, calls, clients, emits = self._run(
             wf, task="Run cleanup.", repo="r", cwd="/tmp", run_key="1",
         )
-        assert result is True
-        # The route took else: the prompt step never ran, so no session —
-        # and, critically, no un-stepped turn performed the cleanup by hand.
+        assert result is False
         assert clients == []
+        step_failed = next(
+            data for event, data in emits if event == "agent/step.failed"
+        )
+        assert step_failed["step"] == "cleanup"
+        assert "unknown action" in step_failed["error"]
+        assert all(event != "agent/step.completed" for event, _ in emits)
+
+        run = WorkflowRun.find_by_run_key("pr-closed", "1", repo="r")
+        assert run is not None
+        assert run.status == "failed"
+        assert "unknown action" in run.error
+
+    def test_unreached_prompt_step_reports_undelivered_brief(self):
+        """A successful deterministic route may complete without a prompt."""
+        wf = Workflow(name="pr-closed", steps=[
+            StepDef(name="cleanup", action="cleanup_worktree"),
+            StepDef(name="route-merged", condition="merged_live == true",
+                    goto="close-issue", else_goto="done"),
+            StepDef(name="close-issue", prompt="close the issue"),
+            StepDef(name="done", condition="1 == 1"),
+        ])
+        with patch(
+            "bobi.workflow.orchestrator._execute_native_action",
+            return_value={"status": "preserved", "merged_live": False},
+        ):
+            result, calls, clients, emits = self._run(
+                wf, task="Run cleanup.", repo="r", cwd="/tmp", run_key="1",
+            )
+
+        assert result is True
+        assert calls == [] and clients == []
         assert any(t == "agent/workflow.brief_undelivered" for t, _ in emits)
 
     def test_delivered_brief_emits_no_undelivered_event(self):
@@ -1564,7 +1775,7 @@ class TestAwaitStep:
         # prompt as a context block — one turn, not a reinject turn plus a
         # step turn (#1016).
         assert len(clients[0].queries) == 1
-        assert "Workflow `t` context" in clients[0].queries[0]
+        assert "Workflow `t` background" in clients[0].queries[0]
         assert "build it" in clients[0].queries[0]
         assert "_runtime" not in clients[0].queries[0]
 
@@ -2090,6 +2301,19 @@ class TestHandoffEdgeCases:
         session_dir.mkdir()
         (session_dir / "handoff-setup.yaml").write_text("")
         result = _read_handoff("wf-test-empty", "setup")
+        assert result == {}
+
+    @pytest.mark.parametrize("body", ["summary\n", "- summary\n- done\n"])
+    def test_non_mapping_yaml_returns_empty(self, tmp_path, monkeypatch, body):
+        """Valid YAML that is not a mapping is as unusable as a corrupt file:
+        every caller treats the result as a dict (#1111 F3).
+        """
+        _bind_runtime_root(tmp_path, monkeypatch)
+        sessions_dir = paths.sessions_dir(tmp_path)
+        session_dir = sessions_dir / "wf-test-nonmapping"
+        session_dir.mkdir()
+        (session_dir / "handoff-setup.yaml").write_text(body)
+        result = _read_handoff("wf-test-nonmapping", "setup")
         assert result == {}
 
 

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -240,6 +241,207 @@ def main(ctx):
 
 
 @main.group()
+def feedback():
+    """File an explicit Bobi bug report or feature request."""
+
+
+def _feedback_body(body: str | None, body_file) -> str:
+    if body is not None and body_file is not None:
+        raise click.UsageError("Pass either --body or --body-file, not both.")
+    value = body if body is not None else (
+        body_file.read() if body_file is not None else ""
+    )
+    if not value.strip():
+        raise click.UsageError("Pass --body or --body-file with non-empty content.")
+    return value
+
+
+def _run_feedback(
+    kind, title, body, body_file, repo, labels, json_output, dry_run,
+    dedupe=True, rca=False,
+):
+    from bobi.config import Config
+    from bobi.feedback import (
+        MAX_RCA_BODY_CHARS,
+        MAX_TITLE_CHARS,
+        FeedbackError,
+        build_context,
+        build_issue_body,
+        clamp_text,
+        load_feedback_config,
+        rca_enabled,
+        resolve_destination,
+        resolve_token,
+        submit_feedback,
+    )
+
+    # The operator switch is honored before any RCA work starts, filing
+    # included: an off switch that still writes to the tracker is not one.
+    if rca and not rca_enabled():
+        _echo_feedback_status(
+            json_output, "disabled",
+            "Framework bug RCA is disabled (BOBI_FRAMEWORK_RCA=off); nothing filed.",
+        )
+        return
+    if not title.strip():
+        raise click.UsageError("--title must not be empty.")
+    try:
+        project_path = _try_detect_project_root()
+        config = Config.load(project_path) if project_path else Config()
+        feedback_config = load_feedback_config(config)
+        destination = resolve_destination(
+            repo, os.environ.get("BOBI_FEEDBACK_REPO"), feedback_config,
+        )
+        context = build_context(project_path, config, __version__)
+        raw_body = _feedback_body(body, body_file)
+        if rca:
+            title = clamp_text(title, MAX_TITLE_CHARS)
+            raw_body = clamp_text(raw_body, MAX_RCA_BODY_CHARS)
+        issue_labels = list(dict.fromkeys([
+            *feedback_config.labels_for(kind), *labels,
+        ]))
+        if dry_run:
+            result = {
+                "dry_run": True,
+                "repo": destination,
+                "kind": kind,
+                "title": title,
+                "body": build_issue_body(kind, raw_body, context),
+            }
+            if json_output:
+                click.echo(json.dumps(result))
+            else:
+                # "File", not "create": a dry run sends nothing, so it cannot
+                # know whether the real call would open an issue or comment on
+                # an existing one.
+                click.echo(
+                    f"Would file this {kind} in {destination}: {title}\n\n"
+                    f"{result['body']}"
+                )
+            return
+        result = submit_feedback(
+            destination,
+            kind,
+            title,
+            raw_body,
+            issue_labels,
+            context,
+            token=resolve_token(config.credential("github", "token")),
+            dedupe=dedupe,
+            dedupe_required=rca,
+        )
+    except FeedbackError as exc:
+        if json_output:
+            click.echo(json.dumps({"error": exc.code, "message": exc.message}))
+        else:
+            click.echo(f"Error: {exc.message}", err=True)
+        # An RCA is a bystander to the task that triggered it. Failing to file
+        # must never take that task down with it, so the diagnosis path reports
+        # the failure and exits clean.
+        raise click.exceptions.Exit(0 if rca else 1)
+    if result.warning:
+        click.echo(result.warning, err=True)
+    output = {
+        "action": result.action,
+        "url": result.url,
+        "number": result.number,
+        "repo": result.repo,
+        "kind": result.kind,
+        "title": result.title,
+    }
+    if result.comment_url:
+        output["comment_url"] = result.comment_url
+    click.echo(
+        json.dumps(output) if json_output else (result.comment_url or result.url)
+    )
+
+
+def _echo_feedback_status(json_output, status, message):
+    """Report a no-op outcome without opening an issue, and exit clean."""
+    if json_output:
+        click.echo(json.dumps({"action": "skipped", "status": status}))
+    else:
+        click.echo(message, err=True)
+
+
+# Shared so `bug` and `feature` cannot drift apart: an option added to one and
+# forgotten on the other is the failure mode this list exists to prevent.
+_FEEDBACK_OPTIONS = [
+    click.option("--title", required=True),
+    click.option("--body"),
+    click.option("--body-file", "body_file", "-F", type=click.File("r")),
+    click.option("--repo"),
+    click.option("--label", "labels", multiple=True),
+    click.option("--json", "json_output", is_flag=True),
+    click.option("--dry-run", is_flag=True),
+    click.option(
+        "--dedupe/--no-dedupe", default=True,
+        help="Comment on an existing matching issue instead of opening a duplicate.",
+    ),
+]
+
+
+def _feedback_options(command):
+    for option in reversed(_FEEDBACK_OPTIONS):
+        command = option(command)
+    return command
+
+
+@feedback.command("bug")
+@_feedback_options
+@click.option(
+    "--rca", is_flag=True,
+    help="File as a framework-bug RCA: short-form limits, dedupe required, "
+         "never fatal to the caller.",
+)
+def feedback_bug(title, body, body_file, repo, labels, json_output, dry_run,
+                 dedupe, rca):
+    """File a bug report as a GitHub issue."""
+    _run_feedback("bug", title, body, body_file, repo, labels, json_output,
+                  dry_run, dedupe=dedupe, rca=rca)
+
+
+@feedback.command("feature")
+@_feedback_options
+def feedback_feature(title, body, body_file, repo, labels, json_output, dry_run,
+                     dedupe):
+    """File a feature request as a GitHub issue."""
+    _run_feedback("feature", title, body, body_file, repo, labels, json_output,
+                  dry_run, dedupe=dedupe)
+
+
+@feedback.command("rca")
+@click.option("--error", default="", help="One line: what broke.")
+def feedback_rca(error):
+    """Print the root-cause procedure for a suspected bug in Bobi itself."""
+    from bobi.feedback import (
+        FeedbackError,
+        rca_enabled,
+        rca_guide,
+        rca_in_progress,
+    )
+
+    if not rca_enabled():
+        click.echo(
+            "Framework bug RCA is disabled (BOBI_FRAMEWORK_RCA=off). "
+            "Carry on with your task and file nothing.", err=True,
+        )
+        return
+    if rca_in_progress():
+        click.echo(
+            "Already inside a framework bug RCA. Do not analyze an RCA "
+            "failure; report it in one line and stop.", err=True,
+        )
+        return
+    try:
+        click.echo(rca_guide(error))
+    except FeedbackError as exc:
+        # Nothing about a missing prompt file justifies breaking the caller's
+        # actual work, so this path stays non-fatal like the rest of RCA.
+        click.echo(f"Error: {exc.message}", err=True)
+
+
+@main.group()
 @click.argument("name")
 @click.pass_context
 def agent(ctx, name):
@@ -264,6 +466,20 @@ def _has_systemd_service() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _refuse_runtime_lifecycle(project_path: Path, command: list[str]) -> None:
+    from bobi.service import caller_is_manager_descendant
+
+    if not caller_is_manager_descendant(project_path):
+        return
+    rendered = shlex.join(
+        ["bobi", "agent", paths.agent_name_for_root(project_path), *command]
+    )
+    raise click.ClickException(
+        f"`{rendered}` cannot run from inside the target runtime.\n"
+        f"Run it from a shell outside the runtime:\n  {rendered}"
+    )
 
 
 def _systemctl(action: str) -> bool:
@@ -907,6 +1123,10 @@ def stop(force):
         return
 
     project_path = _detect_project_root()
+    command = ["stop"]
+    if force:
+        command.append("--force")
+    _refuse_runtime_lifecycle(project_path, command)
     from bobi.service import stop_team
 
     result = stop_team(project_path, force=force)
@@ -967,6 +1187,12 @@ def restart(fresh):
         log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
+
+    project_path = _detect_project_root()
+    command = ["restart"]
+    if fresh:
+        command.append("--fresh")
+    _refuse_runtime_lifecycle(project_path, command)
 
     ctx = click.get_current_context()
     ctx.invoke(stop)
@@ -1128,10 +1354,15 @@ def _channels_reply_send(conversation, text, edit_ref, files=None):
         _unescape_shell_literals(text),
         mode="final", edit_ref=edit_ref, files=files,
     )
+    # Preserve the gateway's message identity so workflow steps can edit it.
+    ts = result.get("ts") if isinstance(result, dict) else None
     if edit_ref:
-        click.echo(f"Updated {edit_ref} in {conversation}")
+        click.echo(f"Updated {ts or edit_ref} in {conversation}")
     else:
-        click.echo(f"Sent to {conversation}")
+        if ts:
+            click.echo(f"Sent to {conversation} (ts={ts})")
+        else:
+            click.echo(f"Sent to {conversation}")
     return result
 
 
@@ -1521,6 +1752,8 @@ def _print_transcript_entry(line: str) -> None:
 @main.command()
 def status():
     """Show active agents — manager + engineer sub-agents."""
+    import time as _time
+
     project_path = _detect_project_root()
 
     from bobi.service import team_status
@@ -1539,7 +1772,18 @@ def status():
     click.echo(f"  Sub-agents: {len(active)} active")
     for e in active:
         rotation_info = f", rotations={e.rotation_count}" if e.rotation_count else ""
-        click.echo(f"    {e.name} ({e.role}) — {e.status}{rotation_info}")
+        inbox_info = ""
+        if e.inbox_depth:
+            oldest_age = e.inbox_oldest_age_seconds
+            if e.inbox_oldest_enqueued_at:
+                oldest_age = max(
+                    oldest_age, _time.time() - e.inbox_oldest_enqueued_at)
+            inbox_info = (
+                f", inbox={e.inbox_depth}, oldest={int(oldest_age)}s"
+            )
+        click.echo(
+            f"    {e.name} ({e.role}) — {e.status}{rotation_info}{inbox_info}"
+        )
 
 
 @main.command()
@@ -3048,18 +3292,29 @@ main.add_command(event_server_cmd)
 
 @subagents.command("launch")
 @click.option("--workflow", "-w", required=True, help="Workflow to run (e.g. issue-lifecycle, adhoc)")
-@click.option("--role", required=True, help="Agent role (see 'bobi agent <name> roles list')")
+@click.option("--role", default="",
+              help="Agent role (see 'bobi agent <name> roles list'). Given, "
+                   "it runs EVERY step of the workflow. Omit it only for a "
+                   "workflow whose every prompt step names its own agent: - "
+                   "each step then runs as that agent.")
+@click.option("--input", "input_values", multiple=True, metavar="KEY=VALUE",
+              help="Bind a workflow input (repeatable), e.g. "
+                   "--input pr_number=123")
+@click.option("--input-json", default=None, metavar="OBJECT",
+              help="Bind workflow inputs from a JSON object")
 @click.option("--id", "run_key", default=None,
               help="Explicit run key for correlation (e.g. an issue number). "
                    "Relaunching the same key resumes that run. Default: a key "
                    "derived from the launch itself - workflow, role, model, "
-                   "effort, task text - so an identical launch collides with "
+                   "effort, inputs, task text - so an identical launch "
+                   "collides with "
                    "the run already in flight instead of starting a second "
                    "one.")
 @click.option("--id-random", "random_key", is_flag=True,
               help="Mint a random run key instead of deriving one from the "
                    "launch. Without it, an un-keyed launch derives its key "
-                   "from the workflow, role, model, effort and task text, so "
+                   "from the workflow, role, model, effort, inputs and task "
+                   "text, so "
                    "relaunching the same one while the first run is still "
                    "going is refused as a duplicate. Use this to fan out N "
                    "copies of an IDENTICAL launch on purpose. Cannot be "
@@ -3099,22 +3354,30 @@ main.add_command(event_server_cmd)
                    "since re-running the same --task otherwise resumes the "
                    "dead session. Implied when the run key is derived (no "
                    "--id), where there is no run the caller meant to continue.")
-def subagents_launch(workflow, role, run_key, random_key, task, timeout, wait,
-                     as_check, post_event, requested_by, non_interactive,
-                     persistent, subscribe, model, effort, fresh):
+def subagents_launch(workflow, role, input_values, input_json, run_key,
+                     random_key, task, timeout, wait, as_check, post_event,
+                     requested_by, non_interactive, persistent, subscribe,
+                     model, effort, fresh):
     """Launch a sub-agent with a workflow and role.
 
-    Every sub-agent runs a workflow with a role. Use 'adhoc' for open-ended tasks.
+    Every sub-agent runs a workflow. Use 'adhoc' for open-ended tasks.
     Use 'bobi agent <name> roles list' to see available roles.
+
+    --role pins every step of the workflow to that role. Omit it to run a
+    multi-role workflow (steps with different agent: values) as written:
+    each step runs as its own agent:. That is only allowed when every
+    prompt step names one; otherwise --role is required.
 
     Examples:
         bobi agent eng subagents launch -w issue-lifecycle --role engineer --id 42 --task "Fix moda-labs/bobi-agent#42"
         bobi agent eng subagents launch -w adhoc --role engineer --task "Why is CI failing?"
+        bobi agent eng subagents launch -w issue-lifecycle --id 42 --task "Fix moda-labs/bobi-agent#42"  # each step as its agent:
     """
     if subscribe:
         persistent = True
     _dispatch_agent(task=task, workflow=workflow, role=role, run_key=run_key,
                     random_key=random_key,
+                    input_values=input_values, input_json=input_json,
                     timeout=timeout, wait=wait, as_check=as_check,
                     post_event=post_event, requested_by=requested_by,
                     interactive=not non_interactive,
@@ -3143,12 +3406,95 @@ def _parse_requested_by(requested_by: str | None) -> dict:
     return parsed
 
 
+def _require_known_role(role: str, cwd: str, where: str = "") -> None:
+    """Exit with the available roles listed when *role* is not installed."""
+    from .prompts.resolver import validate_role, discover_roles
+    if validate_role(role, Path(cwd)):
+        return
+    available = discover_roles(Path(cwd))
+    names = ", ".join(r["name"] for r in available) if available else "(none)"
+    click.echo(f"Unknown role '{role}'{where}. Available: {names}", err=True)
+    raise SystemExit(1)
+
+
+def _require_step_roles(workflow: str, cwd: str, *, persistent: bool) -> None:
+    """Admit a launch with no --role only when the workflow names every role.
+
+    A launch role pins every step to it (the executor's ``role or
+    step.agent``), so the role-less launch is the only way to run a
+    multi-role workflow as written - the same ``role=""`` auto-dispatch
+    passes. Every prompt step must name its agent: an agent-less one would
+    run as whichever agent ran before it, or with no role prompt at all
+    when first. Each named role must be installed: an unknown one would
+    otherwise surface mid-run, after earlier steps already spent.
+    """
+    if persistent:
+        # A persistent session never runs the workflow's steps, so their
+        # agent: fields cannot supply its role - it would run role-less.
+        raise click.UsageError(
+            "--role is required with --persistent/--subscribe: a persistent "
+            "session does not run the workflow's steps, so their agent: "
+            "fields cannot supply its role")
+    from .workflow.triggers import find_installed_workflow
+    wf = find_installed_workflow(workflow)
+    if wf is None:
+        raise click.UsageError(
+            f"--role is required: workflow {workflow} was not found, so its "
+            f"steps' agent: roles cannot be read")
+    prompt_steps = [s for s in wf.steps if s.is_prompt_step]
+    agentless = [s.name for s in prompt_steps if not s.agent]
+    if agentless:
+        raise click.UsageError(
+            f"--role is required: workflow {workflow} has steps without an "
+            f"agent: ({', '.join(agentless)})")
+    for step in prompt_steps:
+        _require_known_role(step.agent, cwd,
+                            where=f" (workflow {workflow}, step '{step.name}')")
+
+
+def _parse_workflow_inputs(input_values, input_json):
+    """Parse repeatable KEY=VALUE and JSON-object workflow inputs."""
+    parsed = {}
+    if input_json is not None:
+        try:
+            decoded = json.loads(input_json)
+        except json.JSONDecodeError as exc:
+            raise click.UsageError(f"--input-json must be valid JSON: {exc.msg}")
+        if not isinstance(decoded, dict):
+            raise click.UsageError("--input-json must contain a JSON object")
+        parsed.update(decoded)
+
+    for raw in input_values:
+        key, separator, value = raw.partition("=")
+        if not separator or not key:
+            raise click.UsageError(
+                f"--input must use KEY=VALUE syntax (got {raw!r})"
+            )
+        parsed[key] = value
+    for key in ("task", "run_key"):
+        if key in parsed:
+            raise click.UsageError(
+                f"Cannot override built-in workflow input {key!r}"
+            )
+    return parsed
+
+
 def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
-                    timeout, wait,
+                    input_values=(), input_json=None, timeout, wait,
                     as_check=False, post_event=None, requested_by=None,
                     interactive=True, persistent=False, subscribe=None,
                     model="", effort="", fresh=False):
     """Dispatch logic for the agent command."""
+    workflow_inputs = _parse_workflow_inputs(input_values, input_json)
+    if as_check and (input_values or input_json is not None):
+        raise click.UsageError(
+            "--input/--input-json require a workflow launch, not --as-check"
+        )
+    if persistent and (input_values or input_json is not None):
+        raise click.UsageError(
+            "--input/--input-json are not supported with --persistent"
+        )
+
     if not workflow:
         click.echo("--workflow is required. Use 'adhoc' for open-ended tasks.", err=True)
         raise SystemExit(1)
@@ -3177,22 +3523,24 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
                    "key already opts out of task-derived dedup)", err=True)
         raise SystemExit(1)
 
+    if not role:
+        # Before --as-check on purpose: omitting --role is allowed only where
+        # the workflow itself names every step's role, whatever other flags
+        # ride along.
+        _require_step_roles(workflow, cwd, persistent=persistent)
+
     if as_check:
         _run_check(cwd=cwd, task=task, timeout=timeout, post_event=post_event)
         return
 
-    # --- Validate role ---
-    from .prompts.resolver import validate_role, discover_roles
-    if not validate_role(role, Path(cwd)):
-        available = discover_roles(Path(cwd))
-        names = ", ".join(r["name"] for r in available) if available else "(none)"
-        click.echo(f"Unknown role '{role}'. Available: {names}", err=True)
-        raise SystemExit(1)
+    if role:
+        _require_known_role(role, cwd)
 
     if wait:
         with _launch_refusal_is_readable(project_path):
             _run_agent_wait(cwd=cwd, task=task, workflow=workflow, role=role,
                             run_key=run_key, random_key=random_key,
+                            input_fields=workflow_inputs,
                             timeout=timeout,
                             requested_by=requested_by, interactive=interactive,
                             persistent=persistent, subscribe=subscribe or [],
@@ -3212,6 +3560,7 @@ def _dispatch_agent(*, task, workflow, role, run_key=None, random_key=False,
             subscribe=subscribe or [],
             run_key=run_key,
             random_key=random_key,
+            input_fields=workflow_inputs,
             model=model,
             effort=effort,
             fresh=fresh,
@@ -3237,11 +3586,14 @@ def _launch_refusal_is_readable(project_path: Path):
     """
     from .launch_lineage import LaunchBlockedError
     from .sdk import ACTIVE_STATUSES
-    from .subagent import DuplicateRunError
+    from .subagent import DuplicateRunError, WorkflowInputError
     try:
         yield
     except LaunchBlockedError as exc:
         click.echo(str(exc), err=True)
+        raise SystemExit(1) from None
+    except WorkflowInputError as exc:
+        click.echo(f"Launch refused: {exc}", err=True)
         raise SystemExit(1) from None
     except DuplicateRunError as exc:
         # Render the real agent name: an LLM pastes a `<name>` placeholder
@@ -3265,6 +3617,7 @@ def _launch_refusal_is_readable(project_path: Path):
 def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
                     run_key: str | None, timeout: int, requested_by,
                     interactive: bool, persistent: bool, subscribe: list[str],
+                    input_fields: dict | None = None,
                     model: str = "", effort: str = "",
                     fresh: bool = False, random_key: bool = False) -> None:
     """Run a real agent synchronously and print its final text."""
@@ -3297,6 +3650,7 @@ def _run_agent_wait(*, cwd: str, task: str, workflow: str, role: str,
         task=task, cwd=cwd, workflow_name=workflow, timeout=timeout,
         requested_by=requester, interactive=interactive, role=role,
         subscribe=subscribe, run_key=run_key, random_key=random_key,
+        input_fields=input_fields,
         model=model, effort=effort, fresh=fresh, wait=True,
     )
     if result.final_text:

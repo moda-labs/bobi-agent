@@ -51,6 +51,14 @@ def _branch_exists(repo: Path, branch: str) -> bool:
     ).returncode == 0
 
 
+def _run_for(run_key: str):
+    from bobi.workflow.state import WorkflowRun
+
+    run = WorkflowRun.find_by_run_key("pr-closed", run_key, repo=REPO_SLUG)
+    assert run is not None
+    return run
+
+
 def _drive_pr_closed(env, monkeypatch, *, branch, pr_number, run_key,
                      live_merged, payload_merged):
     """Run the real pr-closed workflow once; return (result, api_urls_read)."""
@@ -114,6 +122,9 @@ class TestPrClosedMergeGuard:
         )
         assert wt.exists(), "worktree of an unmerged PR was deleted"
         assert _branch_exists(repo, branch), "branch of an unmerged PR was deleted"
+        run = _run_for("1004-unmerged")
+        assert run.status == "completed"
+        assert run.error == ""
 
     def test_unreadable_merge_state_keeps_its_branch_and_worktree(
         self, stub_bobi_env, monkeypatch,
@@ -128,10 +139,17 @@ class TestPrClosedMergeGuard:
         branch = "agent/issue-1004-unreadable"
         wt = _add_worktree(repo, branch)
 
-        monkeypatch.setattr(
-            "bobi.http.get",
-            lambda *a, **k: (_ for _ in ()).throw(httpx.ConnectError("no route")),
+        request = httpx.Request(
+            "GET", f"https://api.github.com/repos/{REPO_SLUG}/pulls/1005"
         )
+        response = httpx.Response(401, request=request)
+
+        def _unauthorized(*args, **kwargs):
+            raise httpx.HTTPStatusError(
+                "401 Unauthorized", request=request, response=response,
+            )
+
+        monkeypatch.setattr("bobi.http.get", _unauthorized)
 
         result = run_workflow(
             load_workflow(PR_CLOSED_YAML),
@@ -149,9 +167,14 @@ class TestPrClosedMergeGuard:
             },
         )
 
-        assert result is True
+        assert result is False
         assert wt.exists()
         assert _branch_exists(repo, branch)
+        run = _run_for("1005-unreadable")
+        assert run.status == "failed"
+        assert "could not read the PR's merge state" in run.error
+        assert "HTTPStatusError" in run.error
+        assert "401 Unauthorized" in run.error
 
     def test_merged_pr_still_gets_cleaned_up(self, stub_bobi_env, monkeypatch):
         """The positive control: the guard gates the delete, it does not
@@ -161,18 +184,22 @@ class TestPrClosedMergeGuard:
         branch = "agent/issue-1004-merged"
         wt = _add_worktree(repo, branch)
 
-        # The run's own outcome is not asserted: on the merged path the
-        # workflow goes on to `close-issue`, a prompt step whose handoff the
-        # stub brain cannot write. The cleanup this test is about has already
-        # happened by then, and it is what gets checked.
-        _drive_pr_closed(
+        monkeypatch.setattr(
+            "bobi.workflow.orchestrator._read_handoff",
+            lambda *args, **kwargs: {"status": "closed"},
+        )
+        result, _ = _drive_pr_closed(
             stub_bobi_env, monkeypatch,
             branch=branch, pr_number=1006, run_key="1006-merged",
             live_merged=True, payload_merged=True,
         )
 
+        assert result is True
         assert not wt.exists(), "worktree of a merged PR was left behind"
         assert not _branch_exists(repo, branch), "branch of a merged PR was left behind"
+        run = _run_for("1006-merged")
+        assert run.status == "completed"
+        assert run.error == ""
 
 
 class TestPrClosedWorkflowShape:

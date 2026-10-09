@@ -166,7 +166,7 @@ Two tasks do need it, at **two incompatible versions**:
 
 | Task | Node | Why |
 |---|---|---|
-| Any non-editable wheel build, and therefore `tests/integration/test_container_image.py` and `tests/integration/test_packaged_event_server.py` | **20 exactly** | `hatch_build.py::_require_build_node` rejects any other major outright, 22 and 24 included |
+| Any non-editable wheel build, and therefore `tests/integration/test_container_image.py` and `tests/integration/test_packaged_event_server.py` | **20+** | Node 20 is the reproducible release baseline; newer supported majors are also validated |
 | The Worker/wrangler suites (`event-server/`) | **22+** | wrangler refuses anything below 22 |
 
 There is deliberately no `.nvmrc`: a single pin would be wrong for one of the

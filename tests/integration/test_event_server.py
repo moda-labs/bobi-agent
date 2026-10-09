@@ -45,6 +45,8 @@ TEST_GRANTS_SECRET = "bobi-integration-test-grants"
 #: Operator credential handed to the `wrangler dev` Worker so `/mcp` is
 #: reachable. Test-only, and only ever written into a local `.dev.vars`.
 TEST_FLEET_OPERATOR_TOKEN = "bobi-integration-test-operator"
+EVENT_PROTOCOL = {"current": 1, "minimum": 1}
+_MISSING = object()
 
 
 def _post_json(url: str, data: dict, headers: dict | None = None) -> dict:
@@ -417,6 +419,7 @@ class TestEventServerLifecycle:
         base_url, _port, backend = event_server
         data = _get_json(f"{base_url}/health")
         assert data["status"] == "ok"
+        assert data["protocol"] == EVENT_PROTOCOL
         if backend == "local":
             assert data["mode"] == "local"
 
@@ -439,6 +442,82 @@ class TestEventServerLifecycle:
         assert "deployment_id" in result
         assert "api_key" in result
         assert result["api_key"].startswith("moda_")
+        assert result["protocol"] == EVENT_PROTOCOL
+
+    @pytest.mark.parametrize(
+        ("protocol", "expected_status", "expected_error"),
+        [
+            ({"minimum": 1, "current": 2, "ignored": True}, 201, None),
+            ({"minimum": 1}, 400, "invalid_protocol"),
+            ({"minimum": 2, "current": 2}, 426, "incompatible_protocol"),
+        ],
+    )
+    def test_registration_protocol_negotiation(
+            self, event_server, protocol, expected_status, expected_error):
+        base_url, *_ = event_server
+        payload = json.dumps({
+            "name": f"protocol-{expected_status}",
+            "subscriptions": [f"inbox/protocol-{expected_status}"],
+            "protocol": protocol,
+        }).encode()
+        request = urllib.request.Request(
+            f"{base_url}/deployments",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                status = response.status
+                data = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            data = json.loads(exc.read())
+
+        assert status == expected_status
+        assert data["protocol"] == EVENT_PROTOCOL
+        if expected_error:
+            assert data["error"] == expected_error
+
+    def test_subscription_sync_protocol_negotiation(self, event_server):
+        base_url, *_ = event_server
+        registration = _register(
+            base_url,
+            "protocol-sync",
+            ["inbox/protocol-sync"],
+            protocol=EVENT_PROTOCOL,
+        )
+
+        status, data = _put_subscriptions(
+            base_url,
+            registration["deployment_id"],
+            registration["api_key"],
+            ["inbox/protocol-sync"],
+            EVENT_PROTOCOL,
+        )
+        assert status == 200
+        assert data["protocol"] == EVENT_PROTOCOL
+
+        status, data = _put_subscriptions(
+            base_url,
+            registration["deployment_id"],
+            registration["api_key"],
+            ["inbox/must-not-replace"],
+            {"minimum": 2, "current": 2},
+        )
+        assert status == 426
+        assert data["error"] == "incompatible_protocol"
+
+        status, data = _put_subscriptions(
+            base_url,
+            registration["deployment_id"],
+            registration["api_key"],
+            ["inbox/protocol-sync"],
+            EVENT_PROTOCOL,
+        )
+        assert status == 200
+        assert data["subscriptions"] == ["inbox/protocol-sync"]
+        assert data["added"] == 0
+        assert data["removed"] == 0
 
     @pytest.mark.local_only
     def test_health_shows_deployment_count(self, event_server):
@@ -459,6 +538,69 @@ class TestEventServerLifecycle:
         )
         data = _get_json(f"{base_url}/health")
         assert data["deployments"] >= 1
+
+    @pytest.mark.local_only
+    def test_local_health_tracks_client_ack_progress(self, event_server):
+        base_url, *_ = event_server
+        dep = _register(base_url, "ack-health", ["inbox/ack-health"])
+        ws_url = base_url.replace("http://", "ws://")
+        ws = websocket.create_connection(
+            f"{ws_url}/deployments/{dep['deployment_id']}/subscribe?last_seen=0",
+            header=[f"Authorization: Bearer {dep['api_key']}"],
+            timeout=5,
+        )
+        try:
+            assert json.loads(ws.recv())["type"] == "connected"
+            _post_event_signed(
+                base_url,
+                "inbox/ack-health",
+                {"source": "inbox", "payload": {"text": "queued"}},
+                dep["bubble_id"],
+                dep["bubble_key"],
+            )
+            delivered = json.loads(ws.recv())
+            seq = delivered["data"]["seq"]
+
+            before = next(
+                item for item in _get_json(f"{base_url}/health")["delivery"]
+                if item["deployment_id"] == dep["deployment_id"]
+            )
+            assert before["next_seq"] == seq + 1
+            assert before["last_acked_seq"] == 0
+            assert before["pending_events"] == 1
+
+            # last_seen suppresses replay into this process, but it can include
+            # events still queued in memory and must not count as completion.
+            ws.close()
+            ws = websocket.create_connection(
+                f"{ws_url}/deployments/{dep['deployment_id']}"
+                f"/subscribe?last_seen={seq}",
+                header=[f"Authorization: Bearer {dep['api_key']}"],
+                timeout=5,
+            )
+            assert json.loads(ws.recv())["type"] == "connected"
+            reconnected = next(
+                item for item in _get_json(f"{base_url}/health")["delivery"]
+                if item["deployment_id"] == dep["deployment_id"]
+            )
+            assert reconnected["last_acked_seq"] == 0
+            assert reconnected["pending_events"] == 1
+
+            ws.send(json.dumps({"type": "ack", "seq": seq}))
+            deadline = time.monotonic() + 2
+            after = reconnected
+            while time.monotonic() < deadline:
+                after = next(
+                    item for item in _get_json(f"{base_url}/health")["delivery"]
+                    if item["deployment_id"] == dep["deployment_id"]
+                )
+                if after["last_acked_seq"] == seq:
+                    break
+                time.sleep(0.05)
+            assert after["last_acked_seq"] == seq
+            assert after["pending_events"] == 0
+        finally:
+            ws.close()
 
 
 class TestGitHubWebhook:
@@ -493,6 +635,24 @@ class TestGitHubWebhook:
         ))
         pr_events = [e for e in events if e.get("type") == "github.pull_request"]
         assert len(pr_events) >= 1
+
+    def test_github_pr_review_preserves_author_and_reviewer(self, deployment):
+        base_url, dep_id, api_key = deployment
+        events = _send_and_drain(base_url, dep_id, api_key, lambda: _post_json(
+            f"{base_url}/webhooks/github",
+            {"action": "submitted",
+             "sender": {"login": "reviewer"},
+             "pull_request": {"number": 1071, "title": "Fix runtime",
+                              "user": {"login": "bobi"}},
+             "review": {"id": 5253223366, "state": "changes_requested"},
+             "repository": {"full_name": "test-org/test-repo"}},
+            headers={"x-github-event": "pull_request_review",
+                     "x-github-delivery": "test-398"},
+        ))
+        review = next(e for e in events if e.get("type") == "github.pull_request_review")
+        assert review["fields"]["pr_author"] == "bobi"
+        assert review["fields"]["sender"] == "reviewer"
+        assert review["fields"]["review_state"] == "changes_requested"
 
 
 class TestLinearWebhook:
@@ -1090,18 +1250,41 @@ def _drain_ws(base_url: str, dep_id: str, api_key: str,
 
 
 def _register(base_url: str, name: str, subs: list[str],
-              bubble_id: str = "", bubble_key: str = "") -> dict:
+              bubble_id: str = "", bubble_key: str = "",
+              protocol: object = _MISSING) -> dict:
     """Register a deployment. MINT (unsigned) when no bubble_key; JOIN (signed)
     otherwise. Returns the full server response."""
     from bobi.events.signing import serialize_body, sign_headers
 
-    body = serialize_body({"name": name, "subscriptions": subs})
+    payload = {"name": name, "subscriptions": subs}
+    if protocol is not _MISSING:
+        payload["protocol"] = protocol
+    body = serialize_body(payload)
     headers = {"Content-Type": "application/json"}
     if bubble_key:
         headers.update(sign_headers(bubble_id, bubble_key, "POST", "/deployments", body))
     req = urllib.request.Request(f"{base_url}/deployments", data=body.encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read())
+
+
+def _put_subscriptions(base_url: str, deployment_id: str, api_key: str,
+                       subscriptions: list[str], protocol: object) -> tuple[int, dict]:
+    payload = json.dumps({"replace": subscriptions, "protocol": protocol}).encode()
+    req = urllib.request.Request(
+        f"{base_url}/deployments/{deployment_id}/subscriptions",
+        data=payload,
+        method="PUT",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read())
 
 
 def _live_subscriber(base_url: str, dep_id: str, api_key: str, timeout: float = 4):

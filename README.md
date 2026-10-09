@@ -59,6 +59,19 @@ agents you can build:
 You don't clone this repo to run Bobi - it's a published package. Install the CLI
 and go.
 
+For a plain Python installation, use an isolated virtual environment:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install bobi
+bobi --version
+```
+
+On a fresh install, `bobi agent <name> doctor` may report missing Claude Code and Node.js
+20+ until those prerequisites are installed. Those warnings are actionable;
+the local setup UI can start without Claude, but creating an agent requires it.
+
 ### 1) Set up an agent runtime
 
 Bobi runs each agent on **Claude Code** (default) or **OpenAI Codex**. You need

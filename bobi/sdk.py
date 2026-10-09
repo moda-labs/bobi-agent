@@ -145,7 +145,16 @@ def _pid_file_alive(pid_path: Path) -> bool:
 
 @contextmanager
 def _state_file_lock(path: Path) -> Iterator[None]:
-    """Serialize whole-document state changes across processes."""
+    """Serialize whole-document state changes across processes.
+
+    The lock is held only while the document it guards exists. Every writer
+    here re-checks *path* under the lock and no-ops when the entry has already
+    vanished, so on that path the lock file is the only thing the call would
+    leave behind - inside a session directory that is being removed. A file
+    created after ``shutil.rmtree`` has scandir'd the directory makes the
+    final ``os.rmdir`` raise ``ENOTEMPTY``, so unlink it while still holding
+    it: nothing can be mid-write on a document that is already gone.
+    """
     lock_path = path.with_suffix(".lock")
     with open(lock_path, "a+") as lock_file:
         import fcntl
@@ -154,6 +163,8 @@ def _state_file_lock(path: Path) -> Iterator[None]:
         try:
             yield
         finally:
+            if not path.exists():
+                lock_path.unlink(missing_ok=True)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
@@ -298,6 +309,9 @@ class SessionEntry:
     rotation_count: int = 0
     started_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
+    inbox_depth: int = 0
+    inbox_oldest_age_seconds: float = 0.0
+    inbox_oldest_enqueued_at: float = 0.0
     requested_by: dict = field(default_factory=dict)
     # Honest terminal status + reconciler backstop (MDS-65).
     # error: terminal failure message; "" on success/while running.
@@ -382,6 +396,27 @@ class SessionRegistry:
                 if k in data:
                     data[k] = v
             data["last_activity"] = time.time()
+            self._write_state(path, data)
+
+    def update_inbox_stats(self, name: str, *, depth: int,
+                           oldest_age: float) -> None:
+        """Persist queue telemetry without advancing session activity."""
+        path = self._state_path(name)
+        if not path.exists():
+            return
+        with _state_file_lock(path):
+            if not path.exists():
+                return
+            try:
+                data = json.loads(path.read_text())
+            except (json.JSONDecodeError, TypeError):
+                return
+            data = asdict(SessionEntry.from_dict(data))
+            data["inbox_depth"] = max(0, int(depth))
+            data["inbox_oldest_age_seconds"] = max(0.0, float(oldest_age))
+            data["inbox_oldest_enqueued_at"] = (
+                time.time() - max(0.0, float(oldest_age)) if depth else 0.0
+            )
             self._write_state(path, data)
 
     def record_cost(self, name: str, cost_usd: float,
