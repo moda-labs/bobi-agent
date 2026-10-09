@@ -2,166 +2,335 @@
 
 Issue: [#952](https://github.com/moda-labs/bobi-agent/issues/952)
 Status: spec, awaiting approval (Gate 1).
-Written 2026-10-09 from scratch, replacing the generic-overlay design in PR #956.
 
-Every `bobi/`, `event-server/`, `tests/`, `docs/` and `AGENTS.md` file:line below was read at `83bebe49` (`origin/main`, 2026-10-09).
-Every `moda-agents` file:line was read at `bf9d1088` (`origin/main`, 2026-10-08).
-Line numbers from the August review rounds have moved and are not reused.
+Every `bobi/`, `event-server/`, `tests/`, `docs/` and `AGENTS.md` file:line below was read at `70db2e1059fdf8f35751b17806496cb91f427b09` (`origin/main`, 2026-10-09).
+Every `moda-agents` file:line was read at `bf9d1088ad08bafd175232daeddcce3ab2d7e76c` (`origin/main`, 2026-10-08).
+One coordinate system, no translation table.
 
-Revision 5, after four independent review rounds:
-- `plans/reviews/2026-10-09-952-subscriptions-review-1.md` (3 blockers; the design lost its composition function as a result).
-- `plans/reviews/2026-10-09-952-subscriptions-review-2.md` (2 blockers; the accepted set moved off the credential record, and seeding stopped firing for auto-detecting teams).
-- `plans/reviews/2026-10-09-952-subscriptions-review-3.md` (1 blocker; the design lost its boot-time seeder, and the spec lost 46 lines of restated argument).
-- `plans/reviews/2026-10-09-952-subscriptions-review-4.md` (1 blocker; the accepted-set lock had to cover each writer's apply, not just its write).
-
-The design has gotten SMALLER at every revision.
-Revision 1 had a composition function and a `bobi/service.py` refactor; revision 5 has neither, and no boot-time seeder either.
+Six review rounds preceded this document and their reports are committed next to it in `plans/reviews/`.
+Rounds 1 to 4 are same-model with fresh context; rounds 5 and 6 are OpenAI Codex.
+This revision is a rewrite, not a seventh fold: round 6 found that six rounds of insertion-only amendment had left six contradictory instruction pairs and that every round kept finding the same class of defect (an unmodeled writer, or an unmodeled stale-state boundary) because the spec had no single distributed-state section.
+That section is now the centre of the document, and the superseded text is deleted rather than layered over.
 
 ## Problem
 
 Changing which repos a running team hears about means editing agent pack source in a second repository, rebuilding the pack, reinstalling it, and restarting the manager.
 
-The topics live in `subscribe:` in `moda-labs/moda-agents` at `agents/moda-eng-team/agent.yaml:127-134`, installed as a frozen read-only image at `<run>/package/agent.yaml`.
+The topics live in `subscribe:` in `moda-labs/moda-agents` at `agents/moda-eng-team/agent.yaml:127-134`, installed as a frozen read-only image at `<run>/package/agent.yaml` (`bobi/runtime_guard.py:143-153`).
 The 2026-08-03 familystories-ai offboard is the measured case: a commit in another repo, a pack rebuild, an install, and a restart.
-The pack comment at `agent.yaml:124-126` says so itself: "the server-side subscription set is replaced by `register` on the next manager-session start, so this team must be redeployed for the cut to take effect."
+The pack comment at `agents/moda-eng-team/agent.yaml:124-126` says so itself: "the server-side subscription set is replaced by `register` on the next manager-session start, so this team must be redeployed for the cut to take effect."
 
 A team cannot change its own subscriptions, so onboarding is gated on a human doing a release in a different repository.
 
 ## Decisions
 
-Settled by Zach in Slack `C0BAEN48KQR` thread `1791519568.830069` on 2026-10-09, quoted verbatim, not reopened here.
+All settled by Zach in Slack `C0BAEN48KQR` on 2026-10-09, not reopened here.
+D1 to D5 are from thread `1791519568.830069`; D6 to D9 answer the questions this spec posed back, in thread `1791568791.200569`.
 
 **D1.** The core question is generic: a running team may mutate its own event subscriptions.
 
 **D2.** Subscriptions live as a list in the WORKSPACE; the pack `agent.yaml` `subscribe:` is only the SEED.
 
-**D3.** A generic framework CLI subcommand applies changes, e.g. `bobi agent <name> subscriptions list|add|remove` (topics, not repos - no repo concepts in `bobi/`, and no `repos` CLI, per his Aug rulings).
+**D3.** A generic framework CLI subcommand applies changes, e.g. `bobi agent <name> subscriptions list|add|remove` (topics, not repos: no repo concepts in `bobi/`, and no `repos` CLI, per his August rulings).
 It persists the workspace list and hot-applies via the existing identity-preserving `PUT /deployments/<id>/subscriptions {"replace":[...]}`.
 No restart needed.
 
-**D4.** Read-back of what is LIVE: `subscriptions list` shows the persisted list vs what the event server actually routes, flagging topics the server silently dropped.
-Prefer reusing the PUT response if it already returns the accepted set; add a GET route only if needed.
+**D4.** Read-back of what is live, as relaxed by D8: `subscriptions list` shows the local last-accepted list, labelled "last accepted at T".
 Not via the admin channel.
 
 **D5.** `managed_repos` is eng-team specific: remove it from the pack `agent.yaml`, move it into a director-maintained workspace file, and update the eng-team director ROLE prompt to read and keep it current.
-Prompt/pack change only, no bobi-agent code.
-Accepted trade-off: the director can grant itself branch-delete authority (Zach, Aug: branches are recoverable).
+Prompt and pack change only, no bobi-agent code.
+Accepted trade-off: the director can grant itself branch-delete authority (Zach, August: branches are recoverable).
 
-The old generic-overlay design (`overlay.yaml` merged over `agent.yaml`, `OverlayError`, framework-key rejection) is REPLACED, not amended.
+**D6.** `workspace/subscriptions.yaml` is created lazily, by the CLI, on the first `add` or `remove`.
+Nothing seeds it at boot and no pack template ships it.
+
+**D7.** When the server rejects the live apply, the CLI keeps the workspace change, reports the server's exact `unauthorized_topics` list, and exits non-zero.
+
+**D8.** No new GET endpoint, and server introspection stays out of scope.
+`list` shows the local last-accepted list, labelled "last accepted at T".
+The existing reconnect re-assert remains the repair for a stale server-side index.
+
+**D9.** The event server's non-atomic `replace` is accepted as a known failure mode.
+This spec records the acceptance and states how an operator detects and recovers from a partial replace.
+
+The old generic-overlay design (`overlay.yaml` merged over `agent.yaml`, `OverlayError`, framework-key rejection) in PR #956 is REPLACED, not amended.
 
 ## What the code actually does
 
+Five facts the design is built on. Each is executed code, not inference.
+
 ### The live subscription set is per session, and it is not the workspace list
 
-`bobi/service.py:625-642` composes the manager's topic list: the explicit list, then `--subscribe` extras, then `monitor_subscription_keys(...)`, then `lifecycle_subscription_keys()`.
-That list reaches the session at `:759`.
+`bobi/service.py:630-647` composes the manager's topic list: `discover_subscriptions` (`:630`), then `--subscribe` extras (`:631`), then `monitor_subscription_keys(...)` (`:639-641`), then `lifecycle_subscription_keys()` (`:645-647`).
+That list reaches the session at `:764`.
 `bobi/session.py:1657-1660` then prepends `inbox/<session name>` before registering, and `_start_event_subscription` (`bobi/subagent.py:1715`) registers exactly those keys.
 
 So the live set is `["inbox/<session>"] + composed`, and `{"replace": [...]}` is authoritative: `event-server/core/src/core.ts:1522-1530` removes every stored subscription not in `desired`, and `:1535` assigns `deployment.subscriptions = desired`.
 
-Two consequences govern the whole design.
-A PUT built from the workspace list alone unsubscribes the manager from monitor findings, from sub-agent `session.completed`/`session.failed`, and from its own inbox, which is what makes it addressable by `bobi agent <name> message` and `ask`.
-A PUT built by recomputing the composition also re-syncs whatever the monitor set happens to be at that moment: `bobi/cli.py:2965`, `:2992` and `:3016` write `package/monitors.yaml` at runtime under `with_mutable_runtime_package`, and the manager does not re-PUT on those, so recomposing from a CLI command would add or remove monitor topics as an undeclared side effect.
+A PUT built from the workspace list alone would unsubscribe the manager from monitor findings, from sub-agent `session.completed`/`session.failed`, and from its own inbox, which is what makes it addressable by `bobi agent <name> message` and `ask`.
+A PUT built by recomputing the composition would re-sync whatever the monitor set happens to be at that moment: `bobi/cli.py:3102`, `:3129` and `:3153` write `package/monitors.yaml` at runtime under `with_mutable_runtime_package`, and the manager does not re-PUT on those.
 
-The design below therefore never recomputes the set.
-It edits the set the server last accepted.
+The design therefore never recomposes the set.
+It applies the workspace file's delta to the set the server last accepted.
 
-### The deaf-reconnect hook belongs to every session, not to the manager
+### The deaf-reconnect hook belongs to every session
 
 `_resubscribe_on_deaf` is defined once inside `_start_event_subscription` (`bobi/subagent.py:1974-1982`) and wired into every client at `:1990`.
 The only callers of `_start_event_subscription` are `bobi/session.py:1673` and `:1710`, which serve every session: the manager gets `["inbox/<self>"] + composed`, a worker gets `["inbox/<self>"]` only.
+It runs on a daemon thread (`bobi/events/client.py:440-446`), entered only after `_HEARTBEAT_TIMEOUT_S = 95.0` seconds of no pong (`:260`, `:294-297`).
 
-Today the hook replays the in-process `active_subscriptions` (`bobi/subagent.py:1765`, reassigned at `:1835` and `:1892`, read at `:1982`).
-A CLI change applied to the server would be reverted by the next deaf reconnect.
-But sourcing that hook from the manager's composed list would push the manager's `github:`/`slack:`/`linear:` topics onto a worker's own deployment on the worker's next deaf reconnect.
+Today the hook replays the in-process `active_subscriptions` (`bobi/subagent.py:1765`, reassigned at `:1835` and `:1892`, read at `:1982`), so a CLI change applied to the server would be reverted by the next deaf reconnect.
+Sourcing it from the manager's composed list instead would push the manager's `github:`/`slack:`/`linear:` topics onto a worker's own deployment on the worker's next reconnect.
 Per-session deployments exist precisely to prevent that: `bobi/events/state.py:21-25` and `tests/integration/test_event_isolation.py:1-16` record the 2026-06-12 incident where project leads received the user's Slack DMs to the director and replied to them.
 
-The fix must keep the hook per session.
+The hook must stay per session.
 
-### The accepted set needs its own per-session file, not the credential record
-
-`bobi/events/state.py:32-64` keeps two kinds of per-session state under `<run>/state/`: the deployment record (`deployment_state_path`, `:32`) holding `deployment_id` and `api_key`, and the event cursor (`session_cursor_path`, `:37`).
-`save_deployment_state` (`:55-64`) replaces the whole document on every call, takes no lock, and reads nothing first.
-
-The accepted set does NOT go in that record.
-A CLI write to the credential document can lose a concurrent re-register's new `deployment_id`, and the next manager start then takes the `_sync_saved_deployment` branch, PUTs to a deployment the server deleted, gets 403, and boots into a background retry loop against the same stale record.
-Three existing tests also assert that document's exact shape (`tests/test_event_subscription.py:71`, `:469-471`, `:514-515`), and the latter two assert it survives a PUT that does not re-mint.
-
-A third per-session file follows the pattern the other two already set.
-`event-server/core/src/core.ts:1537-1540` returns `{subscriptions, added, removed, protocol}` on a `replace`, and `bobi/subagent.py:1938-1946` reads that body, validates it, and throws it away.
-
-The register path is different and must be described differently.
-`register()` (`bobi/events/server.py:849-875`) returns `(deployment_id, api_key)` only; the response body (`core.ts:1473-1480`) carries no `subscriptions` member.
-What a 201 proves is that the server stored the requested array verbatim (`core.ts:1461`), having rejected the whole request otherwise, so the register site records the list it passed in rather than a server echo.
-
-### The empty-list fallthrough is a real hazard, and the malformed case is worse
+### The empty-list fallthrough is a real hazard, and the schema-invalid case is worse
 
 `bobi/events/subscriptions.py:61` gates on `if explicit:`.
-An empty list is falsy, so control falls through to `:68-78`, which calls `Config.load` and then `detect()`, and finally returns `[project_path.name]`.
+An empty list is falsy, so control falls through to `bobi/events/subscriptions.py:68-78`, which calls `Config.load` and then `detect()`, and finally returns `[project_path.name]`.
 An operator-emptied list does not mean "subscribe to nothing"; it means "auto-detect from git remotes".
 
-Worse, the call at `:60` sits inside a `try` whose `except Exception: pass` at `:63-66` is deliberate and test-pinned by `tests/test_ingress.py:306-324`.
-A malformed file read inside that `try` is swallowed and routes to the same auto-detection.
+The call at `bobi/events/subscriptions.py:60` also sits inside a `try` whose `except Exception: pass` at `:63-66` is deliberate and test-pinned by `tests/test_ingress.py:306`, so a parse error is swallowed into the same auto-detection.
 
-Measured at `83bebe49`, the fallthrough collapses this team's 4 GitHub topics to 1: `_detect_github` returns `['github:moda-labs/bobi-agent']`.
-`bobi/events/adapters.py:139-142` names the Slack hazard in the same path ("swallowing it here would silently promote a channel-scoped subscription to a workspace-wide one"), and `_detect_linear` (`:290-315`) subscribes to every Linear team the API key can see rather than MDS and MOD.
-The pack `subscribe:` is tolerable behind this gate because `<run>/package/` is read-only (`bobi/runtime_guard.py:143-153`).
-The new file is not: `<run>/workspace/` is writable, is edited by the CLI by design, and is advertised to the agent brain as its own scratch space (`bobi/prompts/resolver.py:86-97`).
+Measured at `70db2e10`, that fallthrough collapses this team's four GitHub topics to one: `_detect_github` (`bobi/events/adapters.py:57`) returns `['github:moda-labs/bobi-agent']`.
+`bobi/events/adapters.py:142` names the Slack hazard in the same path ("silently promote a channel-scoped subscription to a workspace-wide one"), and `_detect_linear` (`:290-315`) subscribes to every Linear team the API key can see rather than MDS and MOD.
 
-A malformed workspace file must therefore fail loud, not fall through.
+Worse, the pack parser maps whole classes of wrong-but-valid YAML to `[]` rather than raising.
+A non-dict document root returns `[]` (`bobi/events/subscriptions.py:44-45`), an empty file becomes `{}` through `yaml.safe_load(...) or {}` (`:43`) and then `[]`, and any `subscribe:` value that is neither a string nor a list returns `[]` (`:13-22`).
+Under a design where `[]` is authoritative, a truncated file, `{}`, `subscribe: {}`, or a bare list at the document root would silently become "subscribe to nothing".
+
+The pack `subscribe:` is tolerable behind this permissiveness because `<run>/package/` is read-only.
+A workspace file is not: `<run>/workspace/` is writable, is edited by the CLI by design, and is advertised to the agent brain as its own scratch space (`bobi/prompts/resolver.py:86-97`).
+It needs its own strict validator, and it must fail loud rather than fall through.
 
 ### The ingress warning reads a different function, and `doctor` reads it too
 
 `bobi/ingress.py:83` reads `explicit_subscriptions`, not `discover_subscriptions`.
-`tests/test_ingress.py:260-276` pins the two to one parser, and the `explicit_subscriptions` docstring at `:28` names itself "The ONE parser for the `subscribe:` surface (D078)".
+`tests/test_ingress.py:260-276` pins the two to one parser, and the `explicit_subscriptions` docstring at `:25` names itself "The ONE parser for the `subscribe:` surface (D078)".
 
 A workspace layer added only to `discover_subscriptions` would silently break that invariant while the test stayed green, because the test writes no workspace file.
 The workspace layer goes inside `explicit_subscriptions`.
 
-That also makes `bobi doctor` a reader, through `check_ingress_reachability` (`bobi/doctor.py:51`).
+That also makes `bobi doctor` a reader, through `_check_ingress_reachability` (`bobi/doctor.py:663`, called at `:51`).
 
 ### Authorization is a network write, it fails open, and it covers two services
 
-`authorize_resources` (`bobi/events/server.py:680-684`) is not a filter.
-It POSTs the real GitHub/Linear credential to `/resources/authorize` once per global topic (`:650-655`, `:781-784`), needs the signed bubble identity from `<run>/state/bubble.json`, and returns the list UNFILTERED when that identity is absent (`:713-714`: "can't sign - leave the set unchanged").
+`authorize_resources` (`bobi/events/server.py:680`) is not a filter.
+It POSTs the real GitHub or Linear credential to `/resources/authorize` once per global topic (`:648-655`, called per topic at `:781-784`), needs the signed bubble identity from `<run>/state/bubble.json`, and returns the list UNFILTERED when that identity is absent (`:714`: "can't sign, leave the set unchanged").
 
-It writes grants for two services only: `_RESOURCE_CRED_KEYS` at `:640` is `{"github": ..., "linear": ...}`, and `:761-765` passes `slack:`/`whatsapp:`/`discord:` through untouched because their grants come from the channel registrations in `_register_channel_credentials` (`bobi/subagent.py:1767`), which runs at session start.
-The server checks all five prefixes (`core.ts:411`, `:1504-1512`), and the slack grant is keyed on the TEAM id rather than the channel (`core.ts:445-450`), so a new channel inside an already-registered workspace passes while a new workspace does not.
-
-Its `filter_unauthorized=False` mode is the deliberate policy for an existing deployment, and both the function docstring (`:706-712`) and `_sync_saved_deployment` (`bobi/subagent.py:1859-1864`) give the same reason: "replacing the deployment's subscriptions with a filtered list would silently unsubscribe a valid existing deployment."
-The CLI PUTs to that same deployment, so it uses the same mode.
+It writes grants for two services only: `_RESOURCE_CRED_KEYS` at `bobi/events/server.py:640` is `{"github": ..., "linear": ...}`, and `:761-765` passes `slack:`/`whatsapp:`/`discord:` through untouched because their grants come from the channel registrations in `_register_channel_credentials` (`bobi/subagent.py:1767`), which runs at session start.
+The server checks all five prefixes (`core.ts:411`, `:1506-1512`), and the slack grant is keyed on the TEAM id rather than the channel (`core.ts:445-450`), so a new channel inside an already-registered workspace passes while a new workspace does not.
 
 Grants are permanent: `event-server/worker/src/index.ts:147-165` writes them with no `expirationTtl`, and `core.ts` has no revocation route.
+`filter_unauthorized=False` is the deliberate policy for an existing deployment, and both the function docstring (`bobi/events/server.py:706-711`) and `_sync_saved_deployment` (`bobi/subagent.py:1859-1866`) give the same reason: a filtered list "would silently unsubscribe a valid existing deployment".
+The CLI PUTs to that same deployment, so it uses the same mode.
 
 ### The server rejects; it does not silently drop
 
-`core.ts:1508-1512` calls `unauthorizedGlobalTopics` and, on any ungranted topic, returns `400 {"error":"unauthorized_topics","topics":[...]}`, rejecting the whole update with no partial write.
-`core.ts:1498-1500` returns `400 replace[] must not be empty`, so an empty replace is never a legal repair.
+`core.ts:1509-1511` calls `unauthorizedGlobalTopics` and, on any ungranted topic, returns `400 {"error":"unauthorized_topics","topics":[...]}`, rejecting the whole update before any write.
+`core.ts:1499` returns `400 replace[] must not be empty`, so an empty replace is never a legal repair.
 
-The only silent drop is client-side, in `authorize_resources` with `filter_unauthorized=True`, which only the register path uses: that is the parameter default at `bobi/events/server.py:682`, and the call site at `bobi/subagent.py:1805-1808` passes no keyword.
-The new path uses `False`, so D4's "topics the server silently dropped" is always a 400 naming the exact topics, and no GET route is needed.
-
-The register path already parses that 400 into `UnauthorizedTopics` (`bobi/events/server.py:627`, raised at `:840-842`).
-The PUT path does not: `bobi/subagent.py:1938-1946` reaches `resp.raise_for_status()` first and discards the topic list.
+The only silent drop is client-side, in `authorize_resources` with `filter_unauthorized=True`, which only the register path uses: that is the parameter default (`bobi/events/server.py:680`) and the call site at `bobi/subagent.py:1805-1808` passes no keyword.
+The register path parses that 400 into `UnauthorizedTopics` (`bobi/events/server.py:627`, raised at `:840-842`) and retries once after 0.5s because, after a successful authorize, it "almost always means Cloudflare KV has not yet propagated a just-written grant" (`:856-868`).
+The PUT path does neither: `bobi/subagent.py:1926-1946` reaches `resp.raise_for_status()` first and discards the topic list, and it has no retry.
 
 ### `managed_repos` has exactly one consumer
 
 `grep -rn "managed_repos" bobi/` exits 1.
-The only bobi-agent hits are `tests/test_memory.py:52,55,62,66`, where the string is arbitrary memory-index test data and not the pack key.
+The only bobi-agent hits are `tests/test_memory.py:52`, `:55`, `:62`, `:66`, where the string is arbitrary memory-index test data and not the pack key.
 
 Fleet-wide there is one real consumer: `moda-labs/moda-agents` `scripts/check-deploy-compose.py:85-94` parses `managed_repos` off the composed pack `agent.yaml` and fails the deploy-compose check unless `moda-labs/moda-skills` maps to `github-issues`.
-The director ROLE prompt is not a consumer today: `agents/moda-eng-team/roles/director/ROLE.md:12` and `:22` say "from configuration" and "in configuration" and never name the key, so `agent.yaml:155` ("Advisory tracker binding read by the director prompt") is already false.
+The director ROLE prompt is not a consumer today: `agents/moda-eng-team/roles/director/ROLE.md:12` and `:22` say "from configuration" and "in configuration" and never name the key, so `agents/moda-eng-team/agent.yaml:155` ("Advisory tracker binding read by the director prompt") is already false.
 D5's prompt half is an addition, not an update.
+
+## Distributed state
+
+This section is the design's spine.
+Everything after it is a consequence of it.
+Six review rounds each found the same shape of defect in a new place, because the document had no single place naming every source of truth, every writer, and every crash point.
+
+### Sources of truth
+
+| # | State | Location | Owner | Authoritative for |
+| --- | --- | --- | --- | --- |
+| S1 | pack `subscribe:` | `<run>/package/agent.yaml` | the pack author, read-only at runtime (`bobi/runtime_guard.py:143-153`) | the seed, before any operator edit |
+| S2 | declared list | `<run>/workspace/subscriptions.yaml` | the operator, written only by the CLI | what this team intends to hear |
+| S3 | derived set | computed, never stored | the framework | monitor, lifecycle and inbox routing |
+| S4 | accepted record | `<run>/state/subscriptions/<session>.json` | the framework, one per session | what a reconnect should re-assert |
+| S5 | routing index and deployment record | the event server | the server | what actually routes |
+
+S5 is the only state that routes events.
+S2 is the only durable record of operator intent.
+S4 is a cache with one consumer, and it is never a correctness source for S5.
+
+### Invariants
+
+**I1.** S2 holds declared topics only.
+No monitor key, no lifecycle key, no `inbox/` or `reply/` key is ever written to it.
+Writing one would create a second source of truth for S3 that drifts.
+
+**I2.** S4's `subscriptions` is never empty.
+A writer with an empty desired set is a bug and refuses rather than recording.
+An empty S4 would make every later repair PUT a `{"replace": []}` the server rejects forever (`core.ts:1499`), with the exception swallowed on a daemon thread.
+
+**I3.** S4 holds a set that the server accepted at or before `at`, or (when `applied` is false) a set a writer claimed and whose server outcome is unknown.
+S4 is never a claim that S5 currently holds that set.
+The codebase states S5 can go stale after acceptance independently of any client: the reconnect comment at `bobi/events/client.py:437-439` and the hook docstring at `bobi/subagent.py:1977-1980` both exist for that case.
+D8 settles the consequence: `list` labels S4 "last accepted at T" and makes no live claim.
+
+**I4.** Every write to S5 is a full `replace`, so it is idempotent.
+Replaying a set that is already live is a no-op at the server beyond `added: 0, removed: 0`.
+This is what makes every recovery path in this design a retry of the same operation rather than a compensating action.
+
+**I5.** The manager's own session start unconditionally re-asserts S2 and S3 onto S5.
+`bobi/service.py:630-647` recomposes from `discover_subscriptions`, which reads S2 once it exists, and `_sync_saved_deployment` or `_register_with_retry` PUTs the result.
+So every start is a reconciliation point, and any divergence this design can produce is bounded by one manager start.
+
+**I6.** No lock is held across a network round-trip between processes.
+`fsutil.file_lock` is a blocking `fcntl.flock(..., LOCK_EX)` with no deadline and no `LOCK_NB` (`bobi/fsutil.py:180`), and no caller anywhere in `bobi/` uses a timed or non-blocking variant.
+Holding it across `authorize_resources` (one 10s POST per global topic, `bobi/events/server.py:653` called per topic at `:781-784`) plus a 10s PUT would let a stalled CLI block a manager start with no bound at all.
+
+### Declared versus derived ownership
+
+The two layers overlap as strings, so ownership cannot be expressed as a prefix list.
+
+S3 is composed at three sites, and two of them emit BOTH the source-qualified topic and the bare delivered type:
+
+- `lifecycle_subscription_keys` returns `session.completed` and `session.failed` alongside their `agent/` forms (`bobi/events/subscriptions.py:88-105`, from `LIFECYCLE_EVENTS` at `:85`).
+- `monitor_subscription_keys` does the same for every effective monitor event, so a team with a `monitor/support.email` monitor also has bare `support.email` composed (`:108-130`).
+- `inbox/<session name>` comes from the session's own identity (`bobi/session.py:1657-1660`).
+
+`docs/EVENT_SERVER.md:374-376` documents why: current servers route a posted event onto both forms, older ones only onto the bare type, so clients subscribe to both.
+
+Two consequences follow, and a four-prefix rejection list gets both of them wrong.
+
+It would be incomplete, because a bare derived key like `session.completed` matches no `agent/`, `monitor/`, `inbox/` or `reply/` prefix.
+An operator could add it to S2 and later remove it, which is a real S2 delta, and the authoritative PUT would then drop framework-owned lifecycle routing.
+
+It would be overbroad, because `agent/` is a real event namespace and not a synonym for the two lifecycle keys.
+`agent/auto_dispatch.failed` is published by the reactor (`bobi/events/reactor.py:382`), documented as a subscribable topic (`docs/EVENT_SERVER.md:371`, `docs/MONITORS.md:256`), and already used as an `auto_dispatch` rule event (`tests/test_reactor.py:554`).
+A rule cannot fire on an event the deployment does not receive, so rejecting the prefix would make a documented topic unsubscribable and silently narrow D1.
+
+**The ownership rule is computed from S3, not matched against prefixes.**
+Let `D` be the derived set for the manager session, computed at command time from exactly those three sites.
+
+- `add T` is rejected when `T` is any `inbox/` or `reply/` key.
+  These belong to a session identity, never to a declared list.
+  This closes `add inbox/<worker session>`, which is the 2026-06-12 cross-session class, and needs no resource grant to exploit (`core.ts:411` makes `inbox/` bubble-scoped, and `core.spec.ts:2251-2262` proves the server stores an arbitrary inbox key).
+- `add T` is rejected when `T` is in `D`, with the error naming which site derives it.
+  This is what keeps the two layers disjoint, so I1 holds and `remove` can never be ambiguous.
+  `add agent/auto_dispatch.failed` is therefore accepted, because it is in no composition site.
+- `remove T` is rejected when `T` is not in the current S2 list.
+  An edit that produces no S2 delta produces no S5 mutation, which closes `remove inbox/<manager session>` and `remove session.completed`.
+- `remove T` is rejected when `T` is in `D`, as defence in depth against a hand-edited S2 that violates I1.
+
+`D` is computed fresh, so a monitor added after the manager's last start can make a `remove` fail that would have succeeded at boot.
+That is a conservative false rejection, it fails closed, and the error names the monitor.
+A hand-edited S2 that does carry a derived key is otherwise harmless, because the boot composition dedups every append (`bobi/service.py:631` for the `--subscribe` extras, `:640` and `:646` for the derived appends, each gating on membership).
+
+### Writers
+
+Four writers mutate S5 for a given session.
+Three are in the session process; one is a separate process.
+
+| W | Writer | Site | Trigger | Process |
+| --- | --- | --- | --- | --- |
+| W1 | `_register_with_retry` | `bobi/subagent.py:1811-1835` | session start with no saved deployment | session |
+| W2 | `_sync_saved_deployment` | `bobi/subagent.py:1856-1892` | session start with a saved deployment | session |
+| W3 | `_resubscribe_on_deaf` | `bobi/subagent.py:1974-1982`, daemon thread per `bobi/events/client.py:440-446` | 95s of no pong, then reconnect | session |
+| W4 | `bobi agent <name> subscriptions add\|remove` | new | an operator or the director agent | separate |
+
+Rounds 2 through 5 each missed one of these.
+Round 2 modelled file writers only, round 4 modelled W1 and W2, round 5 found W3.
+W4 is the one this change adds.
+
+`--subscribe` extras (`bobi/service.py:631`) are not a fifth writer: they enter S5 through W1 or W2 and are never in S2, so the empty-delta rule protects them and they drop at the next start without the flag, exactly as today.
+
+### The accepted record
+
+```
+<run>/state/subscriptions/<_safe_session(session)>.json
+```
+
+```json
+{"generation": 7, "subscriptions": ["inbox/eng-team", "github:moda-labs/bobi-agent"],
+ "applied": true, "at": "2026-10-09T18:22:04Z", "by": "cli"}
+```
+
+A third per-session file beside the deployment record (`bobi/events/state.py:32`) and the event cursor (`:37`), with `_safe_session` (`:28`) applied as both siblings do, because worker session names are caller-chosen (`bobi/subagent.py:836-838`).
+
+It is NOT the deployment record.
+`save_deployment_state` (`bobi/events/state.py:55-64`) replaces the whole document on every call, takes no lock and reads nothing first, so a CLI write there could lose a concurrent re-register's new `deployment_id`; the next start would then PUT to a deployment the server deleted, get 403, and boot into a retry loop against the same stale record.
+Three tests also assert that document's exact shape (`tests/test_event_subscription.py:71`, `:470-471`, `:514-515`), and the latter two assert it survives a PUT that does not re-mint.
+
+`generation` is a monotonic counter and the concurrency primitive.
+`applied` is false between a writer's claim and its confirmation, which is what makes the remote PUT and the local write crash-recoverable without a second file.
+`by` is diagnostic only.
+
+### Serialization
+
+**In-process (W1, W2, W3): one module-level `threading.Lock` in `bobi/subagent.py`,** held across each writer's whole claim, apply and confirm sequence, including its network call.
+That is safe here and only here: the sole contender is another writer in the same process, every network call it waits behind has a 10s timeout, and no other process can be starved by it.
+W3 cannot interleave with a boot writer, which is what round 5's F2 race needed.
+
+**Cross-process (W4 against the session process): `fsutil.file_lock` on the accepted record, held only around a local read and write.**
+Microseconds, never across the network, per I6.
+`file_lock` gains a `timeout` parameter for this; the default stays blocking so no existing caller changes behaviour.
+
+On lock timeout the two sides differ deliberately:
+
+- W4 abandons the live apply, keeps the S2 change already written, says another writer is applying, and exits non-zero.
+- W1, W2 and W3 proceed WITHOUT the lock after the deadline and log a warning.
+  A manager start must never be blocked by a wedged CLI, and the generation check still detects a lost update at confirm time.
+
+**The claim, apply, confirm sequence**, run by all four writers:
+
+1. Under the lock: read the record, capture `generation = g`.
+   Write `{generation: g+1, subscriptions: <desired>, applied: false, at: now, by: <writer>}`.
+   Release.
+2. Outside any cross-process lock: authorize if needed, then PUT (or `register`).
+3. Under the lock: re-read.
+   If `generation != g+1`, another writer superseded this one; leave the record untouched.
+   Otherwise write `{generation: g+1, subscriptions: <server echo, else desired>, applied: true, at: now, by: <writer>}`.
+   Release.
+
+A reader (W3, or `list`) replays `subscriptions` whether `applied` is true or false.
+Replaying an unconfirmed claim is correct by I4: the server either already holds it, in which case the replay is a no-op, or does not, in which case the replay is the repair.
+
+**What this guarantees, and what it does not.**
+The claim is written before the PUT, so no writer can revert a change that is already live: a reconnect firing in the window between W4's claim and W4's PUT reads W4's own claimed set.
+The generation check means no writer's confirmation can clobber a newer writer's record.
+It does NOT guarantee that S4 equals S5 under true concurrency: if two writers' PUTs cross on the wire, the server keeps whichever arrived last while the record keeps whichever confirmed last, and those can differ.
+I5 is the repair: the next manager start re-asserts S2 and S3 unconditionally, so the divergence window is bounded by one start, and in the W4 case both candidate sets already contain the operator's declared change because both are built from `accepted ± S2 delta`.
+
+### Crash points and reconciliation
+
+| Crash point | State left behind | Who reconciles, and how |
+| --- | --- | --- |
+| During W4's step 4 S2 write | `atomic_write_text` (`bobi/fsutil.py:100`) leaves the old or the new file, never a torn one | nothing to do |
+| Between W4's claim and its PUT | S4 claimed, `applied: false`; S5 unchanged | the next W3 or the next start replays or overwrites the claim (I4) |
+| Between the PUT and the confirm | S5 holds the new set; S4 says `applied: false` | the next W3 replays the same set (no-op) and confirms it; the next start overwrites S4 with its own authoritative claim |
+| During the confirm write (disk full, read-only filesystem) | S5 holds the new set; S4 unconfirmed | same as above; the command reports the local write failure and exits non-zero, having already applied live |
+| Inside the server's `replace` loop | S5 partially changed; S4 unconfirmed | see "Accepted failure modes"; re-run the command or restart the manager, both of which are full `replace` retries (I4) |
+| Session process killed with the in-process lock held | the lock dies with the process | nothing to do |
+| W4 killed holding the file lock | `flock` releases on fd close | nothing to do |
+
+The resolution order a reader applies is one rule: **replay `subscriptions` unconditionally.**
+There is no second state file, no pending-journal format, and no boot-time resolution pass, because I4 makes an unconditional replay both the confirmation path and the repair path.
+If resolution itself fails, the record simply stays unconfirmed and the next reconnect or start repeats it.
+`list` surfaces that state so an operator can see it rather than inferring it.
 
 ## Design
 
-One new workspace file, one new CLI group, one new per-session state file.
-No composition function, no change to `bobi/service.py`, no boot-time seeder, no new server route, no overlay, and no merge semantics.
-`UnauthorizedTopics` is reused for the server's rejection, and the one new error class is for a malformed workspace file.
+One new workspace file, one strict reader, one new per-session state file, one new CLI group.
+No composition function, no change to `bobi/service.py`, no boot-time seeder, no pack template, no new server route, no overlay and no merge semantics.
+`UnauthorizedTopics` is reused for the server's rejection; the one new error class is for an invalid workspace file.
 
 ### The file
 
-`<run>/workspace/subscriptions.yaml`, a mapping with one key:
+`<run>/workspace/subscriptions.yaml`, a mapping with exactly one key:
 
 ```yaml
 # Event topics this team subscribes to.
@@ -181,59 +350,75 @@ subscribe:
 
 That body is what this team's first `add` seeds from: `agents/moda-eng-team/agent.yaml:128-134` at `bf9d1088`.
 
-A mapping under the same `subscribe:` key, rather than a bare YAML list, so the existing parser is reused rather than forked.
-`explicit_subscriptions` already requires a dict and reads `raw.get("subscribe", [])` (`bobi/events/subscriptions.py:43-48`).
-Keeping one parser for one wire shape is less new code and preserves the D078 invariant its docstring claims at `:28`.
+The same `subscribe:` key as the pack, so the wire shape is one shape rather than two.
+Monitor topics, lifecycle topics and `inbox/<session>` are absent by I1.
 
-Monitor topics, lifecycle topics and `inbox/<session>` are NOT in this file.
-They are derived from `monitors:`, from the framework, and from the session's own identity, so writing them here would create a second source of truth that drifts.
-
-The CLI writes the RESOLVED topics, not the raw pack text, because it seeds from `discover_subscriptions`, which has already interpolated.
-So `${VAR}` in a pack `subscribe:` stops being re-resolved per boot once the file exists.
-No fleet pack uses `${}` inside `subscribe:` today, so this is a latent change of contract rather than a live one, and it is stated here rather than discovered later.
+The CLI writes the RESOLVED topics, because it seeds from `discover_subscriptions`, which has already interpolated.
+The workspace reader does NOT interpolate, so a `${VAR}` in a pack `subscribe:` stops being re-resolved per boot once the file exists.
+Only two fleet packs declare `subscribe:` at `bf9d1088` (`agents/moda-eng-team`, `agents/baohua`) and neither uses `${}` inside it, so this is a latent change of contract rather than a live one, stated here rather than discovered later.
 
 The CLI writes a fixed header constant plus `yaml.safe_dump({"subscribe": [...]})`.
-Only PyYAML is available (`pyproject.toml` declares `pyyaml>=6.0` and nothing else), and `safe_dump` discards comments, which the header says out loud rather than working around with line splicing.
+Only PyYAML is available (`pyproject.toml:24`), and `safe_dump` discards comments, which the header says out loud rather than working around with line splicing.
 
-### Presence, not truthiness
+### The reader, and its strict validator
 
-`bobi/events/subscriptions.py` gains one reader:
+`bobi/events/subscriptions.py` gains one function:
 
 ```
 workspace_subscriptions(project_path) -> list[str] | None
 ```
 
 `None` means the file is absent.
-`[]` means the operator subscribes to nothing explicit, and is returned as such.
-A malformed file raises `WorkspaceSubscriptionsError`, a new class in the same module, carrying the file path and the underlying parse error.
-It is its own class rather than a bare `yaml.YAMLError` because `doctor` has to tell a malformed WORKSPACE file apart from a malformed pack `agent.yaml`, whose historical fall-through must not change.
+`[]` means the operator declares nothing, and is returned as such.
+Everything else that is not a valid document raises `WorkspaceSubscriptionsError`, a new class in the same module carrying the file path and the reason.
 
-`explicit_subscriptions` consults it first and returns it when it is not `None`, so the one parser keeps serving both its callers and the ingress warning at `bobi/ingress.py:83` follows the workspace layer for free.
+The validator is its own, NOT the permissive pack parser, because under this design `[]` is authoritative and the pack parser maps six distinct wrong inputs to `[]`.
+Rejected, each naming the fault:
 
-`discover_subscriptions` calls `workspace_subscriptions` directly, BEFORE and OUTSIDE the `try` at `:59-66`, and returns the list when it is not `None`.
+- an unparseable file (`yaml.YAMLError`)
+- an empty file, or a document root that is not a mapping
+- a missing `subscribe` key
+- a `subscribe` value that is not a list, including the bare string the pack parser accepts
+- any element that is not a non-empty string after stripping
+- **duplicate topics**, naming the offending topic
+- **any unknown top-level key**, naming it
+
+The last two are policy choices and they are stated rather than delegated.
+Duplicates are rejected because they make `remove` ambiguous and because the server dedups a `replace` anyway (`core.ts:1518`), so a duplicate can only ever be a hand-edit mistake.
+Unknown keys are rejected because this file is machine-written, so `subscriptions:` typed for `subscribe:` must fail closed rather than normalise to "subscribe to nothing", which is the exact hazard the strict validator exists to close.
+
+The pack's historical permissiveness is unchanged.
+`explicit_subscriptions` keeps its own parser for `package/agent.yaml`, and `tests/test_symmetric_node.py:90-102` keeps pinning it.
+
+### Where the layer attaches
+
+`explicit_subscriptions` (`bobi/events/subscriptions.py:25`) consults `workspace_subscriptions` first and returns it when it is not `None`, which keeps the D078 one-parser invariant and makes `bobi/ingress.py:83` follow the workspace layer for free.
+
+`discover_subscriptions` (`bobi/events/subscriptions.py:51`) calls `workspace_subscriptions` directly, BEFORE and OUTSIDE the `try` at `:59-66`, and returns the list when it is not `None`.
 That placement is the whole point.
-Inside the `try`, a malformed workspace file would be swallowed into auto-detection; outside it, the manager boot fails with the path, while a malformed PACK `agent.yaml` keeps its historical fall-through, which `tests/test_ingress.py:306-324` pins.
+Inside the `try`, an invalid workspace file would be swallowed into auto-detection; outside it, the manager boot fails with the path, while an invalid PACK `agent.yaml` keeps its historical fall-through, which `tests/test_ingress.py:306` pins.
 That test monkeypatches `explicit_subscriptions`, so `discover_subscriptions` must keep calling it inside the `try` rather than reaching past it to a pack-only reader; otherwise the pin stays green while no longer proving anything.
 
+The pack's own truthiness gate at `bobi/events/subscriptions.py:61` is left alone.
+Nothing writes `package/agent.yaml` at runtime, so an empty pack list is not a reachable operator mistake.
+The `monitors` commands do write `package/monitors.yaml` under `with_mutable_runtime_package`; `agent.yaml` has no such path.
+
 The file is read twice on an absent-file boot, once by each function.
-One window follows: a file CREATED between the two reads is read from inside the `try`, so if it is also malformed the exception is swallowed for that one boot.
+One window follows: a file created between the two reads is read from inside the `try`, so if it is also invalid the exception is swallowed for that one boot.
 The CLI writes with `atomic_write_text`, so this needs a create rather than a torn write, and the next boot fails loud as intended.
 
-The pack's own truthiness gate at `:61` is left alone, deliberately.
-Nothing writes `package/agent.yaml` at runtime, so an empty pack list is not a reachable operator mistake, and `tests/test_symmetric_node.py:90-102` pins the current behavior.
-(The `monitors` commands DO write `package/monitors.yaml` under `with_mutable_runtime_package`; `agent.yaml` has no such path.)
+The three other readers degrade safely, except `doctor`:
 
-The three other readers degrade safely and are unchanged, except for `doctor`.
-`bobi/supervisor/snapshot.py:104-109` wraps its `discover_subscriptions` call in `except Exception: pass` and is documented as best-effort, so a malformed file yields no declared subscriptions and silence detection simply asserts less.
-`bobi/service.py:184-195` wraps `check_ingress_reachability` the same way, so the reachability warning is skipped at `log.debug`.
-`bobi/doctor.py` must change: `_check_ingress_reachability` gains an `except WorkspaceSubscriptionsError` arm returning `ok=False` with the path, placed AHEAD of the two arms it already has (`except FileNotFoundError` -> `ok=True, "no agent config"` at `:673-675`, then `except Exception` -> `ok=True, "skipped: ..."` at `:676-678`).
-Both existing arms stay exactly as they are; a missing config must keep reporting `ok=True`.
-Without the new arm a malformed workspace file fails the manager boot while `doctor`, the command an operator runs first, reports green.
+- `bobi/supervisor/snapshot.py:104-109` wraps its call in `except Exception: pass` and is documented best-effort, so silence detection simply asserts less.
+- `bobi/service.py:184-195` wraps `check_ingress_reachability` the same way, so the reachability warning is skipped at `log.debug`.
+- `bobi/doctor.py` must change: `_check_ingress_reachability` (`:663`) gains an `except WorkspaceSubscriptionsError` arm returning `ok=False` with the path, placed AHEAD of the two arms it already has (`except FileNotFoundError` -> `ok=True, "no agent config"` at `:673-675`, then `except Exception` -> `ok=True, "skipped: ..."` at `:676-678`).
+  Both existing arms stay exactly as they are; a missing config must keep reporting `ok=True`.
+  Without the new arm an invalid workspace file fails the manager boot while `doctor`, the command an operator runs first, reports green.
 
-### Nothing seeds the file at boot
+### Nothing seeds the file (D6)
 
 The file is created by the first `subscriptions add` or `remove`, and by nothing else.
-There is no boot-time seeder, because none is needed: with no workspace file the reader returns `None`, `discover_subscriptions` falls through to the pack list exactly as it does today, and no auto-detection or network call happens.
+No boot seeder is needed: with no file the reader returns `None`, `discover_subscriptions` falls through to the pack list exactly as today, and no auto-detection or network call happens.
 
 ```
 $ cd /tmp && PYTHONPATH=<main worktree> python3 -   # pack with subscribe:, no workspace file,
@@ -243,48 +428,39 @@ explicit_subscriptions : ['github:moda-labs/lightweave', 'linear:MDS']
 discover_subscriptions : ['github:moda-labs/lightweave', 'linear:MDS']
 ```
 
-So a boot seeder would buy nothing a reader cannot already get, while costing a `bobi/service.py` change, a pack-non-empty gate (the pack reader cannot tell an absent `subscribe:` from `subscribe: []`, which is what made the first attempt at this write an authoritative empty list for most of the fleet), and three tests.
-Creating the file lazily is also strictly better on upgrade: until an operator acts, there is no new file and no boot reads differently.
-
-The CLI is therefore the only writer, and it holds `bobi/fsutil.py:162` `file_lock` across load, mutate and save, as `AGENTS.md:97` requires for read-modify-write state.
-`atomic_write_text` alone keeps the file parseable without stopping a concurrent updater's change from being overwritten.
+A boot seeder would buy nothing a reader already gets, while costing a `bobi/service.py` change, a pack-non-empty gate (the pack reader cannot tell an absent `subscribe:` from `subscribe: []`, which would make the write an authoritative empty list for the auto-detecting majority of the fleet), and three tests.
+Lazy creation is also strictly better on upgrade: until an operator acts, there is no new file and no boot reads differently.
 
 The cost is that `cat workspace/subscriptions.yaml` shows nothing until the first edit, so `list` carries a branch for it.
-See Q1 for the alternative, which is a pack `workspace/` template rather than a boot-time seeder.
 
-### The accepted set, recorded per session
+### The accepted-record API
 
-A third per-session state file, beside the deployment record and the cursor:
+`bobi/events/state.py` gains, following `session_cursor_path` (`:37`) for the path shape and `atomic_write_json` (`bobi/fsutil.py:143`) for the write:
 
 ```
-<run>/state/subscriptions/<_safe_session(session)>.json  ->  {"subscriptions": [...], "at": "<iso8601>"}
+accepted_subscriptions_path(project_path, session) -> Path
+load_accepted_subscriptions(project_path, session) -> dict | None
+claim_accepted_subscriptions(project_path, session, subscriptions, by) -> int    # returns generation
+confirm_accepted_subscriptions(project_path, session, generation, subscriptions, by) -> bool
 ```
 
-`_safe_session` (`bobi/events/state.py:28-29`) is applied, as both sibling path functions do, because worker session names are caller-chosen (`bobi/subagent.py:836-838`).
+`load_` returns `None` for a missing file, a missing or non-list `subscriptions`, or an empty one (I2).
+`claim_` and `confirm_` take the bounded `file_lock` internally and implement steps 1 and 3 of the claim sequence; `confirm_` returns `False` when the generation moved, which is the superseded case.
+`save_deployment_state` (`bobi/events/state.py:55-64`) is not touched, so the CLI never writes the file holding an api key and the three exact-shape assertions on it stay valid.
 
-`bobi/events/state.py` gains `accepted_subscriptions_path(project_path, session)`, `load_accepted_subscriptions(project_path, session) -> list[str] | None`, and `save_accepted_subscriptions(project_path, session, subscriptions)`.
-The credential record is not touched, so the CLI never writes a file holding an api key and the three exact-shape assertions on it stay valid.
+W1 claims the `authorized` list it is about to pass to `register()` and confirms it on a 201, which proves the server stored that array verbatim (`core.ts:1456-1463`); the register response body carries no `subscriptions` member (`core.ts:1473-1480`), so there is no echo to prefer.
+W2 and W4 claim their desired list and confirm with the PUT's echo when the body carries one (`core.ts:1539`) and with the claimed list otherwise, which is why the nine existing tests that answer the PUT with a bare `{"ok": True}` now produce a correct record instead of none.
+W3 replays and then confirms the same set.
 
-Two sites write it, both on the line where they already assign `active_subscriptions`:
-- `_register_with_retry` (`bobi/subagent.py:1834-1835`) records the `authorized` list it passed to `register()`; a 201 proves the server stored that array verbatim (`core.ts:1461`).
-- `_sync_saved_deployment` (`:1891-1892`) records what `put_subscriptions` returned, which is the server's own echo.
-
-An absent or empty result is NOT recorded, and the reader returns `None` for a missing file, a missing `subscriptions` key, or an empty list.
-That rule is load-bearing: `validate_server_response` ignores unknown fields and never checks `subscriptions` (`bobi/events/protocol.py:55-70`), nine existing tests answer the PUT with a bare `{"ok": True}`, and a recorded `[]` would make every later repair PUT a `{"replace": []}` that the server rejects forever (`core.ts:1498-1500`) with the exception swallowed on a daemon thread.
-
-`_resubscribe_on_deaf` (`bobi/subagent.py:1974-1982`) reads its OWN session's record and PUTs that, falling back to `active_subscriptions` when the reader returns `None`.
-A worker therefore replays `["inbox/<worker>"]`, and the manager replays whatever was last accepted, including a change the CLI made minutes ago.
-That fixes the revert without a branch, without recomposition, and without any cross-session leak.
-The read is a small JSON file on a daemon thread, written only with `atomic_write_json`, so a concurrent write reads as either the old or the new document and never a partial one.
-
-A torn read is not the only race, so all three writers take `file_lock` on this file, and each holds it across its APPLY as well as its write.
-Locking only the write would not serialize anything that matters, because at both manager sites the apply comes first: `_sync_saved_deployment` PUTs at `bobi/subagent.py:1891` and assigns at `:1892`, and `_register_with_retry` calls `register()` at `:1822` and assigns at `:1835`.
-So `_sync_saved_deployment` holds the lock from the `authorize_resources` call (`:1880`) through `:1892`, `_register_with_retry` holds it from `register()` (`:1822`) through `:1835`, and the CLI holds it across steps 5 to 8.
-Without that, an `add` that reads the record and then loses the CPU to a manager restart PUTs the pre-restart snapshot afterwards, removing whatever the restart's recomposed boot PUT had added: `bobi/service.py:625-642` recomposes from `MonitorRegistry.load(...)`, which `bobi/cli.py:2965`, `:2992` and `:3016` can have changed since.
-That is the monitor re-sync trap arriving from the other direction, and with the apply inside the lock the CLI's step-5 re-read can actually observe a restart that already applied.
-
-No `CURRENT_FORMAT_VERSION` bump (`bobi/state_version.py:25-27`).
+No `CURRENT_FORMAT_VERSION` bump (`bobi/state_version.py:27`).
 The file is new and optional, an older bobi never reads it, and a downgrade degrades to the `active_subscriptions` fallback rather than refusing to start.
+
+### `_resubscribe_on_deaf`
+
+It reads its OWN session's record and PUTs that, falling back to `active_subscriptions` when `load_accepted_subscriptions` returns `None`.
+A worker therefore replays `["inbox/<worker>"]`, and the manager replays whatever was last claimed, including a change the CLI made seconds ago.
+That fixes the revert without a branch, without recomposition and without any cross-session leak.
+It runs inside the in-process lock, which is what excludes it from W1 and W2, and it confirms an unapplied claim on success.
 
 ### The CLI
 
@@ -295,89 +471,121 @@ bobi agent <name> subscriptions remove <topic>...
 ```
 
 Generic by Zach's own test: the command names a framework concept (a topic), not a domain one (a repo).
-It follows the `monitors` group precedent (`bobi/cli.py:3155`).
+It follows the `monitors` group precedent (`bobi/cli.py:3292`).
 
 `<name>` is the INSTALLED slot, not the pack's `agent:` key.
 This deployment is installed as `eng-team` while the pack declares `moda-eng-team`, so the director must derive it from `BOBI_ROOT` via `paths.agent_name_for_root` (`bobi/paths.py:92`) rather than guessing.
-D1 means the director agent is the primary caller, from inside the runtime; `_detect_project_root` (`bobi/cli.py:80-95`) honors the inherited `BOBI_ROOT` that the `agent` group binds.
+D1 means the director agent is the primary caller, from inside the runtime; `_detect_project_root` (`bobi/cli.py:80`) honors the inherited `BOBI_ROOT` that the `agent` group binds.
 
 `add` and `remove` each:
 
-1. Resolve the runtime root via `_detect_project_root`.
-2. Resolve the manager's session and its live identity, BEFORE any write, any network call and any process work: `manager_session_name(project_path)` (`bobi/service.py:135-144`), then `load_deployment_state(project_path, session)` (`bobi/events/state.py:44-52`) and `load_accepted_subscriptions(project_path, session)`.
-   If either is missing there is nothing live to update, which is recorded now and changes only what happens after step 4.
-3. Compute the effective list the edit applies to.
+1. Resolve the runtime root via `_detect_project_root`, and the manager's session via `manager_session_name(project_path)` (`bobi/service.py:135`).
+2. Validate every topic argument against the ownership rule, BEFORE any write and any network call.
+   A rejected topic fails the whole command non-zero with nothing written, naming the rule and, for a derived topic, the site that derives it.
+3. Select the path from the liveness and identity table below, reading `service.team_status(project_path).manager_running` (`bobi/service.py:842-847`) and the two state files.
+4. Compute the effective list the edit applies to.
    When `workspace/subscriptions.yaml` exists, that is its contents.
    When it is absent, it is `discover_subscriptions(project_path)`, so a team that was auto-detecting keeps its effective set instead of collapsing to the one topic named on the command line.
-   This runs OUTSIDE `file_lock`, because on an auto-detecting team it makes live Slack and Linear API calls (`bobi/events/adapters.py:290-315` POSTs to the Linear API with a 5s timeout), and the lock must not be held across a network round-trip.
+   This runs under no lock, because on an auto-detecting team it makes live Slack and Linear API calls (`bobi/events/adapters.py:290-315` POSTs to the Linear API with a 5s timeout), and I6 forbids a lock across that.
    The command says in its own output that it made those calls.
-4. Under `file_lock`, re-read the file, apply the topic edit, and write it back with `atomic_write_text` (`bobi/fsutil.py:100`).
-   The re-read inside the lock is what makes two concurrent `add` calls compose instead of overwriting each other; step 3's value is used only when the file is still absent.
-   Persisting is the whole operation, so if step 2 found nothing live, the command stops here, says plainly that nothing was applied live and that the change takes effect at next start, and exits zero.
-5. Under `file_lock` on the accepted-set record, held from here through step 8: re-read the record, and abort with "the manager restarted, re-run the command" if it changed since step 2.
-   Then build the PUT list by applying the SAME topic edit to the record.
-   Nothing is recomposed, so monitor, lifecycle and `inbox/` topics pass through untouched by construction.
-6. For `add` only, call `authorize_resources(..., filter_unauthorized=False)` on the NEWLY ADDED topics alone, so a new `github:` or `linear:` topic has its grant written before the PUT.
-   Passing the whole PUT list instead would re-POST the real credential once per topic already granted (`bobi/events/server.py:781-784` authorizes per global topic), which is seven signed POSTs on this team where one is needed.
+5. Under `file_lock` on the workspace file, re-read it, apply the topic edit, and write it back with `atomic_write_text` (`bobi/fsutil.py:100`), per `AGENTS.md:97`.
+   The re-read inside the lock is what makes two concurrent `add` calls compose instead of overwriting each other; step 4's value is used only when the file is still absent.
+   Record the exact S2 delta, meaning the set of topics actually added and actually removed.
+   Persisting is the whole operation, so a persist-only path stops here, says plainly that nothing was applied live and that the change takes effect at the next start, and exits zero.
+6. Claim the accepted record: `accepted − removed + added`, where both sets are step 5's S2 delta.
+   Nothing is recomposed, so monitor, lifecycle, `inbox/` and `--subscribe` topics pass through untouched by construction.
+   If the claim is refused because another writer holds the lock past the deadline, stop: the S2 change stands, the command says another writer is applying, and it exits non-zero.
+7. For `add` only, call `authorize_resources(..., filter_unauthorized=False)` on the NEWLY ADDED topics alone, so a new `github:` or `linear:` topic has its grant written before the PUT.
+   Passing the whole PUT list instead would re-POST the real credential once per already-granted topic (`bobi/events/server.py:781-784` authorizes per global topic), which is seven signed POSTs on this team where one is needed.
    The return value is discarded; `filter_unauthorized=False` is kept so the call can never narrow the set.
-   If `load_bubble_state` (`bobi/events/state.py:79`) is empty the command FAILS with that fact, rather than proceeding into the unfiltered pass-through at `bobi/events/server.py:713-714`.
-   `remove` skips this step entirely: the server re-checks every surviving topic (`core.ts:1509`), but grants carry no TTL and have no revocation route, so a survivor granted at an earlier boot still passes.
-7. Resolve `es_url` from `cfg.event_server_url` with the `http://localhost:8080` fallback, and `ensure_running` when `local_port_from_url` matches, exactly as `bobi/subagent.py:1948-1955` does.
-   Step 2's bail-out is what keeps a persist-only run from ever reaching this line and spawning a server.
-8. `PUT /deployments/<id>/subscriptions` via the shared `put_subscriptions` helper, then record the returned set with `save_accepted_subscriptions`.
-9. Print the full diff of the previous accepted set against the new one, naming every add and every remove, not just the topic the operator typed.
-   On `UnauthorizedTopics`, print the topics the server named, state that nothing was applied live, and exit non-zero so a script does not read a rejected apply as success.
-   The workspace change written at step 4 is kept; see Q2.
+   If `load_bubble_state` (`bobi/events/state.py:79`) is empty the command FAILS with that fact, rather than proceeding into the unfiltered pass-through at `bobi/events/server.py:714`.
+   `remove` skips this step: the server re-checks every surviving topic (`core.ts:1509`), but grants carry no TTL and have no revocation route, so a survivor granted at an earlier boot still passes.
+8. Resolve `es_url` from `cfg.event_server_url` with the `http://localhost:8080` fallback, and `ensure_running` when `local_port_from_url` matches, exactly as `bobi/subagent.py:1948-1955` does.
+   Step 3's persist-only paths are what keep a run from ever reaching this line and spawning a server.
+9. `PUT /deployments/<id>/subscriptions` via the shared `put_subscriptions` helper, then confirm the record.
+10. Print the full diff of the previous accepted set against the new one, naming every add and every remove, not just the topic the operator typed.
+    On `UnauthorizedTopics`, print the topics the server named, state that nothing was applied live, and exit non-zero so a script does not read a rejected apply as success.
+    The S2 change written at step 5 is kept, per D7.
+    On a superseded confirmation, say the manager applied concurrently and that re-running is safe, and exit non-zero.
 
-Two states mean "nothing live to update" at step 2: no deployment record (the manager is not running), and a deployment record with no accepted-set file (the running manager predates this version, so every `add` is persist-only until it restarts once).
-Both persist and exit zero.
-A `put_subscriptions` rejection at step 8 persists and exits non-zero.
-A step-5 abort does too, and the re-run is idempotent: step 4's edit is already in the file, so step 5 simply re-applies it to the fresh record.
+### Liveness and identity
 
-`list` prints the persisted workspace list and the recorded accepted set with its timestamp.
-It flags ONE direction: topics in the persisted list that are absent from the accepted set, which is what D4's "topics the server silently dropped" means.
-The other direction is expected and is never flagged, because `inbox/<session>`, the monitor keys and the lifecycle keys are in the accepted set by design and never in the file: on this team that is 17 topics, so flagging "any difference" would fire on every run of a healthy team and bury the one real signal.
-Those 17 print as a separate derived group, labelled as such.
-With no workspace file, `list` resolves the effective list with `discover_subscriptions`, labels it as the pack's or auto-detected rather than persisted, says in its own output when that resolution made live Slack or Linear calls, and flags the same one direction against it.
-With no record it says no live set is recorded, naming which reason applies.
-It does not PUT, because a read command must not mutate.
+Step 3's selection, every row stated:
 
-The workspace file and the live set can diverge, and that is detectable rather than hidden.
-An `add` issued while the manager is booting can lose the race: the boot PUT is built from whatever `discover_subscriptions` resolves, which is the workspace file once it exists, so if the CLI's write lands first the topic is live, and if it lands second the file is ahead of the server until the next start.
-`list` reports exactly that gap, which is what D4's read-back is for.
+| # | `manager_running` | deployment record | accepted record | Path and exit |
+| --- | --- | --- | --- | --- |
+| L1 | false | any | any | persist-only, exit 0. Nothing is consuming the deployment, so no PUT and no `ensure_running`. |
+| L2 | true | absent | any | persist-only, exit 0. There is no identity to PUT to. |
+| L3 | true | present | absent | persist-only, exit 0. A pre-upgrade manager is running; it records on its next start, and until then every edit is persist-only. |
+| L4 | true | present | present | live apply, steps 6 to 10. |
+| L5 | true at step 3, false by step 9 | present | present | the PUT still goes out and is still correct: the deployment is per session, the server keeps it, and the next start re-asserts. Reported as applied. |
+| L6 | false at step 3, true by step 5 | any | any | persist-only was selected, but the boot composition reads S2, so the change applies at that boot if step 5's write landed first and at the following start otherwise. `list` shows the gap. |
+
+L1 is the row file existence gets wrong, which is why it reads the pid.
+Nothing unlinks the deployment record on stop: `grep -rn deployment_state_path bobi/` returns only the definition and accessor sites in `bobi/events/state.py`.
+PR #1098 added an OS-service stop path that stops the unit and returns without touching event state (`bobi/cli.py:1223-1246`), and its generated units restart the manager unattended (`Restart=on-failure` at `bobi/service_manager.py:120`, `KeepAlive` at `:138`).
+`team_status` probes the pid rather than trusting the file (`bobi/service.py:846-847`, `_pid_alive` at `:288`), and normal shutdown unlinks it (`:662-667`), so stopped direct, stopped systemd, stopped launchd and a restart-delay window all answer `False`.
+
+L5 and L6 are windows, not bugs, and neither is closed by re-checking: a re-check has the same race. They are stated and `list` reports the gap.
+
+### `list`
+
+It prints three things:
+
+1. The declared list, labelled as persisted, or as the pack's or auto-detected when no workspace file exists yet, saying in its own output when that resolution made live Slack or Linear calls.
+2. The derived group, labelled as derived and not editable: `inbox/<manager session>`, four lifecycle keys (two events, two forms each), and two keys per effective monitor event.
+3. The accepted set, labelled **"last accepted at T"** per D8, plus "unconfirmed since T" when `applied` is false.
+
+It flags ONE direction: topics in the declared list that are absent from the accepted set, which is what a dropped or not-yet-applied topic looks like.
+The other direction is never flagged, because the derived group and `--subscribe` extras are in the accepted set by design and never in the file, so flagging any difference would fire on every run of a healthy team and bury the real signal.
+
+With no record it says no live set is recorded, naming which of L2 or L3 applies.
+It does not PUT, because a read command must not mutate: `core.ts:1522-1536` would make that a write.
+
+Per D8, `list` makes no claim about current routing.
+S5 can go stale after acceptance and nothing here detects that; the reconnect re-assert remains the repair, and no GET route is added.
 
 ## Exact changes per file
 
 ### `moda-labs/bobi-agent`
 
+**`bobi/fsutil.py`**
+`file_lock` (`:162`) gains `timeout: float | None = None`.
+`None` keeps today's blocking `LOCK_EX` (`:180`) so every existing caller is unchanged; a float retries `LOCK_EX | LOCK_NB` until the deadline and then raises a new `FileLockTimeout`.
+This is the only way to satisfy I6, because no timed or non-blocking variant exists anywhere in `bobi/` today.
+
 **`bobi/events/subscriptions.py`**
-Add `workspace_subscriptions(project_path) -> list[str] | None`, reusing `_normalize_explicit_subscriptions` (`:13`) and the env interpolation `explicit_subscriptions` applies at `:46-48`.
-Add `WorkspaceSubscriptionsError(path, cause)`, raised by it on a parse error.
+Add `workspace_subscriptions(project_path) -> list[str] | None` with the strict validator above.
+It does not reuse `_normalize_explicit_subscriptions` (`:13`) and it does not interpolate.
+Add `WorkspaceSubscriptionsError(path, reason)`, raised by it.
+Add `derived_subscription_keys(project_path, session) -> list[str]`, composing `inbox/<session>` plus `monitor_subscription_keys(...)` plus `lifecycle_subscription_keys()` from the same `MonitorRegistry.load(...).effective_monitors()` source `bobi/service.py:636-638` uses, so the ownership rule and the boot composition cannot disagree.
 Have `explicit_subscriptions` (`:25`) return the workspace list when it is not `None`.
 Have `discover_subscriptions` (`:51`) consult `workspace_subscriptions` before and outside the `try` at `:59-66`, gating on `is not None`.
 Leave the pack gate at `:61` unchanged.
 No seeder, and no new pack-only reader.
 
 `bobi/service.py` is NOT changed.
-`:625-642` stays exactly as it is.
+`bobi/service.py:630-647` stays exactly as it is.
 
 **`bobi/events/state.py`**
-Add `accepted_subscriptions_path`, `load_accepted_subscriptions` and `save_accepted_subscriptions`, following `session_cursor_path` (`:37`) for the path shape, including `_safe_session` (`:28-29`), and `atomic_write_json` for the write.
-Every writer takes `file_lock` on the record and holds it across its apply, not just its write.
+Add `accepted_subscriptions_path`, `load_accepted_subscriptions`, `claim_accepted_subscriptions` and `confirm_accepted_subscriptions`, per "The accepted-record API".
+`claim_` and `confirm_` take the bounded `file_lock` internally, around local I/O only.
 `save_deployment_state` (`:55-64`) is unchanged.
 
 **`bobi/events/server.py`**
-Add a module-level `put_subscriptions(base_url, deployment_id, api_key, subscriptions) -> list[str] | None`.
-It is the closure at `bobi/subagent.py:1926-1946` moved out, same contract: `bobi/http.put` (`:78`) with `timeout=10.0`, body `{"replace": [...], "protocol": protocol_payload()}`, then `raise_for_protocol_error`, then an `UnauthorizedTopics` raise on `400 {"error":"unauthorized_topics"}` matching the register path at `:840-842`, then `raise_for_status`, the `"error" in data` guard, and `validate_server_response`.
+Add a module-level `put_subscriptions(base_url, deployment_id, api_key, subscriptions, *, _retry_unauthorized=True) -> list[str] | None`.
+It is the closure at `bobi/subagent.py:1926-1946` moved out, same contract: `bobi/http.py:78` `put` with `timeout=10.0`, body `{"replace": [...], "protocol": protocol_payload()}`, then `raise_for_protocol_error`, then an `UnauthorizedTopics` raise on `400 {"error":"unauthorized_topics"}` matching the register path at `bobi/events/server.py:840-842`, then `raise_for_status`, the `"error" in data` guard, and `validate_server_response`.
 The register path raises BEFORE `raise_for_protocol_error` and this one after; either order works, because that function only raises for `invalid_protocol`, `incompatible_protocol` and 426, so it passes a `400 unauthorized_topics` body through untouched.
+It carries the SAME bounded single retry `register()` already has (`:856-868`): on `UnauthorizedTopics`, sleep 0.5s and retry once with the flag cleared.
+Without it a correct new credential is reported as unauthorized whenever Cloudflare KV has not yet propagated the grant the CLI just wrote, and the in-memory local server cannot reproduce that.
 It returns the body's `subscriptions` array, or `None` when the body omits it.
-`authorize_resources` (`:680-684`) is unchanged.
+`authorize_resources` (`:680`) is unchanged.
 
 **`bobi/subagent.py`**
+Add a module-level `threading.Lock` serializing W1, W2 and W3 per "Serialization".
 Delete the `_put_subscriptions` closure at `:1926-1946` and call `events.server.put_subscriptions` instead; it closes over `es_url` and `protocol_payload`, so the CLI cannot reuse it in place.
-Record the accepted set at `:1834` (the `authorized` list) and at `:1891` (the helper's return value).
-Both sites take `file_lock` on the accepted-set record across their apply and their write, per "The accepted set, recorded per session"; locking only the write would serialize nothing, since the apply precedes it at both.
-Change `_resubscribe_on_deaf` (`:1974-1982`) to read its own session's record, falling back to `active_subscriptions`.
+Wrap `_register_with_retry` (`:1811-1835`) and `_sync_saved_deployment` (`:1856-1892`) in claim, apply, confirm, each inside the in-process lock.
+Change `_resubscribe_on_deaf` (`:1974-1982`) to read its own session's record, replay it, and confirm, inside the same lock, falling back to `active_subscriptions` when the record is absent.
 Extend `_sync_saved_deployment`'s error classifier (`:1894-1924`) with an `UnauthorizedTopics` branch that names the topics, so the new raise does not downgrade the existing boot message from "resource grants rejected (HTTP 400)" to "unexpected subscription failure".
 Keep `filter_unauthorized=False` at `:1883`.
 `active_subscriptions` (`:1765`, `:1812`, `:1835`, `:1867`, `:1892`, `:1982`) stays as the fallback.
@@ -387,21 +595,21 @@ Fix the stale "(and re-registers on failure)" clause at `:501-502`: only `_regis
 Raise the swallowed-exception log at `:518-519` from `debug` to `warning`, so a voided repair PUT is visible.
 
 **`bobi/doctor.py`**
-`_check_ingress_reachability` gains `except WorkspaceSubscriptionsError` returning `ok=False` with the file path, ahead of the existing `except FileNotFoundError` (`:673-675`) and `except Exception` (`:676-678`) arms, both unchanged.
+`_check_ingress_reachability` (`:663`) gains `except WorkspaceSubscriptionsError` returning `ok=False` with the file path, ahead of the existing `except FileNotFoundError` (`:673-675`) and `except Exception` (`:676-678`) arms, both unchanged.
 
 **`bobi/cli.py`**
 Add the `subscriptions` group with `list`, `add`, `remove`, then `main.add_command(subscriptions)`.
-Add `"subscriptions"` to the group list at `:4168`, without which `bobi agent <name> subscriptions` does not resolve.
-Add it to the pop list at `:4177-4179` so it is not also a top-level command.
+Add `"subscriptions"` to the agent-group list at `:4305-4307`, without which `bobi agent <name> subscriptions` does not resolve.
+Add it to the pop list at `:4313-4319` so it is not also a top-level command.
+Import `bobi.service` lazily for `team_status` and `manager_session_name`, as `:53`, `:577` and `:1232` already do.
 
 **`tests/test_event_subscription.py`**
-The three exact-shape assertions on the deployment record (`:71`, `:469-471`, `:514-515`) stay as they are, unchanged, which is already the proof that the new write never touches the credential document.
-They do NOT gain an assertion that the accepted-set file exists: both of those tests answer the PUT with a bare `{"ok": True}` (`:456`, `:499`), so `put_subscriptions` returns `None`, nothing is recorded by the absent-or-empty rule, and the file correctly does not exist.
-Changing those mock replies to carry a `subscriptions` array would destroy the property the `{"ok": True}` shape exists to prove, which is that the client tolerates a minimal legacy reply.
-The write sites are covered by new test 7 instead.
+The three exact-shape assertions on the deployment record (`:71`, `:470-471`, `:514-515`) stay unchanged, which is the proof that the new write never touches the credential document.
+The accepted record now exists after those tests' PUTs, because a claim precedes the PUT and the confirm falls back to the claimed list when the `{"ok": True}` body (`:456`, `:499`) omits an echo.
+Those mock replies are NOT changed: the minimal legacy reply is the property they exist to prove.
 
 **Docs**
-`docs/EVENT_SERVER.md:378-398`: the resolution order gains a level above "Explicit", and the "on top of that" paragraph at `:396-398` stays correct.
+`docs/EVENT_SERVER.md:378-398`: the resolution order at `:382-394` gains a level above "Explicit", and the "On top of that" paragraph at `:396-398` stays correct.
 `docs/BUILDING_AGENT_TEAMS.md:129-133`: `subscribe:` stops being the live source of truth once a workspace file exists, and omitting it still means auto-detection.
 `skills/bobi.md`: the new CLI group, which `AGENTS.md:12` names as the CLI command reference.
 `AGENTS.md:133` requires all of these in the same PR, never as a follow-up.
@@ -418,85 +626,134 @@ Drop the `managed_repos` assertion at `:85-94`, which cannot pass once the key l
 Keep the `subscribe:` assertion at `:76-83`: the seed must still carry moda-skills.
 
 **`agents/moda-eng-team/workspace/managed-repos.yaml`** (new)
-The director-maintained tracker bindings, carrying the content removed from `agent.yaml:151-162`.
+The director-maintained tracker bindings, carrying the content removed from `agents/moda-eng-team/agent.yaml:151-162`.
 Seeded by the existing `seed_workspace` (`bobi/install.py:174-192`), which copies pack `workspace/` templates only if absent, so a later install never overwrites director edits.
 Four packs already ship a `workspace/` directory through that path (`gtm-team`, `market-research`, `support-manager`, `zachs-personal-assistant`), so the mechanism is proven.
+`subscriptions.yaml` is deliberately NOT shipped this way, per D6.
 
 **`agents/moda-eng-team/roles/director/ROLE.md`**
 Point `:12` and `:22` at `workspace/managed-repos.yaml` instead of the unnamed "configuration", and say the director keeps that file current.
 Resolve the agent name from `BOBI_ROOT` rather than a literal `<name>` in any command the prompt prints: this deployment is installed as `eng-team` while the pack's `agent:` is `moda-eng-team`.
 
 **`agents/baohua/`** (comment-only)
-`agent.yaml:105` and `:118`, and `README.md:152`, describe the pack `subscribe:` short-circuit as the top of the resolution order.
-Update the prose; baohua's behavior is unchanged, since its pack list is still its seed.
+`agents/baohua/agent.yaml:105` and `agents/baohua/agent.yaml:118`, and `agents/baohua/README.md:152`, describe the pack `subscribe:` short-circuit as the top of the resolution order.
+Update the prose; baohua's behaviour is unchanged, since its pack list is still its seed.
+
+## Accepted failure modes
+
+Two failure modes are accepted rather than fixed.
+Both are stated with how an operator sees them and what repairs them, because silence is what turned each of them into a review finding.
+
+### The server's `replace` is not failure-atomic after validation (D9)
+
+The authorization gate rejects the whole update before any write (`core.ts:1506-1512`), so an ungranted topic never half-applies.
+After validation passes, `replace` runs independent storage operations in sequence with no transaction and no rollback: the interface at `core.ts:285-292` exposes `putDeployment`, `addSubscription` and `removeSubscription` separately, and the loop at `:1522-1536` calls them one after another.
+A storage failure after some removals but before the additions or the `putDeployment` leaves the routing index partially changed while the deployment record and the accepted record keep the old set.
+
+This is pre-existing event-server behaviour that this change neither introduces nor misstates.
+What this change does is turn the window into an operator-triggered authoritative mutation, which is why D9 records the acceptance explicitly rather than leaving it unsaid.
+
+**Detection.** The symptom is behavioural: a topic the CLI reported as applied whose events never arrive, or a removed topic that keeps delivering.
+There is no API to read the index (D8), so there is no direct check.
+The CLI surfaces the only local signal it has, which is that the PUT raised and the record is unconfirmed.
+
+**Recovery.** Both repairs are a full `replace` retry, by I4:
+
+- re-run the same `subscriptions add` or `remove`, which recomputes the whole desired set and PUTs it again, or
+- restart the manager, whose boot PUT re-asserts S2 and S3 unconditionally (I5).
+
+Either converges, and neither needs a compensating action, because `replace` is idempotent and the desired set is recomputable from S2.
+
+**Why acceptance is tenable.** The window needs a storage failure inside a single Durable Object request; every repair path is a retry of the same idempotent operation; and a manager start already re-asserts the full set.
+
+### A rejected `add` leaves the boot PUT failing until it is undone (D7)
+
+D7 keeps the workspace change when the server rejects the apply, so S2 can hold a topic with no resource grant.
+The consequence must be stated, because it outlives the command.
+
+The next manager start composes its boot PUT from S2 (`bobi/service.py:630`), so that PUT carries the ungranted topic.
+`_sync_saved_deployment` passes `filter_unauthorized=False` (`bobi/subagent.py:1883`), so the topic is kept, and the server 400s the whole update (`core.ts:1509-1511`).
+The boot subscription sync therefore fails as a unit: the server keeps the previously accepted set, routing continues on it, and the deployment and cursor are retained (`bobi/subagent.py:1917-1920`).
+The classifier reports "resource grants rejected (HTTP 400)" naming the topics, which is why the `UnauthorizedTopics` branch is a required change above.
+
+So the team keeps working on its old routing while every start and every deaf reconnect re-attempts the same rejected PUT.
+That is the correct outcome for the normal case, where the grant arrives moments later via the GitHub App install and the next start simply succeeds.
+
+**Recovery** is `subscriptions remove <topic>`, which needs no grant (step 7 skips authorization for `remove`), or fixing the grant upstream.
+`list` flags the topic as declared and not accepted, which is exactly the one direction it flags.
 
 ## Test plan
 
-The risk lives in the real event server and in cross-session isolation, so the load-bearing tests are integration tests where the harness can reach them and unit tests on the real seam where it cannot.
+The risk lives in the real event server, in cross-session isolation, and in the claim protocol, so the load-bearing tests are integration tests where the harness can reach them and unit tests on the real seam where it cannot.
+
+Every test below must be red against the pre-change code for the right reason.
+A test that passes before the change is vacuous and does not count.
 
 **Integration, against the real local event server**
 
-The fixture is `tests/integration/test_event_server.py:371` (`event_server`), with `:394` for a deployment and `:62` for seeded resource grants.
+The fixture is `tests/integration/test_event_server.py:371` (`event_server`), with `:394` for a deployment and `:62` (`_seed_resource_grants`) for grants.
 `tests/integration/test_e2e_event_flow.py:87` already boots a real manager against a real event server and publishes a `github:` topic through to it, and `tests/integration/test_event_isolation.py:211` already runs two real session subprocesses against one server.
 
 1. An ungranted global topic in a `replace` returns `400 unauthorized_topics` naming it, and the deployment's prior subscriptions are unchanged.
-   This is the no-partial-write behavior the design relies on, and it is NOT covered today: `event-server/test/core.spec.ts` asserts `unauthorized_topics` only for the register path (`:2030`), never for `handleUpdateSubscriptions`.
+   This is the no-partial-write behaviour the design relies on and it is NOT covered today: `event-server/test/core.spec.ts` asserts `unauthorized_topics` only for the register path (`:2030`), never for `handleUpdateSubscriptions`.
 2. A CLI `add` makes the server route the new topic and a CLI `remove` stops it, with no restart, and the deployment id and api key are unchanged across both, proving identity is preserved and no `register()` happened.
-3. After a CLI `add`, the live set still contains every monitor key, both lifecycle keys, and `inbox/<manager session>`: a published `agent/session.completed` is still delivered, and `bobi agent <name> message` still reaches the manager.
-   The same test pauses a monitor between boot and the `add`, so it also covers the case where `package/monitors.yaml` changed since the boot PUT.
-   This is the regression test for the largest trap.
+3. After a CLI `add`, the live set still contains every monitor key, both forms of both lifecycle keys, and `inbox/<manager session>`: a published `agent/session.completed` is still delivered, and `bobi agent <name> message` still reaches the manager.
+   The same test pauses a monitor between boot and the `add` and asserts the paused monitor's keys are STILL in the live set afterwards, which proves nothing was recomposed.
 4. Cross-session isolation survives the change: on the `test_event_isolation.py` harness, a worker's deployment never gains a `github:` topic while the manager's CLI change is applied.
+5. Two concurrent `add` calls, asserting all four observables: both topics in S2, the accepted record, the live server set, and the loser's non-zero exit; then re-run the loser and prove both topics route.
+   Asserting S2 alone would pass in exactly the state the test exists to rule out, because both topics survive S2's lock while the loser never reaches the server.
 
-**Unit, on the deaf-reconnect and PUT seam**
+**Unit, on the claim protocol**
 
-The deaf path is entered only by the heartbeat detector after `_HEARTBEAT_TIMEOUT_S = 95.0` seconds of no pong (`bobi/events/client.py:260`, `:294-297`), so these drive `on_deaf_reconnect` off a patched client, exactly as `tests/test_event_subscription.py:110-136` already does, with no 95s wait.
+The deaf path is entered only after `_HEARTBEAT_TIMEOUT_S = 95.0` seconds of no pong (`bobi/events/client.py:260`, `:294-297`), so these drive `on_deaf_reconnect` off a patched client exactly as `tests/test_event_subscription.py:110-136` already does, with no 95s wait.
 
-5. A worker session's deaf reconnect PUTs only `inbox/<worker>`, never a `github:`/`slack:`/`linear:` topic, with a MANAGER record also on disk, so it proves the hook reads its own session's record.
-   This extends `test_deaf_reconnect_uses_filtered_registered_subscriptions` (`:110-136`), which already asserts the `["inbox/self"]` PUT; the own-record half is the new coverage.
-6. A manager's deaf reconnect after a CLI change PUTs the recorded set, not the boot-time list.
-7. Both write sites record, and an omitted echo does not erase, in three legs:
-   a fresh register with no saved deployment records the `authorized` list it passed (`bobi/subagent.py:1834-1835`);
-   a later start whose PUT returns `{"subscriptions": [...]}` records that echo (`:1891-1892`);
-   a third start whose 200 body OMITS `subscriptions` leaves the previous record intact, and the next deaf reconnect replays it rather than `{"replace": []}`.
-   The third leg needs a prior record to survive, so a single `{"ok": True}` PUT proves nothing, which is why the existing tests that answer the PUT that way (`:456`, `:499`) are left alone.
-8. A PUT that 400s with `unauthorized_topics` raises `UnauthorizedTopics`, `_sync_saved_deployment`'s classifier names the topics and still reports "resource grants rejected" rather than "unexpected subscription failure", and on the deaf path the same raise is logged at `warning` by `bobi/events/client.py:518-519`.
+6. A worker session's deaf reconnect PUTs only `inbox/<worker>`, never a `github:`/`slack:`/`linear:` topic, with a MANAGER record also on disk, so it proves the hook reads its own session's record.
+   This extends `test_deaf_reconnect_uses_filtered_registered_subscriptions` (`tests/test_event_subscription.py:110-136`), which already asserts the `["inbox/self"]` PUT; the own-record half is the new coverage.
+7. A manager's deaf reconnect after a CLI change PUTs the recorded set, not the boot-time list.
+8. The claim ordering: a deterministic barrier fires the reconnect hook between the CLI's claim and the CLI's PUT, and the final server set equals the final record.
+   A second leg fires it between the PUT and the confirm and asserts the replay is a no-op that flips `applied` to true.
+9. A crash between the PUT and the confirm leaves `applied: false` with the new set; the next reconnect replays it and confirms; a manager start instead overwrites it with its own claim.
+   Plus a disk-full confirm: the command exits non-zero having applied live, and the record stays unconfirmed rather than wrong.
+10. Generation CAS: a confirm whose generation moved returns `False` and leaves the newer record intact; the CLI reports "applied concurrently" and exits non-zero.
+11. The bounded lock: a stalled holder does not block a manager start past the deadline (the boot writer proceeds and logs a warning), and the CLI's own timeout makes it persist-only with a non-zero exit.
+    `file_lock(timeout=None)` still blocks, proven by an existing-caller test.
+12. The PUT retry and the classifier in one: the first PUT answers `400 unauthorized_topics` and the second succeeds; a second leg leaves both answering 400, raises `UnauthorizedTopics`, has `_sync_saved_deployment`'s classifier report "resource grants rejected" rather than "unexpected subscription failure", and has the deaf path log it at `warning` (`bobi/events/client.py:518-519`).
+13. I2 holds: a writer whose desired set is empty refuses to claim, so no record can ever drive a `{"replace": []}` the server rejects (`core.ts:1499`).
 
 **Unit, on the subscription surface**
 
-9. With `workspace/subscriptions.yaml` present and `subscribe: []`, `discover_subscriptions` returns `[]`.
-   Written against the pre-change code this is red for the right reason: the pre-change gate ignores the file entirely and returns the pack list.
-   A version that passes before the change is vacuous and does not count, and that bar applies to every test in this plan.
-10. A malformed `workspace/subscriptions.yaml` does NOT produce an auto-detected set.
-    Asserted against the real detector rather than a mock, so the test fails if the read is ever moved inside the `try` at `:59-66`.
+14. With `workspace/subscriptions.yaml` present and `subscribe: []`, `discover_subscriptions` returns `[]`.
+    Against the pre-change gate at `bobi/events/subscriptions.py:61` this is red for the right reason: it ignores the file and returns the pack list.
+15. The strict validator, one case each: unparseable, empty file, `{}`, missing `subscribe`, non-mapping root, bare-string value, non-list value, non-string element, duplicate topic, unknown top-level key.
+    All raise `WorkspaceSubscriptionsError` naming the fault, and none auto-detects: asserted against the real detector rather than a mock, so the test fails if the read is ever moved inside the `try` at `bobi/events/subscriptions.py:59-66`.
     The same test asserts `bobi/supervisor/snapshot.py:104-109` still returns an empty expectation list rather than raising, and that `bobi doctor`'s ingress check reports `ok=False` with the path.
-11. `explicit_subscriptions` and `discover_subscriptions` agree with a workspace file present, extending the parametrized `tests/test_ingress.py:260-276` so the D078 pin covers the new precedence.
-    Its cases include an absent file (reader returns `None`), `subscribe: []` (returns `[]`) and a non-empty list.
-12. Two concurrent `add` calls both survive, which is what the re-read inside `file_lock` at CLI step 4 is for.
-13. `subscriptions add` on a team with no workspace file seeds it from the effective set, so the previously auto-detected topics are still present afterwards, and the file it writes holds the RESOLVED topics.
-14. `subscriptions add` with no manager running, and with a deployment record but no accepted-set file, persists the file, reports that nothing was applied live, exits zero, and never calls `ensure_running`.
-15. `subscriptions add` with an empty bubble state fails with that reason and does not PUT.
+16. `explicit_subscriptions` and `discover_subscriptions` agree with a workspace file present, extending the parametrized `tests/test_ingress.py:260-276` so the D078 pin covers the new precedence.
+    Cases: absent file (reader returns `None`), `subscribe: []` (returns `[]`), and a non-empty list.
+17. The ownership rule, one assertion per branch: `remove inbox/<manager>` rejected; `add inbox/<worker>` rejected; `add reply/<anything>` rejected; `add session.completed` rejected as derived; `add support.email` rejected on a team with that monitor and ACCEPTED on a team without it; `add agent/auto_dispatch.failed` ACCEPTED and PUT; `remove` of a topic absent from S2 rejected.
+    Every rejection exits non-zero with nothing written and no PUT.
+18. The liveness table, one case per row: L1 with a stale deployment record present, under stopped-direct, stopped-systemd and stopped-launchd; L2; L3 (a live pre-upgrade manager stays persist-only); L4; and L6's window.
+19. `subscriptions add` on a team with no workspace file seeds it from the effective set, so previously auto-detected topics are still present afterwards, and the file holds the RESOLVED topics.
+20. `subscriptions add` with an empty bubble state fails with that reason and does not PUT.
 
 Four assertions are deliberately NOT new tests, each already covered.
-`replace` returning the accepted set: `event-server/test/core.spec.ts:2284-2306` (`added: 1`, `removed: 1`, the exact `subscriptions` array) and over real HTTP at `tests/integration/test_event_server.py:510-520`.
+`replace` returning the accepted set: `event-server/test/core.spec.ts:2284-2306` (`added: 1`, `removed: 1`, the exact `subscriptions` array at `:2301`) and over real HTTP at `tests/integration/test_event_server.py:510-520`.
 `{"replace": []}` returning 400: `core.spec.ts:2314-2324`.
-A `remove` whose survivors were granted at an earlier boot: `core.spec.ts:2284-2306` seeds the grant before the replace and the replace passes, and CLI step 6 has `remove` skip authorization by construction.
+A `remove` whose survivors were granted at an earlier boot: `core.spec.ts:2284-2306` seeds the grant before the replace and the replace passes, and CLI step 7 has `remove` skip authorization by construction.
 `bobi/service.py` is not changed at all, so `tests/test_service.py:21-26` needs no attention.
 
 ## Migration
 
-No behavior change on upgrade, for any pack shape, because nothing writes a workspace file until an operator runs `add` or `remove`.
+No behaviour change on upgrade, for any pack shape, because nothing writes a workspace file until an operator runs `add` or `remove`.
 
 Until then every pack resolves its subscriptions exactly as it does today: a pack list short-circuits, and a pack without one auto-detects.
-The first boot after the upgrade composes the same list as the last boot before it, PUTs it, and the server's `added: 0, removed: 0` echo becomes the first recorded accepted set.
-Test 14 covers the window before that boot, when the CLI persists but cannot apply.
+The first boot after the upgrade composes the same list as the last boot before it, claims it, PUTs it, and confirms the server's `added: 0, removed: 0` echo as the first accepted record.
+Row L3 covers the window before that boot, when the CLI can persist but not apply.
 
-The deployment id, api key, and event cursor are untouched: nothing in this change calls `register()`, nothing unlinks a cursor, and the credential record is not rewritten.
+The deployment id, api key and event cursor are untouched: nothing in this change calls `register()`, nothing unlinks a cursor, and the credential record is not rewritten.
 
 ### Release ordering
 
-The fleet's bobi version is pinned in `moda-labs/moda-agents` `.github/fleet-version` and moved automatically by `version-gate.yml:100` once `ci-canary` proves a release, so the pin's current value is not worth stating here.
-
-Order:
+The fleet's bobi version is pinned in `moda-labs/moda-agents` `.github/fleet-version` and moved automatically by `version-gate.yml` once `ci-canary` proves a release, so the pin's current value is not worth stating here.
 
 1. Land and release the bobi-agent change; let the canary prove it and the pin PR land.
 2. Land the moda-agents companion PR.
@@ -506,359 +763,17 @@ Step 2 must not precede step 1: the director prompt would otherwise name command
 
 ## Out of scope
 
-- A GET route for live subscriptions.
-  D4 asks for one "only if needed", and it is not: the PUT response already returns the accepted set (`core.ts:1537-1540`, proved at `core.spec.ts:2300-2301` and over real HTTP at `tests/integration/test_event_server.py:517-520`), and that set is now recorded.
+- A GET route for live subscriptions, and any server-side introspection.
+  D8 settles it: `list` shows the last-accepted set labelled as such, and the reconnect re-assert remains the repair for a stale index.
 - Making a `whatsapp:`, `discord:` or new-workspace `slack:` topic apply LIVE from the CLI.
   Their grants are written by the channel registrations the manager runs at session start (`bobi/subagent.py:1767`), which the CLI does not run, so such a topic persists to the workspace file and applies at the next start.
-  An in-workspace `slack:` channel does apply live, because the grant is keyed on the team id.
+  An in-workspace `slack:` channel does apply live, because the grant is keyed on the team id (`core.ts:445-450`).
+- Making the server's `replace` transactional.
+  D9 accepts the window; the detection and recovery behaviour is specified above.
 - Hot-reloading anything else from the workspace.
   This change applies exactly one key.
 
 ## Open questions
 
-Revision 5 closes the original Q1, the read-back mechanism.
-D4 says "Prefer reusing the PUT response if it already returns the accepted set; add a GET route only if needed", and the response does return it (`core.spec.ts:2300-2301`, and over real HTTP at `tests/integration/test_event_server.py:517-520`), so D4's own condition decides it.
-`list` shows the recorded set labelled "last accepted at T"; no GET route, and no read-command PUT, which `core.ts:1531-1536` would turn into a write.
-
-**Q1. Should `workspace/subscriptions.yaml` exist before the first `add`?**
-As specified it does not: the CLI creates it, and until then a pack list short-circuits and a pack without one auto-detects, exactly as today.
-That is the smaller design, it is a strictly smaller migration, and a boot-time seeder would need a gate that can tell an absent `subscribe:` from `subscribe: []` (the reader cannot) to avoid writing an authoritative empty list for the auto-detecting majority of the fleet.
-The cost is discoverability: a director that wants to read its own subscription list has to run `subscriptions list` rather than `cat` the file.
-This is also the one place where the design takes a reading of D2 ("Subscriptions live as a list in the WORKSPACE; the pack `agent.yaml` `subscribe:` is only the SEED"): the list lives in the workspace from the first mutation onward, not from the first boot.
-There is a third option, and it is the cheapest: ship `workspace/subscriptions.yaml` as a pack TEMPLATE, which the already-shipping `seed_workspace` copies if absent (`bobi/install.py:174-192`, key-agnostic and copy-if-absent).
-That is zero bobi-agent code, needs no absent-vs-empty gate, satisfies D2's second clause from install rather than from the first mutation, and is exactly the mechanism this spec already adopts for `managed-repos.yaml`.
-Its cost is that the eng-team list then appears twice in the pack, with only `subscribe:` checked by `scripts/check-deploy-compose.py:76-83`, so the two can drift.
-My recommendation is lazy creation, with the pack template as the answer if you want the file to exist from install; the boot-time seeder plus its gate is the expensive version and I would not bring it back.
-
-**Q2. When the server rejects the live apply, should `add` keep the workspace change?**
-With `filter_unauthorized=False`, an added topic with no grant is kept in the PUT and the server 400s the whole update, so nothing is applied live and the workspace file is ahead of the server.
-Keeping it treats the workspace list as the operator's declared intent and lets a later grant (usually the GitHub App install, moments later) make it live at the next boot or the next `add`.
-Rolling it back refuses to persist something that does not work today, at the cost of making the correct onboarding order fragile.
-My recommendation is to keep it, report the server's exact `unauthorized_topics` list, and exit non-zero so a script does not read the failure as success.
-
-## Amendment 2026-10-09: codex adversarial review (round 5)
-
-Insertion-only. Nothing above this line is rewritten.
-
-Round 5 was run by OpenAI Codex v0.144.5, model `gpt-5.6-sol`, reasoning effort high, read-only sandbox, against spec sha `7a4bac2` with read access to `origin/main` at `70db2e10`.
-Verdict: REQUEST CHANGES.
-Full verbatim output: `plans/reviews/2026-10-09-952-codex-review.md`.
-
-Every finding below was re-verified against `origin/main` at `70db2e10` before being accepted.
-Line numbers in this amendment are `70db2e10` line numbers, not the `83bebe49` numbers used above.
-Ten findings: eight folded as defects, two posed as questions for Zach, none retracted as invalid.
-
-### A1. The CLI must reject reserved topic prefixes (codex F1, blocker)
-
-The design has no topic validation, so the operator's argument reaches the accepted-set edit unfiltered.
-`inbox/` is not a global topic (`event-server/core/src/core.ts:411`), so it needs no resource grant, and the server stores whatever inbox key it is handed (`event-server/test/core.spec.ts:2260-2261`).
-
-Two concrete failures follow.
-`subscriptions remove inbox/<manager session>` does not change the workspace file, because that key was never in it, but step 5 applies the same edit to the accepted set and step 8 PUTs it authoritatively, which unsubscribes the manager's own inbox and makes it unreachable by `bobi agent <name> message` and `ask`.
-`subscriptions add inbox/<worker session>` subscribes the manager to another session's inbox, which is the 2026-06-12 cross-session class recorded at `bobi/events/state.py:21-25`.
-
-"Nothing is recomposed, so monitor, lifecycle and `inbox/` topics pass through untouched by construction" holds only while the operator does not name one.
-
-Required change: `add` and `remove` reject any topic matching a derived prefix (`inbox/`, `reply/`, `monitor/`, `agent/`), in the CLI and in the workspace reader, before any write or network call.
-A `remove` may only alter the accepted set for a topic that was actually present in the workspace list.
-New tests: removing the manager's own inbox, and adding another session's inbox, both rejected with a non-zero exit and no PUT.
-
-### A2. `_resubscribe_on_deaf` is a fourth mutator and must take the lock (codex F2, blocker)
-
-The spec enumerates three writers of the accepted-set record.
-The deaf-reconnect hook is a fourth authoritative mutator of server state: it runs on a daemon thread (`bobi/events/client.py:444-446`) and PUTs without any lock (`bobi/subagent.py:1982`).
-`file_lock` is advisory and "only serializes writers that also take it" (`bobi/fsutil.py:169`), so the CLI's step 5 to 8 lock does not exclude it.
-
-Sequence: the record holds `R0`; the CLI takes the lock and PUTs `R1`; before the CLI's save, the reconnect thread reads `R0` and PUTs `R0`; the CLI then saves `R1`.
-Final state is record `R1`, server routing `R0`, and `list` compares the file against the record and reports healthy.
-Round 4's fold moved the manager-vs-CLI race onto the daemon thread rather than closing it.
-
-Required change: the hook takes the same accepted-record lock across its read and its PUT.
-New test: a deterministic barrier that fires the hook between the CLI's PUT and its save, asserting the final server set equals the final record.
-
-### A3. The remote PUT and the local record write are not crash-atomic (codex F3, blocker)
-
-Step 8 PUTs and then records, as two separate operations.
-The server commits before responding (`event-server/core/src/core.ts:1531-1536`), so a kill, a read-only filesystem, or a full disk between the PUT and `save_accepted_subscriptions` leaves the server at `R1` and the record at `R0`.
-The absent-or-empty rule does not cover this: the record is present and non-empty, just stale.
-The next deaf reconnect then replays `R0` and reverts a change that had already succeeded, and a failed local write can also make the command report failure for an applied change.
-
-Required change: the spec must state a recovery protocol rather than add another lock.
-The two shapes are a pending journal written before the PUT and resolved on boot and on reconnect, or dropping the local record as a correctness source in favour of server-side read-back (which is Q3 below).
-New tests: fault injection after the server commit, and a disk-full accepted-record write.
-
-### A4. A deployment record does not prove the manager is running (codex F4, major)
-
-Step 2 infers liveness from the presence of the deployment record, and step 2's two "nothing live to update" states are both defined by file absence.
-Nothing unlinks the deployment record on stop: `grep -rn deployment_state_path bobi/` returns only the three definition and accessor sites in `bobi/events/state.py`.
-PR #1098 added an OS-service stop path that stops the unit and returns without touching event state (`bobi/cli.py:1223-1242`), and its generated units restart the manager unattended (`Restart=on-failure` at `bobi/service_manager.py:120`, `KeepAlive` at `:138`).
-Current main already exposes the real signal: `team_status` reads the pid and checks it is alive (`bobi/service.py:842-847`).
-
-So a stopped-but-supervised manager leaves both files in place, the CLI takes the live-apply path, may spawn an event server at step 7, mutates an idle deployment, and reports success.
-Unattended restarts also make step 5's "the manager restarted, re-run the command" abort a routine event rather than a rare one.
-
-Required change: select live-apply versus persist-only from `service.team_status(project_path).manager_running`, not from file existence.
-New tests: stopped direct, stopped systemd, stopped launchd, and a restart-delay window, each with a stale deployment record on disk.
-
-### A5. "Malformed" must mean schema-invalid, not just unparseable (codex F6, major)
-
-The design reuses the pack parser and raises `WorkspaceSubscriptionsError` on a parse error.
-That parser maps whole classes of wrong-but-valid YAML to `[]` rather than raising: a non-dict document root returns `[]` (`bobi/events/subscriptions.py:44-45`), an empty file becomes `{}` through `yaml.safe_load(...) or {}` (`:43`) and then `[]`, and any `subscribe:` value that is neither a string nor a list returns `[]` (`bobi/events/subscriptions.py:19-20`).
-
-Under the new semantics `[]` is authoritative, so a truncated file, `{}`, `subscribe: {}`, or a bare list at the document root silently becomes "subscribe to nothing" and the next boot drops every explicit GitHub, Slack and Linear topic.
-None of these raise `yaml.YAMLError`, so the new error class never fires and test 10 does not reach them.
-This is the same fall-through hazard the "Presence, not truthiness" section exists to close, arriving through the schema rather than through the parser.
-
-Required change: the workspace file gets its own strict validator, separate from the deliberately permissive pack parser: a non-empty mapping, `subscribe` present, its value a list, every element a non-empty string, with a stated policy for duplicates and for unknown keys.
-New tests: empty file, `{}`, missing `subscribe`, non-mapping root, non-list value, and non-string elements.
-
-### A6. `put_subscriptions` needs the register path's propagation retry (codex F7, major)
-
-Step 6 authorizes the newly added topics and step 8 PUTs immediately, which is the exact sequence `register()` already guards against.
-`register()` retries once after 0.5s on a `400 unauthorized_topics` because, after a successful authorize, it "almost always means Cloudflare KV has not yet propagated a just-written grant" (`bobi/events/server.py:856-868`).
-The PUT path re-checks the same grant (`event-server/core/src/core.ts:1506-1512`) and the specified `put_subscriptions` contract has no retry.
-
-So a correct new GitHub or Linear credential writes its grant, the immediate PUT reads stale KV, and the CLI exits non-zero reporting an authorization failure that does not exist.
-The in-memory local server cannot reproduce this, so it will not surface before production.
-
-Required change: `put_subscriptions` takes the same bounded single retry on `unauthorized_topics`.
-New test: the first PUT answers `unauthorized_topics` and the second succeeds.
-
-### A7. Test 12 passes while the losing topic is not live (codex F9, major)
-
-This is a test-plan defect, not a design defect.
-The design already specifies the behaviour: a step-5 abort exits non-zero and the re-run is idempotent.
-Test 12 asserts only that "two concurrent `add` calls both survive", which is a property of the workspace file under step 4's lock.
-Both topics do survive in the file while the loser aborts at step 5 and never reaches the server, so the test passes in exactly the state it is meant to rule out.
-
-Required change: test 12 asserts all three final states, meaning the workspace file, the accepted record, and the live server set, plus the loser's non-zero exit, then re-runs the loser and proves both topics route.
-
-### A8. Every `bobi/cli.py` and `bobi/service.py` citation is stale (codex F10, minor)
-
-The spec's header states it was read at `83bebe49`.
-PR #1098 landed on `main` after that, so `main` is now `70db2e10` and the two files it touched have moved.
-Verified mechanically across all 93 citations in this spec: 85 are unchanged between `83bebe49` and `70db2e10`, and 8 have drifted.
-Every underlying claim is still true at `70db2e10`; only the line numbers moved.
-
-| Spec citation | Current main | Claim |
-| --- | --- | --- |
-| `bobi/service.py:625-642` | `:630-647` | the composition block |
-| `bobi/service.py:759` | `:764` | `subscribe=subscribe` reaching the session |
-| `bobi/cli.py:2965` | `:3102` | `with_mutable_runtime_package` monitor write |
-| `bobi/cli.py:2992` | `:3129` | same |
-| `bobi/cli.py:3016` | `:3153` | same |
-| `bobi/cli.py:3155` | `:3292` | `main.add_command(monitors)` |
-| `bobi/cli.py:4168` | `:4305-4307` | the agent-group list |
-| `bobi/cli.py:4177-4179` | `:4313-4319` | the pop list |
-
-The two "Exact changes per file" citations are the ones that matter: at `70db2e10`, `cli.py:4168` is `def kb_remove(name):` and `:4177` is a bare `try:`, so an implementer following them edits unrelated KB code.
-The pop list is also now seven entries rather than three, because #1098 added `supervise`, `install-service` and `uninstall-service`.
-
-Required change: restate every citation against `70db2e10`, and state the read sha in the header.
-
-### A9. `file_lock` is untimed and the design puts it on the boot path (triage pass, major)
-
-Found while triaging the findings above, not raised by codex, and verified the same way.
-
-`file_lock` is a blocking `fcntl.flock(fd, LOCK_EX)` with no timeout and no `LOCK_NB` (`bobi/fsutil.py:180`), and no caller anywhere in `bobi/` uses a non-blocking or timed variant.
-The design holds it across network round-trips on both sides: the CLI from step 5 through step 8, and `_sync_saved_deployment` from `authorize_resources` through its assign.
-`authorize_resources` POSTs once per global topic at `timeout=10.0` each (`bobi/events/server.py:650-653`, called per topic at `:781-784`) and the PUT adds another 10s, so on this team's six GitHub and Linear topics the worst-case hold is about 70 seconds.
-
-`_sync_saved_deployment` is on the manager's boot path, so a CLI command stalled inside that window blocks a manager start indefinitely, with no timeout to degrade to.
-The spec states the rule it then breaks: step 3 keeps the workspace-file lock off the network path because "the lock must not be held across a network round-trip", and steps 5 to 8 hold the accepted-set lock across exactly that.
-Round 4's fold introduced this by extending the lock to cover each writer's apply.
-
-Required change: bound the hold. Either take the lock non-blocking with a deadline and fail the CLI command with a clear "another writer is applying" message, or keep the lock strictly around the record's read-modify-write and serialize the apply some other way.
-The spec must say which, because "hold it across the apply" and "never hold it across a network round-trip" cannot both stand.
-
-### Questions for Zach (not decided here)
-
-**Q3. Does D4's read-back require live server introspection?** (codex F5, which it rates a blocker)
-
-D4 asks that `list` show "what the event server actually routes", and prefers reusing the PUT response, adding a GET route "only if needed".
-The spec reads that condition as satisfied, because the PUT response returns the accepted set and the design records it.
-
-Codex's objection is that the recorded set is a command-time cache, not current routing, and the codebase says so in two places: the client re-asserts subscriptions after a deaf reconnect "in case the server-side subscription index went stale" (`bobi/events/client.py:437-439`), and the hook exists to repair a deployment "dropped from the index" (`bobi/subagent.py:1977-1980`).
-If the index loses a topic after acceptance, the record does not change, and `list` reports healthy while nothing routes.
-There is no authenticated GET route today: no `GET` handler for `/deployments/<id>/subscriptions` exists in `event-server/worker/src/index.ts`, `event-server/src/local.ts` or `event-server/core/src/core.ts`.
-
-So D4 as literally worded is not met by a cache, and meeting it means adding server introspection, which this spec lists as out of scope.
-That is a decision about D4's own "only if needed" clause and about scope, so it is yours.
-Either D4 is satisfied by "last accepted at T" and the wording relaxes, or the GET route comes back into scope and A3's recovery protocol can lean on it.
-
-**Q4. Is the event server's non-atomic replace in scope?** (codex F8, which it rates major)
-
-The spec's no-partial-write claim is correctly scoped: the authorization gate rejects the whole update before any write (`event-server/core/src/core.ts:1506-1512`).
-Codex raises a different window that the spec is silent on. After validation passes, `replace` runs independent storage operations in sequence with no transaction and no rollback (`event-server/core/src/core.ts:285-292` for the interface, `:1522-1536` for the loop), so a storage failure after some removals but before the additions or the `putDeployment` leaves the routing index partially changed while both the deployment record and the local accepted file keep the old set.
-
-This is a pre-existing property of the event server that this change neither introduces nor misstates, and fixing it is event-server work beyond this spec's declared surface.
-Flagging it rather than folding it: say whether it belongs in this ticket, a follow-up, or neither.
-
-## Amendment 2026-10-09: codex adversarial re-review (round 6)
-
-Insertion-only. Nothing above this line is rewritten, including the round-5 amendment.
-
-Round 6 was run by OpenAI Codex v0.144.5, model `gpt-5.6-sol`, reasoning effort high, read-only sandbox, against spec sha `99eed6ee` with read access to `origin/main` at `70db2e10`.
-It was asked to grade its own round-5 findings against the fold, attack the fold's 158 new lines, and re-check the citations.
-Verdict: REQUEST CHANGES.
-Full verbatim output: `plans/reviews/2026-10-09-952-codex-review-2.md`.
-
-Round-5 resolution, as graded and then re-verified against `70db2e10`:
-
-| Round-5 finding | Fold | Status |
-| --- | --- | --- |
-| F1 reserved topic edits | A1 | partially resolved, see B1 |
-| F2 deaf-reconnect writer | A2 | resolved |
-| F3 PUT/record crash atomicity | A3 | not resolved, see B2 |
-| F4 deployment record as liveness | A4 | resolved |
-| F5 `list` does not show routing | Q3 | not resolved, Zach's call, sharpened below |
-| F6 malformed means schema-invalid | A5 | partially resolved, see B3 |
-| F7 PUT propagation retry | A6 | resolved |
-| F8 non-atomic server replace | Q4 | not resolved, Zach's call, sharpened below |
-| F9 concurrent-add test | A7 | resolved |
-| F10 stale citations | A8 | partially resolved, see B7 |
-
-Four resolved, three partially resolved, three not resolved.
-Of the three not resolved, two were routed to Zach as Q3 and Q4 and one (F3) was folded without picking a design.
-
-Eight items below. All eight are defects, verified against `70db2e10`; none are retracted as invalid.
-One codex qualification was examined and is NOT a defect, recorded at the end.
-Line numbers in this amendment are `70db2e10` line numbers.
-
-### B1. A1's reserved-prefix rule is both incomplete and overbroad (codex F1 partial, blocker)
-
-A1 requires rejecting the four prefixes `inbox/`, `reply/`, `monitor/`, `agent/`.
-The derived layer is not describable by those prefixes, in either direction.
-
-It is incomplete because two of the three composition sites emit BOTH the source-qualified topic and the bare delivered type.
-`lifecycle_subscription_keys` returns `session.completed` and `session.failed` alongside their `agent/` forms (`bobi/events/subscriptions.py:100-105`, from `LIFECYCLE_EVENTS` at `:85`).
-`monitor_subscription_keys` does the same for every configured monitor event, so a team with `monitor/support.email` also has bare `support.email` composed (`bobi/events/subscriptions.py:127-130`).
-Both are appended into the manager's subscription list at `bobi/service.py:639-647`.
-A bare derived key IS a legal workspace entry, so an operator can `add session.completed` and later `remove session.completed`: that is a real workspace delta, it passes A1's "actually present in the workspace list" gate at `spec.md:563`, and the authoritative PUT then drops framework-owned lifecycle routing.
-A1 closes the `inbox/` path and leaves this one open.
-
-It is overbroad because `agent/` is a real event namespace and not a synonym for the two lifecycle keys.
-`agent/auto_dispatch.failed` is published by the reactor (`bobi/events/reactor.py:382`), documented as a subscribable topic (`docs/EVENT_SERVER.md:371`, `docs/MONITORS.md:256`), and already used as an `auto_dispatch` rule event in tests (`tests/test_reactor.py:554`).
-A rule cannot fire on an event the deployment does not receive, so blanket-rejecting `agent/` makes a documented topic unsubscribable and silently narrows D1's generic surface (`spec.md:34-40`) without saying so.
-`monitor/` has the same shape for any source-qualified monitor event not produced by this project's own `effective_monitors()`, though I could not name a concrete in-use example.
-
-Required change: replace the prefix rule with an ownership rule.
-Compute the derived set the manager would compose (the three sites above), and reject a workspace edit when, and only when, it would remove a key that set contains or add a key that set reserves for a different session's identity (`inbox/`, `reply/`).
-Everything else, including `agent/auto_dispatch.failed`, stays addable.
-New tests: `remove session.completed` and `remove support.email` rejected; `add agent/auto_dispatch.failed` accepted and PUT; `add inbox/<other session>` and `remove inbox/<manager>` still rejected.
-
-### B2. A3 must pick one recovery architecture (codex F3, blocker)
-
-A3 names the two shapes of a fix, a pending journal or dropping the local record for server-side read-back, and then picks neither (`spec.md:586-587`).
-Those have materially different boot, reconnect, error-reporting and cleanup semantics, so no implementer can build from the pair.
-A blocker is not closed by enumerating its candidate fixes.
-
-A3 also made its own resolution conditional on Q3, which makes a correctness blocker wait on a scope answer.
-It must not: the journal shape works whether or not Zach adds introspection.
-
-Required change: specify the journal as the design, with its on-disk shape, who writes it, who resolves it, the resolution order against the accepted record, and what happens when resolution itself fails.
-Then state separately that if Q3 is answered toward live introspection, read-back subsumes the journal's reconciliation step, and say which parts drop.
-Keep A3's two tests.
-
-### B3. A5 must state the duplicate and unknown-key policy, not require that one be stated (codex F6 partial, major)
-
-A5's required change ends "with a stated policy for duplicates and for unknown keys" (`spec.md:612`) and does not state either policy.
-Both are semantic, not cosmetic: duplicates decide what `remove` does when a topic appears twice, and unknown-key handling decides whether a typo (`subscriptions:` for `subscribe:`) fails closed or silently becomes "subscribe to nothing", which is the exact hazard A5 exists to close.
-
-Required change: state both. My recommendation is reject duplicates with the offending topic named, and reject unknown top-level keys, because this file is machine-written by the CLI and a hand edit that does not round-trip should fail loudly rather than be normalised.
-Add the two cases to A5's test list.
-
-### B4. The document now holds six contradictory instruction pairs (codex new, blocker)
-
-The spec is insertion-only across six rounds, so body text an amendment supersedes is still in the document and an implementer still reads it.
-Six pairs now conflict, and in three of them the later text does not supply a replacement:
-
-| Body says | Amendment says | Replacement given? |
-| --- | --- | --- |
-| reuse the existing parser (`spec.md:184`, `:354`) | separate strict validator (`:612`) | yes |
-| helper has no retry (`:371-373`) | helper retries once (`:624`) | yes |
-| three writers hold the lock across apply (`:280`, `:366`) | four writers (`:576`), or maybe lock only the record RMW (`:671-672`) | no |
-| missing state files select persist-only (`:308`, `:332-333`) | manager liveness selects it (`:600`) | partial, see B5 |
-| PUT then save the record (`:327`) | a journal, or drop the record (`:586-588`) | no, see B2 |
-| GET is unnecessary and out of scope (`:509-510`, `:519-521`) | GET may be required (`:676-687`) | no, Q3 |
-
-The lock row is the sharpest: A2 at `:576` requires the reconnect hook to hold the record lock across its PUT, while A9 at `:671-672` offers an architecture that stops holding that lock across any apply.
-My own two amendments contradict each other.
-The GET row is also worse than codex states: `spec.md:519` asserts "Revision 5 closes the original Q1, the read-back mechanism" while Q3 at `:676` reopens that same question.
-
-Required change: the implementing PR opens with a single rewritten design section, not a seventh amendment.
-One source-of-truth list, one writer list, one algorithm, one test plan, with the superseded body text deleted rather than layered over.
-This amendment is the last insertion-only round.
-
-### B5. A4 needs a liveness-and-identity truth table (codex new, major)
-
-`service.team_status(project_path).manager_running` is the right signal and exists: it reads the manager pid and probes it live (`bobi/service.py:842-847`, `_pid_alive` at `:288-291`), it is importable from the CLI the way the CLI already imports `bobi.service` lazily (`bobi/cli.py:53`, `:577`, `:1232`), and because it probes the pid rather than the file it answers correctly even when `_cleanup` never ran (`bobi/service.py:662-665`), which covers stopped direct, stopped systemd, stopped launchd and a restart-delay window.
-So A4's selector is sound.
-
-What A4 does not do is reconcile with the body it supersedes.
-`manager_running` answers liveness only; it supplies neither the deployment identity nor the accepted baseline that steps 5 to 8 need.
-The body still routes on file presence (`spec.md:308`, `:332-333`), including the deliberate pre-upgrade case where a LIVE manager with no accepted record is persist-only.
-Liveness alone cannot express that case.
-
-Required change: state the full table, each row naming the path taken: manager false with stale records present; manager true with both records; manager true with no deployment record; manager true with a deployment record and no accepted record (the pre-upgrade row, which stays persist-only); and the manager's state changing during step 3's slow discovery.
-New tests: one per row.
-
-### B6. A9 states a required change and no tests (codex new, major)
-
-Every other amendment in round 5 ends in a "New tests" line. A9 does not: its section runs `spec.md:659-672` and has none.
-A bounded-lock protocol is exactly the kind of change that passes review and then regresses silently.
-
-Required change: A9's tests are a stalled holder not blocking manager boot past the deadline; a reconnect under contention not reasserting stale state; a timeout leaving state the next writer can reconcile; and the losing writer reporting or retrying per the chosen protocol.
-
-### B7. A8's citation rebase is required but unexecuted, so the document carries two coordinate systems (codex F10 partial, minor)
-
-A8 requires restating every citation against `70db2e10` and stating the read sha in the header (`spec.md:657`).
-Neither has happened, because a fold cannot edit line 7: the header still assigns the body to `83bebe49` (`spec.md:7`) while `:548` assigns the amendments to `70db2e10`.
-Codex independently confirmed all eight of A8's drift mappings are correct, sampled 18 of the unchanged citations with no failures, and confirmed the 85/8 split, so the translation table is trustworthy; the document is just not rebased.
-
-This is unambiguous only to a reader who notices `:548`.
-An implementer who opens "Exact changes per file" and follows `bobi/cli.py:4168` lands on `def kb_remove(name):`.
-
-Required change: the single-coordinate rebase happens in B4's rewritten design section, against the sha that is current when the implementing PR opens, with that sha in the header. Until then, A8's table is authoritative over the body's numbers.
-
-### B8. Two precision errors in my own A9 text
-
-Codex flagged both and both are mine, so they are corrected here rather than argued.
-
-A9 says "The spec states the rule it then breaks" and quotes "the lock must not be held across a network round-trip" as if it were a general rule.
-It is not: `spec.md:312` states that specifically about the workspace-file lock, with discovery's Slack and Linear calls as the reason.
-The availability defect A9 describes is unaffected, because `file_lock` is a blocking `LOCK_EX` with no deadline and no `LOCK_NB` (`bobi/fsutil.py:180`) and the design does hold it across network work; only the claim that the spec contradicted itself in advance is withdrawn.
-
-A9's "about 70 seconds" is a nominal sum of six 10-second authorize calls (`bobi/events/server.py:650-655`, called per topic at `:781-784`) plus a 10-second PUT.
-It is not an upper bound: it ignores retries, TCP-level stalls and a suspended holder, against which there is no bound at all.
-Read it as the illustrative case, not the worst one.
-
-### Examined and NOT a defect
-
-Codex noted that A3 cites `event-server/core/src/core.ts:1531-1536` for commit-before-response while the removals actually begin at `:1522`.
-It then states the cited range supports the claim, and it does: `:1531-1536` is the commit-then-return sequence A3 is describing.
-Recorded here so a later round does not re-raise it. No change.
-
-### Questions for Zach, sharpened (numbering preserved)
-
-**Q3 (unchanged question, sharper condition).** Codex rejects the deferral as currently framed.
-Its point: Q3 is a legitimate product decision ONLY in the branch where you revise D4's wording.
-D4 today says `list` shows "what the event server actually routes" (`spec.md:42`), and a recorded PUT response provably cannot satisfy that, because the codebase states the index can go stale after acceptance (`bobi/events/client.py:437-439`) and the reconnect hook exists to repair exactly that (`bobi/subagent.py:1977-1980`).
-So the two branches are: relax D4 to "last accepted at T", which makes the cache correct and keeps GET out of scope; or leave D4 as written, in which case live introspection is required and calling it out of scope would be laundering a defect as a scope ruling.
-There is no third branch where D4 stands unchanged and the cache satisfies it.
-
-**Q4 (unchanged question, reclassified).** Codex disagrees with my framing of Q4 as scope and I now think it is right.
-The non-atomic replace is pre-existing (`event-server/core/src/core.ts:285-292` for the interface, `:1522-1536` for the unrolled-back sequence), but this change is what turns it into an operator-triggered authoritative mutation and then builds local recovery state on its presumed outcome.
-So the decision is not "is this in scope" but "do you accept this failure mode".
-Either answer is fine; silence is not. If you accept it, the spec records the acceptance and states how an operator detects and recovers from a partial replace. If you do not, it becomes work in this ticket or a named blocking follow-up.
-
-### Why six rounds keep finding the same class of defect
-
-Codex's closing observation, which I agree with and could not have written about my own spec.
-
-Every round has found the same shape in a new place: round 1 lost `inbox/<self>` to recomposition, round 2 clobbered the credential record, round 3 raced the manager restart, round 4 mis-scoped the lock, round 5 found a fourth writer and a crash boundary, round 6 finds derived-topic ownership and an unbounded lock.
-Each is an unmodeled writer or an unmodeled stale-state boundary, and each fold patches the instance.
-
-What the spec has never had is one distributed-state section: the named sources of truth, their invariants, which layer owns derived versus declared topics, the complete writer list, the serialization rule, every crash point, and the reconciliation behaviour at each.
-Without it a seventh round finds a seventh instance.
-B4 is that section, and it is the reason this amendment asks for a rewrite rather than another fold.
+None.
+D6 through D9 answered the four this spec previously carried, and no new design fork was found in the rewrite.
