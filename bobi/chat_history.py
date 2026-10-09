@@ -202,15 +202,30 @@ KIND_TOOL_RESULT = "tool_result"
 
 # A tool result can be an entire file. The slab shows enough to recognize
 # what came back; the transcript on disk stays the place to read it whole.
-TOOL_RESULT_PREVIEW = 400
+TOOL_RESULT_PREVIEW = 4000
+
+def tool_result_preview(text: str) -> str:
+    if len(text) <= TOOL_RESULT_PREVIEW:
+        return text
+    preview = text[:TOOL_RESULT_PREVIEW]
+    if "\n" in preview:
+        return preview[:preview.rfind("\n") + 1]
+    if text[TOOL_RESULT_PREVIEW].isspace():
+        return preview
+    boundary = next((index for index in range(len(preview) - 1, -1, -1)
+                     if preview[index].isspace()), None)
+    # ponytail: unbroken tokens stop at 4000 characters; use a bounded source viewer for longer results.
+    return preview[:boundary + 1] if boundary is not None else preview
 
 
 def _entry(kind: str, role: str, text: str, at: str, tool: str = "",
-           truncated: bool = False, is_error: bool = False) -> dict:
+           truncated: bool = False, is_error: bool = False,
+           total_bytes: int | None = None) -> dict:
     """One rendered line. Every key on every entry, so the slab branches on
     value and never on key presence."""
     return {"kind": kind, "role": role, "text": text, "at": at, "tool": tool,
-            "truncated": truncated, "is_error": is_error}
+            "truncated": truncated, "is_error": is_error,
+            "total_bytes": len(text.encode("utf-8")) if total_bytes is None else total_bytes}
 
 
 def _tool_blocks(content, *, role: str, at: str) -> list[dict]:
@@ -227,11 +242,13 @@ def _tool_blocks(content, *, role: str, at: str) -> list[dict]:
                 KIND_TOOL, role, _tool_input_summary(block.get("input")), at,
                 tool=str(block.get("name", "") or "")))
         elif btype == "tool_result":
-            text = _extract_text(block.get("content", "")).strip()
+            text = _extract_text(block.get("content", ""))
+            preview = tool_result_preview(text)
             blocks.append(_entry(
-                KIND_TOOL_RESULT, role, text[:TOOL_RESULT_PREVIEW], at,
-                truncated=len(text) > TOOL_RESULT_PREVIEW,
-                is_error=bool(block.get("is_error"))))
+                KIND_TOOL_RESULT, role, preview, at,
+                truncated=len(preview) < len(text),
+                is_error=bool(block.get("is_error")),
+                total_bytes=len(text.encode("utf-8"))))
     return blocks
 
 
