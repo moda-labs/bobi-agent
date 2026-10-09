@@ -22,7 +22,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -141,17 +140,56 @@ class _Collector:
             self.proc.kill()
 
 
-def _await_listening(port: int, proc: subprocess.Popen, timeout: float = 60.0) -> None:
+def _await_ready(port: int, proc: subprocess.Popen, log: Path,
+                 timeout: float = 60.0) -> None:
+    """Block until the COLLECTOR answers HTTP, not merely until the port opens.
+
+    A bare TCP connect is not readiness on the `docker run -p` path. Docker
+    publishes the host port the moment the container is created, so a connect
+    succeeds while the collector inside is still booting. The proxy then fails
+    to dial the not-yet-listening container port and resets the first real
+    request, which surfaces to the client as `[Errno 104] Connection reset by
+    peer` and reddens whichever test POSTs first (#1083).
+
+    Speaking HTTP is what closes that window: docker forwards bytes and cannot
+    synthesize a response, so a status code proves the collector itself is on
+    the other end and its OTLP routes are mounted.
+
+    Both ways of failing quote *log*, the launch log, so a failed image pull or
+    a rejected config says why instead of only that nothing ever answered. On
+    the docker path that file is the only durable record: the fixture's
+    ``finally`` runs ``docker rm -f``, so ``docker logs`` is already gone by the
+    time anyone reads the failure.
+    """
+    import httpx
+
+    def tail() -> str:
+        try:
+            text = log.read_text(errors="replace").strip()
+        except OSError:
+            return ""
+        return f"\nLaunch log:\n{text[-2000:]}" if text else ""
+
     deadline = time.monotonic() + timeout
+    last = "no attempt completed"
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            raise AssertionError(f"collector exited early with {proc.returncode}")
-        with socket.socket() as s:
-            s.settimeout(0.5)
-            if s.connect_ex(("127.0.0.1", port)) == 0:
-                return
+            raise AssertionError(
+                f"collector exited early with {proc.returncode}{tail()}")
+        try:
+            # Any status is readiness. An unmapped path is deliberate: the OTLP
+            # receiver 404s it without reaching a pipeline, so the probe cannot
+            # pollute the debug output these tests assert on. Verified against
+            # otel/opentelemetry-collector 0.144.0: `GET /` returns 404.
+            httpx.get(f"http://127.0.0.1:{port}/", timeout=1.0)
+            return
+        except httpx.HTTPError as exc:
+            last = f"{type(exc).__name__}: {exc}"
         time.sleep(0.2)
-    raise AssertionError(f"collector did not listen on {port} within {timeout}s")
+    raise AssertionError(
+        f"collector did not answer HTTP on {port} within {timeout}s "
+        f"(last: {last}){tail()}"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -175,17 +213,21 @@ def collector(tmp_path_factory):
         config.write_text(CONFIG.format(port=4318))
         config.chmod(0o644)
         container = f"bobi-otel-test-{port}"
+        # Same log file as the binary path. DEVNULL here made a failed image
+        # pull or a rejected config invisible: the test could only report that
+        # nothing ever answered, never why.
+        handle = log.open("w")
         proc = subprocess.Popen(
             ["docker", "run", "--rm", "--name", container,
              "-p", f"127.0.0.1:{port}:4318",
              "-v", f"{config}:/etc/otelcol/config.yaml:ro",
              COLLECTOR_IMAGE, "--config", "/etc/otelcol/config.yaml"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=handle, stderr=subprocess.STDOUT,
         )
 
     running = _Collector(proc, port, log, container)
     try:
-        _await_listening(port, proc)
+        _await_ready(port, proc, log)
         yield running
     finally:
         running.stop()

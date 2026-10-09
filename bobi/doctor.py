@@ -214,6 +214,8 @@ def _check_runtime_write_policy() -> CheckResult:
 def _check_bobi_install_integrity() -> CheckResult:
     from bobi.runtime_guard import check_bobi_distribution_integrity
 
+    # Full verification is the default: this reports the event-server build
+    # inputs whose digest only the launch gate tolerates (see runtime_guard).
     result = check_bobi_distribution_integrity()
     if result.ok:
         return CheckResult("Bobi install", ok=True, detail=result.detail)
@@ -223,7 +225,11 @@ def _check_bobi_install_integrity() -> CheckResult:
         detail=result.detail,
         hint=(
             "Reinstall or upgrade Bobi, and move any desired framework changes "
-            "into a source PR instead of editing the installed package."
+            "into a source PR instead of editing the installed package. If only "
+            "bobi/event-server/package.json or package-lock.json differ, an npm "
+            "command re-resolved the dependency graph inside the installed "
+            "package: the wheel already ships the runnable bundle, so drop any "
+            "event-server rebuild or overlay step from the image."
         ),
     )
 

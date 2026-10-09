@@ -86,7 +86,8 @@ and parsing live in `bobi/workflow/schema.py`.
 ### Prompt step (the default)
 
 Injects `prompt` into the persistent session, waits for the agent to finish the
-turn, then reads a handoff file. This is the only step type that uses the LLM.
+turn, then reads a handoff file if fields are declared. This is the only step
+type that uses the LLM.
 
 ```yaml
   - name: pickup
@@ -101,7 +102,14 @@ turn, then reads a handoff file. This is the only step type that uses the LLM.
     timeout: 1800
 ```
 
-`agent` names the role whose prompt frames the turn. `timeout` (seconds, default
+`agent` names the role whose prompt frames the turn - unless the run was
+launched with a role (`subagents launch --role <r>`), which pins EVERY step to
+that role and overrides each step's `agent`. To run a multi-role workflow as
+written, launch it without `--role`, exactly as auto-dispatch does: each step
+then runs as its own `agent`. The CLI allows that only when every prompt step
+(not route/action/notify/await) names an installed `agent`; otherwise `--role`
+is required. A prompt step with no `agent` inherits the previous step's.
+`timeout` (seconds, default
 1800) is the step's wall-clock budget, and it has exactly one enforcement point:
 it gates whether a turn-cap restart is allowed to **start** (see [Turn
 budget](#turn-budget) for the resulting bound). Nothing interrupts a drain already in
@@ -172,15 +180,14 @@ whenever a resumable session id exists (the rare fallbacks that clear it - a
 stale resume, a session that never reported an id - re-seed a fresh session
 from the workflow context, exactly as a model switch would).
 
-An `agent:` change is **not** on its own a session boundary. The engine only
-rebuilds the session when a step changes `model`, `effort`, or `max_turns`; a
-step that switches `agent:` while all three of those match continues in the live
-session and inherits the previous agent's transcript under its own system
-prompt. That is a known gap, not an intended behavior - a reviewer step
-following a builder step at identical dials sees the builder's reasoning. When a
-step must start clean, give it an explicit dial change (a different `model`,
-`effort`, or `max_turns`): that enters the rebuild branch, and an agent change
-inside it always starts fresh rather than resuming natively.
+An `agent:` change is a session boundary. A step whose acting agent differs
+from the previous prompt step's always starts a fresh session - never a native
+resume - seeded with the accumulated workflow context, so a reviewer step
+following a builder step does not see the builder's reasoning and runs under its
+own role prompt. (It used to be a boundary only when `model`, `effort`, or
+`max_turns` changed too, which silently ran a role-less multi-role launch as a
+single role.) A launch `--role` pins every step to one agent, so it never
+crosses this boundary.
 
 ### Turn budget
 
@@ -299,6 +306,11 @@ nothing unless that live read says merged - never the `input.merged` the run
 was launched with, which is the webhook's snapshot and stale by arrival. It
 publishes the verdict it acted on as `merged_live`, and downstream routes key
 off that, so the branch taken cannot disagree with what happened on disk.
+An action result with `status: error` is a fatal step failure: the engine emits
+`agent/step.failed`, preserves the error for retry, and records the workflow as
+failed. A verified unmerged PR returns `status: preserved` and completes; an
+unreadable merge-state response preserves the worktree but returns `status:
+error` so it cannot masquerade as a successful no-op.
 
 ## Variables and templating
 
@@ -309,7 +321,8 @@ through a small recursive-descent parser.
 **Scopes** are named dictionaries on the run's `VariableContext`:
 
 - `input` — `task`, `repo`, `run_key`, plus any `input_fields` from the trigger
-  (for example `input.pr_number`, `input.head_branch`).
+  or manual `subagents launch --input KEY=VALUE` / `--input-json` options (for
+  example `input.pr_number`, `input.head_branch`).
 - `requested_by` — who triggered the run (channel, thread) for notify routing.
 - `worktree` — `worktree.path` when the run uses an isolated git worktree.
 - `event` — the payload of the event that resumed a suspended run.
@@ -317,8 +330,10 @@ through a small recursive-descent parser.
   finishes, `${{pr.pr_url}}` holds its handoff `pr_url` field.
 
 **Filters**: `${{scope.key | lower}}` and `${{scope.key | upper}}`. A reference
-to a missing scope or key resolves to an empty string and logs a warning rather
-than failing the run.
+to a missing scope or key resolves to an empty string and logs a warning. Native
+actions declare their required inputs and reject the launch before execution
+when one is absent, so a deterministic action cannot silently complete as a
+no-op.
 
 **Conditions** in route steps use bare names (resolved from a flat namespace of
 all step outputs) and support `==`, `!=`, `in`, `not in`, `and`, `or`, `not`,
@@ -351,9 +366,21 @@ blocked_by: <value>  # optional
 
 After the turn, the engine reads that file and checks every `required` field is
 present (`_validate_handoff`). If fields are missing, it re-prompts the agent to
-fill them in, up to `MAX_HANDOFF_RETRIES` (2). If they are still missing, the
-step fails and the workflow fails. Present fields (required and optional) become
-the step's output scope and feed downstream routing and templating.
+fill them in, up to `MAX_HANDOFF_RETRIES` (2). The repair prompt names the step
+and exact handoff path, identifies the retry as repair rather than a new task,
+and tells the agent to inspect existing results without repeating completed
+work or side effects. It does not replay the original dispatch. If fields are
+still missing, the step fails and the workflow fails. Present fields (required
+and optional) become the step's output scope and feed downstream routing and
+templating.
+
+With no declared required or optional fields, a successful turn completes
+without reading a handoff file or requesting a repair. An optional-only
+contract reads supplied outputs but does not require a file to complete.
+Brain errors remain failures regardless of the handoff contract.
+
+A handoff file written for a contractless step is ignored; use the session
+registry and workflow ledger status, not file presence, to determine completion.
 
 ## Execution model
 
@@ -424,16 +451,19 @@ workflow whose reachable steps are all deterministic opens no brain session at
 all.
 
 **`connect()` is never a turn (#1016).** Opening a session delivers no text, so
-no execution point exists before step 0. The launch task is not an instruction
-the agent acts on directly: it reaches the agent as a labelled YAML context
-block (`input.task`, alongside the other scopes) prepended to the **first
-prompt step's** prompt — on a fresh transcript, and on a resumed transcript
-when a new dispatch arrives. The same fold delivers the persisted scopes when a
-mid-run model/agent switch starts a fresh session; no turn is spent on context
-injection anywhere. Before this invariant, the raw task text drained as a full
-tool-enabled agent turn *before* step 0, which is how one catch-up dispatch of
-`daily-standup` published two standups. If a run completes without any prompt
-step executing, the engine says so — it emits
+no execution point exists before step 0. Every prompt turn begins with a
+step-aware header listing the workflow steps and marking the current step. The
+launch task is background, not a competing instruction: it reaches the agent
+as a labelled YAML block (`input.task`, alongside the other scopes) prepended
+to the **first prompt step's** prompt, before that step header. The background
+block says that the step instruction is what to do now; if it restates the task,
+the agent should do it. This framing applies on a fresh transcript and on a
+resumed transcript when a new dispatch arrives. The same fold delivers the
+persisted scopes when a mid-run model/agent switch starts a fresh session; no
+turn is spent on context injection anywhere. Before this invariant, the raw
+task text drained as a full tool-enabled agent turn *before* step 0, which is
+how one catch-up dispatch of `daily-standup` published two standups. If a run
+completes without any prompt step executing, the engine says so — it emits
 `agent/workflow.brief_undelivered` rather than letting the launch brief vanish
 silently.
 

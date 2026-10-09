@@ -122,7 +122,7 @@ def test_dead_transport_transitions_to_error(bobi_install):
 
 @pytest.mark.asyncio
 async def test_decode_error_replaces_spent_client_before_next_message(
-    bobi_install,
+    bobi_install, caplog,
 ):
     """Queued work must wait for replacement of a spent response reader."""
 
@@ -194,6 +194,10 @@ async def test_decode_error_replaces_spent_client_before_next_message(
     assert spent.queries == ["first"]
     assert fresh.queries == ["second"]
     assert acknowledgements == ["second"]
+    assert "leaving it unacknowledged" in caplog.text
+    assert "Brain replacement does not replay this message" in caplog.text
+    assert "deployment and server history survive" in caplog.text
+    assert "do not use --fresh" in caplog.text
 
 
 @pytest.mark.asyncio

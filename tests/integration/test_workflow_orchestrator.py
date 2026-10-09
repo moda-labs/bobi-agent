@@ -245,6 +245,50 @@ class TestNotifyAwaitDeliveryGuard:
         assert "notify_checkin" in state["error"]
 
 
+class TestContractlessCompletion:
+    @pytest.fixture
+    def bobi_env(self, dual_brain_env):
+        return dual_brain_env
+
+    @pytest.mark.timeout(300)
+    def test_adhoc_completes_once_without_handoff(self, bobi_env):
+        from bobi.sdk import SessionRegistry, session_handoff_path
+        from bobi.workflow.orchestrator import make_session_name, run_workflow
+        from bobi.workflow.schema import load_workflow
+        from bobi.workflow.state import WorkflowRun
+
+        workflow = load_workflow(bobi_env.workflows_dir / "adhoc.yaml")
+        run_key = "1018-no-contract"
+        session_name = make_session_name(workflow.name, "test-repo", run_key)
+        handoff_path = session_handoff_path(session_name, "task")
+        collected = {}
+
+        assert run_workflow(
+            workflow,
+            task="Reply exactly REVIEW_DONE. Do not use tools or create files.",
+            repo="test-repo",
+            cwd=str(bobi_env.project_path),
+            run_key=run_key,
+            timeout=120,
+            interactive=False,
+            collect=collected,
+        ) is True
+
+        assert collected["final_text"]
+        assert not handoff_path.exists()
+        registry = SessionRegistry()
+        assert registry.get(session_name).status == "completed"
+        run = WorkflowRun.find_by_run_key(workflow.name, run_key, repo="test-repo")
+        assert run.status == "completed"
+        assert run.variable_scopes["task"] == {}
+        events = [
+            json.loads(line)
+            for line in (registry.session_dir(session_name) / "log.jsonl")
+            .read_text().splitlines()
+        ]
+        assert len([event for event in events if event.get("event") == "stop"]) == 1
+
+
 class TestConnectIsNeverATurn:
     """#1016 end-to-end on the stub brain: one dispatch of a publish-shaped
     workflow drains exactly one turn per prompt step. On the old engine the
@@ -291,6 +335,7 @@ class TestConnectIsNeverATurn:
             "extra turn means the launch task executed before step 0"
         )
 
+
     def test_step_by_name(self):
         from bobi.workflow.schema import Workflow, StepDef
         wf = Workflow(
@@ -315,3 +360,101 @@ class TestConnectIsNeverATurn:
         assert wf.step_index("a") == 0
         assert wf.step_index("b") == 1
         assert wf.step_index("missing") == -1
+
+
+class TestLaunchNoteScopedToStep:
+    """The launch brief stays background while each prompt owns one step."""
+
+    @pytest.fixture
+    def bobi_env(self, dual_brain_env):
+        return dual_brain_env
+
+    @pytest.mark.timeout(300)
+    def test_step_header_scopes_imperative_launch_note(
+        self, bobi_env, monkeypatch,
+    ):
+        from bobi.brain import get_brain
+        from bobi.workflow.orchestrator import run_workflow
+        from bobi.workflow.schema import StepDef, Workflow
+
+        project = bobi_env.project_path
+        (project / "README.md").write_text("# Phase 3 fixture\n")
+        published = project / "published.txt"
+        if published.exists():
+            published.unlink()
+
+        prompts = []
+        absent_after_first = []
+        real_brain = get_brain()
+
+        class RecordingSession:
+            def __init__(self, session):
+                self._session = session
+                self.provider = session.provider
+
+            async def connect(self):
+                return await self._session.connect()
+
+            async def query(self, prompt):
+                prompts.append(prompt)
+                return await self._session.query(prompt)
+
+            async def receive_response(self):
+                try:
+                    async for message in self._session.receive_response():
+                        yield message
+                finally:
+                    if len(prompts) == 1:
+                        absent_after_first.append(not published.exists())
+
+            async def disconnect(self):
+                return await self._session.disconnect()
+
+            def abort(self):
+                return self._session.abort()
+
+        class RecordingBrain:
+            capabilities = real_brain.capabilities
+
+            def make_session(self, **kwargs):
+                return RecordingSession(real_brain.make_session(**kwargs))
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: RecordingBrain())
+
+        workflow = Workflow(name="standup", steps=[
+            StepDef(name="review", prompt="Read README.md and summarize it."),
+            StepDef(
+                name="publish",
+                prompt="Create published.txt containing exactly ok.",
+            ),
+        ])
+        success = run_workflow(
+            workflow,
+            task="Prepare and publish the standup. Publish now.",
+            repo="test-repo",
+            cwd=str(project),
+            run_key="1093-step-framing",
+            timeout=240,
+            interactive=False,
+            fresh=True,
+        )
+
+        if not success and bobi_env.env.get("BOBI_BRAIN") != "stub":
+            from bobi.sdk import get_registry
+            entry = get_registry().get("wf-standup-test-repo-1093-step-framing")
+            if entry and "authenticate" in entry.error.lower():
+                pytest.skip(f"Claude credentials unavailable: {entry.error}")
+        assert success is True
+        assert absent_after_first == [True]
+        assert len(prompts) == 2
+        assert "Workflow `standup` background" in prompts[0]
+        assert prompts[0].index("Workflow `standup` background") < prompts[0].index(
+            "Workflow `standup` steps: [review], publish"
+        ) < prompts[0].index("Read README.md and summarize it.")
+        assert "Workflow `standup` steps: review, [publish]" in prompts[1]
+        assert "Workflow `standup` background" not in prompts[1]
+
+        if bobi_env.env.get("BOBI_BRAIN") == "stub":
+            assert not published.exists()
+        else:
+            assert published.read_text().strip() == "ok"

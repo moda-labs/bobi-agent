@@ -87,6 +87,12 @@ class TestUnmatchableReason:
     def test_ignores_in_process_system_events(self):
         assert _unmatchable_reason("system/spend.cap.breached") == ""
 
+    def test_validates_known_source_inside_qualified_name(self):
+        assert _unmatchable_reason("monitor/standup.due") == ""
+        assert _unmatchable_reason("system/x") == ""
+        assert _unmatchable_reason("github/github.issues.assigned") != ""
+        assert _unmatchable_reason("monitor/github.issues.assigned") == ""
+
 
 # --- the checks -----------------------------------------------------------
 

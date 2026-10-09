@@ -480,6 +480,7 @@ class Config:
     entry_point: str = ""
     chat: str = ""
     services: list[ServiceConfig] = field(default_factory=list)
+    feedback: dict = field(default_factory=dict)
 
     event_server_url: str = ""
 
@@ -683,6 +684,9 @@ class Config:
             entry_point=raw.get("entry_point", ""),
             chat=raw.get("chat", ""),
             services=services,
+            feedback=(
+                raw.get("feedback") if isinstance(raw.get("feedback"), dict) else {}
+            ),
             event_server_url=raw.get("event_server_url", event_server_url),
             venn_api_key=raw.get("venn_api_key", ""),
             mcp_servers=raw.get("mcp_servers") or {},

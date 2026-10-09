@@ -345,8 +345,8 @@ class TestCleanupActionLiveMergeRead:
         assert mock_cleanup.call_args[1]["merged"] is True
         assert result["merged_live"] is True
 
-    def test_unreadable_merge_state_preserves(self, install_root):
-        """Fail closed: a verdict we could not read is not a licence to delete."""
+    def test_unreadable_merge_state_fails_closed(self, install_root):
+        """Fail closed: preserve files, but report the unreadable verdict."""
         from bobi.workflow.orchestrator import _cleanup_worktree_action
 
         ctx = self._ctx(merged=True)
@@ -355,7 +355,7 @@ class TestCleanupActionLiveMergeRead:
             mock_state.return_value = {"error": "connection refused"}
             result = _cleanup_worktree_action(ctx, str(install_root))
 
-        assert result["status"] == "preserved"
+        assert result["status"] == "error"
         assert result["merged_live"] is False
         assert result["merge_state_error"] == "connection refused"
         # The human-facing reason must not claim the PR did not merge - we

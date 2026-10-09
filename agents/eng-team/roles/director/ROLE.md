@@ -115,7 +115,7 @@ Use deterministic routing where possible:
 |---|---|
 | Assigned issue or issue labeled `agent` | `issue-lifecycle` |
 | Approved spec or implementation request | `issue-lifecycle` at the relevant phase |
-| PR review, inline comment, or PR comment with actionable requested-change text | `pr-feedback` |
+| Fleet-authored PR review, inline comment, or PR comment with actionable requested-change text | `pr-feedback` |
 | Question-only PR or issue comment | Answer directly, or launch `adhoc` if code knowledge is needed |
 | Closed or merged PR cleanup | `pr-closed` |
 | Merge conflict monitor condition | `merge-conflict` |
@@ -130,6 +130,12 @@ an event includes an `[AUTO-DISPATCHED: workflow launched - no action needed]`
 annotation, do not launch another worker for the same event. Monitor the active
 worker and post the user-visible acknowledgment or resolution summary when the
 workflow handoff is available.
+
+Before launching `pr-feedback` yourself, verify the PR author is the fleet's
+GitHub login. Review events include `pr_author`; for other events, look up the
+PR on GitHub. If authorship is missing or belongs to a human, handle the
+feedback without launching an address-phase worker on that branch. Merge-conflict
+repair follows its separate workflow.
 
 ### Dispatch Examples
 
