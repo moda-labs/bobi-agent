@@ -12,7 +12,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 
 from bobi.brain import (
     AssistantText,
@@ -478,6 +485,22 @@ def test_make_session_sets_generous_max_buffer_size(monkeypatch):
     assert captured["max_buffer_size"] > 1024 * 1024
 
 
+def test_make_session_scrubs_metrics_routing_secrets(monkeypatch):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "private-config")
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "private-secret")
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", "private-subject")
+    captured, _options = _capture_options()
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
+
+    for name in ("BOBI_METRICS_EXPERIMENT_JSON", "BOBI_METRICS_ASSIGNMENT_SECRET", "BOBI_METRICS_EXPERIMENT_SUBJECT"):
+        assert captured["env"][name] == ""
+        assert name in captured["env"]["BOBI_INTERNAL_PROVIDER_CLEARED_ENV"].split(",")
+
+
 def test_make_session_max_buffer_size_env_override(monkeypatch):
     monkeypatch.setenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", str(8 * 1024 * 1024))
     captured, _options = _capture_options()
@@ -701,6 +724,15 @@ def test_result_to_turn_handles_error_and_status():
     assert turn.result_text == "API Error: 529 Overloaded"
 
 
+def test_result_to_turn_classifies_5xx_api_error_without_error_flag():
+    msg = _result(is_error=False, result='API Error: 521 {"title":"Error 521: Web server is down"}')
+    turn = _result_to_turn(msg)
+    assert turn.is_error is True
+    assert turn.error_kind == "api_error"
+    assert "Error 521" in turn.error_message
+
+
+
 def test_result_to_turn_normalizes_max_turns_error():
     msg = _result(
         is_error=True,
@@ -859,10 +891,11 @@ class _FakeSDKClient:
             yield m
 
 
-def _claude_session_over(messages):
+def _claude_session_over(messages, *, provider="anthropic"):
     """A _ClaudeSession whose underlying SDK client is swapped for a fake."""
     sess = _ClaudeSession.__new__(_ClaudeSession)
     sess._client = _FakeSDKClient(messages)
+    sess.provider = provider
     return sess
 
 
@@ -882,6 +915,246 @@ async def test_receive_response_converts_assistant_and_result():
     assert out[0].usage == {"input_tokens": 5, "cache_read_input_tokens": 100}
     assert isinstance(out[1], TurnResult)
     assert out[1].total_cost_usd == 0.1
+
+
+@pytest.mark.asyncio
+async def test_receive_response_captures_invocation_and_tool_metadata():
+    first = AssistantMessage(
+        content=[ToolUseBlock(id="tool-1", name="view_file", input={"path": "x"})],
+        model="claude-opus-4-8",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    tool_result = UserMessage(
+        content=[ToolResultBlock(tool_use_id="tool-1", content="ok")]
+    )
+    second = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="claude-opus-4-8",
+        usage={"input_tokens": 6, "output_tokens": 3},
+        message_id="message-2",
+    )
+    result = _result(
+        model_usage={
+            "claude-opus-4-8": {"input_tokens": 11, "output_tokens": 5}
+        }
+    )
+
+    out = [
+        message
+        async for message in _claude_session_over(
+            [first, tool_result, second, result]
+        ).receive_response()
+    ]
+    turn = out[-1]
+
+    assert [item.provider_event_id for item in turn.invocations] == [
+        "message-1",
+        "message-2",
+    ]
+    assert turn.invocations[0].usage.input_tokens == 5
+    assert len(turn.tool_executions) == 1
+    tool = turn.tool_executions[0]
+    assert tool.provider_tool_call_id == "tool-1"
+    assert tool.tool_name == "view_file"
+    assert tool.tool_kind == "file_read"
+    assert tool.triggering_provider_event_id == "message-1"
+    assert tool.consuming_provider_event_id == "message-2"
+    assert tool.ended_at_us >= tool.started_at_us
+
+
+@pytest.mark.asyncio
+async def test_receive_response_deduplicates_repeated_provider_message_chunks():
+    first = AssistantMessage(
+        content=[ToolUseBlock(id="tool-1", name="view_file", input={"path": "x"})],
+        model="deepseek-flash",
+        usage={"input_tokens": 5, "output_tokens": 0},
+        message_id="message-1",
+    )
+    repeated = AssistantMessage(
+        content=[TextBlock(text="working")],
+        model="deepseek-flash",
+        usage={"input_tokens": 5, "output_tokens": 0},
+        message_id="message-1",
+    )
+    turn = [
+        message
+        async for message in _claude_session_over(
+            [
+                first,
+                repeated,
+                _result(model_usage={
+                    "claude-opus-5": {"inputTokens": 5, "outputTokens": 2}
+                }),
+            ]
+        ).receive_response()
+    ][-1]
+
+    assert [item.provider_event_id for item in turn.invocations] == ["message-1"]
+    assert turn.invocations[0].usage.input_tokens == 5
+    assert turn.invocations[0].ended_at_us >= turn.invocations[0].started_at_us
+
+
+@pytest.mark.asyncio
+async def test_receive_response_uses_gateway_invocation_model_for_turn_usage():
+    assistant = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="deepseek-flash",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    result = _result(
+        model_usage={
+            "claude-opus-5": {
+                "inputTokens": 5,
+                "outputTokens": 2,
+                "canonicalModel": "claude-opus-5",
+            }
+        }
+    )
+
+    turn = [
+        message
+        async for message in _claude_session_over(
+            [assistant, result], provider="gateway"
+        ).receive_response()
+    ][-1]
+
+    assert [item.model for item in turn.usage] == ["deepseek-flash"]
+    assert [item.model for item in turn.costs] == ["deepseek-flash"]
+    assert turn.usage[0].raw_usage["canonicalModel"] == "claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_receive_response_preserves_native_anthropic_usage_model():
+    assistant = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="claude-sonnet-4-5-20250929",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    result = _result(model_usage={
+        "claude-3-7-sonnet-20250219": {
+            "inputTokens": 5,
+            "outputTokens": 2,
+        }
+    })
+
+    turn = [
+        message
+        async for message in _claude_session_over([assistant, result]).receive_response()
+    ][-1]
+
+    assert [item.model for item in turn.usage] == ["claude-3-7-sonnet-20250219"]
+    assert [item.model for item in turn.costs] == ["claude-3-7-sonnet-20250219"]
+
+
+@pytest.mark.asyncio
+async def test_receive_response_deltas_persistent_session_usage_and_cost():
+    session = _claude_session_over([
+        AssistantMessage(
+            content=[TextBlock(text="first")],
+            model="claude-opus-5",
+            usage={"input_tokens": 2, "output_tokens": 4},
+            message_id="message-1",
+        ),
+        _result(
+            total_cost_usd=0.31,
+            usage={
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 30,
+                "cache_creation": {"ephemeral_1h_input_tokens": 30},
+                "cache_read_input_tokens": 8,
+                "output_tokens": 4,
+            },
+            model_usage={
+                "claude-opus-5": {
+                    "inputTokens": 2,
+                    "cacheCreationInputTokens": 30,
+                    "cacheReadInputTokens": 8,
+                    "outputTokens": 4,
+                },
+                "claude-haiku-4-5": {
+                    "inputTokens": 10,
+                    "outputTokens": 1,
+                },
+            },
+        ),
+    ])
+    first = [message async for message in session.receive_response()][-1]
+
+    session._client = _FakeSDKClient([
+        AssistantMessage(
+            content=[TextBlock(text="second")],
+            model="claude-opus-5",
+            usage={"input_tokens": 2, "output_tokens": 15},
+            message_id="message-2",
+        ),
+        _result(
+            total_cost_usd=0.35,
+            usage={
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 2,
+                "cache_creation": {"ephemeral_1h_input_tokens": 2},
+                "cache_read_input_tokens": 38,
+                "output_tokens": 15,
+            },
+            model_usage={
+                "claude-opus-5": {
+                    "inputTokens": 4,
+                    "cacheCreationInputTokens": 32,
+                    "cacheReadInputTokens": 46,
+                    "outputTokens": 19,
+                },
+                "claude-haiku-4-5": {
+                    "inputTokens": 10,
+                    "outputTokens": 1,
+                },
+            },
+        ),
+    ])
+    second = [message async for message in session.receive_response()][-1]
+
+    assert {usage.model for usage in first.usage} == {
+        "claude-opus-5",
+        "claude-haiku-4-5",
+    }
+    assert [usage.model for usage in second.usage] == ["claude-opus-5"]
+    usage = second.usage[0]
+    assert usage.uncached_input_tokens == 2
+    assert usage.cache_read_input_tokens == 38
+    assert usage.cache_write_input_tokens == 2
+    assert usage.cache_write_1h_input_tokens == 2
+    assert usage.output_tokens == 15
+    assert second.total_cost_usd == pytest.approx(0.04)
+    assert second.costs == [usage.legacy_cost()]
+
+
+@pytest.mark.asyncio
+async def test_resumed_session_omits_ambiguous_first_cumulative_total():
+    session = _claude_session_over([_result(
+        total_cost_usd=0.35,
+        model_usage={
+            "claude-opus-5": {"inputTokens": 100, "outputTokens": 10}
+        },
+    )])
+    session._cumulative_usage_ready = False
+    first = [message async for message in session.receive_response()][-1]
+
+    session._client = _FakeSDKClient([_result(
+        total_cost_usd=0.40,
+        model_usage={
+            "claude-opus-5": {"inputTokens": 120, "outputTokens": 14}
+        },
+    )])
+    second = [message async for message in session.receive_response()][-1]
+
+    assert first.usage == []
+    assert first.costs == []
+    assert first.total_cost_usd == 0
+    assert second.usage[0].uncached_input_tokens == 20
+    assert second.usage[0].output_tokens == 4
+    assert second.total_cost_usd == pytest.approx(0.05)
 
 
 @pytest.mark.asyncio

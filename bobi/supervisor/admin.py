@@ -46,6 +46,8 @@ import logging
 import math
 import threading
 import time
+from collections import deque
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from queue import Queue, SimpleQueue
 
 from .bus import default_publish as _default_publish
@@ -57,6 +59,7 @@ log = logging.getLogger(__name__)
 COMMAND_RESULT_TOPIC = "fleet/command_result"
 ADMIN_COMMANDS = frozenset({"restart", "stop", "start", "status",
                             "chat", "transcript", "roster", "spend", "usage",
+                            "usage_session", "usage_turn",
                             "session_log",
                             # The single-agent view's read model + the three
                             # operator writes it offers on a waiting run.
@@ -75,6 +78,14 @@ _STOP = object()
 # The three run-scoped writes, dispatched through one delegate: they differ
 # only in which shared action they call.
 _RUN_ACTIONS = frozenset({"resume_run", "remind_run", "close_run"})
+_METRICS_COMMANDS = frozenset({
+    "usage", "usage_session", "usage_turn",
+})
+METRICS_QUERY_WORKERS = 4
+METRICS_QUERY_QUEUE_CAPACITY = 8
+METRICS_QUERY_CAPACITY = METRICS_QUERY_WORKERS + METRICS_QUERY_QUEUE_CAPACITY
+METRICS_QUERY_SHUTDOWN_GRACE_SECONDS = 2.0
+METRICS_QUERY_LATENCY_SAMPLES = 1024
 
 
 class AdminCommandError(Exception):
@@ -168,6 +179,23 @@ class AdminListener:
         # commands strictly ordered.
         self._work: Queue = Queue()
         self._worker: threading.Thread | None = None
+        self._metrics_slots = threading.BoundedSemaphore(METRICS_QUERY_CAPACITY)
+        self._metrics_executor = ThreadPoolExecutor(
+            max_workers=METRICS_QUERY_WORKERS,
+            thread_name_prefix="admin-metrics-query",
+        )
+        self._metrics_state = threading.Condition()
+        self._metrics_accepting = True
+        self._metrics_active = 0
+        self._metrics_queued = 0
+        self._metrics_rejected = 0
+        self._metrics_deadline_cancellations = 0
+        self._metrics_completed = 0
+        self._metrics_latencies_ms: deque[float] = deque(
+            maxlen=METRICS_QUERY_LATENCY_SAMPLES,
+        )
+        self._metrics_futures: set[Future] = set()
+        self._metrics_shutdown_grace_seconds = METRICS_QUERY_SHUTDOWN_GRACE_SECONDS
 
     # --- startup ----------------------------------------------------------
 
@@ -263,6 +291,9 @@ class AdminListener:
         if command == "chat":
             self._dispatch_chat_async(command_id, args)
             return
+        if command in _METRICS_COMMANDS:
+            self._dispatch_metrics_async(command_id, command, args)
+            return
         status, result, error = "done", None, None
         try:
             if command in _RUN_ACTIONS:
@@ -293,8 +324,6 @@ class AdminListener:
                 result = {"subagents": self._read_roster()}
             elif command == "spend":
                 result = {"spend": self._read_spend()}
-            elif command == "usage":
-                result = {"usage": self._read_usage(args)}
             elif command == "session_log":
                 result = self._read_session_log()
             elif command == "runs":
@@ -316,6 +345,163 @@ class AdminListener:
             status, error = "error", str(e)
             log.exception("supervisor: admin command %s failed", command)
         self._publish_result(command_id, status, result, error)
+
+    def _dispatch_metrics_async(self, command_id: str, command: str,
+                                args: dict) -> None:
+        """Admit without waiting; query workers never block lifecycle dispatch."""
+        with self._metrics_state:
+            unavailable = not self._metrics_accepting
+            admitted = self._metrics_accepting \
+                and self._metrics_slots.acquire(blocking=False)
+            if admitted:
+                self._metrics_queued += 1
+                try:
+                    future = self._metrics_executor.submit(
+                        self._run_metrics_query, command, args,
+                    )
+                except Exception:
+                    self._metrics_queued -= 1
+                    self._metrics_rejected += 1
+                    self._metrics_slots.release()
+                    admitted = False
+                    unavailable = True
+                    future = None
+                else:
+                    # Register while admission is still serialized with stop();
+                    # shutdown therefore cannot miss an accepted future.
+                    self._metrics_futures.add(future)
+            else:
+                self._metrics_rejected += 1
+        if not admitted:
+            self._publish_result(
+                command_id,
+                "error",
+                {"code": "metrics_busy", "retry_after_ms": 250},
+                ("Metrics query executor is unavailable" if unavailable else
+                 "Metrics query capacity is temporarily exhausted"),
+            )
+            return
+        assert future is not None
+        future.add_done_callback(
+            lambda completed: self._finish_metrics_query(
+                command_id, command, completed,
+            )
+        )
+
+    def _run_metrics_query(self, command: str, args: dict) -> dict:
+        """Measure one admitted query without widening its public response."""
+        started = time.monotonic()
+        with self._metrics_state:
+            self._metrics_queued -= 1
+            self._metrics_active += 1
+        try:
+            return self._execute_metrics_query(command, args)
+        except Exception as exc:
+            # The query layer exposes deadline expiry through the stable busy
+            # protocol code. Keep the more specific reason internal to health.
+            if (getattr(exc, "code", None) == "metrics_busy"
+                    and "deadline" in str(exc).lower()):
+                with self._metrics_state:
+                    self._metrics_deadline_cancellations += 1
+            raise
+        finally:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            with self._metrics_state:
+                self._metrics_active -= 1
+                self._metrics_completed += 1
+                self._metrics_latencies_ms.append(elapsed_ms)
+                self._metrics_state.notify_all()
+
+    def _execute_metrics_query(self, command: str, args: dict) -> dict:
+        from bobi.metrics.query import MetricsQueries, MetricsQueryError
+
+        if command == "usage":
+            legacy_args = dict(args)
+            if args.get("from") is not None or args.get("to") is not None:
+                from bobi.metrics.query import _time_range
+
+                start_us, end_us = _time_range(args)
+                legacy_args.pop("from", None)
+                legacy_args.pop("to", None)
+                legacy_args["window_seconds"] = (end_us - start_us) / 1_000_000
+                legacy_args["end_at"] = end_us / 1_000_000
+            legacy = self._read_usage(legacy_args)
+            if self.project_root is None:
+                return {"usage": legacy}
+            queries = MetricsQueries(self.project_root)
+            try:
+                legacy.update(queries.summary(args))
+            except MetricsQueryError as exc:
+                # Backward compatibility: a deployment with metrics disabled
+                # still serves the pre-existing usage summary. Other query
+                # failures remain visible rather than silently degrading.
+                if exc.code != "metrics_not_ready":
+                    raise
+            return {"usage": legacy}
+        queries = MetricsQueries(self.project_root)
+        method = {
+            "usage_session": queries.session,
+            "usage_turn": queries.turn,
+        }[command]
+        return {command: method(args)}
+
+    def _finish_metrics_query(self, command_id: str, command: str,
+                              future: Future) -> None:
+        from bobi.metrics.query import MetricsQueryError
+
+        try:
+            result = future.result()
+        except CancelledError:
+            # Normal during supervisor shutdown: the caller is going away and
+            # no command result can be delivered reliably. A cancelled future
+            # never entered _run_metrics_query, so remove it from queue health
+            # here; the common finally still releases its one capacity permit.
+            with self._metrics_state:
+                self._metrics_queued -= 1
+            return
+        except (MetricsQueryError, AdminCommandError) as exc:
+            self._publish_result(
+                command_id,
+                "error",
+                {"code": exc.code, **exc.detail},
+                str(exc),
+            )
+        except Exception as exc:
+            log.exception("supervisor: metrics command %s failed", command)
+            self._publish_result(command_id, "error", None, str(exc))
+        else:
+            self._publish_result(command_id, "done", result, None)
+        finally:
+            with self._metrics_state:
+                self._metrics_futures.discard(future)
+                self._metrics_state.notify_all()
+            self._metrics_slots.release()
+
+    @staticmethod
+    def _latency_percentile(samples: list[float], percentile: float) -> float | None:
+        if not samples:
+            return None
+        ordered = sorted(samples)
+        index = max(0, math.ceil(len(ordered) * percentile) - 1)
+        return round(ordered[index], 3)
+
+    def metrics_query_health(self) -> dict:
+        """Return a compact, privacy-safe snapshot of query executor health."""
+        with self._metrics_state:
+            samples = list(self._metrics_latencies_ms)
+            return {
+                "accepting": self._metrics_accepting,
+                "active_workers": self._metrics_active,
+                "queue_depth": self._metrics_queued,
+                "rejected_queries": self._metrics_rejected,
+                "deadline_cancellations": self._metrics_deadline_cancellations,
+                "completed_queries": self._metrics_completed,
+                "query_latency_ms": {
+                    "p50": self._latency_percentile(samples, 0.50),
+                    "p95": self._latency_percentile(samples, 0.95),
+                    "p99": self._latency_percentile(samples, 0.99),
+                },
+            }
 
     # --- tier-3 reads + data-plane chat (Phase C, #11) --------------------
     #
@@ -406,7 +592,8 @@ class AdminListener:
         from bobi import service
         from bobi.webapp.runs import build_usage_summary
 
-        window = _float_arg(args.get("window_seconds"))
+        raw_window = args.get("window_seconds", 24 * 60 * 60)
+        window = _float_arg(raw_window)
         if window is None or window <= 0:
             raise AdminCommandError(
                 "window_seconds must be a positive number",
@@ -584,6 +771,10 @@ class AdminListener:
     # --- shutdown ---------------------------------------------------------
 
     def stop(self) -> None:
+        # Close admission before touching the executor so a concurrent admin
+        # callback cannot enqueue work behind shutdown.
+        with self._metrics_state:
+            self._metrics_accepting = False
         client = self._client
         if client is not None:
             try:
@@ -594,3 +785,11 @@ class AdminListener:
         if worker is not None:
             self._work.put(_STOP)
             worker.join(timeout=5)
+        self._metrics_executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + self._metrics_shutdown_grace_seconds
+        with self._metrics_state:
+            while self._metrics_futures:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._metrics_state.wait(timeout=remaining)

@@ -1,4 +1,6 @@
 from pathlib import Path
+import shlex
+import sys
 import os
 import subprocess
 
@@ -228,3 +230,40 @@ def test_diy_install_gate_fails_closed():
     assert run(CODE="true", CHANGE_RESULT="success", BUILD_RESULT="failure", CONSUMER_RESULT="skipped") != 0
     assert run(CODE="true", CHANGE_RESULT="success", BUILD_RESULT="success", CONSUMER_RESULT="cancelled") != 0
     assert run(CODE="", CHANGE_RESULT="success", BUILD_RESULT="skipped", CONSUMER_RESULT="skipped") != 0
+
+
+def test_fast_integration_excludes_live_brains_with_clis_installed(tmp_path):
+    steps = _ci_workflow()["jobs"]["integration-fast"]["steps"]
+    command = shlex.split(next(step["run"] for step in steps
+                              if step.get("name") == "Run all other non-Claude integration tests"))
+    selection = command[command.index("-m") + 1]
+    (tmp_path / "conftest.py").write_text(
+        "from unittest.mock import patch\n"
+        "with patch('shutil.which', return_value='/offline/fake-claude'):\n"
+        "    from tests.integration.conftest import (\n"
+        "        pytest_collection_modifyitems, requires_claude, requires_codex, BRAIN_PARAMS)\n"
+    )
+    (tmp_path / "test_selection.py").write_text(
+        "import pytest\n"
+        "from conftest import requires_claude, requires_codex, BRAIN_PARAMS\n"
+        "@pytest.mark.parametrize('brain', BRAIN_PARAMS)\n"
+        "def test_dual_brain(brain):\n"
+        "    raise AssertionError('collection must never execute a model')\n"
+        "@requires_claude\n"
+        "def test_direct_claude():\n"
+        "    raise AssertionError('collection must never execute a model')\n"
+        "@requires_codex\n"
+        "def test_direct_codex():\n"
+        "    raise AssertionError('collection must never execute a model')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(tmp_path), "--confcutdir", str(tmp_path),
+         "--collect-only", "-m", selection, "-q"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test_dual_brain[stub]" in result.stdout
+    assert "test_dual_brain[claude]" not in result.stdout
+    assert "test_direct_claude" not in result.stdout
+    assert "test_direct_codex" not in result.stdout
+    assert "1/4 tests collected (3 deselected)" in result.stdout

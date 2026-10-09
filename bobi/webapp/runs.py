@@ -369,6 +369,115 @@ def _matches_query(row: dict, query: str) -> bool:
     )
 
 
+def _metrics_usage_by_session(root: Path) -> dict[str, dict]:
+    """Recover token volume and cost from SQLite telemetry if available."""
+    db_path = root / "state" / "metrics" / "metrics.db"
+    if not db_path.is_file():
+        return {}
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+
+        query_usage = """
+        WITH chosen_usage AS (
+            SELECT
+                s.session_name,
+                s.session_id,
+                b.input_tokens,
+                b.output_tokens,
+                b.cache_read_input_tokens
+            FROM best_usage b
+            JOIN turns t ON t.turn_id = b.turn_id
+            JOIN sessions s ON s.session_id = t.session_id
+            WHERE (
+                (b.scope = 'invocation' AND EXISTS (
+                    SELECT 1 FROM llm_invocations i WHERE i.turn_id = b.turn_id
+                ))
+                OR
+                (b.scope = 'turn' AND NOT EXISTS (
+                    SELECT 1 FROM best_usage bi WHERE bi.turn_id = b.turn_id AND bi.scope = 'invocation'
+                ))
+            )
+        )
+        SELECT
+            session_name,
+            session_id,
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(cache_read_input_tokens), 0) AS cached_input_tokens,
+            COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) AS total_tokens
+        FROM chosen_usage
+        GROUP BY session_id
+        """
+        usage_rows = conn.execute(query_usage).fetchall()
+
+        query_cost = """
+        WITH chosen_cost AS (
+            SELECT
+                s.session_id,
+                c.amount_usd,
+                c.is_estimated
+            FROM cost_measurements c
+            JOIN turns t ON t.turn_id = c.turn_id
+            JOIN sessions s ON s.session_id = t.session_id
+            WHERE (
+                (c.scope = 'invocation' AND EXISTS (
+                    SELECT 1 FROM llm_invocations i WHERE i.turn_id = c.turn_id
+                ))
+                OR
+                (c.scope = 'turn' AND NOT EXISTS (
+                    SELECT 1 FROM cost_measurements ci WHERE ci.turn_id = c.turn_id AND ci.scope = 'invocation'
+                ))
+            )
+        )
+        SELECT
+            session_id,
+            COALESCE(SUM(CASE WHEN is_estimated = 0 THEN amount_usd END), 0.0) AS exact_cost,
+            COALESCE(SUM(CASE WHEN is_estimated = 1 THEN amount_usd END), 0.0) AS est_cost
+        FROM chosen_cost
+        GROUP BY session_id
+        """
+        cost_by_sid = {r["session_id"]: r for r in conn.execute(query_cost).fetchall()}
+
+        result: dict[str, dict] = {}
+        for row in usage_rows:
+            sid = row["session_id"]
+            sname = row["session_name"]
+            c = cost_by_sid.get(sid)
+            cost_usd = round(c["exact_cost"] if c else 0.0, 6)
+            est_cost_usd = round(c["est_cost"] if c else 0.0, 6)
+            if cost_usd == 0.0 and est_cost_usd > 0.0:
+                cost_usd = est_cost_usd
+            entry = {
+                "total_tokens": row["total_tokens"],
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "cached_input_tokens": row["cached_input_tokens"],
+                "cost_usd": cost_usd,
+                "estimated_cost_usd": est_cost_usd or cost_usd,
+            }
+            if sid:
+                result[sid] = entry
+            if sname:
+                if sname in result:
+                    prev = result[sname]
+                    result[sname] = {
+                        "total_tokens": prev["total_tokens"] + entry["total_tokens"],
+                        "input_tokens": prev["input_tokens"] + entry["input_tokens"],
+                        "output_tokens": prev["output_tokens"] + entry["output_tokens"],
+                        "cached_input_tokens": prev["cached_input_tokens"] + entry["cached_input_tokens"],
+                        "cost_usd": round(prev["cost_usd"] + entry["cost_usd"], 6),
+                        "estimated_cost_usd": round(prev["estimated_cost_usd"] + entry["estimated_cost_usd"], 6),
+                    }
+                else:
+                    result[sname] = entry.copy()
+        conn.close()
+        return result
+    except Exception:
+        return {}
+
+
 def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
     """Build the de-duplicated rows once for list and usage views."""
     from bobi.costs import session_usage
@@ -380,6 +489,14 @@ def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
     usage_by_session = {
         e.name: session_usage(e.model_usage, e.total_cost_usd) for e in entries
     }
+    telemetry_usage = _metrics_usage_by_session(root)
+    for k, v in telemetry_usage.items():
+        if k in usage_by_session:
+            curr = usage_by_session[k]
+            if not curr.get("total_tokens") and v.get("total_tokens"):
+                usage_by_session[k] = v
+        else:
+            usage_by_session[k] = v
     # Who can be spoken to right now. The same predicate `list_active` uses,
     # off the same read - and the read reaps, so an active status with a dead
     # pid is already `crashed` here rather than a chat target that is gone.
@@ -456,12 +573,36 @@ def build_usage_summary(root: Path, *, window_seconds: float,
     }
 
 
+def _is_manager(row: dict) -> bool:
+    detail = row.get("detail") or {}
+    return bool(detail.get("is_manager")) or detail.get("role") in ("director", "manager") or str(row.get("origin", "")).startswith("manager")
+
+
+def _is_monitor(row: dict) -> bool:
+    detail = row.get("detail") or {}
+    return row.get("kind") == "monitor" or detail.get("role") == "monitor" or str(row.get("origin", "")).startswith("monitor")
+
+
+def _matches_kind(row: dict, kind: str) -> bool:
+    if not kind or kind == "all":
+        return True
+    if kind == "manager":
+        return _is_manager(row)
+    if kind == "monitor":
+        return _is_monitor(row)
+    if kind == "workflow":
+        return row.get("kind") == "workflow"
+    if kind == "session":
+        return row.get("kind") == "session"
+    return row.get("kind") == kind
+
+
 def build_runs(root: Path, *, manager_name: str = "", status: str = "",
-               query: str = "", offset: int = 0,
+               kind: str = "", query: str = "", offset: int = 0,
                limit: int = DEFAULT_LIMIT, now: float | None = None) -> dict:
     """Everything this agent did, newest first, live runs at the top.
 
-    ``status`` and ``query`` filter before ``offset`` / ``limit`` paginate.
+    ``status``, ``kind`` and ``query`` filter before ``offset`` / ``limit`` paginate.
     ``failed`` covers crashed terminal sessions too. ``counts`` always
     describes the whole set; ``total`` describes the filtered set so both tabs
     and the pager stay honest.
@@ -469,8 +610,12 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     now = time.time() if now is None else now
     rows = _all_rows(root, manager_name=manager_name, now=now)
 
-    counts = {"all": len(rows), "running": 0, "awaiting_action": 0,
-              "failed": 0}
+    counts = {
+        "all": len(rows),
+        "running": 0,
+        "awaiting_action": 0,
+        "failed": 0,
+    }
     for row in rows:
         if row["status"] in LIVE_STATUSES:
             counts["running"] += 1
@@ -479,6 +624,12 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
         if row["status"] in FAILED_STATUSES:
             counts["failed"] += 1
 
+    if status in ("manager", "monitor", "workflow", "session") and not kind:
+        kind = status
+        status = ""
+
+    if kind:
+        rows = [r for r in rows if _matches_kind(r, kind)]
     if status:
         rows = [r for r in rows if _matches(r, status)]
     query = query.strip()

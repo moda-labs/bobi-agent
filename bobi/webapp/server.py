@@ -24,11 +24,12 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from bobi import paths
 from bobi.chat_history import safe_name
+from bobi.metrics.query import MetricsQueryError
 from bobi.webapp.runtime import (
     LocalRuntime,
     TeamAlreadyRunning,
@@ -129,6 +130,17 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def _unknown_run(request, exc) -> JSONResponse:
         return JSONResponse({"error": "unknown run"}, status_code=404)
 
+    @app.exception_handler(MetricsQueryError)
+    def _metrics_error(request, exc) -> JSONResponse:
+        status = 404 if exc.code in {"unknown_session", "unknown_turn"} else 503 if exc.code in {
+            "metrics_busy", "metrics_not_ready", "metrics_unsupported",
+        } else 409 if exc.code == "config_environment_override" else 500 if exc.code == "config_write_failed" else 504 if exc.code == "policy_timeout" else 502 if exc.code.startswith("policy_") else 400
+        headers = {"Cache-Control": "no-store"}
+        if status == 503:
+            headers["Retry-After"] = "1"
+        return JSONResponse({"error": str(exc), "code": exc.code, **exc.detail},
+                            status_code=status, headers=headers)
+
     @app.exception_handler(TeamAlreadyRunning)
     def _already_running(request, exc) -> JSONResponse:
         return JSONResponse({"error": "already running", "pid": exc.pid},
@@ -172,6 +184,96 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_overview(name: str) -> dict:
         return rt.overview(name)
 
+    @app.get("/api/agents/{name}/metrics/summary")
+    def metrics_summary(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                        model: str = "", session_name: str = "", session_id: str = "",
+                        session: str = "", routing: str = "") -> JSONResponse:
+        data = rt.metrics(name, "summary", {"from": start, "to": end, "model": model,
+                          "session_name": session_name, "session_id": session_id,
+                          "session": session, "routing": routing,
+                          "group_by": ["model"], "include_dashboard": True})
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/agents/{name}/metrics/test-route")
+    async def metrics_test_route(name: str, request: Request) -> JSONResponse:
+        import asyncio
+        import json
+
+        try:
+            body = bytearray()
+            async with asyncio.timeout(3):
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > 131072:
+                        raise ValueError("simulation body too large")
+                    body.extend(chunk)
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                raise ValueError("simulation body must be an object")
+        except (ValueError, UnicodeError, RecursionError, TimeoutError):
+            raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
+        return JSONResponse(await rt.test_route(name, payload), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/turns")
+    def metrics_turns(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                      model: str = "", session_name: str = "", session_id: str = "",
+                      session: str = "", routing: str = "",
+                      limit: int = Query(default=50, ge=1, le=200), cursor: str = "") -> JSONResponse:
+        data = rt.metrics(name, "turns", {"from": start, "to": end, "model": model,
+                          "session_name": session_name, "session_id": session_id,
+                          "session": session, "routing": routing,
+                          "limit": limit, "cursor": cursor})
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/sessions")
+    def metrics_sessions(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                         limit: int = Query(default=200, ge=1, le=200), cursor: str = "") -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "sessions", {"from": start, "to": end, "limit": limit,
+                            "cursor": cursor}), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/sessions/{session_id}")
+    def metrics_session(name: str, session_id: str, cursor: str = "",
+                        limit: int = Query(default=50, ge=1, le=200)) -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "session", {"session_id": session_id, "cursor": cursor,
+                            "limit": limit}), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/turns/{turn_id}")
+    def metrics_turn(name: str, turn_id: str) -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "turn", {"turn_id": turn_id, "include_policy": True}),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/jev-config")
+    @app.get("/api/agents/{name}/routing/config")
+    def get_routing_config(name: str) -> JSONResponse:
+        return JSONResponse(rt.get_routing_config(name), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/agents/{name}/metrics/jev-config")
+    @app.post("/api/agents/{name}/routing/config")
+    async def update_routing_config(name: str, request: Request) -> JSONResponse:
+        import asyncio
+        import json
+
+        try:
+            body = bytearray()
+            async with asyncio.timeout(3):
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > 131072:
+                        raise ValueError("configuration body too large")
+                    body.extend(chunk)
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                raise ValueError("configuration must be an object")
+        except (ValueError, UnicodeError, RecursionError, TimeoutError):
+            raise MetricsQueryError("invalid JEV configuration", "invalid_jev_config") from None
+        from starlette.concurrency import run_in_threadpool
+
+        data = await run_in_threadpool(rt.update_routing_config, name, payload)
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.delete("/api/agents/{name}/metrics/jev-config")
+    @app.delete("/api/agents/{name}/routing/config")
+    def delete_routing_config(name: str) -> JSONResponse:
+        return JSONResponse(rt.update_routing_config(name, {"enabled": False}), headers={"Cache-Control": "no-store"})
+
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
     # Normalized on the way out so the state keys the strip reads are present
@@ -188,13 +290,18 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_sessions(name: str) -> dict:
         return rt.session_log(name)
 
+    # System daemon logs: manager.log tail for debugging network/LLM/event failures
+    @app.get("/api/agents/{name}/logs")
+    def agent_logs(name: str, lines: int = 200) -> dict:
+        return rt.system_logs(name, lines=max(1, min(lines, 1000)))
+
     # The unified runs view: sessions + workflow runs + monitor runs as one
     # list. Filters are applied before the page window is selected.
     @app.get("/api/agents/{name}/runs")
-    def agent_runs(name: str, status: str = "", query: str = "",
+    def agent_runs(name: str, status: str = "", kind: str = "", query: str = "",
                    offset: int = 0, limit: int = 0) -> dict:
         return rt.runs(
-            name, status=status, query=query, offset=max(0, offset),
+            name, status=status, kind=kind, query=query, offset=max(0, offset),
             limit=limit or None)
 
     # The runs table's one write action. Resume ANSWERS a gate: the verdict

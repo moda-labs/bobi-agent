@@ -18,7 +18,7 @@ from bobi.events.signing import serialize_body, sign_headers
 from bobi.events.state import save_bubble_state, save_deployment_state, session_cursor_path
 from bobi.subagent import _start_event_subscription
 
-from .conftest import BRAIN_PARAMS
+from .conftest import BRAIN_PARAMS, _free_port
 from .test_event_server import event_server, _register
 
 
@@ -59,6 +59,63 @@ def _root(tmp_path, base):
         f"agent: recovery\nentry_point: manager\nevent_server: {base}\n"
     )
     return root
+
+
+def test_owned_local_server_restart_recovers_saved_subscription(tmp_path):
+    from bobi.events.server import ensure_running, health
+    from bobi.events.signing import signed_request
+    from bobi.events.state import load_bubble_state, load_deployment_state
+
+    base = f"http://localhost:{_free_port()}"
+    root = _root(tmp_path, base)
+    session = "recovery-manager"
+    subscription = None
+    try:
+        subscription = _start_event_subscription(session, [f"inbox/{session}"], root)
+        assert subscription.client.wait_connected(10)
+        original = load_deployment_state(root, session)
+        bubble = load_bubble_state(root)
+        cursor = session_cursor_path(root, session)
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.write_text('{"last_seen":4}')
+        assert ensure_running(int(base.rsplit(":", 1)[1]), project_path=root) == "connected"
+        assert load_deployment_state(root, session) == original
+        assert cursor.read_text() == '{"last_seen":4}'
+        subscription.stop()
+        subscription = None
+        pid = int((paths.state_path(root) / "event-server.pid").read_text())
+        os.kill(pid, signal.SIGTERM)
+        _wait(lambda: health(base) is None)
+
+        subscription = _start_event_subscription(session, [f"inbox/{session}"], root)
+        assert subscription.client.wait_connected(10)
+        assert load_deployment_state(root, session)["deployment_id"] != original["deployment_id"]
+        current_bubble = load_bubble_state(root)
+        assert current_bubble["bubble_id"] != bubble["bubble_id"]
+        assert _load_cursor(cursor) == 0
+        backups = list((paths.state_path(root) / "event-transport-backups").iterdir())
+        assert len(backups) == 1
+        assert json.loads((backups[0] / "bubble.json").read_text()) == bubble
+        assert json.loads((backups[0] / "deployments" / f"{session}.json").read_text()) == original
+        assert (backups[0] / "cursors" / f"{session}.json").read_text() == '{"last_seen":4}'
+        received = []
+        subscription.client.state_dir = paths.state_path(root)
+        subscription.client.on_event = received.append
+        response = signed_request(base, "POST", f"/events/inbox/{session}", {"text": "after restart"},
+                                  current_bubble["bubble_id"], current_bubble["bubble_key"], timeout=5)
+        assert response.status_code == 200
+        _wait(lambda: received)
+        assert received[0]["seq"] == 1
+        assert received[0]["text"] == "after restart"
+    finally:
+        if subscription is not None:
+            subscription.stop()
+        pid_file = paths.state_path(root) / "event-server.pid"
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize("brain", BRAIN_PARAMS)

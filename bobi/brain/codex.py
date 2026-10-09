@@ -29,17 +29,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
     AssistantText,
     BrainCost,
+    BrainInvocation,
     BrainMessage,
     BrainSession,
+    BrainToolExecution,
+    BrainUsage,
     TurnResult,
     classify_brain_unavailability,
 )
 from bobi.brain.gateway import GatewayAwareEngine, gateway_base_url
+from bobi.metrics.providers import codex_usage
 
 # Headless, non-interactive, fully autonomous: the box is the sandbox, so we
 # bypass Codex's approval/sandbox prompts (the analog of Claude's
@@ -56,6 +61,22 @@ _EXEC_FLAGS = (
 # StreamReader.readline().
 _CODEX_STREAM_LIMIT = 16 * 1024 * 1024
 _CODEX_TERMINATE_TIMEOUT = 5.0
+
+_CODEX_TOOL_ITEMS = frozenset({
+    "command_execution",
+    "file_change",
+    "mcp_tool_call",
+    "web_search",
+})
+
+_CUMULATIVE_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
 
 
 def _instructions(system_prompt: Any) -> str:
@@ -77,10 +98,71 @@ def _costs(u: dict, model: str) -> list[BrainCost]:
     # (its non_cached_input() is input - cached), so record both as-is;
     # summing them double-counts every cache read. reasoning_output_tokens
     # is likewise a subset of output_tokens - never add it. #760
-    return [BrainCost(model=model or "codex",
-                      input_tokens=u.get("input_tokens", 0) or 0,
-                      cached_input_tokens=u.get("cached_input_tokens", 0) or 0,
-                      output_tokens=u.get("output_tokens", 0) or 0)]
+    return [_usage(u, model).legacy_cost()]
+
+
+def _usage(raw: dict, model: str, provider_event_id: str = "") -> BrainUsage:
+    """Normalize Codex totals while retaining cache-write and reasoning facts."""
+    normalized = codex_usage(
+        raw if isinstance(raw, dict) else {},
+        model=model,
+        provider_event_id=provider_event_id,
+    )
+    return BrainUsage(
+        model=normalized.model,
+        provider_event_id=normalized.provider_event_id,
+        input_tokens=normalized.input_tokens,
+        uncached_input_tokens=normalized.uncached_input_tokens,
+        cache_read_input_tokens=normalized.cache_read_input_tokens,
+        cache_write_input_tokens=normalized.cache_write_input_tokens,
+        cache_write_5m_input_tokens=normalized.cache_write_5m_input_tokens,
+        cache_write_1h_input_tokens=normalized.cache_write_1h_input_tokens,
+        cache_write_unknown_ttl_input_tokens=(
+            normalized.cache_write_unknown_ttl_input_tokens
+        ),
+        cache_write_breakdown_complete=normalized.cache_write_breakdown_complete,
+        output_tokens=normalized.output_tokens,
+        reasoning_output_tokens=normalized.reasoning_output_tokens,
+        raw_usage=normalized.raw_usage,
+        token_semantics_version=normalized.token_semantics_version,
+    )
+
+
+def _usage_delta(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
+    """Convert Codex's thread-cumulative stdout counters into one turn."""
+    delta = dict(current)
+    for field in _CUMULATIVE_USAGE_FIELDS:
+        value = current.get(field)
+        if not isinstance(value, int) or isinstance(value, bool):
+            continue
+        prior = previous.get(field)
+        prior = prior if isinstance(prior, int) and not isinstance(prior, bool) else 0
+        delta[field] = value - prior if value >= prior else value
+    return delta
+
+
+def _tool_name(item: dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "")
+    if item_type == "command_execution":
+        return "shell"
+    if item_type == "file_change":
+        return "edit_file"
+    if item_type == "web_search":
+        return "web_search"
+    return str(item.get("tool") or item.get("name") or item_type or "unknown")
+
+
+def _tool_kind(item: dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "")
+    if item_type == "file_change":
+        return "file_edit"
+    if item_type == "command_execution":
+        return "shell"
+    if item_type == "web_search":
+        return "web_search"
+    if item_type == "mcp_tool_call":
+        return "mcp"
+    return "client"
 
 
 async def _write_stdin(writer: asyncio.StreamWriter, text: str) -> None:
@@ -109,9 +191,13 @@ async def _spawn_codex(
     ``codex exec`` blocks reading a piped-but-open stdin (Phase-0 gotcha).
     Non-JSON lines (banners) are skipped.
     """
+    from bobi.env import agent_spawn_env
+    from bobi.metrics.router import provider_subprocess_env
+
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
+        env=provider_subprocess_env(agent_spawn_env()),
         stdin=asyncio.subprocess.PIPE if stdin_text is not None
         else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
@@ -204,6 +290,8 @@ class _CodexSession:
         self._effort = effort
         self._runner = runner or _spawn_codex
         self._pending: str | None = None
+        self._usage_baseline: dict[str, Any] = {}
+        self._usage_baseline_ready = not bool(resume)
         # Effective MCP servers (rendered into config.toml at make_session).
         # Codex has no live status introspection, so the preflight probe reaches
         # each server directly through get_mcp_status below (#428 Stage 4).
@@ -226,11 +314,12 @@ class _CodexSession:
         direct uses outside validation."""
         from bobi.env import agent_spawn_env
         from bobi.mcp_handshake import preflight_timeout, probe_servers
+        from bobi.metrics.router import provider_subprocess_env
 
         return await probe_servers(
             self._mcp_servers,
             timeout=preflight_timeout(),
-            env=self._mcp_env or agent_spawn_env(),
+            env=provider_subprocess_env(self._mcp_env or agent_spawn_env()),
         )
 
     async def connect(self) -> None:
@@ -278,16 +367,49 @@ class _CodexSession:
             prompt = f"{self._instructions}\n\n{prompt}"
 
         argv = self._build_argv()
+        turn_started_us = time.time_ns() // 1000
+        tool_states: dict[str, dict[str, Any]] = {}
         async for ev in self._runner(argv, self._cwd, prompt):
             etype = ev.get("type")
             if etype == "thread.started":
                 self._thread_id = ev.get("thread_id") or self._thread_id
-            elif etype == "item.completed":
+            elif etype in ("item.started", "item.completed"):
                 item = ev.get("item") or {}
-                if item.get("type") == "agent_message" and item.get("text"):
+                item_type = str(item.get("type") or "")
+                item_id = str(item.get("id") or "")
+                observed_at_us = time.time_ns() // 1000
+                if etype == "item.completed" and item_type == "agent_message" and item.get("text"):
                     yield AssistantText(text=item["text"])
+                elif item_type in _CODEX_TOOL_ITEMS:
+                    tool_id = item_id or f"{item_type}-{len(tool_states) + 1}"
+                    state = tool_states.setdefault(
+                        tool_id,
+                        {
+                            "provider_tool_call_id": tool_id,
+                            "tool_name": _tool_name(item),
+                            "tool_kind": _tool_kind(item),
+                            "started_at_us": observed_at_us,
+                            "status": "running",
+                            "is_error": False,
+                        },
+                    )
+                    if etype == "item.completed":
+                        item_status = str(item.get("status") or "completed")
+                        failed = item_status in {"failed", "error"}
+                        state.update(
+                            ended_at_us=observed_at_us,
+                            status="failed" if failed else "completed",
+                            is_error=failed,
+                        )
             elif etype == "turn.completed":
-                usage = ev.get("usage") or {}
+                cumulative_usage = ev.get("usage") or {}
+                baseline_ready = self._usage_baseline_ready
+                usage = (
+                    _usage_delta(cumulative_usage, self._usage_baseline)
+                    if baseline_ready else {}
+                )
+                self._usage_baseline = dict(cumulative_usage)
+                self._usage_baseline_ready = True
                 # Deliberately do NOT feed codex usage to the manager's context-
                 # rotation metric. codex exec reports a per-turn AGGREGATE (summed
                 # across internal model calls), which over-counts context fill by
@@ -297,9 +419,32 @@ class _CodexSession:
                 # (auto-compaction), so the manager keeps one stable thread. Cost
                 # attribution still uses the usage. (#485 follow-up: a turn-count
                 # rotation if unbounded rollout growth ever becomes an issue.)
+                normalized_usage = (
+                    _usage(
+                        usage,
+                        self._model,
+                        str(ev.get("turn_id") or ev.get("id") or ""),
+                    )
+                    if baseline_ready or not cumulative_usage else None
+                )
+                observed_at_us = time.time_ns() // 1000
+                provider_turn_id = str(ev.get("turn_id") or ev.get("id") or "")
                 yield TurnResult(
                     session_id=self._thread_id or "",
-                    costs=_costs(usage, self._model),
+                    costs=[normalized_usage.legacy_cost()] if normalized_usage else [],
+                    usage=[normalized_usage] if normalized_usage else [],
+                    provider_turn_id=provider_turn_id,
+                    invocations=[BrainInvocation(
+                        provider_event_id=provider_turn_id,
+                        model=normalized_usage.model if normalized_usage else self._model,
+                        started_at_us=turn_started_us,
+                        ended_at_us=observed_at_us,
+                        status="completed",
+                    )],
+                    tool_executions=[
+                        BrainToolExecution(**state)
+                        for state in tool_states.values()
+                    ],
                 )
                 return
             elif etype in ("turn.failed", "error"):

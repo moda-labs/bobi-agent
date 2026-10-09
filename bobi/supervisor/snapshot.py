@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 # container this ships as bundled source with no installed distribution, so an
 # env stamp (set by the image build) or this literal is the source of truth.
 #
+# 0.4.0 adds bounded fine-grained usage session/turn/hotspot/experiment reads.
 # 0.3.0 adds the rolling usage command used by the fleet MCP summary.
 # 0.2.0 added the single-agent view's six commands (runs / overview /
 # run_details / resume_run / remind_run / close_run) and the additive `detail`
@@ -32,7 +33,7 @@ log = logging.getLogger(__name__)
 # docs/ADMIN_PROTOCOL.md's compatibility promise - and readable by a consumer,
 # which is the point: an instance still on 0.1.0 drops those verbs with no
 # reply, and this is how the runtime tells "too old" from "not answering".
-SUPERVISOR_VERSION = "0.3.0"
+SUPERVISOR_VERSION = "0.4.0"
 
 
 def _iso(now: float) -> str:
@@ -137,6 +138,7 @@ def build_heartbeat(*, identity: dict, state: SupervisorState,
                     derived_status: str, healthy: bool,
                     manager_pid: int | None, now: float,
                     project_root: Path | None,
+                    metrics: dict | None = None,
                     supervisor_version: str = SUPERVISOR_VERSION) -> dict:
     """Assemble the tier-1 heartbeat snapshot."""
     health = state.health or {}
@@ -171,6 +173,11 @@ def build_heartbeat(*, identity: dict, state: SupervisorState,
         # block is reported null. Populated when the sidecar gains its own WS
         # subscription (Phase B) or /health surfaces the manager's client.
         "event_client": None,
+        "metrics": metrics or {
+            "mode": "disabled",
+            "status": "disabled",
+            "db_ready": False,
+        },
         "resources": _resources(project_root),
         "versions": _versions(project_root),
         "expectations": _expectations(project_root),

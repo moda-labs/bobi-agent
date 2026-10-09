@@ -17,6 +17,7 @@
 
 import { fmtUsd, fmtEst, fmtTok, EST_NOTE } from "../shell.js";
 import { composerMode, resumeBody } from "./composer.js";
+import { renderRunMetrics } from "./metrics.js";
 
 /* --- formatting ------------------------------------------------------ */
 
@@ -87,7 +88,7 @@ const CHAT_POLL_MS = 1500;
 
 /* --- the view -------------------------------------------------------- */
 
-export function mountAgent(el, { api, name }) {
+export function mountAgent(el, { api, name, session = "" }) {
   const base = "/api/agents/" + encodeURIComponent(name);
 
   el.innerHTML = "";
@@ -100,6 +101,9 @@ export function mountAgent(el, { api, name }) {
           <p class="desc" data-el="desc"></p>
         </div>
         <div class="ah-right">
+          <button class="btn bobi-btn small" data-el="refreshBtn" type="button">refresh</button>
+          <a class="btn bobi-btn quiet small" data-el="metricsLink">metrics & routing</a>
+          <button class="btn bobi-btn quiet small" data-el="logsBtn" type="button">system logs</button>
           <div class="agent-header-state" data-el="band"></div>
           <span class="stat-popover" data-el="savedWrap">
             <span class="chip" data-el="savedChip" tabindex="0"
@@ -123,8 +127,10 @@ export function mountAgent(el, { api, name }) {
 
       <section class="runs-section">
         <div class="section-label">
-          <span>Runs</span>
-          <span class="count" data-el="runsCount"></span>
+          <div class="section-title-wrap">
+            <span class="section-heading">Runs</span>
+            <span class="count-pill" data-el="runsCount"></span>
+          </div>
         </div>
         <div class="runs-controls">
           <span class="runs-search-field bobi-field">
@@ -145,8 +151,8 @@ export function mountAgent(el, { api, name }) {
                 <th style="width:118px">Status</th>
                 <th>Run</th>
                 <th style="width:150px">When</th>
-                <th style="width:130px" class="r-tok">Tokens · cost</th>
-                <th style="width:280px"></th>
+                <th style="width:160px" class="r-tok">Tokens · cost</th>
+                <th style="width:240px"></th>
               </tr></thead>
               <tbody data-el="runRows"></tbody>
             </table>
@@ -166,8 +172,25 @@ export function mountAgent(el, { api, name }) {
           <span class="meta" data-el="slabMeta"></span>
           <button class="btn bobi-btn small" data-el="slabClose" type="button">Close</button>
         </div>
+        <div class="metrics-toolbar slab-tabs" data-el="slabTabs" role="group"
+             aria-label="Run detail sections" hidden></div>
         <div class="transcript" data-el="slabBody"></div>
         <div class="composer" data-el="slabComposer" hidden></div>
+      </div>
+    </div>
+
+    <div class="logs-backdrop system-logs-backdrop" data-el="logsBackdrop" hidden>
+      <div class="modal system-logs-modal" role="dialog" aria-modal="true" aria-label="System Logs">
+        <div class="modal-head">
+          <span class="eyebrow">Daemon Logs</span>
+          <span class="path">manager.log</span>
+          <span class="meta" data-el="logsMeta"></span>
+          <div class="logs-head-actions">
+            <button class="btn bobi-btn quiet small" data-el="logsRefresh" type="button">↻ Refresh</button>
+            <button class="btn bobi-btn small" data-el="logsClose" type="button">Close</button>
+          </div>
+        </div>
+        <div class="system-logs-viewer" data-el="logsViewer"></div>
       </div>
     </div>`;
   el.appendChild(page);
@@ -178,6 +201,15 @@ export function mountAgent(el, { api, name }) {
   });
 
   els.title.textContent = name;
+  els.metricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics`;
+  if (els.refreshBtn) {
+    els.refreshBtn.addEventListener("click", () => {
+      pollHealth();
+      pollRuns();
+      pollOverview();
+      pollSpend();
+    });
+  }
 
   let timers = [];
   let health = null;
@@ -191,6 +223,53 @@ export function mountAgent(el, { api, name }) {
   let runsRequest = 0;
   let busyVerb = null;
   let runsError = "";       // why the table is empty, when it is not "no runs"
+  let autoOpenedSession = false;
+
+  /* --- system logs modal -------------------------------------------- */
+  async function fetchAndRenderLogs() {
+    els.logsViewer.innerHTML = '<div class="logs-loading">Loading daemon logs…</div>';
+    const { ok, data } = await api(base + "/logs?lines=300");
+    if (!ok || !data) {
+      els.logsViewer.innerHTML = '<div class="log-line log-error">Failed to fetch logs from server.</div>';
+      return;
+    }
+    els.logsMeta.textContent = `${data.logs ? data.logs.length : 0} lines (${data.total_lines || 0} total)`;
+    els.logsViewer.innerHTML = "";
+    if (!data.logs || !data.logs.length) {
+      els.logsViewer.innerHTML = '<div class="log-line">No logs recorded yet.</div>';
+      return;
+    }
+    data.logs.forEach(line => {
+      const div = document.createElement("div");
+      div.className = "log-line";
+      if (line.includes("[ERROR]") || line.includes(" 521") || line.includes("Error 521") || line.includes("terminal model error")) {
+        div.classList.add("log-error");
+      } else if (line.includes("[WARNING]")) {
+        div.classList.add("log-warning");
+      } else if (line.includes("[INFO]")) {
+        div.classList.add("log-info");
+      }
+      div.textContent = line;
+      els.logsViewer.appendChild(div);
+    });
+    els.logsViewer.scrollTop = els.logsViewer.scrollHeight;
+  }
+
+  function openLogsModal() {
+    els.logsBackdrop.hidden = false;
+    fetchAndRenderLogs();
+  }
+
+  function closeLogsModal() {
+    els.logsBackdrop.hidden = true;
+  }
+
+  els.logsBtn.addEventListener("click", openLogsModal);
+  els.logsClose.addEventListener("click", closeLogsModal);
+  els.logsRefresh.addEventListener("click", fetchAndRenderLogs);
+  els.logsBackdrop.addEventListener("click", (e) => {
+    if (e.target === els.logsBackdrop) closeLogsModal();
+  });
 
   /* --- the agent that isn't there ----------------------------------- */
 
@@ -453,18 +532,48 @@ export function mountAgent(el, { api, name }) {
 
   const TABS = [
     { key: "all", label: "all" },
+    { key: "manager", label: "manager" },
+    { key: "monitor", label: "monitor" },
     { key: "running", label: "running" },
     { key: "awaiting_action", label: "awaiting action" },
     { key: "failed", label: "failed" },
   ];
 
+  function isManagerRow(r) {
+    return Boolean(r.detail?.is_manager || r.detail?.role === "director" || r.detail?.role === "manager" || (r.origin && r.origin.startsWith("manager")));
+  }
+  function isMonitorRow(r) {
+    return Boolean(r.kind === "monitor" || r.detail?.role === "monitor" || (r.origin && r.origin.startsWith("monitor")));
+  }
+
+  let knownCounts = {};
+
   function renderTabs() {
     const counts = (runs && runs.counts) || {};
+    if (runs && runs.runs) {
+      if (tab === "all") {
+        knownCounts.manager = runs.runs.filter(isManagerRow).length;
+        knownCounts.monitor = runs.runs.filter(isMonitorRow).length;
+      } else if (tab === "manager") {
+        knownCounts.manager = runs.total != null ? runs.total : runs.runs.length;
+      } else if (tab === "monitor") {
+        knownCounts.monitor = runs.total != null ? runs.total : runs.runs.length;
+      }
+    }
     els.tabs.innerHTML = "";
     for (const t of TABS) {
       // ALL stays bare: the panel head's "⌁ N runs" IS the all-count, and
       // printing it again one gap to the right reads as two facts.
-      const n = t.key === "all" ? null : counts[t.key];
+      let n = null;
+      if (t.key === "all") {
+        n = null;
+      } else if (t.key === "manager") {
+        n = knownCounts.manager != null ? knownCounts.manager : null;
+      } else if (t.key === "monitor") {
+        n = knownCounts.monitor != null ? knownCounts.monitor : null;
+      } else {
+        n = counts[t.key];
+      }
       const on = tab === t.key;
       const b = mk("button", "tab" + (on ? " active" : ""),
                    n == null ? t.label : `${t.label} · ${n}`);
@@ -496,9 +605,8 @@ export function mountAgent(el, { api, name }) {
     const rows = (runs && runs.runs) || [];
     els.runRows.innerHTML = "";
     const counts = (runs && runs.counts) || {};
-    // The eyebrow beside this already says "runs", so the count is a
-    // number and nothing else.
     els.runsCount.textContent = counts.all ? String(counts.all) : "";
+    els.runsCount.hidden = !counts.all;
 
     if (!rows.length) {
       els.runsEmpty.hidden = false;
@@ -506,6 +614,10 @@ export function mountAgent(el, { api, name }) {
         ? (runsError || "Loading…")
         : query
           ? `No runs match “${query}”.`
+        : tab === "manager"
+          ? "No manager runs recorded."
+        : tab === "monitor"
+          ? "No monitor runs recorded."
         : tab === "awaiting_action"
           ? "No workflows are waiting for approval or clarification."
         : tab === "failed"
@@ -620,13 +732,22 @@ export function mountAgent(el, { api, name }) {
       action, which ends the run without advancing the approval gate. */
   function rowActions(row) {
     const actions = mk("div", "row-actions");
+
+    if (row.session_id) {
+      const metricsLink = mk("a", "btn bobi-btn small metrics-jump-link", "Metrics ↗");
+      metricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(row.session_id)}`;
+      metricsLink.title = "View routing decisions, tokens, and stream telemetry for this session";
+      metricsLink.addEventListener("click", (e) => e.stopPropagation());
+      actions.appendChild(metricsLink);
+    }
+
     const transcript = mk("button", "btn bobi-btn small", "Transcript");
     transcript.type = "button";
     transcript.disabled = !row.session_id;
     if (!row.session_id) transcript.title = "No transcript was recorded for this run";
     transcript.addEventListener("click", (e) => {
       e.stopPropagation();
-      openSlab(row);
+      openSlab(row, "transcript");
     });
     actions.appendChild(transcript);
 
@@ -681,12 +802,18 @@ export function mountAgent(el, { api, name }) {
   // if the operator has moved on. Without it a reply lands in a slab now
   // showing a different run.
   let slabToken = 0;
+  let slabAbort;
 
   function closeSlab() {
+    slabAbort?.abort();
     slabToken += 1;
     els.backdrop.classList.remove("open");
     els.slabComposer.hidden = true;
     els.slabComposer.innerHTML = "";
+    if (location.hash.includes("session=")) {
+      const cleanHash = location.hash.split("?")[0];
+      history.replaceState(null, "", cleanHash);
+    }
   }
   els.slabClose.addEventListener("click", closeSlab);
   els.backdrop.addEventListener("click", (e) => {
@@ -695,7 +822,9 @@ export function mountAgent(el, { api, name }) {
   const onKey = (e) => { if (e.key === "Escape") closeSlab(); };
   document.addEventListener("keydown", onKey);
 
-  async function openSlab(row) {
+  async function openSlab(row, section = "transcript") {
+    slabAbort?.abort();
+    slabAbort = new AbortController();
     const token = ++slabToken;
     els.backdrop.classList.add("open");
     els.slabTitle.textContent = row.title || "";
@@ -704,6 +833,10 @@ export function mountAgent(el, { api, name }) {
     els.slabBody.appendChild(mk("div", "tr-empty", "Loading…"));
     els.slabComposer.hidden = true;
     els.slabComposer.innerHTML = "";
+    if (els.slabTabs) {
+      els.slabTabs.replaceChildren();
+      els.slabTabs.hidden = true;
+    }
 
     // Rows with a session get a transcript; rows without get details.
     // That is the rule, and it is decided by data rather than by kind.
@@ -794,50 +927,37 @@ export function mountAgent(el, { api, name }) {
     const mode = composerMode(row);
     const box = els.slabComposer;
     box.innerHTML = "";
-    // Reset, never accumulate: one slab element is reused for every row.
     box.className = "composer " + mode;
-    box.hidden = false;
 
-    if (mode === "ended") {
-      box.appendChild(mk("p", "composer-note",
-        "This session has ended and it is not waiting on anything, so there "
-        + "is nothing here to reply to."));
+    if (mode !== "gate") {
+      box.hidden = true;
       return;
     }
+    box.hidden = false;
 
-    const gate = mode === "gate";
     const awaited = ((row.detail && row.detail.await_event) || "approval")
       .replaceAll("_", " ");
 
-    const label = gate ? "Approve" : "Send";
+    const label = "Approve";
     const input = mk("textarea");
     input.rows = 2;
-    input.placeholder = gate ? "Why? (optional, goes to the agent)"
-                             : "Reply to this session…";
-    input.setAttribute("aria-label",
-      gate ? "Reason for this decision" : "Reply to this session");
+    input.placeholder = "Why? (optional, goes to the agent)";
+    input.setAttribute("aria-label", "Reason for this decision");
 
     const foot = mk("div", "composer-foot");
-    foot.appendChild(mk("span", "composer-note", gate
-      ? `This run is awaiting ${awaited}. Approving resumes it into its next `
-        + "step; rejecting sends it back to rework in the same session."
-      : "Delivered to this session, the same way the CLI delivers a message."));
+    foot.appendChild(mk("span", "composer-note",
+      `This run is awaiting ${awaited}. Approving resumes it into its next `
+        + "step; rejecting sends it back to rework in the same session."));
 
-    // Reject sits before Approve, and is the quiet one: the advancing action
-    // is the one that should take the deliberate click.
-    let reject = null;
-    if (gate) {
-      reject = mk("button", "btn bobi-btn small", "Reject");
-      reject.type = "button";
-      foot.appendChild(reject);
-    }
+    const reject = mk("button", "btn bobi-btn small", "Reject");
+    reject.type = "button";
+    foot.appendChild(reject);
+
     const send = mk("button", "btn bobi-btn small primary", label);
     send.type = "button";
     foot.appendChild(send);
 
     const status = mk("p", "composer-status");
-    // The outcome arrives minutes later with no focus change, so a screen
-    // reader has to be told rather than left to notice.
     status.setAttribute("role", "status");
     status.hidden = true;
 
@@ -845,24 +965,9 @@ export function mountAgent(el, { api, name }) {
     box.appendChild(foot);
     box.appendChild(status);
 
-    const ui = { input, send, reject, status, gate, label };
-    if (gate) {
-      send.addEventListener("click", () => resumeGate(row, ui, "approve"));
-      reject.addEventListener("click", () => resumeGate(row, ui, "reject"));
-      return;
-    }
-    send.addEventListener("click", () => sendComposer(row, ui));
-    input.addEventListener("keydown", (e) => {
-      // Enter sends and Shift+Enter breaks the line: the chat idiom, and the
-      // reason the control is a textarea rather than an input.
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        sendComposer(row, ui);
-      }
-    });
-    // No Enter-to-send on the gate branch: there are two verdicts, so there
-    // is no default one, and guessing which is meant is how a spec gets
-    // approved by a stray keystroke.
+    const ui = { input, send, reject, status, label };
+    send.addEventListener("click", () => resumeGate(row, ui, "approve"));
+    reject.addEventListener("click", () => resumeGate(row, ui, "reject"));
   }
 
   /** Say something under the box. Inline, never a toast: this modal is what
@@ -1050,7 +1155,13 @@ export function mountAgent(el, { api, name }) {
       limit: "100",
       offset: String(pageIndex * 100),
     });
-    if (tab !== "all") params.set("status", tab);
+    if (tab !== "all") {
+      if (tab === "manager" || tab === "monitor") {
+        params.set("kind", tab);
+      } else {
+        params.set("status", tab);
+      }
+    }
     if (query) params.set("query", query);
     const { ok, status, data } = await api(base + "/runs?" + params);
     if (request !== runsRequest) return;
@@ -1066,6 +1177,22 @@ export function mountAgent(el, { api, name }) {
       renderTabs();
       renderRuns();
       renderPager();
+      if (session && !autoOpenedSession) {
+        autoOpenedSession = true;
+        let target = (runs.runs || []).find(r => r.session_id === session || r.title === session || r.key === `session:${session}`);
+        if (!target && (session.startsWith("ses_") || session.startsWith("sess-") || session.length >= 32)) {
+          try {
+            const met = await api(`/api/agents/${encodeURIComponent(name)}/metrics/sessions/${encodeURIComponent(session)}`);
+            if (met.ok && met.data?.session?.session_name) {
+              const sessName = met.data.session.session_name;
+              target = (runs.runs || []).find(r => r.session_id === sessName || r.title === sessName || r.key === `session:${sessName}`);
+            }
+          } catch { /* ignore */ }
+        }
+        if (target) {
+          openSlab(target);
+        }
+      }
       return;
     }
     // A read that failed is not a read that is still running. Left saying
@@ -1103,6 +1230,8 @@ export function mountAgent(el, { api, name }) {
     setInterval(pollOverview, 30000),
   ];
   return () => {
+    slabAbort?.abort();
+    slabToken += 1;
     timers.forEach(clearInterval);
     clearTimeout(searchTimer);
     document.removeEventListener("keydown", onKey);

@@ -157,6 +157,25 @@ def test_start_records_the_bundle_it_launched(tmp_path, monkeypatch):
     assert artifact.BUNDLE_NAME in stale.detail
 
 
+def test_launch_does_not_retire_transport_state_for_another_process(tmp_path, monkeypatch):
+    from bobi.events.state import load_bubble_state, save_bubble_state
+
+    es_dir = tmp_path / "event-server"
+    _write_valid_artifact(es_dir)
+    save_bubble_state(tmp_path, "saved-bubble", "saved-key")
+    monkeypatch.setattr(es, "_is_installed_event_server_dir", lambda path: True)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "resolve_node_runtime", lambda: ("/node20", "v20.19.2"))
+    monkeypatch.setattr(es.subprocess, "Popen", lambda *a, **kw: Mock(pid=12345))
+    responses = iter([None, {"status": "ok", "mode": "local", "process_id": 98765}])
+    monkeypatch.setattr(es, "health", lambda *a, **kw: next(responses))
+
+    es.ensure_running(8080, project_path=tmp_path)
+
+    assert load_bubble_state(tmp_path) == {"bubble_id": "saved-bubble", "bubble_key": "saved-key"}
+    assert not (paths.state_path(tmp_path) / "event-transport-backups").exists()
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

@@ -90,13 +90,49 @@ class TestTranscriptDetail:
     def test_tool_results_are_previewed_and_flagged(self, tmp_path, monkeypatch):
         _seed_transcript(tmp_path, monkeypatch, [
             _line("user", [{"type": "tool_result",
-                            "content": [{"type": "text", "text": "x" * 900}]}]),
+                            "content": [{"type": "text", "text": "x" * 4900}]}]),
         ])
         [entry] = read_transcript_detail("sid")
         assert entry["kind"] == KIND_TOOL_RESULT
         assert len(entry["text"]) == TOOL_RESULT_PREVIEW
         assert entry["truncated"] is True
         assert entry["is_error"] is False
+        assert entry["total_bytes"] == 4900
+
+    def test_tool_preview_ends_at_line_boundary_and_counts_utf8(self, tmp_path, monkeypatch):
+        text = "é" * 2500 + "\n" + "界" * 2500
+        _seed_transcript(tmp_path, monkeypatch, [
+            _line("user", [{"type": "tool_result", "content": text}]),
+        ])
+        [entry] = read_transcript_detail("sid")
+        assert entry["text"] == "é" * 2500 + "\n"
+        assert entry["truncated"] is True
+        assert entry["total_bytes"] == len(text.encode("utf-8"))
+
+    def test_tool_preview_keeps_exact_limit_untruncated(self, tmp_path, monkeypatch):
+        text = "界" * TOOL_RESULT_PREVIEW
+        _seed_transcript(tmp_path, monkeypatch, [
+            _line("user", [{"type": "tool_result", "content": text}]),
+        ])
+        [entry] = read_transcript_detail("sid")
+        assert entry["text"] == text
+        assert entry["truncated"] is False
+        assert entry["total_bytes"] == 3 * TOOL_RESULT_PREVIEW
+
+    @pytest.mark.parametrize("text,expected", [
+        ("hello " * 800, "hello " * 666),
+        ("界 " * 2500, "界 " * 2000),
+        ("🙂" * 4500, "🙂" * 4000),
+        ("x" * 4000 + " rest", "x" * 4000),
+        ("x" * 3900 + "\t" + "y" * 200, "x" * 3900 + "\t"),
+    ])
+    def test_tool_preview_safe_word_boundaries_and_original_bytes(self, tmp_path, monkeypatch, text, expected):
+        _seed_transcript(tmp_path, monkeypatch, [_line("user", [{"type": "tool_result", "content": text}])])
+        [entry] = read_transcript_detail("sid")
+        assert entry["text"] == expected
+        assert len(entry["text"]) <= TOOL_RESULT_PREVIEW
+        assert entry["truncated"] is True
+        assert entry["total_bytes"] == len(text.encode("utf-8"))
 
     def test_error_results_are_marked(self, tmp_path, monkeypatch):
         _seed_transcript(tmp_path, monkeypatch, [
@@ -133,7 +169,7 @@ class TestTranscriptDetail:
             ]),
         ])
         expected = {"kind", "role", "text", "at", "tool", "truncated",
-                    "is_error"}
+                    "is_error", "total_bytes"}
         for entry in read_transcript_detail("sid"):
             assert set(entry) == expected
 

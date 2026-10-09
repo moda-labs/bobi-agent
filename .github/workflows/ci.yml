@@ -364,7 +364,7 @@ jobs:
         # they run in the dedicated container-image job, not here.
         # The packaged distribution boundary runs in the named step above.
         run: >-
-          pytest tests/integration/ -m "not claude and not docker"
+          pytest tests/integration/ -m "not claude and not docker and not live"
           --ignore=tests/integration/test_packaged_event_server.py
           --timeout=180 -v
 

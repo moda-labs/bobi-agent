@@ -441,7 +441,7 @@ class EventBusRuntime(TeamRuntime):
         result = self._view_command(fleet, instance, "overview") or {}
         return result.get("overview") or {}
 
-    def runs(self, name: str, *, status: str = "", query: str = "",
+    def runs(self, name: str, *, status: str = "", kind: str = "", query: str = "",
              offset: int = 0, limit: int | None = None) -> dict:
         """The unified runs table for one hosted agent.
 
@@ -453,7 +453,7 @@ class EventBusRuntime(TeamRuntime):
         degrades to an empty page rather than a KeyError in the renderer.
         """
         fleet, instance = decode_name(name)
-        args = {"status": status or "", "query": query or "",
+        args = {"status": status or "", "kind": kind or "", "query": query or "",
                 "offset": max(0, offset)}
         if limit and limit > 0:
             args["limit"] = limit

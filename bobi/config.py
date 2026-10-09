@@ -33,6 +33,7 @@ def _launch_admission_defaults() -> dict:
 # `${{` keeps templates intact during both scanning and interpolation.
 _ENV_VAR_RE = re.compile(r"\$\{(?!\{)([^}]+)\}")
 _DOTENV_LOADED: dict[str, str] = {}
+_PROVIDER_CLEARED_ENV = "BOBI_INTERNAL_PROVIDER_CLEARED_ENV"
 
 # The shared moda-hosted event server. Mirrors provision-instance.sh's default
 # so every surface (setup, Slack manifest, deploy) agrees on where instances
@@ -98,10 +99,18 @@ def write_env_file(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(f"{k}={v}" for k, v in sorted(values.items())) + "\n")
 
 
+def _restore_provider_env(env: dict[str, str]) -> None:
+    """Make sanitizer-created blanks eligible for trusted runtime restoration."""
+    for name in env.pop(_PROVIDER_CLEARED_ENV, "").split(","):
+        if name and env.get(name) == "":
+            env.pop(name)
+
 def load_dotenv(project_path: Path) -> None:
     """Load the selected runtime's .env into os.environ."""
     from bobi import paths
-    for key, value in parse_env_file(paths.env_path(project_path)).items():
+    values = parse_env_file(paths.env_path(project_path))
+    _restore_provider_env(os.environ)
+    for key, value in values.items():
         if key not in os.environ:
             os.environ[key] = value
             _DOTENV_LOADED[key] = value
