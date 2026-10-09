@@ -24,7 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from bobi import paths
@@ -134,7 +134,7 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def _metrics_error(request, exc) -> JSONResponse:
         status = 404 if exc.code in {"unknown_session", "unknown_turn"} else 503 if exc.code in {
             "metrics_busy", "metrics_not_ready", "metrics_unsupported",
-        } else 400
+        } else 409 if exc.code == "config_environment_override" else 500 if exc.code == "config_write_failed" else 504 if exc.code == "policy_timeout" else 502 if exc.code.startswith("policy_") else 400
         headers = {"Cache-Control": "no-store"}
         if status == 503:
             headers["Retry-After"] = "1"
@@ -194,6 +194,25 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
                           "group_by": ["model"], "include_dashboard": True})
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
+    @app.post("/api/agents/{name}/metrics/test-route")
+    async def metrics_test_route(name: str, request: Request) -> JSONResponse:
+        import asyncio
+        import json
+
+        try:
+            body = bytearray()
+            async with asyncio.timeout(3):
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > 131072:
+                        raise ValueError("simulation body too large")
+                    body.extend(chunk)
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                raise ValueError("simulation body must be an object")
+        except (ValueError, UnicodeError, RecursionError, TimeoutError):
+            raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
+        return JSONResponse(await rt.test_route(name, payload), headers={"Cache-Control": "no-store"})
+
     @app.get("/api/agents/{name}/metrics/turns")
     def metrics_turns(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
                       model: str = "", session_name: str = "", session_id: str = "",
@@ -222,13 +241,38 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         return JSONResponse(rt.metrics(name, "turn", {"turn_id": turn_id, "include_policy": True}),
                             headers={"Cache-Control": "no-store"})
 
+    @app.get("/api/agents/{name}/metrics/jev-config")
     @app.get("/api/agents/{name}/routing/config")
     def get_routing_config(name: str) -> JSONResponse:
         return JSONResponse(rt.get_routing_config(name), headers={"Cache-Control": "no-store"})
 
+    @app.post("/api/agents/{name}/metrics/jev-config")
     @app.post("/api/agents/{name}/routing/config")
-    def update_routing_config(name: str, payload: dict) -> JSONResponse:
-        return JSONResponse(rt.update_routing_config(name, payload), headers={"Cache-Control": "no-store"})
+    async def update_routing_config(name: str, request: Request) -> JSONResponse:
+        import asyncio
+        import json
+
+        try:
+            body = bytearray()
+            async with asyncio.timeout(3):
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > 131072:
+                        raise ValueError("configuration body too large")
+                    body.extend(chunk)
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                raise ValueError("configuration must be an object")
+        except (ValueError, UnicodeError, RecursionError, TimeoutError):
+            raise MetricsQueryError("invalid JEV configuration", "invalid_jev_config") from None
+        from starlette.concurrency import run_in_threadpool
+
+        data = await run_in_threadpool(rt.update_routing_config, name, payload)
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.delete("/api/agents/{name}/metrics/jev-config")
+    @app.delete("/api/agents/{name}/routing/config")
+    def delete_routing_config(name: str) -> JSONResponse:
+        return JSONResponse(rt.update_routing_config(name, {"enabled": False}), headers={"Cache-Control": "no-store"})
 
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.
