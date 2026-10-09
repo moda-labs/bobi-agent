@@ -29,9 +29,9 @@ durability it already had.
 **What replacing a file costs.** The write lands as a *new inode* renamed
 over the target, so the target's mode, ownership, and symlink-ness do not
 survive it: a file someone had chmod-ed to 0600 comes back at the process
-umask, and a path that was a symlink becomes a regular file. Two rules
-follow. A secret whose confidentiality depends on its mode must be created
-with that mode rather than fixed up afterwards — see
+umask unless an explicit ``mode`` is supplied, and a path that was a symlink
+becomes a regular file. A secret whose confidentiality depends on its mode
+must be created with that mode rather than fixed up afterwards — see
 ``bobi/events/state.py:save_bubble_state``, which opens with ``0o600`` for exactly
 this reason and deliberately does NOT use this helper. And a mode-based
 write guard is not a defense against an atomic write at all: replacing a
@@ -106,6 +106,7 @@ def atomic_write_text(
     mkdir: bool = True,
     executable: bool = False,
     fsync: bool = False,
+    mode: int | None = None,
 ) -> Path:
     """Write *text* to *path* so a crash can never leave it truncated.
 
@@ -118,6 +119,7 @@ def atomic_write_text(
     the temp file and its directory before/after the rename — see the module
     docstring for which crash class that buys.
 
+    ``mode`` creates the temporary file with explicit permissions before writing.
     The temp file is removed on any failure, so a raising write leaves no
     litter beside the target.
     """
@@ -126,7 +128,18 @@ def atomic_write_text(
         path.parent.mkdir(parents=True, exist_ok=True)
     tmp = _tmp_path(path)
     try:
-        tmp.write_text(text, encoding=encoding)
+        if mode is None:
+            tmp.write_text(text, encoding=encoding)
+        else:
+            descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            try:
+                stream = os.fdopen(descriptor, "w", encoding=encoding)
+            except BaseException:
+                os.close(descriptor)
+                raise
+            with stream:
+                os.fchmod(stream.fileno(), mode)
+                stream.write(text)
         if executable:
             tmp.chmod(tmp.stat().st_mode | stat.S_IEXEC)
         if fsync:

@@ -25,6 +25,29 @@ def _strays(path):
 
 
 class TestAtomicWriteText:
+    def test_explicit_mode_protects_secret_before_rename(self, tmp_path, monkeypatch):
+        target = tmp_path / ".env"
+        original_replace = os.replace
+        def replace(source, destination):
+            assert source.stat().st_mode & 0o777 == 0o600
+            assert source.read_text() == "private"
+            original_replace(source, destination)
+        monkeypatch.setattr(os, "replace", replace)
+        atomic_write_text(target, "private", mode=0o600)
+        assert target.stat().st_mode & 0o777 == 0o600
+        assert _strays(target) == []
+
+    def test_explicit_mode_failure_preserves_existing_file(self, tmp_path, monkeypatch):
+        target = tmp_path / ".env"
+        target.write_text("old")
+        def fail(*args):
+            raise OSError("mode failure")
+        monkeypatch.setattr(os, "fchmod", fail)
+        with pytest.raises(OSError):
+            atomic_write_text(target, "new", mode=0o600)
+        assert target.read_text() == "old"
+        assert _strays(target) == []
+
     def test_writes_content(self, tmp_path):
         target = tmp_path / "state.json"
         assert atomic_write_text(target, "hello") == target
