@@ -34,13 +34,177 @@ def test_dashboard_canonical_usage_routing_and_privacy(tmp_path):
     assert turns[-1]["confidence"] == 0.72
     assert turns[-1]["usage"]["output_tokens"] == 0
     assert turns[-1]["tool_count"] == 0
-    assert turns[-1]["costs"] == {"reported_cost_usd": None, "estimated_cost_usd": None}
+    # No recorded dollars; the list-price fallback rides separately.
+    assert turns[-1]["costs"] == {"reported_cost_usd": None, "estimated_cost_usd": None,
+                                  "list_price_usd": pytest.approx(100 * 0.05 / 1_000_000)}
+    assert turns[0]["costs"]["list_price_usd"] is None
     detail = queries.turn({"turn_id": "t-pro", "include_policy": True})
     assert detail["router_decisions"][0]["confidence"] == 0.96
     assert "private-task" not in json.dumps([summary, turns, detail])
     filtered = queries.summary({**args, "include_dashboard": True, "model": "deepseek-v4-pro"})
     assert filtered["totals"]["input_tokens"] == 620
     assert filtered["routing"]["turns"] == 2
+    from bobi.costs import estimate_cost
+
+    # Chosen usage per routed turn: invocation rows for t-routine and t-pro,
+    # the exact terminal row for t-reused.
+    executed = [("deepseek-flash", 100, 0, 0), ("deepseek-v4-pro", 300, 60, 50),
+                ("ds/deepseek-v4-pro", 320, 80, 50)]
+    routed = sum(estimate_cost("gateway", m, i, o, c) for m, i, o, c in executed)
+    ceiling = sum(estimate_cost("gateway", "ds/deepseek-v4-pro", i, o, c) for _m, i, o, c in executed)
+    floor = sum(estimate_cost("gateway", "ds/deepseek-flash", i, o, c) for _m, i, o, c in executed)
+    savings = summary["routing"]["savings"]
+    assert savings["priced_turns"] == 3 and savings["unpriced_turns"] == 0
+    assert savings["escalated_turns"] == 2
+    assert savings["ceiling_model"] == "ds/deepseek-v4-pro"
+    assert savings["floor_model"] == "ds/deepseek-flash"
+    assert savings["routed_cost_usd"] == pytest.approx(routed, abs=1e-6)
+    assert savings["ceiling_cost_usd"] == pytest.approx(ceiling, abs=1e-6)
+    assert savings["floor_cost_usd"] == pytest.approx(floor, abs=1e-6)
+    assert savings["saved_pct"] == round(100 * (ceiling - routed) / ceiling, 1)
+    assert savings["captured_pct"] == round(100 * (ceiling - routed) / (ceiling - floor), 1)
+    [route_set] = savings["route_sets"]
+    assert [(c["model"], c["turns"]) for c in route_set["candidates"]] == [
+        ("ds/deepseek-flash", 1), ("ds/deepseek-v4-pro", 2)]
+    assert route_set["candidates"][0]["routed_cost_usd"] == pytest.approx(
+        estimate_cost("gateway", "deepseek-flash", 100, 0, 0), abs=1e-6)
+    assert route_set["candidates"][1]["ceiling_cost_usd"] == route_set["candidates"][1]["routed_cost_usd"]
+    assert route_set["candidates"][1]["fallback_turns"] == 0
+    assert route_set["candidates"][1]["prices"] == {
+        "input_per_mtok": 0.22, "cached_input_per_mtok": 0.0073, "output_per_mtok": 0.66}
+
+
+def test_dashboard_routing_savings_name_unpriced_candidates(tmp_path):
+    seed_dashboard(tmp_path, 1_000_000)
+    conn = connect(tmp_path / "state/metrics/metrics.db")
+    conn.execute("UPDATE router_decisions SET candidate_models_json='[\"ds/deepseek-flash\",\"cx/gpt-7-nova\"]' "
+                 "WHERE turn_id='t-routine'")
+    conn.commit()
+    conn.close()
+    savings = MetricsQueries(tmp_path).summary({
+        "from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "include_dashboard": True,
+    })["routing"]["savings"]
+    # An unlisted candidate leaves the turn out instead of guessing a ceiling.
+    assert savings["priced_turns"] == 2 and savings["unpriced_turns"] == 1
+    assert savings["unpriced_models"] == ["cx/gpt-7-nova"]
+    assert savings["floor_model"] == "ds/deepseek-flash"
+
+
+def test_dashboard_routing_savings_hold_helper_calls_constant(tmp_path):
+    from bobi.costs import estimate_cost
+
+    seed_dashboard(tmp_path, 1_000_000)
+    conn = connect(tmp_path / "state/metrics/metrics.db")
+    conn.execute("INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_requested,"
+                 "model_selected,started_at_us,status) VALUES('i1h','t-pro',1,'gateway','haiku',"
+                 "'claude-haiku-4-5',1000001,'completed')")
+    conn.execute("INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,model,"
+                 "measurement_source,is_estimated,input_tokens,output_tokens,cache_read_input_tokens,"
+                 "observed_at_us,token_semantics_version) VALUES('u1h','invocation','t-pro','i1h','gateway',"
+                 "'claude-haiku-4-5','provider_stream',0,1000,100,0,1000001,1)")
+    conn.commit()
+    conn.close()
+    savings = MetricsQueries(tmp_path).summary({
+        "from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "include_dashboard": True,
+    })["routing"]["savings"]
+    helper = estimate_cost("gateway", "claude-haiku-4-5", 1000, 100, 0)
+    executed = [(100, 0, 0), (300, 60, 50), (320, 80, 50)]
+    ceiling = sum(estimate_cost("gateway", "ds/deepseek-v4-pro", i, o, c) for i, o, c in executed)
+    floor = sum(estimate_cost("gateway", "ds/deepseek-flash", i, o, c) for i, o, c in executed)
+    # The haiku helper call is real spend on every side, never re-priced as a candidate.
+    assert savings["priced_turns"] == 3 and savings["unpriced_turns"] == 0
+    assert savings["ceiling_cost_usd"] == pytest.approx(ceiling + helper, abs=1e-6)
+    assert savings["floor_cost_usd"] == pytest.approx(floor + helper, abs=1e-6)
+    assert savings["route_sets"][0]["turns"] == 3
+
+
+@pytest.mark.parametrize("model", ["PRO", "pRo", "  pro  ", "DS/DEEPSEEK-V4"])
+def test_dashboard_model_substring_matches_selected_requested_and_totals(tmp_path, model):
+    seed_dashboard(tmp_path, 1_000_000)
+    queries = MetricsQueries(tmp_path)
+    args = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "model": model}
+    turns = queries.turns(args)["turns"]
+    summary = queries.summary({**args, "include_dashboard": True, "group_by": ["model"]})
+    assert {turn["turn_id"] for turn in turns} == {"t-pro", "t-reused"}
+    assert summary["totals"]["input_tokens"] == 620
+    assert summary["totals"]["turns"] == summary["routing"]["turns"] == len(turns)
+    assert summary["totals"]["invocations"] == 2
+    assert sum(group["input_tokens"] for group in summary["groups"]) == 620
+    assert summary["buckets"][0]["input_tokens"] == 620
+    assert summary["coverage"]["exact_invocations"] == 1
+    assert summary["coverage"]["estimated_invocations"] == 1
+    assert summary["coverage"]["unknown_invocations"] == 0
+
+@pytest.mark.parametrize("model", ["", "   ", "%", "_", "\\", "absent"])
+def test_dashboard_model_filter_empty_and_literal_wildcards(tmp_path, model):
+    seed_dashboard(tmp_path, 1_000_000)
+    queries = MetricsQueries(tmp_path)
+    args = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "model": model}
+    turns = queries.turns(args)["turns"]
+    summary = queries.summary({**args, "include_dashboard": True})
+    assert len(turns) == (4 if not model.strip() else 0)
+    assert summary["routing"]["turns"] == len(turns)
+    assert summary["totals"]["input_tokens"] == (720 if turns else None)
+    assert sum(summary["coverage"][key] for key in
+               ("exact_invocations", "estimated_invocations", "unknown_invocations")) == len(turns)
+
+@pytest.mark.parametrize("dashboard", [False, True])
+@pytest.mark.parametrize("model", ["ONN", "RequestedAlias", "SelectedAlias"])
+def test_model_substring_filter_preserves_tool_cost_and_coverage_totals(metrics_root, dashboard, model):
+    conn = connect(metrics_root / "state/metrics/metrics.db")
+    conn.execute("UPDATE llm_invocations SET model_requested='vendor/RequestedAlias', "
+                 "model_selected='vendor/sonnet-SelectedAlias' WHERE invocation_id='i1'")
+    conn.execute("UPDATE usage_measurements SET model='vendor/sonnet-SelectedAlias' WHERE invocation_id='i1'")
+    conn.execute("UPDATE cost_measurements SET model='vendor/sonnet-SelectedAlias' WHERE invocation_id='i1'")
+    conn.commit()
+    conn.close()
+    queries = MetricsQueries(metrics_root)
+    args = {"window_seconds": 10, "end_at": 4, "model": model, "include_dashboard": dashboard}
+    summary = queries.summary(args)
+    assert len(queries.turns(args)["turns"]) == summary["totals"]["turns"] == 1
+    assert summary["totals"]["input_tokens"] == 100
+    assert summary["totals"]["reported_cost_usd"] == 0.25
+    assert summary["totals"]["tool_executions"] == 1
+    assert summary["coverage"]["exact_invocations"] == 1
+
+def test_dashboard_model_and_routing_filters_include_matching_turn_coverage(tmp_path):
+    seed_dashboard(tmp_path, 1_000_000)
+    conn = connect(tmp_path / "state/metrics/metrics.db")
+    conn.execute("UPDATE llm_invocations SET model_requested='RequestedAlias' WHERE invocation_id='i3'")
+    conn.execute(
+        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_selected,started_at_us,status) "
+        "VALUES('second','t-unknown',1,'gateway','other',4000000,'completed')"
+    )
+    conn.commit()
+    conn.close()
+    summary = MetricsQueries(tmp_path).summary({
+        "from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "model": "requestedalias",
+        "routing": "direct", "include_dashboard": True,
+    })
+    assert summary["routing"]["turns"] == 1
+    assert summary["coverage"]["unknown_invocations"] == 2
+    excluded = MetricsQueries(tmp_path).summary({
+        "from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "model": "requestedalias",
+        "routing": "routed", "include_dashboard": True,
+    })
+    assert excluded["routing"]["turns"] == 0
+    assert excluded["coverage"]["unknown_invocations"] == 0
+
+@pytest.mark.parametrize("model", ["%", "_", "\\", "%_\\", "PREFIX%"])
+def test_model_like_pattern_treats_wildcards_as_literal_substrings(tmp_path, model):
+    seed_dashboard(tmp_path, 1_000_000)
+    conn = connect(tmp_path / "state/metrics/metrics.db")
+    conn.execute("UPDATE llm_invocations SET model_requested=? WHERE invocation_id='i0'", ("prefix%_\\suffix",))
+    conn.commit()
+    conn.close()
+    queries = MetricsQueries(tmp_path)
+    args = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "model": model}
+    assert [turn["turn_id"] for turn in queries.turns(args)["turns"]] == ["t-routine"]
+    for dashboard in (False, True):
+        summary = queries.summary({**args, "include_dashboard": dashboard})
+        assert summary["totals"]["input_tokens"] == 100
+        assert summary["coverage"]["exact_invocations"] == 1
+        assert summary["coverage"]["unknown_invocations"] == 0
 
 
 def test_dashboard_keyset_filters_and_lifecycle_names(tmp_path):
@@ -597,6 +761,7 @@ def test_summary_cost_selects_one_granularity_without_double_counting(metrics_ro
     assert result["totals"]["reported_cost_usd"] == pytest.approx(0.25)
     assert MetricsQueries(metrics_root).turns({"window_seconds": 10, "end_at": 4})["turns"][0]["costs"] == {
         "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": None,
+        "list_price_usd": pytest.approx(0.000464),
     }
 
 
@@ -640,6 +805,7 @@ def test_mixed_exact_and_estimated_invocation_costs_keep_one_granularity(metrics
     assert result["totals"]["estimated_cost_usd"] == pytest.approx(0.05)
     assert MetricsQueries(metrics_root).turns({"window_seconds": 10, "end_at": 4})["turns"][0]["costs"] == {
         "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": pytest.approx(0.05),
+        "list_price_usd": pytest.approx(0.000464),
     }
 
 
@@ -1183,3 +1349,63 @@ def test_cli_prints_wire_envelope(monkeypatch):
     ])
     assert result.exit_code == 0, result.output
     assert '"status": "done"' in result.output
+
+
+def _routed_row(turn_id, model, selected, candidates, input_tokens=1000, output_tokens=100):
+    return {"turn_id": turn_id, "model": model, "model_selected": selected,
+            "candidate_models_json": json.dumps(candidates), "control_model": candidates[0], "fallback_reason": None,
+            "input_tokens": input_tokens, "cache_read_input_tokens": 0, "output_tokens": output_tokens}
+
+
+def test_routing_savings_count_each_turn_once_across_model_rows():
+    from bobi.costs import estimate_cost
+    from bobi.metrics.query import _routing_savings
+
+    candidates = ["claude-haiku-4-5", "claude-opus-5-5"]
+    savings = _routing_savings([
+        # One opus turn recorded under two spellings of the same model.
+        _routed_row("t1", "claude-opus-5-5", "opus", candidates),
+        _routed_row("t1", "claude-opus-5-5[1m]", "opus", candidates),
+        # A gateway remap: no usage matches the selected model, so it all counts as routed.
+        _routed_row("t2", "claude-haiku-4-5-20251001", "claude-3-5-haiku-latest", ["claude-3-5-haiku-latest", "sonnet"]),
+        _routed_row("t2", "claude-haiku-4-5", "claude-3-5-haiku-latest", ["claude-3-5-haiku-latest", "sonnet"]),
+    ])
+    assert savings["priced_turns"] == 2
+    assert [entry["turns"] for entry in savings["route_sets"]] == [1, 1]
+    opus_set = next(entry for entry in savings["route_sets"] if "claude-opus-5-5" in str(entry))
+    # The alias "opus" is the opus candidate, not an off-list pick.
+    assert [(c["model"], c["turns"], c["off_list"]) for c in opus_set["candidates"]] == [
+        ("claude-haiku-4-5", 0, False), ("claude-opus-5-5", 1, False)]
+    assert opus_set["routed_cost_usd"] == opus_set["ceiling_cost_usd"] == pytest.approx(
+        2 * estimate_cost("gateway", "claude-opus-5-5", 1000, 100), abs=1e-6)
+    assert savings["escalated_turns"] == 1
+
+
+def test_routing_savings_drop_helper_cost_of_unpriced_turns():
+    from bobi.metrics.query import _routing_savings
+
+    candidates = ["ds/deepseek-flash", "ds/deepseek-v4-pro"]
+    priced = _routing_savings([_routed_row("t1", "deepseek-flash", "ds/deepseek-flash", candidates)])
+    savings = _routing_savings([
+        _routed_row("t1", "deepseek-flash", "ds/deepseek-flash", candidates),
+        # Same candidate set, but the routed model has no list price: its helper must not leak.
+        _routed_row("t2", "cx/gpt-7-nova", "cx/gpt-7-nova", candidates),
+        _routed_row("t2", "claude-haiku-4-5", "cx/gpt-7-nova", candidates),
+    ])
+    assert savings["priced_turns"] == 1 and savings["unpriced_turns"] == 1
+    assert savings["unpriced_models"] == ["cx/gpt-7-nova"]
+    assert savings["ceiling_cost_usd"] == priced["ceiling_cost_usd"]
+
+
+def test_routing_savings_count_fallback_reasons_per_pick():
+    from bobi.metrics.query import _routing_savings
+
+    candidates = ["ds/deepseek-flash", "ds/deepseek-v4-pro"]
+    rows = [_routed_row(f"t{index}", "deepseek-flash", "ds/deepseek-flash", candidates) for index in range(3)]
+    rows[0]["fallback_reason"] = rows[1]["fallback_reason"] = "policy_low_confidence"
+    rows[2]["fallback_reason"] = "policy_timeout"
+    [route_set] = _routing_savings(rows)["route_sets"]
+    flash, pro = route_set["candidates"]
+    assert flash["fallback_turns"] == 3
+    assert flash["fallback_reasons"] == {"policy_low_confidence": 2, "policy_timeout": 1}
+    assert pro["fallback_reasons"] == {}

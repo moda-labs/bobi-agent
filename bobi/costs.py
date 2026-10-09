@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,13 +27,25 @@ log = logging.getLogger(__name__)
 # model_prices json and models.dev) and should be updated periodically - the
 # authoritative source of cost is always the provider's own billing.
 PRICE_TABLE: dict[str, tuple[float, float, float]] = {
-    # Anthropic (cache read = 10% of input)
+    # Anthropic 5.x (platform.claude.com pricing, 2026-09). Opus 5.5 cache
+    # reads are 5% of input, not the usual 10%.
+    "anthropic:claude-fable-5-1": (10.0, 0.25, 50.0),
+    "anthropic:claude-fable-5": (10.0, 1.00, 50.0),
+    "anthropic:claude-opus-5-5": (4.0, 0.20, 20.0),
+    "anthropic:claude-opus-5": (5.0, 0.50, 25.0),
+    "anthropic:claude-sonnet-5-5": (2.0, 0.20, 10.0),
+    "anthropic:claude-sonnet-5": (2.0, 0.20, 10.0),
+    "anthropic:claude-opus-4-8": (5.0, 0.50, 25.0),
+    "anthropic:claude-opus-4-7": (5.0, 0.50, 25.0),
+    "anthropic:claude-opus-4-6": (5.0, 0.50, 25.0),
+    "anthropic:claude-sonnet-4-6": (3.0, 0.30, 15.0),
+    # Anthropic 4.x and older (cache read = 10% of input)
     "anthropic:claude-haiku-4-5-20251001": (1.0, 0.10, 5.0),
     "anthropic:claude-haiku-4-5": (1.0, 0.10, 5.0),
     "anthropic:claude-sonnet-4-5-20250929": (3.0, 0.30, 15.0),
     "anthropic:claude-sonnet-4-5": (3.0, 0.30, 15.0),
-    "anthropic:claude-opus-4-5-20251101": (15.0, 1.50, 75.0),
-    "anthropic:claude-opus-4-5": (15.0, 1.50, 75.0),
+    "anthropic:claude-opus-4-5-20251101": (5.0, 0.50, 25.0),
+    "anthropic:claude-opus-4-5": (5.0, 0.50, 25.0),
     "anthropic:claude-3-7-sonnet-20250219": (3.0, 0.30, 15.0),
     "anthropic:claude-3-7-sonnet": (3.0, 0.30, 15.0),
     "anthropic:claude-3-5-sonnet-20241022": (3.0, 0.30, 15.0),
@@ -43,6 +56,9 @@ PRICE_TABLE: dict[str, tuple[float, float, float]] = {
     "anthropic:claude-3-5-haiku-20241022": (0.80, 0.08, 4.0),
     "anthropic:claude-3-5-haiku": (0.80, 0.08, 4.0),
     # OpenAI - current codex lineup (gpt-5.6 family) and still-offered tiers
+    # gpt-6.1-sol as billed by the 9router gateway: every one of its 182
+    # recorded requests (2026-10) reproduces exactly at these rates.
+    "openai:gpt-6.1-sol": (2.00, 0.10, 10.00),
     "openai:gpt-5.6": (5.00, 0.50, 30.00),
     "openai:gpt-5.6-sol": (5.00, 0.50, 30.00),
     "openai:gpt-5.6-terra": (2.50, 0.25, 15.00),
@@ -67,8 +83,15 @@ PRICE_TABLE: dict[str, tuple[float, float, float]] = {
     "openai:gpt-4o-mini": (0.15, 0.075, 0.60),
     "openai:gpt-4.1": (2.0, 0.50, 8.0),
     "openai:gpt-4.1-mini": (0.40, 0.10, 1.60),
+    "openai:o1": (15.0, 7.50, 60.0),
     "openai:o3": (2.0, 0.50, 8.0),
     "openai:o4-mini": (1.10, 0.275, 4.40),
+    # DeepSeek via the ai-box gateway (home.ai-box.vn/api/pricing, 2026-10).
+    # That gateway publishes new-api ratios: input $/MTok = model_ratio * 2,
+    # output = input * completion_ratio, cached = input * cache_ratio.
+    "deepseek:deepseek-flash": (0.05, 0.001, 0.20),
+    "deepseek:deepseek-v4-pro": (0.22, 0.0073, 0.66),
+    "deepseek:deepseek-v4.1-flash": (0.03, 0.003, 0.12),
     # Google (implicit cache read = 25% of input)
     "google:gemini-2.5-pro": (1.25, 0.3125, 10.0),
     "google:gemini-2.5-flash": (0.15, 0.0375, 0.60),
@@ -82,23 +105,123 @@ IMAGE_PRICE_TABLE: dict[str, float] = {
 }
 
 
+# Routing prefixes used by gateway/router model ids ("cx/gpt-5.6-sol",
+# "ds/deepseek-flash", "openai:gpt-5.4") name the upstream provider.
+_ROUTE_PREFIX_PROVIDERS = {
+    "cx": "openai", "codex": "openai", "openai": "openai",
+    "anthropic": "anthropic", "claude": "anthropic",
+    "google": "google", "gemini": "google",
+    "ds": "deepseek", "deepseek": "deepseek",
+}
+
+# Claude Code model aliases resolve to the current model of each family.
+# Updating a mapping reprices historical alias usage at the new model's rate.
+_CLAUDE_ALIASES = {
+    "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-4-5",
+}
+
+
+def normalize_model(provider: str, model: str) -> tuple[str, str]:
+    """Resolve a recorded model id to the ``(provider, model)`` price-table key.
+
+    Strips a routing prefix (``cx/``, ``ds/``, ``openai:``) into the provider
+    and rewrites dotted Claude versions (``claude-opus-5.5``) to the dashed
+    API id (``claude-opus-5-5``). A context-window suffix
+    (``claude-opus-5-5[1m]``) and the bare Claude Code aliases (``sonnet``)
+    resolve to the same price-table key."""
+    model = re.sub(r"\[[^\]]*\]$", "", (model or "").strip())
+    match = re.match(r"^([a-z]+)[/:](.+)$", model, re.IGNORECASE)
+    if match and match.group(1).lower() in _ROUTE_PREFIX_PROVIDERS:
+        provider = _ROUTE_PREFIX_PROVIDERS[match.group(1).lower()]
+        model = match.group(2)
+    if model.lower() in _CLAUDE_ALIASES:
+        provider, model = "anthropic", _CLAUDE_ALIASES[model.lower()]
+    if model.lower().startswith("claude-"):
+        model = re.sub(r"(\d)\.(\d)", r"\1-\2", model)
+    return provider, model
+
+
+def model_identity(model: str | None) -> str:
+    """Comparable model identity: ``sonnet``, ``claude-sonnet-5.5`` and
+    ``claude-sonnet-5-5-20260101`` share one key."""
+    name = normalize_model("gateway", model or "")[1].lower()
+    return re.sub(r"-(?:\d{8}|latest)$", "", name)
+
+
+# Model-name patterns for unprefixed ids, checked after routing prefixes and aliases.
+_NAME_PROVIDERS: tuple[tuple[str, str], ...] = (
+    ("anthropic", r"^claude-"), ("openai", r"^(?:gpt-|o\d|codex-|chatgpt-)"),
+    ("deepseek", r"^deepseek-"), ("google", r"^gemini-"),
+)
+
+
+def model_provider(model: str | None) -> str | None:
+    """The upstream provider a model id belongs to, or None when unknown."""
+    provider, name = normalize_model("", model or "")
+    if provider:
+        return provider
+    return next((name_provider for name_provider, pattern in _NAME_PROVIDERS
+                 if re.search(pattern, name.lower())), None)
+
+
+# Gateway prefix used to name each priced provider's models in a routing config.
+_ROUTE_PREFIX = {"openai": "cx/", "deepseek": "ds/", "google": "gemini/", "anthropic": ""}
+
+
+def native_models(brain: str) -> list[str]:
+    """Priced model ids a native brain can run, as its CLI names them.
+
+    ``claude``: the Claude Code aliases, then undated Anthropic ids;
+    ``codex``: undated OpenAI ids. No gateway prefix - these go to the
+    vendor directly."""
+    provider = {"claude": "anthropic", "codex": "openai"}.get(brain)
+    names = list(_CLAUDE_ALIASES) if provider == "anthropic" else []
+    for key in PRICE_TABLE:
+        table_provider, model = key.split(":", 1)
+        if table_provider == provider and not re.search(r"-\d{8}$", model) and model not in names:
+            names.append(model)
+    return names
+
+
+def routable_models() -> list[str]:
+    """Priced model ids in the form a routing config names them.
+
+    Claude Code aliases first, then each provider's undated price-table ids
+    behind their gateway prefix (``cx/gpt-5.6-luna``, ``ds/deepseek-flash``).
+    Every entry resolves back to a list price."""
+    names = list(_CLAUDE_ALIASES)
+    for key in PRICE_TABLE:
+        provider, model = key.split(":", 1)
+        if provider in _ROUTE_PREFIX and not re.search(r"-\d{8}$", model):
+            names.append(_ROUTE_PREFIX[provider] + model)
+    return names
+
+
+def model_prices(model: str, provider: str = "gateway") -> tuple[float, float, float] | None:
+    """Per-MTok ``(input, cached_input, output)`` list prices, or None."""
+    return _lookup_prices(provider, model)
+
+
+def _table_prices(provider: str, model: str) -> tuple[float, float, float] | None:
+    """Exact price-table hit, tolerating a date or ``-latest`` suffix."""
+    stripped = re.sub(r"-latest$", "", re.sub(r"-\d{8}$", "", model))
+    for name in (model, stripped):
+        if f"{provider}:{name}" in PRICE_TABLE:
+            return PRICE_TABLE[f"{provider}:{name}"]
+    return None
+
+
 def _lookup_prices(provider: str, model: str) -> tuple[float, float, float] | None:
-    key = f"{provider}:{model}"
-    if key in PRICE_TABLE:
-        return PRICE_TABLE[key]
-    if provider == "gateway":
-        for p in ("anthropic", "openai", "google"):
-            res = _lookup_prices(p, model)
-            if res:
-                return res
-    import re
-    stripped = re.sub(r"-\d{8}$", "", model)
-    stripped = re.sub(r"-latest$", "", stripped)
-    if stripped != model:
-        key = f"{provider}:{stripped}"
-        if key in PRICE_TABLE:
-            return PRICE_TABLE[key]
+    provider, model = normalize_model(provider, model)
+    # A gateway can front any vendor: try every vendor's exact entry before
+    # the family heuristics below, which would otherwise win on substrings.
+    for vendor in (("anthropic", "openai", "google", "deepseek") if provider == "gateway" else (provider,)):
+        prices = _table_prices(vendor, model)
+        if prices:
+            return prices
     m = model.lower()
+    if "deepseek" in m:
+        return (0.27, 0.07, 1.10)
     if "haiku" in m:
         return (1.0, 0.10, 5.0)
     if "sonnet" in m:
@@ -115,8 +238,6 @@ def _lookup_prices(provider: str, model: str) -> tuple[float, float, float] | No
         return (0.15, 0.0375, 0.60)
     if "pro" in m:
         return (1.25, 0.3125, 10.0)
-    if "deepseek" in m:
-        return (0.27, 0.07, 1.10)
     return None
 
 

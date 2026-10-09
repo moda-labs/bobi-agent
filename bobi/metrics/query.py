@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from bobi.costs import estimate_cost, model_identity, model_prices
 from bobi.metrics.schema import SCHEMA_VERSION
 from bobi.metrics.store import connect
 
@@ -75,6 +76,12 @@ ROUTING_PUBLIC_SQL = (
 
 def _columns(columns: tuple[str, ...]) -> str:
     return ",".join(columns)
+
+def _model_match(alias: str) -> str:
+    return f"(lower({alias}.model_selected) LIKE ? ESCAPE '\\' OR lower({alias}.model_requested) LIKE ? ESCAPE '\\')"
+
+def _model_pattern(model: str) -> str:
+    return "%" + model.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 def _strict_sum(column: str) -> str:
@@ -346,6 +353,161 @@ def _enforce_row_count(*collections: list[object]) -> None:
         raise MetricsQueryError("response exceeds 200 rows; narrow the query", "query_too_large")
 
 
+def _list_price(usage: sqlite3.Row | dict[str, Any]) -> float | None:
+    """List-price USD for one usage row, or None when model or tokens are unknown.
+
+    Rides beside recorded costs as a display fallback; it is never summed into
+    reported or estimated dollars."""
+    if usage["input_tokens"] is None or usage["output_tokens"] is None:
+        return None
+    if model_prices(usage["model"] or "") is None:
+        return None
+    return round(estimate_cost(
+        "gateway", usage["model"], int(usage["input_tokens"]), int(usage["output_tokens"]),
+        int(usage["cache_read_input_tokens"] or 0)), 8)
+
+
+def _price_dict(model: str | None) -> dict[str, float] | None:
+    prices = model_prices(model) if model else None
+    if prices is None:
+        return None
+    return dict(zip(("input_per_mtok", "cached_input_per_mtok", "output_per_mtok"), prices))
+
+
+def _pick_costs(pick: dict[str, Any] | None) -> dict[str, object]:
+    """Spend of the turns routed to one candidate, routed and on the set's strongest pick."""
+    if not pick:
+        return {"routed_cost_usd": None, "ceiling_cost_usd": None, "fallback_turns": 0, "fallback_reasons": {}}
+    return {"routed_cost_usd": round(pick["routed"], 6), "ceiling_cost_usd": round(pick["ceiling"], 6),
+            "fallback_turns": pick["fallback_turns"], "fallback_reasons": dict(sorted(pick["fallback_reasons"].items()))}
+
+
+def _routing_savings(rows: list[sqlite3.Row]) -> dict[str, object]:
+    """Price routed turns against the cheapest and strongest model the router could pick.
+
+    ``rows`` hold one canonical usage total per (routed turn, executed model).
+    The router chooses from a candidate set per decision, so the honest
+    counterfactuals live inside that set: running the turn on the strongest
+    candidate (``ceiling``, the no-router default for quality) and on the
+    cheapest one (``floor``). Each side is priced from
+    :data:`bobi.costs.PRICE_TABLE` over the identical token volumes the turn
+    actually used, which isolates the routing choice from cache behaviour and
+    provider billing drift; cache writes bill as plain input on every side.
+    Usage on a model other than the selected one (a harness's background haiku
+    call) costs the same whatever the router chose, so it counts at its
+    executed price on every side. When no usage matches the selected model
+    (a gateway remapped it), all of the turn's usage is treated as routed.
+    A turn with any unpriced model is left out whole and the model is named in
+    ``unpriced_models``.
+    """
+    by_turn: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        by_turn.setdefault(row["turn_id"], []).append(row)
+
+    def tokens(row: sqlite3.Row) -> dict[str, int]:
+        return {
+            "input_tokens": int(row["input_tokens"] or 0),
+            "output_tokens": int(row["output_tokens"] or 0),
+            "cached_input_tokens": int(row["cache_read_input_tokens"] or 0),
+        }
+
+    totals = {"routed": 0.0, "ceiling": 0.0, "floor": 0.0}
+    priced_turns = unpriced_turns = escalated_turns = 0
+    unpriced_models: set[str] = set()
+    sets: dict[tuple[str, ...], dict[str, Any]] = {}
+    for turn_rows in by_turn.values():
+        first = turn_rows[0]
+        try:
+            candidates = tuple(dict.fromkeys(json.loads(first["candidate_models_json"] or "[]")))
+        except (TypeError, ValueError):
+            candidates = ()
+        selected_key = model_identity(first["model_selected"])
+        matches = [model_identity(row["model"]) == selected_key for row in turn_rows]
+        if not any(matches):
+            matches = [True] * len(turn_rows)
+        routed_rows = [row for row, match in zip(turn_rows, matches) if match]
+        helper_rows = [row for row, match in zip(turn_rows, matches) if not match]
+        missing = {name for name in (*candidates, *(row["model"] for row in turn_rows))
+                   if not name or model_prices(name) is None}
+        if not candidates or missing:
+            unpriced_turns += 1
+            unpriced_models.update(name for name in missing if name)
+            continue
+        helper = sum(estimate_cost("gateway", row["model"], **tokens(row)) for row in helper_rows)
+        routed = helper + sum(estimate_cost("gateway", row["model"], **tokens(row)) for row in routed_rows)
+        costs = {name: helper + sum(estimate_cost("gateway", name, **tokens(row)) for row in routed_rows)
+                 for name in candidates}
+        floor, ceiling = min(costs.values()), max(costs.values())
+        picked = next((name for name in candidates if model_identity(name) == selected_key),
+                      first["model_selected"] or routed_rows[0]["model"])
+        item = sets.setdefault(candidates, {
+            "control_model": first["control_model"], "turns": 0, "selected": {}, "picks": {},
+            "candidate_costs": dict.fromkeys(candidates, 0.0), "routed": 0.0, "ceiling": 0.0, "floor": 0.0,
+        })
+        for key, value in (("routed", routed), ("ceiling", ceiling), ("floor", floor)):
+            item[key] += value
+            totals[key] += value
+        for name, value in costs.items():
+            item["candidate_costs"][name] += value
+        item["turns"] += 1
+        item["selected"][picked] = item["selected"].get(picked, 0) + 1
+        pick = item["picks"].setdefault(picked, {"routed": 0.0, "ceiling": 0.0, "fallback_turns": 0, "fallback_reasons": {}})
+        pick["routed"] += routed
+        pick["ceiling"] += ceiling
+        if first["fallback_reason"]:
+            pick["fallback_turns"] += 1
+            reasons = pick["fallback_reasons"]
+            reasons[first["fallback_reason"]] = reasons.get(first["fallback_reason"], 0) + 1
+        priced_turns += 1
+        if costs.get(picked, routed) > floor:
+            escalated_turns += 1
+
+    def pct(saved: float, base: float) -> float | None:
+        return round(100 * saved / base, 1) if base > 0 else None
+
+    route_sets = []
+    for candidates, item in sorted(sets.items(), key=lambda entry: -entry[1]["turns"]):
+        spend = item["candidate_costs"]
+        route_sets.append({
+            "candidates": [
+                {"model": name, "prices": _price_dict(name),
+                 "turns": item["selected"].get(name, 0), "off_list": name not in candidates,
+                 **_pick_costs(item["picks"].get(name))}
+                for name in (*candidates, *(name for name in item["selected"] if name not in candidates))
+            ],
+            "control_model": item["control_model"],
+            "floor_model": min(spend, key=spend.__getitem__),
+            "ceiling_model": max(spend, key=spend.__getitem__),
+            "turns": item["turns"],
+            "routed_cost_usd": round(item["routed"], 6),
+            "ceiling_cost_usd": round(item["ceiling"], 6),
+            "floor_cost_usd": round(item["floor"], 6),
+            "saved_pct": pct(item["ceiling"] - item["routed"], item["ceiling"]),
+        })
+
+    def single(key: str) -> str | None:
+        names = {entry[key] for entry in route_sets}
+        return names.pop() if len(names) == 1 else None
+
+    spread = totals["ceiling"] - totals["floor"]
+    return {
+        "routed_cost_usd": round(totals["routed"], 6) if priced_turns else None,
+        "ceiling_cost_usd": round(totals["ceiling"], 6) if priced_turns else None,
+        "floor_cost_usd": round(totals["floor"], 6) if priced_turns else None,
+        "saved_usd": round(totals["ceiling"] - totals["routed"], 6) if priced_turns else None,
+        "saved_pct": pct(totals["ceiling"] - totals["routed"], totals["ceiling"]),
+        "premium_pct": pct(totals["routed"] - totals["floor"], totals["floor"]),
+        "captured_pct": round(100 * (totals["ceiling"] - totals["routed"]) / spread, 1) if spread > 0 else None,
+        "ceiling_model": single("ceiling_model"),
+        "floor_model": single("floor_model"),
+        "priced_turns": priced_turns,
+        "unpriced_turns": unpriced_turns,
+        "escalated_turns": escalated_turns,
+        "unpriced_models": sorted(unpriced_models),
+        "route_sets": route_sets,
+    }
+
+
 def _usage_granularity(invocation_turns: int, turn_turns: int) -> str:
     if invocation_turns and turn_turns:
         return "mixed"
@@ -409,7 +571,8 @@ class MetricsQueries:
         session = str(args.get("session") or "").strip() or None
         session_id = str(args.get("session_id") or "").strip() or None
         session_name = str(args.get("session_name") or "").strip() or None
-        model = str(args.get("model") or "").strip() or None
+        model = str(args.get("model") or "").strip().lower() or None
+        model_pattern = _model_pattern(model) if model else None
         run_key = str(args.get("run_key") or "").strip() or None
         experiment_id = str(args.get("experiment_id") or "").strip() or None
         variant_id = str(args.get("variant_id") or "").strip() or None
@@ -435,6 +598,8 @@ class MetricsQueries:
         def build(conn: sqlite3.Connection) -> dict[str, object]:
             filters = ["t.started_at_us>=?", "t.started_at_us<?"]
             params: list[object] = [start, end]
+            model_filter = ""
+            model_param_index = 0
             if session_id and session_name:
                 filters.append("t.session_id=? AND s.session_name=?")
                 params.extend([session_id, session_name])
@@ -448,12 +613,17 @@ class MetricsQueries:
                 filters.append("(t.session_id=? OR s.session_name=?)")
                 params.extend([session, session])
             if model:
+                model_param_index = len(params)
                 if dashboard:
-                    filters.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND (i.model_selected=? OR i.model_requested=?))")
-                    params.extend([model, model])
+                    model_filter = f"EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND {_model_match('i')})"
                 else:
-                    filters.append("b.model=?")
-                    params.append(model)
+                    model_filter = (
+                        "(lower(b.model) LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM llm_invocations i "
+                        "WHERE i.turn_id=t.turn_id AND (i.invocation_id=b.invocation_id "
+                        f"OR i.model_selected=b.model) AND {_model_match('i')}))"
+                    )
+                filters.append(model_filter)
+                params.extend([model_pattern] * (2 if dashboard else 3))
             if run_key:
                 filters.append("s.run_key=?")
                 params.append(run_key)
@@ -565,21 +735,19 @@ class MetricsQueries:
             totals.update({"turns": int(usage["turns"] or 0), "invocations": int(usage["invocations"] or 0)})
             non_usage_filters = list(filters)
             tool_params = list(params)
-            non_usage_filters = [
-                item.replace(
-                    "b.model=?",
-                    "EXISTS (SELECT 1 FROM llm_invocations model_i "
-                    "WHERE model_i.invocation_id=x.triggering_invocation_id "
-                    "AND model_i.model_selected=?)",
-                )
-                for item in non_usage_filters
-            ]
+            if model and not dashboard:
+                tool_params.pop(model_param_index)
+                non_usage_filters = [
+                    f"EXISTS (SELECT 1 FROM llm_invocations i "
+                    f"WHERE i.invocation_id=x.triggering_invocation_id AND {_model_match('i')})"
+                    if item == model_filter else item for item in non_usage_filters
+                ]
             non_usage_where = " AND ".join(non_usage_filters)
             totals["tool_executions"] = int(conn.execute(
                 "SELECT COUNT(*) FROM tool_executions x JOIN turns t ON t.turn_id=x.turn_id JOIN sessions s ON s.session_id=t.session_id WHERE " + non_usage_where,
                 tuple(tool_params),
             ).fetchone()[0])
-            cost_filters = [item.replace("b.model", "c.model") for item in filters]
+            cost_filters = [item.replace("b.model", "c.model").replace("b.invocation_id", "c.invocation_id") for item in filters]
             costs = conn.execute(
                 "WITH chosen_cost AS (SELECT c.* FROM cost_measurements c "
                 "JOIN turns t ON t.turn_id=c.turn_id JOIN sessions s ON s.session_id=t.session_id WHERE " +
@@ -604,8 +772,8 @@ class MetricsQueries:
                 coverage_filters.append("i.turn_id IN (SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id=t.session_id WHERE t.session_id=? OR s.session_name=?)")
                 coverage_values.extend([session, session])
             if model:
-                coverage_filters.append("i.model_selected=?")
-                coverage_values.append(model)
+                coverage_filters.append(_model_match('i'))
+                coverage_values.extend([model_pattern, model_pattern])
             if run_key:
                 coverage_filters.append("i.turn_id IN (SELECT t.turn_id FROM turns t JOIN sessions s ON s.session_id=t.session_id WHERE s.run_key=?)")
                 coverage_values.append(run_key)
@@ -615,6 +783,12 @@ class MetricsQueries:
             if variant_id:
                 coverage_filters.append("EXISTS (SELECT 1 FROM router_decisions r WHERE r.turn_id=i.turn_id AND r.variant_id=?)")
                 coverage_values.append(variant_id)
+            if dashboard:
+                coverage_filters = [
+                    "i.turn_id IN (SELECT t.turn_id FROM turns t JOIN sessions s "
+                    f"ON s.session_id=t.session_id WHERE {where})"
+                ]
+                coverage_values = params
             coverage = _with_usage_granularity(
                 _coverage(conn, " AND ".join(coverage_filters), tuple(coverage_values)),
                 usage["invocation_granularity_turns"],
@@ -636,8 +810,7 @@ class MetricsQueries:
                     f"WHERE {where} AND ({chosen_usage}) GROUP BY 1 ORDER BY 1",
                     (bucket_us, bucket_us, *params),
                 ).fetchall()
-                routing_filters = [item.replace("b.model=?", "EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND i.model_selected=?)") for item in filters]
-                decision_where = " AND ".join(routing_filters)
+                decision_where = where
                 routing = conn.execute(
                     "SELECT COUNT(*) AS turns,COUNT(d.router_decision_id) AS routed_turns,"
                     "COUNT(DISTINCT json_extract(d.metadata_json,'$.policy.call_id')) AS policy_calls,"
@@ -660,11 +833,29 @@ class MetricsQueries:
                     "GROUP BY d.model_selected ORDER BY turns DESC LIMIT ?",
                     (*params, MAX_ROWS + 1),
                 ).fetchall()
+                # One row per routed turn and executed model, folded per turn in
+                # Python; aggregated server-side, so it is not bound by MAX_ROWS.
+                routed_usage = conn.execute(
+                    "SELECT t.turn_id,b.model,d.model_selected,d.candidate_models_json,d.control_model,d.fallback_reason,"
+                    "SUM(b.input_tokens) AS input_tokens,"
+                    "SUM(b.cache_read_input_tokens) AS cache_read_input_tokens,"
+                    "SUM(b.output_tokens) AS output_tokens FROM best_usage b "
+                    "JOIN turns t ON t.turn_id=b.turn_id JOIN sessions s ON s.session_id=t.session_id "
+                    "JOIN router_decisions d ON d.router_decision_id=(SELECT latest.router_decision_id "
+                    "FROM router_decisions latest WHERE latest.turn_id=t.turn_id "
+                    "ORDER BY latest.decided_at_us DESC,latest.router_decision_id DESC LIMIT 1) "
+                    f"WHERE {decision_where} AND ({chosen_usage}) GROUP BY t.turn_id,b.model",
+                    tuple(params),
+                ).fetchall()
                 _enforce_row_count(list(buckets), list(models))
                 payload.update(
                     range={"from_us": start, "to_us": end, "bucket_seconds": bucket_us // 1_000_000},
                     buckets=[_row(row) for row in buckets],
-                    routing={**(_row(routing) or {}), "models": [_row(row) for row in models]},
+                    routing={
+                        **(_row(routing) or {}),
+                        "models": [_row(row) for row in models],
+                        "savings": _routing_savings(routed_usage),
+                    },
                 )
             return payload
 
@@ -702,11 +893,11 @@ class MetricsQueries:
             filters["run_key"] = run_key
             conditions.append("s.run_key=?")
             params.append(run_key)
-        if args.get("model"):
-            model = _required_id(args, "model")
+        if str(args.get("model") or "").strip():
+            model = _required_id(args, "model").lower()
             filters["model"] = model
-            conditions.append("EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND (i.model_selected=? OR i.model_requested=?))")
-            params.extend([model, model])
+            conditions.append(f"EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id=t.turn_id AND {_model_match('i')})")
+            params.extend([_model_pattern(model)] * 2)
         if args.get("routing"):
             routing = _required_id(args, "routing").lower()
             filters["routing"] = routing
@@ -757,7 +948,15 @@ class MetricsQueries:
                     "SUM(CASE WHEN c.is_estimated=1 THEN c.amount_usd END) FROM cost_measurements c "
                     f"WHERE c.turn_id=? AND ({_chosen_cost()})", (row["turn_id"],),
                 ).fetchone()
-                row["costs"] = {"reported_cost_usd": costs[0], "estimated_cost_usd": costs[1]}
+                by_model = conn.execute(
+                    "SELECT b.model,SUM(b.input_tokens) AS input_tokens,"
+                    "SUM(b.cache_read_input_tokens) AS cache_read_input_tokens,"
+                    "SUM(b.output_tokens) AS output_tokens FROM best_usage b "
+                    f"WHERE b.turn_id=? AND ({_chosen_usage()}) GROUP BY b.model", (row["turn_id"],),
+                ).fetchall()
+                prices = [_list_price(item) for item in by_model]
+                row["costs"] = {"reported_cost_usd": costs[0], "estimated_cost_usd": costs[1],
+                                "list_price_usd": sum(prices) if prices and None not in prices else None}
                 row["invocations"] = [_row(invocation) for invocation in conn.execute(
                     "SELECT provider,model_requested,model_selected,status FROM llm_invocations "
                     "WHERE turn_id=? ORDER BY invocation_index LIMIT ?", (row["turn_id"], MAX_ROWS + 1),
@@ -923,6 +1122,8 @@ class MetricsQueries:
                     + f",MAX(b.is_estimated) AS is_estimated FROM best_usage b WHERE b.turn_id=? AND ({_chosen_usage()})",
                     (turn_id,),
                 ).fetchone()
+                for item in (*best_usage, *invocation_usage):
+                    item["list_price_usd"] = _list_price(item)
                 result.update(session=_row(session), next_started_at_us=next_started, best_usage=best_usage,
                               invocation_usage=invocation_usage, usage_totals=_row(totals))
             return result
