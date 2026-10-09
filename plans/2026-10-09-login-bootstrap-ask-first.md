@@ -30,6 +30,12 @@
 > Folded in [section 9](#9-amendment-2026-10-09-round-5-codex-review-fold), which is **insertion-only**: sections 1 to 8 and Appendix A are byte-identical to `ba774d38`, and section 9 wins wherever it contradicts them.
 > 10 findings folded, 1 retracted with evidence, and **4 new questions Q5-Q8 are unanswered**, so this spec is not ready for approval as written.
 >
+> **Round 6 is codex re-reviewing its own round-5 fold, and Gate 1 stays open.**
+> [`reviews/2026-10-09-958-codex-review-2.md`](reviews/2026-10-09-958-codex-review-2.md), codex `gpt-5.6-sol`, verdict **NOT READY** on the fold: of its 11 round-5 findings, **2 resolved, 6 partially resolved, 3 not resolved**, plus **5 new findings** (1 blocker, 4 majors) against section 9 itself.
+> It confirms the insertion-only claim mechanically (`708eba76..f933089a` is 187 insertions, 0 deletions; sections 1 to 8 and Appendix A byte-identical) and it re-confirms §9.4's retraction of its own F11 citation claim.
+> Folded in [section 10](#10-amendment-2026-10-09-round-6-codex-re-review-fold), same insertion-only convention: sections 1 to 9 and Appendix A are byte-identical to `f933089a`, and section 10 wins wherever it contradicts them.
+> 9 amendments A11-A19, 1 item retracted with evidence, **no new questions**: Q5-Q8 stand as posed and Q8's scope narrows. Still not ready for approval as written.
+>
 > **On finding numbers.** Two review rounds of two different documents are cited here, and their `F<n>` numbering collides.
 > A bare `F<n>` always means the round-1 review of *this* spec, linked above.
 > Findings from the superseded plan's own validity review are always written out as "the superseded plan's validity review, its F<n>".
@@ -1023,3 +1029,217 @@ The body keeps the `83bebe49` numbers deliberately, with Appendix A as the singl
 Codex F11's other two claims **are** folded, as corrections to Appendix A:
 - `bobi/tool_library/gstack/guide.md:7-8` ("with its skills linked under `~/.claude/skills/` (and `~/.codex/skills/`)") is a **fourth** in-repo `~/.codex/skills` reference. The round-3 Appendix row claiming "the only `~/.codex/skills` references in the tree are gstack's installer (`tool_library/gstack/tool.yaml:33`, `:35`, `:51`)" is stale: the round-4 row and §6's scope list both already name four. The round-3 row is wrong and the round-4 row is right.
 - An entrypoint path **does** produce a root-owned `auth.json`. `materialize_codex_api_key_auth` writes the file as root (`docker/docker-entrypoint.sh:324-330`) and only chowns afterwards (`:333`), so a death between the two leaves it root-owned. Section 6's "no sub-object that stays root-owned" is about `codex` invocations and should be qualified to say so; the write-then-chown window is a state the two new `chown` lines repair, which strengthens the case for them rather than weakening it.
+
+## 10. Amendment, 2026-10-09: round-6 codex re-review fold
+
+**Insertion-only.** Sections 1 to 9 and Appendix A are left byte-identical.
+Where this section contradicts them, this section wins.
+
+[Round 6](reviews/2026-10-09-958-codex-review-2.md), codex `gpt-5.6-sol` at reasoning effort high, read-only sandbox, spec sha `f933089a`, main pinned at `70db2e10`.
+This is the same model re-reading its own round-5 report and judging the fold, which is the only round so far that can tell whether a fold actually resolved something or only restated it.
+Verdict **NOT READY** on the fold: **2 resolved, 6 partially resolved, 3 not resolved**, plus **5 new findings** against section 9 itself (1 blocker, 4 majors).
+Triaged against main in a worktree pinned at `70db2e10`: **9 amendments folded (A11-A19), 1 item retracted, no new questions**.
+
+Two results are worth stating before the table, because they bound how much of round 6 is new work.
+
+- **The insertion-only convention held mechanically.** Codex checked it rather than taking it: `708eba76..f933089a` is 187 insertions and 0 deletions, and `ba774d38..f933089a` is six header lines plus section 9. Sections 1 to 8 and Appendix A are byte-identical. Round 6 uses the same convention for section 10.
+- **§9.4's retraction is upheld by the model whose finding it retracted.** Codex no longer holds its F11 citation claim: "Appendix A already contained exactly the offsets reproduced in round 5, and the round-5 report itself said the drift was only an offset." Retracting a finding on evidence did not cost the round.
+
+### 10.1 Resolution of the 11 round-5 findings
+
+| codex F | Round-6 judgment | Round-6 triage | Where it lands |
+|---|---|---|---|
+| F1 subscribe-before-post | **RESOLVED** | accepted, no action | A1 stands |
+| F2 concurrent runs | PARTIALLY | **defect** | A11 (lock protocol pinned) |
+| F3 symlink `chown` | **NOT RESOLVED** | **defect**, blocker | A12 (`chown -h` struck) |
+| F4 non-Slack correlation | PARTIALLY | **scope fork**, legitimate | Q5 unchanged |
+| F5 target validation | PARTIALLY | **defect** + scope fork | A13; Q6 unchanged |
+| F6 revoked-credential 401 | **NOT RESOLVED** | **defect** + scope fork | A14; Q7 unchanged |
+| F7 boot failure states | PARTIALLY | **defect** | A15 (the table, produced here) |
+| F8 destructive sweep | **NOT RESOLVED** | **defect** + scope fork | A16; Q8 narrowed |
+| F9 timeout and reaping | PARTIALLY | **defect** | A17 (phase budgets) |
+| F10 verification oracles | PARTIALLY | **defect** | A18 (two oracles pinned) |
+| F11 stale citations | **RESOLVED** | accepted, no action | §9.4 upheld |
+
+| codex N | Sev | Round-6 triage | Where it lands |
+|---|---|---|---|
+| N1 `chown -h` does not stop a following write | BLOCKER | **defect** | A12 |
+| N2 no usable non-blocking lock protocol | MAJOR | **defect** | A11 |
+| N3 `known_brain_kinds()` admits `stub` | MAJOR | **defect** | A13 |
+| N4 mandatory quarantine contradicts Q8 Option B | MAJOR | **defect** | A16 |
+| N5 A9's phase model omits the Claude code wait | MAJOR | **defect** | A17 |
+
+Citation re-check: 2 offset errors introduced by section 9, both folded in A19; the third item codex lists under "Mismatches" is **retracted** in §10.4 on codex's own reasoning.
+Totals: **9 amendments, 1 retraction, 0 questions added**. No finding was manufactured and none was dismissed without evidence.
+
+Codex re-checked and confirmed the rest of the spec's citations against `70db2e10`, listing them by file: roughly 120 individual `file:line` references across `bobi/auth_bootstrap.py`, `bobi/cli.py`, `docker/docker-entrypoint.sh`, the event client and server, the three channel adapters, the codex-state consumers, and the tests. The `moda-labs/moda-agents` citations in §3.5 are out of this tree and were not inspected, which is correct and expected.
+
+### 10.2 Amendments
+
+**A11 (codex F2 partial, N2). The per-target lock needs a mechanism, a key and a scope, or A2 does not close F2.**
+A2 requires "a **non-blocking** per-target lock before posting" and names no mechanism.
+The tree has exactly one lock primitive and it cannot do non-blocking: `file_lock` takes `fcntl.LOCK_EX` unconditionally (`bobi/fsutil.py:180`), with no `LOCK_NB`.
+Q3 (`:544-558`) already walked this road and rejected it, proposing "a pidfile in the agent's run dir, not a new mode on `file_lock`".
+A2 reverses Q3's conclusion on refuted evidence, which is right, but it reverses it without re-opening the mechanism Q3 closed.
+Codex's second point is the one that would actually recreate the race: A2 does not say the lock **key** is the resolved login spec, and a bare codex-brain boot passes `target=None` while the tool path passes `target="codex"` (3.3).
+Keyed on the raw argument those are two different locks guarding one credential file.
+
+**Fold.**
+- **Mechanism:** add `blocking: bool = True` to `file_lock` and pass `LOCK_NB` when false, which is the shape Q3 costed and rejected only because it thought the race was cosmetic. Q3's cost argument does not survive A2, so its mechanism objection does not either. A pidfile remains acceptable, but one of the two must be named in the spec, not left to the builder.
+- **Key:** the **resolved** `spec.kind` after the `BRAIN_ENV` override (`bobi/auth_bootstrap.py:626-627`), never the raw `target` argument. `target=None` on a codex brain and `target="codex"` must take the same lock.
+- **Scope:** acquire before listener registration, hold through the credential check and the outcome post, release in a `finally`. The lock must outlive the post, or the loser can still post a second ask while the winner is mid-login.
+- **Location:** `${DATA_DIR}/codex/.login-lock-<kind>`, next to Q1 Option C's state file and therefore inside the A12 symlink guard's blast radius. `file_lock` locks a `<name>.lock` companion (`bobi/fsutil.py:165-167`, `:177`), so the two locks are distinct files.
+- **Order, so the two locks cannot deadlock:** the active-run lock is **outer**, Option C's ask-state lock is **inner**, never the reverse.
+
+**A12 (codex F3 not resolved, N1 blocker). `chown -h` is struck. The symlink guard must be lstat-and-refuse, and the directory case must pick one behaviour.**
+A3 offered two alternatives for `${CODEX_HOME}/auth.json`: "`[ -L ]` test and refuse, **or `chown -h`**".
+The second is not a fix, and it is the one a builder reaching for the shorter line would take.
+`chown -h` changes ownership of the link inode and nothing else; the root `Path.write_text` that follows at `docker/docker-entrypoint.sh:330` still dereferences the link and writes the target, and `path.chmod(0o600)` at `:331` dereferences it too.
+So the escalation F3 found survives an implementation the spec explicitly blessed.
+Worse than codex stated: the cleanup at `:333` is `chown -R "${APP_USER}:${APP_USER}" "${cred_dir}"`, and `-R` dereferences its **top-level argument**, so `${cred_dir}` pointing at a directory would hand that whole tree to `bobi` recursively.
+
+A3 is also self-contradictory on the directory case, and codex is right that a builder has no single prescribed behaviour: the mechanism says "log loudly and remove the link itself (`rm -f` ...) before `mkdir -p`" (`:910`), while its own verification demands "the boot fails loudly rather than silently escalating" (`:912`).
+Repair-and-continue and fail-the-boot are different outcomes and the test cannot assert both.
+
+**Fold.**
+- **`chown -h` is struck as an option.** The only accepted shape for `${CODEX_HOME}/auth.json` is: `lstat` the path, and if it is a symlink or not a regular file, refuse before any ownership change, `chmod` or write. This guard goes in front of `materialize_codex_api_key_auth`'s write (`docker/docker-entrypoint.sh:324-331`), not only in front of the two new `chown` lines.
+- **`chown -R` on `${cred_dir}` gets the same treatment**, because `-R` dereferences the argument. Validate `${cred_dir}` as a real directory, by `lstat`, before `:333` runs.
+- **The directory case resolves to fail, not repair.** `${DATA_DIR}/codex` being a symlink or a non-directory is not a state any boot path creates; it is evidence of a compromised worker. Log loudly, exit non-zero, and let the machine restart visibly. Repairing it silently discards the only signal that something planted it. The `[ -L "${HOME}/.codex" ] && rm -f` line at `:332` is **not** this case and is unaffected: that path is one the entrypoint itself creates (`:481-488`), and removing it is the documented idempotency step.
+- **Verification** now asserts one outcome: per planted symlink, the protected target's ownership, mode and content are untouched **and** boot exits non-zero with the diagnostic. This replaces A3's third bullet.
+
+**A13 (codex F5 partial, N3). Validate `target` against the supported login specs, not the brain registry.**
+A5 said "validate `target` against the known brain kinds".
+That is the wrong domain, and the gap is a guard bypass of exactly the kind A5 exists to close.
+`known_brain_kinds()` returns `sorted(_BRAINS)` (`bobi/brain/__init__.py:490-494`), and `_BRAINS` contains `stub` (`:54-58`).
+`_SPECS` contains only `claude` and `codex` (`bobi/auth_bootstrap.py:92-114`), and `_active_spec()` falls back to Claude for anything else (`:117-120`).
+So `login-bootstrap stub` passes A5's stated validation, disables the guards per 3.3, and silently runs the **Claude** login flow.
+An "invalid target is rejected" test written against A5 as worded would pass while missing this, because `stub` is a known kind.
+
+The same domain error cuts the other way, which codex did not reach: `BRAIN_KIND_ALIASES` maps `gateway -> claude` and `gateway-openai -> codex` (`bobi/brain/__init__.py:64-67`) and those spellings are still accepted elsewhere, but they are **not** in `known_brain_kinds()`.
+A5's rule would therefore reject two spellings the rest of the tree honours while admitting one it must not.
+
+**Fold.** The allow-list is the `_SPECS` keys, `{"claude", "codex"}`, resolved through `BRAIN_KIND_ALIASES` first so `gateway-openai` reaches `codex`.
+Anything else, including `stub`, is rejected with a clear error naming the accepted values.
+`target="claude"` stays accepted and keeps both guards, which A5 already settled; the correction is only to where the accepted set comes from.
+**Verification** adds `stub` and `gateway-openai` as named cases, not just a generic typo, because a generic case passes while `stub` does not.
+
+**A14 (codex F6 not resolved). §3.5(b)'s 401 recovery is narrowed now, independent of Q7.**
+A6 stated the gap honestly: a machine whose codex credential is present but rejected has "no shell-independent recovery in this design".
+Codex's objection is about where that statement lives, and it is correct.
+§3.5(b) at `:497` still reads "The **director** - and only the director - runs `login-bootstrap codex`" as a working recovery, with no caveat, and a builder or a prompt author reading §3.5 does not reach section 9.
+"Section 10 wins" resolves a contradiction for a careful reader; it does not stop the prompt text in §3.5(b) from being written from the unqualified promise.
+
+**Fold.** §3.5(b)'s recovery line is narrowed here, and the narrowing applies whatever Zach answers on Q7:
+- The recovery is correct for the **absent-credential** case only. That is the case #958 was filed for (`:764`: `~/.codex/auth.json` absent).
+- For a credential that is present but **revoked, server-invalidated, or bound to the wrong account**, `login-bootstrap codex` short-circuits and reports "already present" (`bobi/auth_bootstrap.py:630-633`, `bobi/cli.py:827-829`). The prompt text must say so, so a worker's 401 is not answered with a command that cannot help.
+- Until Q7 is answered, the stated fallback for that case is the `fly ssh` path, which Z1 says cannot be assumed. That is a real residual limitation of v1 and is now written down rather than left to be discovered by a 401 that will not clear.
+Q7 remains as posed: whether to add the human-gated rebind that removes this limitation.
+
+**A15 (codex F7 partial). The failure-state table A7 required, produced here.**
+A7 said Q1 needs "a failure-state table covering post failure, registration failure, connection loss, timeout, and restart, for each of A, B and C" and that "the table is what makes them comparable".
+It then did not contain one.
+Codex is right that this leaves Zach asked to choose A, B or C without the artifact the fold itself called the basis for comparison.
+The table is below. It decides nothing: Q1 stays Zach's.
+
+One correction to A7's own analysis first, in the fold's favour.
+A7 inherited round 5's ordering for its second bullet ("event server down **after** a legacy Slack ask posts ... Option C repeatedly posts into the saved thread").
+A1 already removed that ordering: with register and `wait_connected` ahead of the post, an event-server failure raises **before** any ask exists, on both the legacy and gateway paths, so there is no saved `ts` to spam into.
+The residual case is narrower: a connection **lost after** `wait_connected` succeeded and after the ask was posted.
+
+| Failure | Where it aborts | Option A (block forever at boot) | Option B (bounded, re-post) | Option C (long bound, reply into thread) |
+|---|---|---|---|---|
+| `BOBI_LOGIN_CHANNEL` unset or misconfigured | raises at `bobi/auth_bootstrap.py:649-654`, before registration and before any post | identical to B and C: the raise precedes the wait, so A never blocks. Tight restart loop, no ask, no health surface (section 5 at `:590-640` is never reached) | same | same. No `ts` is ever stored, so Option C adds nothing and loses nothing |
+| Event server unconfigured or unreachable | raises in the waiter at `:521-526`; `register` makes remote calls before any wait | identical to B and C, for the same reason: under A1 this is now pre-post | same | same. No ask, so no thread to spam. This is the case A1 fixed |
+| Chat post fails (channel outage) | after registration, at the post | identical to B and C. No ask lands; boot aborts and retries on the next cycle | same | same. `:535` already requires treating a failed post into a stored `ts` as absent, which covers the degenerate case |
+| Nobody replies within the budget | the timeout itself | blocks **forever** in section 4. No restart, no watchdog, no status file, no second ask. This is the asymmetric cost `:530` already states | exits non-zero, restarts, posts a **new** ask every cycle. The Slack-spam cost `:531` states | exits non-zero, restarts, **replies into** the stored thread. One ask, repeated nudges |
+| Machine restarts mid-wait (deploy, OOM, host reboot) | anywhere | **A's advertised benefit does not survive this.** A persists nothing, so the next boot posts a brand-new ask. "One ask in Slack instead of one per restart" (`:529`) holds only while the machine never restarts, which is not a property a credential-less machine has | new ask, as in the timeout row. B is at least consistent: it never claimed otherwise | the stored `ts` survives, so the thread survives. C is the only option whose one-ask property holds across a restart |
+
+Two things that table makes visible and the prose did not:
+
+- **The first three failure rows are identical across A, B and C.** Q1's three options differ only in the last two rows. Every pre-post failure is a crash loop with no ask and no health surface under all three, which means the option choice does not address the misconfiguration case at all. If Zach wants that case handled, it is a separate change: a distinguishable exit for "misconfigured" versus "waiting for a human", and ideally a backoff so a permanently misconfigured machine does not spin.
+- **Option A's stated advantage is conditional and Option C's is not.** `:537` recommends C over A because "an indefinitely silent machine with no watchdog is a worse failure than a noisy one". The restart row strengthens that: A is not even quieter than C once a restart happens, because A re-asks from scratch.
+
+**Fold, in addition to the table.**
+- Option C's `${DATA_DIR}/codex/.login-ask-<target>` is durable read-modify-write state and must use `atomic_write_text` plus `file_lock` (`bobi/fsutil.py:1-17`, `:161-172`), which A7 already required and which stands.
+- **Lock composition**, which A7 did not cover and codex flagged: Option C's ask-state lock is **inner** to A11's active-run lock, never the reverse. A11 fixes that order so the two cannot deadlock.
+- The ask text must name the agent, instance and target, as A7 required. The table's restart rows are why: under B and C a human sees repeated asks and needs to tell one machine's ask from another's.
+- `${DATA_DIR}/codex/.login-ask-<target>` sits inside A12's guarded directory, so the symlink guard protects the ask state as well as the credential.
+
+**A16 (codex F8 not resolved, N4). The conservative sweep is adopted now. Q8 narrows to the merge question.**
+A8 left the destructive question to Q8 while simultaneously mandating "the sweep must not unconditionally delete an unclassifiable file: quarantine it with a recoverable rename" (`:965`).
+Codex is right on both halves of its objection.
+First, that mandate **contradicts Q8 Option B**, which keeps the sweep deleting only recognized API-key auth "and handle malformed credentials only through Q7's explicit rebind".
+Under Option B the boot sweep does not touch an unclassifiable file at all; A8's "independent of that answer" adds an action Option B says does not happen, so Option B cannot be implemented as written.
+Second, quarantine is not materially safer than deletion for the case that motivates Q8: if the unknown file is a valid newer codex schema, renaming it out of `${CODEX_HOME}` leaves codex with no credential, which is the same outage, merely with a recoverable artefact.
+
+The safety default is a technical call and is settled here rather than posed.
+
+**Fold.**
+- **The boot sweep stays conservative.** It deletes only the recognized API-key shape, as main does today (`docker/docker-entrypoint.sh:553-562`). An unclassifiable `auth.json` is **left untouched** and logged loudly. A boot path must not act destructively on a schema this project has never observed.
+- The widening to "delete anything `credential-status` does not accept" is **withdrawn** from 3.4 pending a real fixture. Section 3.4's sweep change reduces to the re-pointing at `:557` from `${HOME}/.codex` to `${CODEX_HOME}`, which `:612` already requires for an unrelated and still-valid reason.
+- **Quarantine moves out of boot.** If Q7 adds the human-gated rebind, quarantine happens there and only there, gated on the human's reply: a collision-free `auth.json.quarantined-<utc-timestamp>` that never overwrites an existing file, with the restoration path documented, inside A12's lstat guard so it cannot be redirected by a planted link.
+- **Q8 narrows** to the question that is genuinely Zach's, and only that: whether to block this PR on obtaining a real `--device-auth` fixture before merge, or ship the conservative sweep and treat the widening as later work once the shape is observed. The destructive default is no longer one of the options.
+- **Verification** drops the quarantine-at-boot item A10 added and replaces it with: an unclassifiable `auth.json` survives a boot unmodified, and the diagnostic is emitted.
+
+**A17 (codex F9 partial, N5). The timeout phases are enumerated and mapped to real knobs.**
+A9's process reaping stands and is correct.
+Its budget split does not: it named four phases and the flow has five, because the Claude path has a **second** human wait that the codex path does not.
+`_SPECS["claude"]` is `flow="paste_back"` (`bobi/auth_bootstrap.py:98`), so after the URL is posted the command waits for a human to paste a code back; `_SPECS["codex"]` is `flow="device_poll"` (`:108`), where the CLI polls and no second reply arrives.
+A9's list (ask wait, URL scrape, device authorization, post-code exit) omits the paste-back wait entirely, so an implementer can still share one deadline between the ready reply and the pasted code, which is the failure class F9 was about.
+A9 also gave no mapping to configuration, and there are only two knobs: `run_bootstrap(timeout=600, url_timeout=120)` (`:587-588`) and one CLI `--timeout` whose help still says "Seconds to wait for the pasted auth code" (`bobi/cli.py:808-809`).
+
+**Fold.** Five phases, each with its own budget, and the configuration each one comes from:
+
+| Phase | Applies to | Budget | Source |
+|---|---|---|---|
+| 1. Ready-reply wait (the ask) | both | Q1's answer sets it: 600s for a tool trigger, Q1's value at boot | new; the one Q1 is about |
+| 2. URL and device-code scrape | both | `url_timeout`, 120s | exists (`:588`), unchanged |
+| 3a. Pasted-code reply wait | `paste_back` (claude) | the existing 600s | this is what `--timeout`'s help already describes (`bobi/cli.py:808-809`) |
+| 3b. Device authorization | `device_poll` (codex) | the device code's own lifetime, ~15 min, not a shared budget | new |
+| 4. Post-code process exit | both | short and bounded, seconds not minutes | new |
+
+- `--timeout` keeps its current documented meaning, phase 3a, so the flag's help text stays true. It must **not** be silently reused as the phase-1 budget; phase 1 is Q1's value.
+- A phase-1 wait must never consume phase 3b's budget. That is the concrete form of F9's "a human who authorizes at minute eleven loses".
+- Reaping, as A9 specified: signal the process group, bounded `wait`, escalate to `kill`, reap. Unchanged and correct for a `start_new_session=True` child (`:220-224`).
+- **Expected outcome for a late reply**, which A9's test lacked: the reply is dropped, and the thread already carries the expired or cancelled outcome post telling the human a fresh reply is required. The test asserts exactly that, not merely that nothing crashed.
+
+**A18 (codex F10 partial). Two verification oracles pinned; the rest follow their questions.**
+A10's list of categories stands. Two of its items had no asserting oracle and one contradicted its own mechanism.
+- **The two-process concurrency test (A2/A11)** must assert four things, not one: exactly one ask was posted, exactly one login CLI was spawned, the loser returned a deterministic "an ask is already pending" result without posting or spawning, and the **winner** completed and received its reply. A10's "the first run still receives its reply" leaves a loser that posted a second ask passing.
+- **The planted-symlink test (A3/A12)** asserts the single outcome A12 settles on: the protected target is untouched in ownership, mode and content, **and** boot exits non-zero. A3's repair-and-continue wording is superseded.
+- Three items stay blocked on their questions and that is correct, not a gap: the non-Slack destination case follows Q5, the revoked-credential case follows Q7, and the fixture-dependent case follows Q8. They are listed so the answer lands with a test attached.
+- The quarantine item is dropped per A16 and replaced by the leave-untouched assertion.
+- Item 12's strengthening from A10 stands: the exported `CODEX_HOME` value, that `${DATA_DIR}/codex` is a real directory and bobi-owned, and that both hold across a brain switch.
+
+**A19 (codex citation re-check). Two offsets section 9 introduced.**
+Both are offset errors in new section-9 text, neither touches an argument, and both are inconsistent with the **body's own** correct citations, which is how they are identifiable as slips rather than drift.
+- **A2 cites the `BubbleRejected` retry at `bobi/auth_bootstrap.py:559-562`.** The retry registration is `:555-558`; `:559` is blank and `:560-562` builds and starts the client. The body already cites `:561-563` correctly for the client (`:108`). The argument stands: the literal `"login-bootstrap"` name appears at both `:544` and `:556`, so both the first attempt and the retry register under the fixed name.
+- **A6 and the §9 table cite `run_bootstrap`'s short-circuit at `:629-632`.** It is `:630-633`; `:629` only binds `home`. The body cites `:630-633` correctly in three places (`:227`, `:250`, `:552`), so section 9 is the outlier. The argument stands.
+Corrected here rather than by editing sections 1 to 9, per the insertion-only convention.
+
+### 10.3 Status of the questions for Zach
+
+No new questions. The four posed in §9.3 stand, with one scope change.
+
+| Q | Status after round 6 |
+|---|---|
+| **Q1** boot behaviour on silence | Unchanged, and now **decidable**: A15 supplies the failure-state table A7 promised. Codex calls Q1 a legitimate boot-behaviour decision |
+| **Q2** director-only policy | Unchanged; carries a recommendation (director-only), so silence means take it as written. A11's lock is the mechanism that makes the invariant hold when the policy is violated |
+| **Q3** how to enforce one pending ask | Answered in-spec, reversed by A2, and A11 now names the mechanism Q3 had rejected. Not a question for Zach |
+| **Q4** whole config dir or just the credential | Unchanged; carries a recommendation, so silence means take it as written |
+| **Q5** Slack-only in v1 | Unchanged. Codex confirms it is "a legitimate human scope decision ... not a technical defect disguised as a question" |
+| **Q6** may a gateway team mint a direct provider credential | Unchanged. Codex confirms it is "a genuine audit/spend-policy decision owed to the human" |
+| **Q7** does rebind belong in v1 | Unchanged, but **no longer load-bearing for correctness**: A14 narrows §3.5(b)'s promise now, so the spec is truthful either way. Q7 is whether to remove the limitation, not whether to admit it |
+| **Q8** fixture before merge, or conservative sweep | **Narrowed.** A16 adopts the conservative sweep as the safety default, so Q8 is now only: block this PR on a real `--device-auth` fixture, or ship conservative and widen later. The destructive option is withdrawn |
+
+### 10.4 Retracted, with evidence
+
+**Codex's first listed citation mismatch, that the seven `bobi/cli.py` old-baseline offsets "remain stale against current main": retracted, on codex's own reasoning.**
+Codex lists it under "Mismatches" and then neutralizes it in the same entry: "These are offsets only. The mapping is already present in Appendix A and does not invalidate the arguments. This confirms §9.4's F11 retraction."
+Its F11 section says the same more plainly: "The retraction is right ... I no longer hold the claim that the spec failed to record those current-main locations."
+So the item is a restatement of a documented convention, not a finding, and §9.4 needs no change.
+It is recorded here only because it appears under a "Mismatches" heading and a future reader comparing the two reports would otherwise count it.
+
+**Not a finding, recorded for completeness.** Codex notes the `moda-labs/moda-agents:agents/...` citations in §3.5 were not inspected, because they are outside the pinned `bobi-agent` tree and the review brief prohibited reading `agents/`.
+That is correct and expected: §3.5 is a companion change in another repository, explicitly "not a blocker for the bobi-agent PR" (`:488`).
+It remains unverified by any codex round, which is now stated rather than assumed.
