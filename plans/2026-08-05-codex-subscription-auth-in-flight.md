@@ -1,3 +1,10 @@
+> **SUPERSEDED 2026-10-09** by [`plans/2026-10-09-login-bootstrap-ask-first.md`](2026-10-09-login-bootstrap-ask-first.md).
+>
+> Zach's 2026-10-09 decisions replaced this design's two load-bearing choices: the device code is now
+> minted only after a human replies ("ask first"), and the brain flow and the tool flow are one shared
+> primitive rather than two shapes. This file is kept unchanged below so existing links resolve and the
+> cut design stays readable as a record. Do not implement from it.
+
 # Subscription auth for CLI tools: log `codex` in once per machine, from Slack
 
 > **Status:** Draft, awaiting Gate 1 approval from Zach. No implementation until approved.
