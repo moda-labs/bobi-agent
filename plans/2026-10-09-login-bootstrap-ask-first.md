@@ -8,16 +8,20 @@
 > That plan posted the device code immediately and treated the brain flow and the tool flow as separate shapes.
 > Zach's 2026-10-09 decisions replace both halves of that: ask first, and one shared behaviour.
 >
-> **Size:** ~65 lines across 5 files in `bobi-agent`, plus ~25 lines of prompt/doc text in `moda-agents`.
+> **Size:** ~55 lines across 7 files in `bobi-agent`, plus ~25 lines of prompt/doc text in `moda-agents`.
+> The round-3 fold cut the entrypoint change from ~36 lines to 5 and added no new shell predicate (3.4).
 > [Q4](#5-open-questions-for-zach) considers a ~40-line variant and rejects it.
 >
 > Every file:line below was read from a grep run against `origin/main` at `83bebe49` on 2026-10-09.
 > [Appendix A](#appendix-a-verification-record-2026-10-09) is the verification record, including what was executed live.
 >
-> **Reviewed twice, both rounds committed verbatim beside this file.**
-> Round 1: [`plans/reviews/2026-10-09-958-review-1.md`](reviews/2026-10-09-958-review-1.md), verdict SOUND WITH FIXES, 15 findings, 3 blockers.
-> Round 2: [`plans/reviews/2026-10-09-958-review-2.md`](reviews/2026-10-09-958-review-2.md), verdict NOT READY on the round-1 fold, 14 findings, 1 blocker and 4 majors all introduced BY that fold. Folded in turn; this revision is the result.
-> Both single-model: `codex` 401s and `aichat` is unconfigured in this container, which is the gap this spec exists to close.
+> **Reviewed three times, every round committed verbatim beside this file.**
+> Round 1: [`reviews/2026-10-09-958-review-1.md`](reviews/2026-10-09-958-review-1.md), verdict SOUND WITH FIXES, 15 findings, 3 blockers.
+> Round 2: [`reviews/2026-10-09-958-review-2.md`](reviews/2026-10-09-958-review-2.md), verdict NOT READY on the round-1 fold, 14 findings, 1 blocker and 4 majors all introduced BY that fold.
+> Round 3: [`reviews/2026-10-09-958-review-3.md`](reviews/2026-10-09-958-review-3.md), verdict NOT READY, 13 findings, 1 blocker and 7 majors, plus a tested answer to the simplification question.
+> All folded; this revision is the result.
+> **Round 3 replaced section 3c's shape rather than patching it**, because that one block had taken a defect in every round from one cause (3.4).
+> All three rounds single-model: `codex` 401s and `aichat` is unconfigured in this container, which is the gap this spec exists to close.
 >
 > **On finding numbers.** Two review rounds of two different documents are cited here, and their `F<n>` numbering collides.
 > A bare `F<n>` always means the round-1 review of *this* spec, linked above.
@@ -95,7 +99,7 @@ It is not a risk: `login-bootstrap` already does its own waiting today.
 
 - It reads the event server URL from config (`bobi/auth_bootstrap.py:522`; `event_server_url` at `bobi/config.py:485`), which is a **remote** HTTP endpoint, not an in-container process.
 - It registers a listener under its own deployment name `"login-bootstrap"` (`bobi/auth_bootstrap.py:543-546`) and streams events through `EventServerClient` (`:561-563`).
-- The Claude `paste_back` flow calls it at boot already (`bobi/auth_bootstrap.py:670`).
+- The Claude `paste_back` flow calls it at boot already (`bobi/auth_bootstrap.py:677`).
 
 And the boot ordering makes the brain's absence irrelevant: `login-bootstrap` runs in entrypoint section 4 (`docker/docker-entrypoint.sh:565-577`), and the manager is not `exec`'d until section 5 (`:590-640`).
 The waiter is `login-bootstrap`'s own process.
@@ -112,7 +116,7 @@ The delivery circuit breaker is not a risk here, because it trips only on an age
 **So no new polling loop is needed.**
 The task brief suggested polling Slack `conversations.replies` with the bot token as a candidate mechanism.
 Pushing back with evidence: `conversations.replies` appears nowhere in `bobi/` on main.
-`grep -rn 'conversations\.replies' .` over the whole tree matches exactly two lines, `tests/integration/test_channel_gateway.py:86` and `:251`, both a test stub's dispatch table.
+`grep -rn 'conversations\.replies' .` over the whole tree matches exactly two lines, both in `tests/integration/test_channel_gateway.py`: `:86` is a test stub's dispatch table and `:251` is an assertion over that stub's recorded calls.
 (`docs/RELEASE_RUNBOOK.md:389` reads `conversations_replies` with an underscore, which is a `venn` tool name in an operator recipe, not a Slack API call from this codebase.)
 Adding a direct Slack poll would be a second way to read a reply, which Z3 forbids, and it would work only on Slack, where the event-bus path already works on Slack, Discord and WhatsApp.
 A gateway polling primitive does exist as a fallback (`channels_history`, `bobi/events/gateway.py:96`), and is rejected for the same reason: the push path is already there.
@@ -158,10 +162,16 @@ The adapter already gives both signals, so this is two conditions, not new plumb
   So the thread condition is `fields.thread_ts == <the ask's ts>`, on both paths.
   It is an **addition** to the filters `_extract_code` already applies, not a replacement: the source check (`:486-487`) and the login-channel check (`:496-499`) stay, because the listener is registered on the workspace-wide app topic (`:543-546`) and still sees traffic from other channels.
 
+  **The filter is on `fields.thread_ts` only. It must not also filter on the event type.**
+  `threadTs` is read once, before any type branching (`event-server/core/src/adapters/chat-sdk-slack.ts:106`), and `fields.thread_ts` is set for every emitted type (`:166`).
+  So `slack.thread_reply` is not the only type that can carry the ask's `ts`: a human who @mentions the bot *inside* the ask's thread is emitted as `slack.mention` with `fields.thread_ts` set, because `app_mention` takes the branch at `:115-116` before the dedup branch at `:117-118`.
+  Under Z5 that message is "ready", so an event-type filter would reject a human reply the design must accept.
+  Verification item 4 pins both directions.
+
   **What this actually excludes, stated correctly.**
   It is not loose channel chatter: the adapter already drops that.
-  A channel `message` with no self-mention and no `thread_ts` falls through to `return { event: null }` (`event-server/core/src/adapters/chat-sdk-slack.ts:123-124`), and a channel `message` that *does* mention the bot is dropped as a duplicate of the `app_mention` copy (`:117-118`).
-  The real exposure is narrower: an unrelated **thread reply** elsewhere in the login channel (`:121-122`, emitted as `slack.thread_reply`) or an **@mention** of the bot in that channel (`:115-116`, `slack.mention`).
+  A channel `message` with no self-mention and no `thread_ts` falls through to `return { event: null }` (`:123-124`), and a channel `message` that *does* mention the bot is dropped as a duplicate of the `app_mention` copy (`:117-118`).
+  The real exposure is narrower: an unrelated **thread reply** elsewhere in the login channel (`:121-122`, emitted as `slack.thread_reply`) or a **top-level @mention** of the bot in that channel (`:115-116`, `slack.mention`, no `thread_ts`).
   Both carry `fields.channel` equal to the login channel and both satisfy today's filter.
 
 **Per Z5 there is no keyword and no allowlist.** Any human message in the thread is "ready".
@@ -192,7 +202,7 @@ That plan threaded a `spec` argument into the `spawn_login(home)` call site at `
 The site is an injection point (`spawn_login = spawn_login or _spawn_login`, `:604`), and every fake that reaches it has a `(home)`-only signature, so a second positional argument would have raised `TypeError`.
 Counted rather than estimated: `grep -n spawn_login tests/test_auth_bootstrap.py` returns 11 lines.
 Six are `spawn_login=lambda h: None` inside `pytest.raises` guards (`:717`, `:818`, `:834`, `:849`, `:855`, `:1227`) that raise before `:660` and so never reach it at all.
-Four are `def fake_spawn(home)` injections (`:621`, `:692`, `:811`, `:1209`), of which three reach `:660` and `:811`'s asserts it is never called.
+Four are `def fake_spawn(home)` injections, defined at `:600`, `:674`, `:807` and `:1198` and passed at `:621`, `:692`, `:811` and `:1209`, of which three reach `:660` and `:807`'s asserts it is never called.
 One monkeypatches the module attribute, `lambda home:` (`:1289`).
 So three injected fakes plus one monkeypatch actually bind at `:660`, and all four are `(home)`-only.
 The env override leaves `:660` byte-identical - confirmed in the same probe run - so no fake breaks.
@@ -249,92 +259,80 @@ Under `set -euo pipefail` (`:14`) that is `CODEX_HOME: unbound variable` and an 
 
 ```sh
 # --- 3c. Codex's durable config dir, both brains (#958) ---------------------
-# Each brain asserts its own shape for ${DATA_DIR}/codex/skills, because the
-# two brains want that path to be a different KIND of object: a codex brain
-# owns a real directory there via section 3b, and any other brain needs a link
-# out to the image's own codex skills. A guard that merely skips when the path
-# exists inherits whichever shape the last boot left. The export is
-# unconditional so CODEX_HOME names the same path on either brain.
+# On a codex BRAIN this is already ~/.codex: section 3b points that at the same
+# directory, so the export just names it. On any other brain it moves codex's
+# config dir onto the volume so a human-minted auth.json survives a roll.
+# No `skills` object is created here, deliberately: see below.
 mkdir -p "${DATA_DIR}/codex"
 chown "${APP_USER}:${APP_USER}" "${DATA_DIR}/codex"
-if [ "${ENTRYPOINT_ENGINE}" != "codex" ]; then
-  rm -rf "${DATA_DIR}/codex/skills"
-  ln -sT "${HOME}/.codex/skills" "${DATA_DIR}/codex/skills"
-fi
 export CODEX_HOME="${DATA_DIR}/codex"
 ```
 
-`rm -rf` on a symlink removes the link, not its target.
+Three statements, no branch, no `ln`, no `rm -rf`.
+Section 3b is untouched: no cleanup line, so no placement argument and no errexit-position argument.
 
-and one line inside the codex-brain block, **after `:488` and before `:489`**, to drop a link a previous non-codex boot may have left on the volume:
+**This is the round-3 shape. It replaces a branch-and-link shape that took a defect in every single review round.**
+[Round 3](reviews/2026-10-09-958-review-3.md) found the class behind all of them, which is why this section is now three lines instead of thirty-six.
+
+The earlier shape created `${DATA_DIR}/codex/skills`, and needed that one persistent path to be a **different kind of object per brain**: a real directory owned by 3b on a codex brain, a symlink out to the image HOME on any other.
+Two writers, two required shapes, one path, on a volume that outlives the brain choice.
+Every defect was an instance of that collision, not an independent bug:
+
+| Found in | Instance |
+|---|---|
+| pre-review | `ln` over 3b's real directory: `cannot overwrite directory`, boot **abort** |
+| pre-review | link placed before the codex block: `~/.codex` repointed under it, **symlink loop** |
+| round 1 | skip-if-present guard: a claude boot inherits 3b's directory, the image's codex skills **silently lost** |
+| round 2 | cleanup line inside `[ -d /opt/bobi/skills ]`: the loop returns on an image with no baked skills |
+| round 3 | `~/.codex` is itself a link to the volume on a persisted overlay, so 3c links the path **to itself** |
+
+Round 3's instance (its R3-F1) is the one that settles it.
+`${HOME}/.codex` is written in exactly one place, `:527-531`, inside the codex-brain block, and nothing on a non-codex boot ever restores it to a real directory.
+So a rootfs that has booted codex once keeps `${HOME}/.codex -> ${DATA_DIR}/codex` forever, and `ln -sT "${HOME}/.codex/skills" "${DATA_DIR}/codex/skills"` is then a link to itself: measured `rc=0`, no log line, `readlink -f` exit 1.
+A same-machine restart keeps that overlay, and the entrypoint states the distinction itself at `:400-401` ("a fresh image rootfs each deploy ships the real dir; a same-machine restart already has the link").
+The brain can change without a new rootfs, because it is read from the installed team on the volume when `BOBI_BRAIN` is unset (`:276-278`).
+The earlier harness recreated `${HOME}` on every simulated boot, so its "correct on every boot order" claim never saw this axis.
+
+Deleting the link makes all five instances unreachable rather than fixed.
+
+**Nothing reads `${CODEX_HOME}/skills`, which is what makes deleting it safe.**
+
+- `grep -rn 'codex_home()' --include=*.py .` returns six sites (`bobi/brain/codex.py:387`, `bobi/brain/codex_config.py:51`, `:181`, `:208`, `bobi/chat_history.py:317`, `bobi/brain/instructions.py:123`), and none of them touches `skills`.
+- The only in-repo references to `~/.codex/skills` are gstack's installer (`bobi/tool_library/gstack/tool.yaml:33`, `:35`, `:51`), all three by literal `$HOME` path, which the export does not move.
+- codex builds its own: one `codex exec` into a fresh `CODEX_HOME` creates `skills/.system`. On a claude brain that now lands on the volume, durable.
+
+**And the link never delivered what the old 3c comment claimed it did.**
+That comment said "any other brain needs a link out to the image's own codex skills", and the boot matrix asserted a baked team skill was reachable through it.
+No build step puts a `/opt/bobi/skills` entry under `~/.codex/skills`.
+The renderer links `BAKED_SKILLS` into `~/.claude/skills` and nowhere else (`bobi/build_render.py:220-221`), and `grep -rn 'BAKED_SKILLS' bobi/ Dockerfile hatch_build.py` returns only `build_render.py`.
+On the live image all 50 `~/.codex/skills` entries point into `/home/bobi/dev/gstack/.agents/skills/`, and `find ~/.codex/skills -maxdepth 1 -lname '/opt/bobi/skills*'` returns none.
+So the old verification item 12 was a test that fails on a correct implementation, which would have been weakened during implementation, taking the shape's only guard with it.
+
+**The cost of dropping the link, stated.**
+On a claude-brained machine that has never booted codex, `codex exec` no longer sees gstack's codex-side skill links.
+That is the whole loss.
+Nothing in the fleet requires them, gstack's own installer deliberately prunes six of them (`bobi/tool_library/gstack/tool.yaml:51`), and the eng-team codex brief already instructs codex not to read skill definitions.
+It does falsify one sentence of tool-brief text, `bobi/tool_library/gstack/guide.md:7-8` ("its skills linked under `~/.claude/skills/` (and `~/.codex/skills/`)"), which is in this repo and so is one more line in this PR, not a companion edit.
+And after any codex boot the volume keeps 3b's real `skills` directory, which 3c no longer `rm -rf`s, so codex-on-a-claude-brain ends up with more skills than the old shape allowed.
+
+**If you want the link kept**, the minimum correct form adds the mirror of 3b's own repair, because the link *target* can be a stale brain link:
 
 ```sh
-# Section 3c may have left this as a symlink into the image HOME on a previous
-# non-codex boot; a codex brain needs a real directory here. Outside the
-# [ -d /opt/bobi/skills ] guard below on purpose: the loop this prevents does
-# not depend on baked skills existing.
-[ -L "${BRAIN_CRED_DIR}/skills" ] && rm -f "${BRAIN_CRED_DIR}/skills"
+if [ "${ENTRYPOINT_ENGINE}" != "codex" ]; then
+  [ -L "${HOME}/.codex" ] && rm -f "${HOME}/.codex"   # a previous codex boot left a link to the volume
+  mkdir -p "${HOME}/.codex/skills"
+  rm -rf "${DATA_DIR}/codex/skills"
+  ln -sT "${HOME}/.codex/skills" "${DATA_DIR}/codex/skills"
+fi
 ```
 
-**That placement is load-bearing, and the obvious one is wrong.**
-`:491` sits inside `if [ -d /opt/bobi/skills ]` (`:489`), and that directory is conditional: the build renderer only creates it when the team declares build `run:` steps (`bobi/build_render.py:213`), which is why the entrypoint guards for its absence twice (`:394`, `:489`).
-So "before `:491`" puts the cleanup inside that guard, and on an image with no baked skills the cleanup never runs: the stale 3c symlink survives, `:527-530` repoints `~/.codex` at the volume, and `/data/codex/skills` closes a loop on itself.
-Measured with the directory absent: `rc=0`, no log line, `readlink -f` fails, and reading a skill through it gives "Too many levels of symbolic links".
-Placed after `:488` instead, the same sequences are clean with the directory present or absent.
-
-Both details are load-bearing, and the simplest-looking version of this aborts boot.
-
-- **The `!= "codex"` gate, with an unconditional assertion inside it.** Without the gate, 3c's symlink and 3b's real directory fight over the same path. With the gate but a skip-if-present guard, a non-codex boot inherits the real directory a previous codex boot left and the image's own codex skills become unreachable (the matrix below).
-- **The cleanup line in 3b.** Without it, a stale 3c symlink survives a brain switch, 3b writes baked links *through* it into the image HOME, and `:529`'s `rm -rf` of that HOME then closes a symlink loop.
-
-The bare `[ -L ... ] && rm -f ...` form is safe **in this position**, which is not a general property of AND lists.
-The entrypoint runs `bash` (`#!/usr/bin/env bash`, `:1`), which exempts a failing non-final command of an AND list from errexit, but the list's own non-zero status still propagates from some syntactic positions: as the last command of a function body it aborts.
-Verified by execution on bash 5.2.37: standalone and mid-block both reach the next line, and the same line as a function's last command exits 1.
-Here it is mid-block, immediately before `:489`, so it is safe.
+That costs four extra lines, a `rm -rf` on the volume, a three-axis boot matrix as a standing test, and a brain switch that discards whatever the previous brain left there.
+It buys gstack's codex-side skill links on a machine that has never booted codex.
+Recommended against; say so if you want it.
 
 The export reaches every process.
 `as_app` and the final `exec` use `gosu ... env VAR=... cmd` (`:416`, `:637`), and `env` **adds** to the inherited environment rather than replacing it.
 `credentials_path()` then resolves to `/data/codex/auth.json` for free, because the codex spec declares `credentials_dir_env="CODEX_HOME"` (`bobi/auth_bootstrap.py:112`).
-
-**The placement and the guard are load-bearing. The superseded plan's line breaks boot; reproduced both ways.**
-That plan proposed `ln -sfnT "${HOME}/.codex/skills" "${DATA_DIR}/codex/skills"` with no guard and no stated placement.
-
-| Placement | Result on a codex-brained machine |
-|---|---|
-| After the codex-brain block | `ln: /tmp/.../data/codex/skills: cannot overwrite directory`, harness **exit 1**. The block creates that path as a real directory at `:491`. With `set -euo pipefail` (`:14`) this aborts boot. |
-| Before the codex-brain block | **Symlink loop.** `:528-530` then repoints `~/.codex` at `/data/codex`, so `/data/codex/skills -> ~/.codex/skills -> /data/codex/skills`. `readlink -f` exits 1, `ls` reports "Too many levels of symbolic links", and the baked skills become unreachable. |
-
-The guard alone is not enough: at the before-placement it still loops.
-
-**And a guard plus the after-placement is still not enough, because the volume outlives the brain choice.**
-`/data` persists across a redeploy, so a machine can boot claude and later boot codex on the same volume.
-A first version of this spec proposed exactly `[ -e ] || ln -sT`, unconditional, after the codex block, and it aborts boot on that switch: boot 1 creates `/data/codex/skills` as a symlink to `~/.codex/skills`, then boot 2's codex block repoints `~/.codex` at `/data/codex` (`:527-530`) so the symlink loops, `[ -e ]` reads false, and `ln` fails "File exists".
-Three candidate shapes were replayed against every boot order on one simulated volume, with a baked skill and a tool-installed one (`gstack-browse`) in the image HOME:
-
-```
-                        no guard          skip-if-present     shape above
-claude, claude          OK                OK                  OK
-codex,  codex           OK                OK                  OK
-claude, codex           boot2 ABORT       OK                  OK
-codex,  claude          OK                boot2 SKILLS LOST   OK
-claude, codex, claude   boot2+boot3 ABORT boot3 SKILLS LOST    OK
-codex,  claude, codex   (not run)         boot2 SKILLS LOST    OK
-```
-
-`SKILLS LOST` means `rc=0`, no log line, and `$CODEX_HOME/skills` listing only the baked skill: the tool-installed `gstack-browse` is silently unreachable to codex for the rest of that boot.
-That is the shape this spec carried into round-1 review, and it is a strictly worse failure than the abort it replaced, because nothing reports it.
-`OK` means `rc=0` and `readlink -f "$CODEX_HOME/skills"` resolving, with both skills listed on a non-codex boot and the baked one on a codex boot.
-
-Both details are required, in writing, before anyone implements this.
-
-**The cost of `rm -rf`, stated.** A brain switch discards whatever the previous brain left at `${DATA_DIR}/codex/skills`.
-That content is re-derived, not durable state: a codex boot re-links every `/opt/bobi/skills` entry that is absent or already a baked link (`:505-525`, skipping foreign entries at `:509-523`), and a non-codex boot re-links the image HOME.
-What it does not survive is anything written into `~/.codex/skills` at runtime *on a codex-brained machine*, where `~/.codex` is the volume (`:530`) and 3b deliberately preserves foreign entries.
-`tool_library` skills are not that case: they are installed into the image HOME at build time, which is the population 3c links to.
-But codex-cli itself is: `codex exec` materializes a `skills/.system` directory under its config dir on invocation, so on a codex brain that lands on the volume and a later non-codex boot discards it.
-It is re-derived on the next `codex exec`, so the trade still holds, and the honest statement is "re-derivable", not "nothing does this".
-The alternative is to leave a leftover directory in place, which is the skip-if-present guard the matrix shows losing the image's skills on every claude boot after a codex one.
-Discarding re-derivable state on a deliberate, rare brain switch is the cheaper of the two.
 
 Four follow-on edits the export forces:
 
@@ -345,20 +343,32 @@ Four follow-on edits the export forces:
   On `origin/main` it is worse than that, because `:635-639` refuses to re-mint while the key is set, but this spec scopes that refusal to `target is None` (3.3) and the on-demand trigger always passes a target, so the re-mint path stays open.
   Leaving `:547` on `${HOME}/.codex` is not the fix either: under the export codex reads `${CODEX_HOME}/auth.json`, so the api-key file would be written where codex no longer looks and an `api_key`-mode team's codex would 401 with no credential at all - the exact failure #958 exists to close, inflicted on a different team.
   Both halves are needed: retarget the write, and refuse to overwrite an OAuth file.
-  It needs one new predicate beside the two the file already has.
-  Add `codex_auth_is_oauth` as a copy of `codex_auth_uses_api_key` (`:336-355`) - same `python - <<'PY'` form, heredoc body and terminator at column 0 as at `:324-332` - differing only in the final test, which asserts the OAuth shape positively:
 
-  ```python
-  sys.exit(0 if isinstance(data, dict) and data.get("tokens") else 1)
-  ```
+  **Use the validator the repo already has. Do not add a shell predicate.**
+  Round 2's fold added `codex_auth_is_oauth`, a new `python - <<'PY'` heredoc testing `data.get("tokens")` truthiness.
+  [Round 3](reviews/2026-10-09-958-review-3.md) (its R3-F5) rejected it, and the reason is the standing bar: it would be the **third** definition of "usable codex credential" in the tree, and the one that is wrong.
+  The existing authority is `subscription_credentials_status(path, "codex")` (`bobi/auth_bootstrap.py:162-171`), already reachable from this very script as `as_app python -m bobi.auth_bootstrap credential-status codex <path>` and already called at `:570-571`.
+  Measured against it, with `PYTHONPATH` pinned to the `83bebe49` worktree:
 
-  The guard then reads:
+  | `auth.json` state | `credential-status codex` | `codex_auth_is_oauth` |
+  |---|---|---|
+  | OAuth, refresh token present | rc=0 `refresh token is present` | oauth |
+  | api-key shaped | rc=1 `tokens is missing or malformed` | not oauth |
+  | truncated | rc=1 `credential JSON is malformed` | not oauth |
+  | `{"tokens":{"refresh_token":""}}` | rc=1 `refresh token is missing or blank` | **oauth** |
+  | absent | rc=1 `credential file is missing` | not oauth |
+
+  The last row is the defect.
+  An OAuth-shaped file with a blank refresh token is unusable, and `codex_auth_is_oauth` pins it in both modes: `api_key` mode permanently refuses to materialize over it, and the widened sweep permanently refuses to clear it.
+  Round 2's own argument for the positive predicate ("sends every non-OAuth state - absent, api-key, garbage - down the materialize path, which is the recovery") enumerated four states and missed the fifth.
+  The validator gets all five right, so the guard becomes:
 
   ```sh
   else
     # Never turn OPENAI_API_KEY into Codex auth on top of a durable OAuth
     # credential on the volume (#958). The mirror of the sweep at :553-563.
-    if codex_auth_is_oauth "${CODEX_HOME}"; then
+    if as_app python -m bobi.auth_bootstrap credential-status codex \
+        "${CODEX_HOME}/auth.json" >/dev/null 2>&1; then
       log "Leaving durable Codex OAuth auth file intact; not materializing OPENAI_API_KEY"
     else
       materialize_codex_api_key_auth "${CODEX_HOME}"
@@ -366,21 +376,65 @@ Four follow-on edits the export forces:
   fi
   ```
 
-  **The predicate has to assert OAuth, not merely fail to assert api-key.**
-  The obvious guard is `[ -f ... ] && ! codex_auth_uses_api_key ...`, reusing the one predicate that already exists.
-  It is wrong, and measurably so.
+  That is one code path for "is this codex credential usable", and it deletes a heredoc rather than adding one.
+
+  **Why a guard is needed at all, measured.**
+  The obvious shape is `[ -f ... ] && ! codex_auth_uses_api_key ...`, reusing the one shell predicate that already exists.
   `codex_auth_uses_api_key` (`:336-355`) exits 1 for a file that does not parse (`:344-347`), so a *truncated* `auth.json` reads as "not an api-key file" and the negated guard preserves it, logging that it kept an OAuth credential.
   The writer that can produce that state is a plain non-atomic `write_text` (`:330`).
   Executed: with a truncated file, the negated guard leaves it in place in `api_key` mode and the `:553-563` sweep leaves it in place in subscription mode, while `codex login status` reports `Error checking login status: EOF while parsing a string`.
-  Asserting `tokens` instead sends every non-OAuth state (absent, api-key, garbage) down the materialize path, which is the recovery.
-  Severity, stated accurately: subscription mode self-heals regardless, because section 4's `credential-status` check (`:570-571`) reports the file invalid and `login-bootstrap` re-mints over it.
-  It is `api_key` mode that has no recovery without a shell, and Z1 says a shell cannot be assumed.
+
+  **Severity, corrected in round 3.**
+  Round 2's fold said "subscription mode self-heals regardless, because section 4's `credential-status` check (`:570-571`) reports the file invalid and `login-bootstrap` re-mints over it".
+  That is false on the arm this bullet is about.
+  Section 4 checks the **brain's** credential: `credential_path="${BRAIN_CRED_DIR}/${BRAIN_CRED_FILE}"` (`:569`) with `${ENTRYPOINT_ENGINE}` (`:570-571`), and on a claude brain that is `${CLAUDE_CONFIG_DIR}/.credentials.json` (`:100-102`), while `:575` is a bare `login-bootstrap` that logs in the brain only.
+  So on a non-codex brain nothing at boot ever looks at `/data/codex/auth.json`.
+  The correct statement: in subscription mode the **widened sweep** is the boot-time recovery, and without it there is no boot-time recovery in either mode.
+  Recovery otherwise needs a worker 401, a director dispatch and a human reply, and Z1 says a shell cannot be assumed.
   Verified for the other states: `codex login --with-api-key` writes `{"auth_mode":"apikey","OPENAI_API_KEY":...}` with no `tokens`, so a stale api-key file is still replaced rather than pinned.
 - `docker/docker-entrypoint.sh:557` - `codex_dir="${HOME}/.codex"` -> `"${CODEX_HOME}"`, so the subscription sweep at `:559-562` reads the file codex actually uses.
-  This edit is both required and the recovery path for the hazard above: in subscription mode it deletes an api-key `auth.json` from the volume so OAuth can be minted.
-  Widen its predicate the same way: the sweep should remove any `auth.json` that is not usable OAuth, not only one that is positively an api-key file, so a corrupt file on the volume cannot outlive a boot in either mode.
+  This edit is both required and the only boot-time recovery path for the hazard above: in subscription mode it deletes an unusable `auth.json` from the volume so OAuth can be minted.
+  Widen its predicate with the same validator, and keep a `-f` precondition:
+
+  ```sh
+  if [ -f "${codex_dir}/auth.json" ] \
+     && ! as_app python -m bobi.auth_bootstrap credential-status codex \
+        "${codex_dir}/auth.json" >/dev/null 2>&1; then
+    log "Subscription mode: removing unusable Codex auth file so OAuth can be used"
+    rm -f "${codex_dir}/auth.json"
+  fi
+  ```
+
+  **The `-f` precondition and the log reword are both required, and round 2's fold dropped both.**
+  A negated predicate with no `-f` test enters when there is *no* file at all, and the existing message at `:560` then claims a deletion that did not happen.
+  Measured: in subscription mode with `auth.json` absent, the widened sweep logs "removing Codex API-key auth file so OAuth can be used" and deletes nothing.
+  That fires on every boot of every subscription-mode machine before its first login, which is every machine, and it destroys the line's value as the audit signal that a credential *was* deleted.
+  The reword is needed because the predicate no longer means "is an api-key file".
+
+  **This widening inverts the sweep's failure mode, from conservative to destructive.**
+  `codex_auth_uses_api_key` exits 1 on anything it cannot classify, so today an unrecognised file is never deleted.
+  Under the widened predicate an unrecognised file is deleted on every boot.
+  That is the right trade, because an unusable file on the volume otherwise outlives every boot in both modes, but it is a new destructive path and it needs the test that verification item 11 now carries.
+  It also raises the stakes on the one thing this spec could not verify: codex's `--device-auth` write shape was never observed, and if a real OAuth `auth.json` can lack a truthy `tokens` the sweep would destroy it every boot.
+  Re-confirm on the first real login (verification 15) before this ships.
 - **Not in scope, but say it:** the guard above protects the non-codex arm (`:546-548`) only. The codex-brain arm at `:544` passes `${BRAIN_CRED_DIR}`, which is the same `${DATA_DIR}/codex` path (`:89`), so a codex-brained `api_key` team still rewrites its one credential from the env var on every boot. That is pre-existing behaviour and arguably what an `api_key` team wants; it is named here so section 6's claim can be scoped honestly rather than read as universal.
-- `bobi/tool_library/codex/tool.yaml` - **superseded plan's validity review, its F12.** Its `success:` (`:6`) and `fix:` (`:8`) reference codex's home by literal path 6 times (two `~/.codex`, one `~/.codex/auth.json`, three `pathlib.Path.home()/".codex"` constructions) and `grep -n 'CODEX_HOME' bobi/tool_library/codex/tool.yaml` returns nothing. Under the export, that check would read the wrong directory, miss a real credential and fail closed. `success:` also *writes* in its `elif` branch (`mkdir -p ~/.codex` then `p.write_text(...)`), so it would additionally create an api-key file where codex never looks, not only read the wrong directory. Latent for eng-team, which declares no `tool_library:`; fail-closed for the next team that does. It is this change's own breakage, so it is in scope.
+- **`bobi/tool_library/codex/tool.yaml` - a retarget AND the same guard.** **Superseded plan's validity review, its F12.**
+  Its `success:` (`:6`) and `fix:` (`:8`) reference codex's home by literal path 6 times (two `~/.codex`, one `~/.codex/auth.json`, three `pathlib.Path.home()/".codex"` constructions) and `grep -n 'CODEX_HOME' bobi/tool_library/codex/tool.yaml` returns nothing.
+  Under the export, that check would read the wrong directory, miss a real credential and fail closed.
+  **The retarget alone re-opens the clobber the guard above just closed**, which round 2's fold did not state and [round 3](reviews/2026-10-09-958-review-3.md) (its R3-F8) caught.
+  `success:`'s `elif` branch *writes*, unconditionally, every time the preflight runs:
+
+  ```
+  elif [ "${BOBI_AUTH:-api_key}" != "subscription" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+    mkdir -p ~/.codex && python3 -c '... p=pathlib.Path.home()/".codex"/"auth.json"; p.write_text(...)'
+  ```
+
+  Point that at `${CODEX_HOME}` with no guard and an `api_key`-mode team's preflight overwrites the human-minted OAuth credential on the volume, with none of the protection `:547` just gained.
+  So this edit is two changes, not one: honour `CODEX_HOME`, and skip the write when a usable OAuth credential is already there.
+  `tool.yaml:6` already carries its own fourth definition of the credential shape in its subscription branch (`data.get("OPENAI_API_KEY") and not data.get("tokens")`); fold that into the same `credential-status` call rather than adding a fifth.
+  Latent for eng-team, which declares no `tool_library:`; fail-closed and then destructive for the next team that does.
+  It is this change's own breakage, so it is in scope.
+- `bobi/tool_library/codex/guide.md:42` - says the tool "materializes `~/.codex/auth.json` from `OPENAI_API_KEY` before launch", which the export falsifies. One line, same change.
 - `bobi/brain/codex_config.py:46-47` - **superseded plan's validity review, its F16.** The comment says "The entrypoint symlinks ~/.codex at the durable volume, so writing there persists", which is true only on a codex brain. One line; this change makes it unconditionally true.
 
 And one stale comment this change falsifies: `docker/docker-entrypoint.sh:484` still reads "codex has no config-dir override", which stopped being true when `eb90538` landed `credentials_dir_env="CODEX_HOME"`.
@@ -391,7 +445,7 @@ And one stale comment this change falsifies: `docker/docker-entrypoint.sh:484` s
 | Caller | Brain-gated? | Effect on a claude brain |
 |---|---|---|
 | `bobi/brain/codex_config.py:181`, `:208` | n/a, internal to codex config | Config writers; only reached via `codex.py:387` below. |
-| `bobi/brain/codex.py:387` | Yes, `engine == "codex"` | No change on a claude brain. |
+| `bobi/brain/codex.py:387` | Yes, by construction | Inside `CodexBrain.make_session`, behind `:386`'s `if declared is not None:`. There is no literal `engine == "codex"` test there; the gate is the class. No change on a claude brain. |
 | `bobi/brain/instructions.py:123` | Yes, `engine == "codex"` (`:120`) | No change on a claude brain. |
 | `bobi/chat_history.py:317` | No, but codex-specific by construction | Reads `${CODEX_HOME}/sessions`, which is where codex now writes them. Correct, and durable rather than lost on a roll. |
 | `bobi/brain/instructions.py:129-136`, `_all_brain_targets()` | **No** | It unions `instruction_targets(kind)` over `known_brain_kinds()`, so on a claude brain the cross-kind cleanup set now includes `/data/codex/AGENTS.md` instead of `~/.codex/AGENTS.md`. Assessed benign: the set exists to strip managed blocks, and the file it strips them from is now the durable one, which is the one codex reads. |
@@ -427,7 +481,9 @@ Prompt and doc text only. No framework code. Not a blocker for the bobi-agent PR
 | Cut | Why |
 |---|---|
 | **Old change A** - `run_bootstrap(target=...)` threading a `spec` argument into 4 call sites | Replaced by the one-line `BRAIN_ENV` override (3.3). Same capability, no call-site churn, and it does not break the 5 injected `spawn_login` fakes that F11 found. |
-| **Old change A1** - a new gateway refusal guard for a tool target | No new guard needed. The *existing* guard at `:613-624` just gets scoped to `target is None`. |
+| **Old change A1** - a new gateway refusal guard for a tool target | No new guard needed. The *existing* guard at `:614-625` just gets scoped to `target is None`. |
+| **The `${DATA_DIR}/codex/skills` link, its `!= "codex"` gate, its `rm -rf`, and the 3b cleanup line** | Cut in the round-3 fold. One persistent path that had to be two kinds of object took a defect in every review round; nothing in the tree reads `${CODEX_HOME}/skills`, and the link never exposed the baked team skills it claimed to (3.4). Section 3c is now three statements with no branch. |
+| **A `codex_auth_is_oauth` shell predicate** | Cut in the round-3 fold. `python -m bobi.auth_bootstrap credential-status codex` already exists, is already called from this script at `:570-571`, and is correct on a fifth state the new predicate got wrong (3.4). |
 | **Old change B** - a target-aware `cli.py` surface arguing its own safety | The argument is gone, not just the prose. Ask-first means an agent-reachable invocation posts no credential link until a human replies, so the operator-habituation hazard the old plan had to argue around does not arise. The 2 lines of `cli.py` wiring stay. |
 | **Post-the-code-first, for both flows** | Z2. The code can expire unread. Superseded by ask-first. |
 | **"Leave ask-first out of v1 for the brain"** (the thread's own Q1) | Z4 overrode it. Withdrawn. |
@@ -449,8 +505,11 @@ Today a non-zero `login-bootstrap` aborts boot: the call at `docker/docker-entry
 - **Option A: split by trigger, block indefinitely at boot.** One ask in Slack instead of one per restart. For a tool target, keep the bounded `--timeout` (600s) and exit cleanly, because the fleet is productive without codex.
   **Its cost is not symmetric with B's, and the earlier draft did not state it.** `login-bootstrap` runs at `:575`, inside section 4. The supervisor that watches the director from outside is not started until section 5 (`:590-640`, `exec` at `:637`/`:639`). So a credential-less machine blocks forever in section 4 with nothing above it: no health endpoint, no status file, no process to restart, and no second ask. Today's restart loop is at least visible in `fly logs` and self-heals if the credential arrives by another route.
 - **Option B: bounded at boot too.** Time out, exit non-zero, let the machine restart and re-post. Simpler, one rule, but it re-posts the ask on every restart cycle until a human answers - Slack spam on exactly the surface Zach has called spam before.
-- **Option C (recommended): bounded at boot with a long timeout, re-posting into the existing thread.** Block for hours rather than 600s, and on timeout exit non-zero as today, but have the next boot reply *into the ask's existing thread* instead of opening a new one. One ask in Slack, the machine still cycles, and it stays observable. It needs somewhere to remember the ask's `ts` across boots, and the durable volume the rest of this spec already introduces is that place: `${DATA_DIR}/codex` for a tool and the brain credential dir for the brain, named by path rather than by `${CODEX_HOME}` so it holds under either Q4 shape.
-It also needs an invalidation rule, or a login months later replies into a dead thread: clear the stored `ts` once the login succeeds, and treat it as absent if the post into it fails.
+- **Option C (recommended): bounded at boot with a long timeout, re-posting into the existing thread.** Block for hours rather than 600s, and on timeout exit non-zero as today, but have the next boot reply *into the ask's existing thread* instead of opening a new one. One ask in Slack, the machine still cycles, and it stays observable. It needs somewhere to remember the ask's `ts` across boots, and the durable volume the rest of this spec already introduces is that place.
+**One location, one file per target**, named by path rather than by `${CODEX_HOME}` so it holds under either Q4 shape: `${DATA_DIR}/codex/.login-ask-<target>`, with `<target>` being the brain kind for the bare call.
+Round 2's fold said "`${DATA_DIR}/codex` for a tool and the brain credential dir for the brain", which collides on a codex brain: there the brain credential dir **is** `${DATA_DIR}/codex` (`docker/docker-entrypoint.sh:89`), so one slot would hold two flows' asks and the invalidation rule would clear the other flow's.
+That invalidation rule is also required, or a login months later replies into a dead thread: clear the stored `ts` once the login succeeds, and treat it as absent if the post into it fails.
+3.4's 3c no longer `rm -rf`s anything under `${DATA_DIR}/codex`, so the file is safe where it sits.
 - A and B each cost about one `if target is None` on the wait timeout. C costs that plus persisting one string and a "reply into it if present" branch on the post. I recommend **C**, and B over A, because an indefinitely silent machine with no watchdog is a worse failure than a noisy one.
 
 **Q2. Director-only for the tool trigger, or may a worker fire it?**
@@ -476,8 +535,8 @@ Flagged here rather than buried because the earlier draft recommended the opposi
 This is new in round 2, and it is the one question that changes the size of this spec.
 Round-1 review raised it as unverifiable; it is now verified, and the answer points the other way from what 3.4 is written to do.
 
-3.4 moves the **directory** (`export CODEX_HOME=/data/codex`).
-That is what creates the `/data/codex/skills` object, which is the sole source of both round-1 blockers, and what redirects the five other `codex_home()` consumers.
+3.4 moves the **directory** (`export CODEX_HOME=/data/codex`), which is what redirects the five other `codex_home()` consumers.
+It no longer creates a `/data/codex/skills` object: the round-3 fold deleted that, which is what removed the defect class behind both round-1 blockers.
 The alternative moves only the **file**, with no env var at all:
 
 ```sh
@@ -517,9 +576,11 @@ The directory shape gets both right for free: `~/.codex` *is* the volume, so `co
 Closing that gap in the file shape needs a logout hook plus a rule that the boot-time link must not revive a deliberately removed credential, which is more machinery than the directory shape costs.
 That inverts this question's own simplicity argument.
 
-Checked and **not** a problem with either shape: the self-referential case on a codex brain. With the `!= "codex"` gate bypassed, GNU `ln` refuses with "are the same file" and exits 1, so under errexit it is a loud boot abort rather than credential loss.
+Checked and **not** a problem with the file shape: the self-referential `auth.json` case on a codex brain, where `${HOME}/.codex` is already the volume. With the shape's own `!= "codex"` gate bypassed, GNU `ln` refuses with "are the same file" and exits 1, so under errexit it is a loud boot abort rather than silent credential loss.
 
-**What the file shape would delete from this spec.** Both round-1 blockers on the skills link (no `/data/codex/skills` object exists), the `tool.yaml` change (`~/.codex/auth.json` is still the right literal path), the `codex_home()` blast radius in 3.4, and two of the three "accepted and stated" items in section 6 (codex's ~101 MB of state and its PATH-alias helper binaries both stay on the overlay, where they are today).
+**What the file shape would delete from this spec, re-scored after the round-3 fold.** Less than it used to.
+The skills-link hazards are no longer a difference between the two shapes: 3.4 no longer creates a `/data/codex/skills` object either (round 3's R3-F1), so that whole argument is gone from both columns.
+What is left is the `tool.yaml` and `guide.md` changes (`~/.codex/auth.json` stays the right literal path), the `codex_home()` blast radius in 3.4, and two of the "accepted and stated" items in section 6 (codex's ~105 MB of state stays on the overlay, and `codex exec` keeps seeing gstack's codex-side skills).
 
 **What it does not simplify, stated plainly.** Three things survive unchanged:
 
@@ -532,7 +593,8 @@ Checked and **not** a problem with either shape: the self-referential case on a 
 
 **Recommendation: keep the directory shape (3.4 as written). Do not take the file-level symlink.**
 This reverses the recommendation this question carried when it was first drafted, and the reason is the logout evidence above.
-The file shape is smaller on paper and it does delete both skills-link hazards, but it trades them for a credential-revocation bug, and reviving a credential a human revoked is a worse class of defect than losing a re-derivable skills link.
+The round-3 fold strengthens it further: the directory shape's own skills-link hazards are deleted rather than guarded, so the file shape's main remaining selling point was already conceded.
+What the file shape still trades for is a credential-revocation bug, and reviving a credential a human revoked is a worse class of defect than a claude-brained machine not seeing gstack's codex-side skill links.
 House precedent agrees (`CLAUDE_CONFIG_DIR`, and 3b's own `~/.codex` -> volume on a codex brain), and the directory shape is now tested across every boot order with the image's skills directory present and absent.
 The question stays in the spec rather than being deleted, because it is the one place a reader would reasonably ask "why move the whole directory", and the answer is now on the record with the measurement behind it.
 Overrule this if you want the smaller diff and will accept the logout gap.
@@ -543,8 +605,10 @@ Overrule this if you want the smaller diff and will accept the logout gap.
 
 - `bobi/auth_bootstrap.py` - ask-first for both flows, thread-anchored posting, human-only reply filter, one shared wait function, the `target` parameter, and **both** brain-credential guards scoped to the brain (gateway `:614-625` and shadow-env `:635-639`).
 - `bobi/cli.py` - the optional `<tool>` argument and a target-aware pre-check.
-- `docker/docker-entrypoint.sh` - section 3c, the 3b cleanup line, the two re-pointed writers, a `codex_auth_is_oauth` predicate beside the existing `codex_auth_uses_api_key`, the non-clobber guard on the api-key materialization, a widened sweep predicate, the stale comment at `:484`.
-- `bobi/tool_library/codex/tool.yaml` - honour `CODEX_HOME` (F12).
+- `docker/docker-entrypoint.sh` - section 3c (three lines, no branch), the two re-pointed writers, the non-clobber guard on the api-key materialization, the widened sweep predicate with its `-f` precondition and reworded log line, the stale comment at `:484`. Both predicates reuse `python -m bobi.auth_bootstrap credential-status`; **no new shell predicate, and no change to section 3b** (3.4).
+- `bobi/tool_library/codex/tool.yaml` - honour `CODEX_HOME`, **and** skip the `elif` write when a usable OAuth credential is already present (F12, round 3's R3-F8).
+- `bobi/tool_library/codex/guide.md:42` - the `~/.codex/auth.json` claim the export falsifies.
+- `bobi/tool_library/gstack/guide.md:7-8` - the `~/.codex/skills/` claim that 3.4's dropped link falsifies.
 - `bobi/brain/codex_config.py:46-47` - the stale comment (F16).
 - `moda-labs/moda-agents` - the false preflight claim, the on-demand trigger prompt, the runbook line.
 
@@ -558,11 +622,11 @@ Overrule this if you want the smaller diff and will accept the logout gap.
 **Accepted and stated, not guarded.**
 
 - **A codex tool login is permitted alongside an ambient `OPENAI_API_KEY`**, because the shadow-env guard is scoped to the brain (3.3). The on-disk OAuth `auth.json` wins, since codex reads only that file (`docker/docker-entrypoint.sh:535-536`), and the non-clobber guard in 3.4 keeps it that way across boots **on a non-codex brain**. On a codex-brained `api_key` team the pre-existing `:544` arm still rewrites the credential every boot; that arm is out of scope here (3.4).
-- **A brain switch discards `${DATA_DIR}/codex/skills`** (3.4). Re-derived on the next boot of either brain; the only casualty is a skill installed into `~/.codex/skills` at runtime on a codex-brained machine, which nothing does today. Moot under Q4's file-level shape.
-- `CODEX_HOME` moves codex's state (~101 MB today) to the volume. `/data` has 9.1 GB free of 15 GB. Moot under Q4's file-level shape, which leaves everything but `auth.json` on the overlay.
+- **On a claude-brained machine that has never booted codex, `codex exec` does not see gstack's codex-side skill links** (3.4). Nothing reads `${CODEX_HOME}/skills` in this repo, codex creates its own `skills/.system` there on first invocation, and the baked team skills never reached `~/.codex/skills` in the first place. Dropping the link is what removes the defect class section 3c kept producing. Moot under Q4's file-level shape, which leaves `~/.codex` where it is.
+- `CODEX_HOME` moves codex's state to the volume. Measured on a fresh `CODEX_HOME` after one `codex exec`: ~105 MB, of which ~103 MB is a plugins git clone under `.tmp/`, plus four sqlite databases with WALs, `sessions/`, `shell_snapshots/` and `skills/.system`. Live `~/.codex` is 107 MB and `/data` has 8.9 GB free of 15 GB. Moot under Q4's file-level shape, which leaves everything but `auth.json` on the overlay.
 - In `api_key` mode a plaintext key lands on the volume, alongside `GH_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` and `LINEAR_API_KEY`, which already live there at mode 600.
-- codex writes PATH-alias helper binaries into `CODEX_HOME` on every invocation, so they land on the volume. `tests/integration/test_container_image.py:277` guards root-owned entries under `/home/bobi` but not under `/data/codex`. Section 3c's `chown` covers the directory on first boot, though it runs before the `ln -sT`, so the `skills` symlink itself stays root-owned (harmless for a symlink inside a bobi-owned directory).
-No root-run `codex` invocation exists in the entrypoint today. Moot under Q4's file-level shape.
+- codex writes into `CODEX_HOME` on every invocation, so that content lands on the volume. `tests/integration/test_container_image.py:277` guards root-owned entries under `/home/bobi` but not under `/data/codex`. Section 3c's `chown` covers the directory on first boot, and with no `ln` left in 3c there is no sub-object that stays root-owned. No root-run `codex` invocation exists in the entrypoint today. Moot under Q4's file-level shape.
+  Round 2's wording here claimed codex writes "PATH-alias helper binaries"; round 3 did not reproduce that (its R3-F12). The measured footprint is above, and it contains no `bin` directory. The root-ownership point is the part that still matters.
 
 ## 7. Verification plan
 
@@ -571,18 +635,24 @@ Unit, `tests/test_auth_bootstrap.py` (baseline today: 78 passed in 2.51s).
 1. **Ask-first ordering, `device_poll`.** The ask is posted and the reply is consumed **before** `spawn_login` is called. Assert on call order; this is the Z2 guarantee and the one test that would catch a regression to post-first.
 2. **Ask-first ordering, `paste_back`.** Same, for the brain flow. Z4.
 3. **A bot reply is not "ready".** An event carrying `fields.bot_id` does not satisfy the wait; a following human event does.
-4. **Only a human reply in the ask's own thread is "ready".** Written against `fields.thread_ts`, which is the field the filter reads (3.2(d)). Four legs, because three of them are reachable event shapes that are *not* thread replies:
+4. **Only a human reply in the ask's own thread is "ready", on `fields.thread_ts` alone and never on the event type.** Written against `fields.thread_ts`, which is the field the filter reads (3.2(d)). Four legs:
 
    | Event | `fields.thread_ts` | Ready? |
    |---|---|---|
    | `slack.thread_reply` in the ask's thread | the ask's `ts` | **yes** |
    | `slack.thread_reply` in another thread | another `ts` | no |
    | `slack.mention`, top-level in the login channel | **absent** | no |
-   | `slack.dm` with no thread | **absent** | no |
+   | `slack.mention`, **inside the ask's thread** | the ask's `ts` | **yes (Z5)** |
 
-   The "no `thread_ts` at all" case is reachable and must be tested.
-   `:123-124` drops only a plain channel `message`; `app_mention` takes the earlier branch at `:115-116` and a DM takes `:119-120`, neither of which requires `threadTs`, and `:166` sets the field only when it is non-empty.
-   A top-level @mention of the bot in `#bobi-eng-team` is the single most likely stray event while an ask is open, and 3.2(d) names it as the real exposure.
+   **Round 2's fold got this table wrong, and the wrong version drives a Z5 violation.**
+   It asserted `fields.thread_ts` is absent for `slack.mention`, and added a fourth leg for `slack.dm` with no thread.
+   [Round 3](reviews/2026-10-09-958-review-3.md) (its R3-F7) refuted both from the adapter.
+   `threadTs` is read **once, before any type branching** (`event-server/core/src/adapters/chat-sdk-slack.ts:106`) and `fields.thread_ts` is set for **every** emitted type (`:166`).
+   So a human who @mentions the bot *inside the ask's thread* takes the `app_mention` branch at `:115-116`, before the dedup branch at `:117-118`, and is emitted as `slack.mention` carrying the ask's `ts`.
+   Per 3.2(d) that event is ready, and per Z5 it must be.
+   The defect path is concrete: an implementer writing this test from the old table builds a `slack.mention`, finds the `thread_ts`-only predicate accepts it, and "fixes" the predicate with an event-type filter, which then rejects a human message in the ask's own thread.
+   The `slack.dm` leg was also dead and is dropped: `_extract_code`'s login-channel check compares channel ids (`bobi/auth_bootstrap.py:497-499`), `fields.channel` is Slack's raw id (`:129` -> `:162` in the adapter), and the login channel resolves to a `C...` id (`bobi/auth_bootstrap.py:297`, `:302`), so a `D...` DM never reaches the thread test.
+   The "no `thread_ts` at all" case stays, as leg 3, because a top-level @mention of the bot in `#bobi-eng-team` is the single most likely stray event while an ask is open.
 5. **The device code is posted into the ask's thread**, not to the channel root. **Both post paths**, because they are different code and only the legacy one runs in production: legacy asserts `post_slack_message(..., thread_ts=<ask ts>)`, gateway asserts the destination ref is `<dest>:thread:<ask ts>`. One test over one path would ship the other unexercised.
 6. **`target` retargets everything.** With a `claude` brain and `target="codex"`, the spawned command is `codex login --device-auth` and the credential path resolves under the codex spec's credential dir.
 7. **`spawn_login` is still called with exactly one argument.** A fake with a `(home)`-only signature still binds when `target="codex"`. This is the assertion with content; "no injected fake breaks" would be a tautology while `:660` is byte-identical.
@@ -592,13 +662,25 @@ Unit, `tests/test_auth_bootstrap.py` (baseline today: 78 passed in 2.51s).
 
 Shell lane, runnable without docker (the 3.4 harness shape).
 
-11. **The api-key materialization does not clobber a durable OAuth credential, and does not pin a corrupt one.** Four states of `${CODEX_HOME}/auth.json` under `BOBI_AUTH=api_key` with `OPENAI_API_KEY` set: absent and api-key-shaped are both replaced, OAuth-shaped is left untouched with a log line, and **truncated is replaced**. The last leg is the one a `! codex_auth_uses_api_key` guard fails. This is the one new destructive path the change creates.
-12. **Boot-order matrix, with and without `/opt/bobi/skills`.** claude, codex, claude on one persisted `${DATA_DIR}`, and the mirror. Every boot exits 0, and on each non-codex boot `$CODEX_HOME/skills` resolves and lists **both** a baked and a tool-installed skill. Then the same matrix with `/opt/bobi/skills` absent, asserting `rc=0` and no symlink loop. Both axes are required: a same-brain two-boot test passes while the reverse-switch bug is live, and a baked-skills-present-only test passes while the cleanup-line placement bug is live. Not needed under Q4's file-level shape, which creates no such object.
+11. **The credential guard and the sweep, five states x both auth modes.** One table, because the two arms are the same decision read in opposite directions, and both are destructive.
+
+    | `${CODEX_HOME}/auth.json` | `api_key` + `OPENAI_API_KEY` set | `subscription` |
+    |---|---|---|
+    | absent | materialized | no-op, **and no log line** |
+    | api-key shaped | replaced | removed |
+    | truncated | replaced | removed |
+    | `{"tokens":{"refresh_token":""}}` | replaced | removed |
+    | OAuth, refresh token present | **left intact**, with a log line | **left intact** |
+
+    Round 2's fold scoped this item to `api_key` mode only, which left the widened subscription sweep untested, and subscription is the mode eng-team runs.
+    The blank-refresh-token row is the one `codex_auth_is_oauth` fails in both modes; the truncated row is the one a `! codex_auth_uses_api_key` guard fails.
+    The absent row's "no log line" assertion is the pin for the `-f` precondition.
+12. **Boot-order matrix: every boot exits 0.** claude, codex, claude on one persisted `${DATA_DIR}`, and the mirror, with `/opt/bobi/skills` present and absent, and with `${HOME}` persisted across boots as well as recreated. The harness **must** persist `${HOME}`: a per-boot-fresh `${HOME}` is a `fly deploy`, not a same-machine restart, and it is the axis that hid round 3's blocker. Under the 3.4 shape as written there is nothing else to assert, because 3c creates no object whose kind can be wrong. If the skills link is kept instead (3.4's rejected variant), this item also has to assert `readlink -e "$CODEX_HOME/skills"` exits 0 on every boot, across all three axes.
 
 Docker lane, `tests/integration/test_container_image.py` (`-m docker`, needs a built image).
 
-13. **Claude brain, subscription.** `/data/codex` exists and is bobi-owned, the credential path resolves to the volume in the manager's environment, `$CODEX_HOME/skills` resolves and lists a tool-installed skill, and it all survives a restart. The skills assertion is here as well as in item 12 because item 12 is the only other place it lives and it is shape-conditional.
-14. **Codex brain boots clean.** Boot succeeds, the brain credential is intact, and the baked skills are reachable (`readlink -f` on the skills path exits 0). This is the regression pin for the abort reproduced in 3.4.
+13. **Claude brain, subscription.** `/data/codex` exists and is bobi-owned, `CODEX_HOME` resolves to it in the manager's environment, the credential path resolves to `/data/codex/auth.json`, and it all survives a restart.
+14. **Codex brain boots clean.** Boot succeeds, the brain credential is intact, and the baked skills are reachable: `readlink -e "${CODEX_HOME}/skills"` exits 0 and the directory lists a `/opt/bobi/skills` entry. This is the regression pin for the abort reproduced in 3.4. The oracle is `readlink -e`, not `-f`: `readlink -f` exits 0 on a dangling link (measured), so it passes on a broken path and every earlier round used it as the correctness signal.
 
 Live, post-merge, owed on the issue as proof of work.
 
@@ -606,7 +688,8 @@ Live, post-merge, owed on the issue as proof of work.
 16. **Survives a restart.** Same credential after a machine restart, with no second login.
 
 Items 1, 2, 3, 9, 15 and 16 are unchanged from the round-1 spec, and item 10 is its item 11 verbatim.
-Items 4, 5, 6, 7, 8 and 13 were reworded in the round-1 fold; items 11 and 12 are new.
+Items 4, 5, 6, 7, 8 and 13 were reworded in the round-1 fold; items 11 and 12 are new in round 2.
+The round-3 fold rewrote items 4, 11, 12, 13 and 14: item 4's table was wrong about the adapter, item 11 was missing a mode and a state, item 12's skills assertion was unsatisfiable on a real image, and items 13 and 14 used `readlink -f` as a correctness oracle when it passes on a dangling link.
 Items 1 and 2 look redundant and are not: different `spec.flow` branches (`bobi/auth_bootstrap.py:662` vs `:683`).
 
 ## 8. Implementation plan
@@ -618,7 +701,7 @@ Q4 is the one to read first anyway, because it is the only question whose answer
 1. Tests 1-5 (ask-first, human-only, thread-scoped, both post paths) against the current `run_bootstrap`, failing.
 2. Change 1 (3.2), including the `_wait_for_chat_event` factoring. Tests 1-5 green, and the 78 existing tests stay green.
 3. Tests 6-9, failing. Then change 2 (3.3). Test 7 is the pin for the superseded plan's F11.
-4. Change 3 (3.4), in whichever shape Q4 selects: section 3c, the re-pointed sweep, the non-clobber guard, `tool.yaml` and the two stale comments if the directory shape is chosen. Then tests 11-14.
+4. Change 3 (3.4), in whichever shape Q4 selects. Directory shape: section 3c (three lines), both re-pointed writers, the non-clobber guard and the widened sweep (both on `credential-status`, no new shell predicate), `tool.yaml` retarget plus its own guard, and the three stale comments (`docker-entrypoint.sh:484`, `codex_config.py:46-47`, `gstack/guide.md:7-8`) plus `codex/guide.md:42`. Then tests 11-14. **Do not reintroduce a `${DATA_DIR}/codex/skills` link**; 3.4 records why, and three rounds of defects came out of it.
 5. Review gate, full test run, PR.
 6. The `moda-agents` companion PR (3.5).
 7. Post-roll: tests 15-16 on the issue.
@@ -627,9 +710,15 @@ Q4 is the one to read first anyway, because it is the only question whose answer
 ## Appendix A: verification record, 2026-10-09
 
 Pinned to `origin/main` at `83bebe49`.
-Round 1 read `origin/main` in a detached worktree at `/tmp/wt-958-main`; round 2 re-read it in a second detached worktree at `/tmp/wt-958-main-r2`, both cut with an explicit start-point at `83bebe49`.
-Every round-2 citation below was re-read from that worktree rather than carried over.
+Round 1 read `origin/main` in a detached worktree at `/tmp/wt-958-main`; round 2 re-read it at `/tmp/wt-958-main-r2`; round 3 re-read it at the same path and additionally read current `origin/main` at `70db2e10` in `/tmp/wt-r3-main`, all cut with an explicit start-point.
+Every round-2 and round-3 citation below was re-read from a pinned worktree rather than carried over.
 The parked `run/repo` checkout (HEAD `agent/858-impl-wip`) was never grepped.
+
+**`bobi/cli.py` line numbers need re-reading before implementation.**
+`origin/main` moved from `83bebe49` to `70db2e10` during review, and that diff adds ~274 lines to `bobi/cli.py` (local service supervision, #1098).
+The cited code is byte-identical in both SHAs, so nothing in this spec is wrong, but every `cli.py` offset is +43 to +94 off against current main: `login-bootstrap` `:713` -> `:807`, `--timeout` `:714-715` -> `:808-809`, the `credentials_exist()` pre-check `:733` -> `:827`, the `run_bootstrap` call `:737` -> `:831`, `_refuse_runtime_lifecycle` `:471-482` -> `:514-525`, its `stop`/`restart` wiring `:1129`/`:1195` -> `:1221`/`:1265`.
+`bobi/service.py:303` did not drift.
+`bobi/auth_bootstrap.py`, `docker/docker-entrypoint.sh`, `bobi/brain/` and `bobi/build_render.py` are byte-identical between the two SHAs, so every other citation holds on current main.
 Everything that executed code ran with `GH_TOKEN=invalid`, `GITHUB_TOKEN=invalid` and a failing `gh` shim first on `PATH` (`command -v gh` -> `/tmp/neutered-bin/gh`, `gh --version` -> exit 127).
 
 **Executed live, not read.**
@@ -645,7 +734,7 @@ Everything that executed code ran with `GH_TOKEN=invalid`, `GITHUB_TOKEN=invalid
 | Guard + after-placement is correct for same-brain boots | both brains, two boots, exit 0, link resolves |
 | Guard + after-placement ABORTS on a brain switch | claude then codex on one volume: `ln: failed to create symbolic link ...: File exists`, exit 1, link loops; still broken on boot 3 |
 | **A skip-if-present guard silently loses the image's codex skills** | re-run in round 2 across 6 boot orders. `codex, claude`: boot 2 exits 0 with no log line and `$CODEX_HOME/skills` listing only the baked skill; the tool-installed `gstack-browse` is gone. Same on boot 3 of `claude, codex, claude` and boot 2 of `codex, claude, codex`. |
-| **The shape in 3.4 is correct on every boot order** | same 6 sequences, same harness: every boot exits 0, `readlink -f` resolves, and every non-codex boot lists both `baked-a` and `gstack-browse` |
+| ~~**The shape in 3.4 is correct on every boot order**~~ | **REFUTED IN ROUND 3.** The round-2 claim was: same 6 sequences, every boot exits 0, `readlink -f` resolves, every non-codex boot lists both skills. It held only because the harness recreated `${HOME}` every boot. See the round-3 rows below. |
 | Bare `[ -L x ] && rm -f x` is errexit-safe | executed standalone and mid-block under `set -euo pipefail` on bash 5.2.37 (the entrypoint's interpreter, `:1`): both reached the next line, `rc=0` |
 | **codex writes `auth.json` in place, not by rename** | `codex login --with-api-key` over a symlink whose target exists: `Successfully logged in`, link intact, content in the durable target. Through a **dangling** symlink: durable target created at mode `600`, link intact. `codex login status` through a dangling symlink: `Not logged in`, no crash. This is what makes [Q4](#5-open-questions-for-zach) answerable. |
 | **The 3b cleanup line inside the `[ -d /opt/bobi/skills ]` guard re-opens the loop** | same harness with the directory absent. `claude, codex`: boot 2 exits 0 with no log line, `readlink -f` fails, and reading a skill through the path gives "Too many levels of symbolic links". Moved to after `:488`, every sequence is clean with the directory present or absent. |
@@ -660,7 +749,39 @@ Everything that executed code ran with `GH_TOKEN=invalid`, `GITHUB_TOKEN=invalid
 | Baseline suite | `pytest tests/test_auth_bootstrap.py -q` -> 78 passed in 2.51s |
 | Live env | `BOBI_AUTH=subscription`, `BOBI_BRAIN=claude`, `BOBI_LOGIN_CHANNEL=#bobi-eng-team` (the legacy channel-name path), `CODEX_HOME` unset, `OPENAI_API_KEY` unset |
 
+**Round 3, executed.**
+Harness rebuilt from the real entrypoint text (`sed -n '319,355p'` for the two predicate functions, `'481,532p'` for 3b, `'534,551p'` and `'553,563p'` for the api-key block and the sweep) rather than hand-written, with `/opt/bobi/skills` rewritten into the sandbox root.
+
+| What | Result |
+|---|---|
+| **The round-2 shape self-loops when the container overlay persists** | `claude, codex, claude` and `codex, claude, codex` with `${HOME}` persisted across boots: the non-codex boot after a codex one gives `rc=0`, no log line, `readlink -f` exit 1, and `${DATA_DIR}/codex/skills -> ${HOME}/.codex/skills -> ${DATA_DIR}/codex`. This is why 3c no longer creates the link. |
+| `${HOME}/.codex` is never restored on a non-codex boot | written only at `:527-531`, inside the codex-brain block; `grep -n 'BRAIN_HOME_LINK\|\.codex' docker/docker-entrypoint.sh` finds no other writer |
+| A brain switch needs no new rootfs | `:276-278` takes the brain from the installed team on the volume when `BOBI_BRAIN` is unset; `:400-401` states that a same-machine restart keeps the overlay |
+| **The baked team skills never reached `~/.codex/skills`** | `grep -rn 'BAKED_SKILLS' bobi/ Dockerfile hatch_build.py` returns only `build_render.py`, which links them into `~/.claude/skills` (`:220-221`). On the live image `readlink ~/.claude/skills` -> `/opt/bobi/skills`, and `find ~/.codex/skills -maxdepth 1 -lname '/opt/bobi/skills*'` returns **0** of 50 entries |
+| **Nothing reads `${CODEX_HOME}/skills`** | the six `codex_home()` sites touch no `skills` path; the only `~/.codex/skills` references in the tree are gstack's installer (`tool_library/gstack/tool.yaml:33`, `:35`, `:51`), all by literal `$HOME` path |
+| **The three-line 3c is clean on every axis the old shape broke** | all 6 boot sequences x {`${HOME}` fresh, persisted} x {`/opt/bobi/skills` present, absent} x {`~/.codex/skills` present, absent}: `rc=0` throughout, no symlink created, so no loop and no dangling link is constructible. After a codex boot the volume keeps 3b's real `skills` directory and a later claude boot keeps it |
+| `readlink -f` exits 0 on a dangling link | `readlink -f` -> prints the missing target, `rc=0`; `readlink -e` -> `rc=1`. Every earlier round used `-f` as the correctness oracle, so items 12 and 14 now use `-e` |
+| **`codex_auth_is_oauth` pins an unusable OAuth file** | `{"tokens":{"refresh_token":""}}` reads as oauth to the round-2 predicate; `credential-status codex` rejects it (`refresh token is missing or blank`). Measured: `api_key` mode permanently refuses to materialize over it and the widened sweep permanently refuses to clear it |
+| `credential-status codex` is correct on all five states | oauth `rc=0`; api-key, truncated, blank-refresh and absent all `rc=1` with distinct reasons. `IMPORTED FROM: /tmp/wt-958-main-r2/bobi/auth_bootstrap.py` |
+| The widened sweep logs a delete that did not happen | subscription mode, `auth.json` absent: `rc=0`, nothing removed, and `:560`'s "removing Codex API-key auth file" still logged. Fixed by the `-f` precondition |
+| Section 4 does not see the codex tool credential | `:569-571` reads `${BRAIN_CRED_DIR}/${BRAIN_CRED_FILE}` with `${ENTRYPOINT_ENGINE}`, which on a claude brain is `${CLAUDE_CONFIG_DIR}/.credentials.json` (`:100-102`), and `:575` is a bare `login-bootstrap` |
+| **The adapter sets `fields.thread_ts` on every event type** | `threadTs` is read at `chat-sdk-slack.ts:106`, before type branching, and applied at `:166`. So a threaded `app_mention` emits `slack.mention` carrying the ask's `ts`, via the `:115-116` branch taken before the `:117-118` dedup |
+| A DM never reaches the thread test | `_extract_code` drops it on the channel-id compare at `bobi/auth_bootstrap.py:497-499`; `fields.channel` is the raw `D...` id and the login channel resolves to a `C...` id (`:297`, `:302`) |
+| `tool.yaml`'s `elif` write is unguarded | `bobi/tool_library/codex/tool.yaml:6` does `mkdir -p ~/.codex` then `p.write_text(...)` whenever `BOBI_AUTH != subscription` and `OPENAI_API_KEY` is set. Retargeting it to `${CODEX_HOME}` without a guard overwrites a minted OAuth credential |
+| codex's real footprint | one `codex exec` into a fresh `CODEX_HOME`: ~105 MB, `.tmp/plugins` git clone ~103 MB, four sqlite DBs with WALs, `sessions/`, `shell_snapshots/`, `skills/.system`, `installation_id`. **No `bin` directory and no alias binaries.** Live `~/.codex` 107 MB; `/data` 8.9 GB free of 15 GB |
+| codex tolerates a broken skills path | `codex exec` with `${CODEX_HOME}/skills` clean, dangling and looped: identical 401 in all three. Clean created `skills/.system`; the other two created nothing, silently |
+| `bobi/cli.py` drifted, semantically unchanged | `diff` of the `login_bootstrap` block and of `_refuse_runtime_lifecycle` between `83bebe49` and `70db2e10`: identical. `git diff --stat 83bebe49..70db2e10 -- bobi/auth_bootstrap.py docker/docker-entrypoint.sh bobi/brain/ bobi/build_render.py`: empty |
+
 **Could not verify.**
+
+New or sharpened in round 3:
+
+- **Whether a Fly machine restart preserves the container overlay in this deployment specifically.** The entrypoint asserts it does (`:400-401`) and its whole `~/.claude` idempotency block exists for that case, which is the evidence behind the round-3 blocker. Not observed on a live machine.
+- **codex's `--device-auth` write shape**, which now matters more than it did. The widened sweep deletes any `auth.json` it cannot positively classify, so if a real OAuth file can lack a truthy `tokens` the sweep destroys it every boot. Re-confirm on the first real login (verification 15) before this ships.
+- **Whether any out-of-repo consumer reads `${CODEX_HOME}/skills`.** The "nothing reads it" evidence that 3.4's simplification rests on covers this repo plus the gstack tool definitions it vendors. A `moda-agents` prompt or an operator recipe naming `~/.codex/skills` would not appear in that grep; the one in-repo brief that does is `bobi/tool_library/gstack/guide.md:7-8`, now in scope.
+- **A live Slack round-trip for the threaded-`app_mention` case.** Round 3's correction to verification item 4 is read from the adapter source and the Python filter, not from a real event. Worth one minute during implementation.
+
+Carried from earlier rounds:
 
 - **An end-to-end login.** Needs a human to authorize a real device code. Each link is verified separately; the chain is not. This is verification 15.
 - **The docker lane.** `-m docker`, needs a built image. No image build in this session.
