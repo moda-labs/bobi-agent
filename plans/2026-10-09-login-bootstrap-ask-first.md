@@ -24,6 +24,12 @@
 > **Round 3 replaced section 3c's shape rather than patching it**, because that one block had taken a defect in every round from one cause (3.4).
 > All four rounds single-model: `codex` 401s and `aichat` is unconfigured in this container, which is the gap this spec exists to close.
 >
+> **Round 5 is the first review by a model other than Claude, and it reopens Gate 1.**
+> [`reviews/2026-10-09-958-codex-review.md`](reviews/2026-10-09-958-codex-review.md), codex `gpt-5.6-sol`, verdict **NOT READY**, 11 findings, 3 blockers, 7 majors, 1 minor.
+> `codex` subscription auth started working on this box on 2026-10-09, so the single-model limitation stated above is lifted from round 5 onward.
+> Folded in [section 9](#9-amendment-2026-10-09-round-5-codex-review-fold), which is **insertion-only**: sections 1 to 8 and Appendix A are byte-identical to `ba774d38`, and section 9 wins wherever it contradicts them.
+> 10 findings folded, 1 retracted with evidence, and **4 new questions Q5-Q8 are unanswered**, so this spec is not ready for approval as written.
+>
 > **On finding numbers.** Two review rounds of two different documents are cited here, and their `F<n>` numbering collides.
 > A bare `F<n>` always means the round-1 review of *this* spec, linked above.
 > Findings from the superseded plan's own validity review are always written out as "the superseded plan's validity review, its F<n>".
@@ -836,3 +842,184 @@ Carried from earlier rounds:
 - **A real thread reply arriving over the event bus.** The mechanism is verified by reading the code that already does it at boot and by the adapter fields it depends on; no live Slack round-trip was performed.
 - **codex's OAuth device-flow write path specifically.** Q4's in-place-write evidence comes from `codex login --with-api-key`, the one write path reachable without authorizing a real device code. `--with-access-token` rejects a synthetic token before writing (`invalid agent identity JWT format`), so the `--device-auth` write was not observed. Both go through the same `auth.json` persistence, but that is read from behaviour, not from codex's source. Worth re-confirming on the first real login (verification 15) before relying on it.
 - **Cross-model adversarial review.** Impossible here for the reason under review: `codex` 401s and `aichat` is unconfigured (`OPENROUTER_API_KEY`/`AICHAT_PLATFORM` unset). Single-model pass, stated as one.
+
+## 9. Amendment, 2026-10-09: round-5 codex review fold
+
+**Insertion-only.** Sections 1 to 8 and Appendix A are left byte-identical.
+Where this section contradicts them, this section wins.
+Round 5 is the first review of this spec by a model other than Claude, which is the gap line 25 above describes; that line is superseded by the header's round-5 line.
+
+[Round 5](reviews/2026-10-09-958-codex-review.md), codex `gpt-5.6-sol` at reasoning effort high, read-only sandbox, spec sha `ba774d38`, main pinned at `70db2e10`.
+Verdict **NOT READY**: 11 findings, 3 blockers, 7 majors, 1 minor.
+Triaged against main in a worktree pinned at `70db2e10`: **10 folded as defects, 1 retracted, 4 new questions posed for Zach**.
+Three blockers are design defects that four same-model rounds missed; none is a citation error.
+
+| codex | Sev | Class | Verdict, against `70db2e10` |
+|---|---|---|---|
+| F1 | BLOCKER | **defect** | Confirmed. Post-then-subscribe inverts this repo's own contract (`bobi/inbox.py:444-447`, `bobi/events/client.py:207-211`); a lost reply is unrecoverable because replay is per deployment and `register` mints a fresh id (`event-server/core/src/core.ts:1453`). -> A1 |
+| F2 | BLOCKER | **defect** | Confirmed. Fixed name `"login-bootstrap"` (`bobi/auth_bootstrap.py:543-546`) + same-name supersede that de-indexes the prior listener (`event-server/core/src/core.ts:1443-1451`). Q3's "cosmetic" is false. -> A2 |
+| F3 | BLOCKER | **defect** | Confirmed. Root entrypoint (`docker/docker-entrypoint.sh:5-8`), app-owned volume (`:370-373`), `chown` dereferences; 3c widens main's codex-only `chown` (`:485-488`) to every brain. -> A3 |
+| F4 | MAJOR | **defect** | Confirmed. Discord/WhatsApp are supported destinations (`bobi/auth_bootstrap.py:307-309`, `tests/test_auth_bootstrap.py:637-701`) with no `thread_ts` (`adapters/discord.ts:108-114`) and `threads: false` (`channels.ts:483`, `:644`). -> A4, remedy is **Q5** |
+| F5 | MAJOR | **defect** + **scope fork** | Confirmed. `_active_spec` falls back to Claude on any unknown kind (`bobi/auth_bootstrap.py:117-120`), so a typo bypasses both guards: defect -> A5. The gateway-team policy half is **Q6**. |
+| F6 | MAJOR | **defect** | Confirmed. Structural-only validation (`bobi/auth_bootstrap.py:162-171`) short-circuits at `:629-632` and `bobi/cli.py:827-829`, so the 3.5(b) recovery is a no-op on a revoked token. -> A6, remedy is **Q7** |
+| F7 | MAJOR | **defect** | Confirmed. Channel-unset (`bobi/auth_bootstrap.py:648-653`) and event-server (`:521-526`) raises abort before Q1's timeout; Option C's state needs `atomic_write_text` + `file_lock` (`bobi/fsutil.py:1-17`, `:161-172`). -> A7, A/B/C stays Zach's |
+| F8 | MAJOR | **defect** | Confirmed. Widened sweep (`docker/docker-entrypoint.sh:553-562`) depends on a shape item 15 defers post-roll (§8 step 7) while Appendix A demands it "before this ships". -> A8, remedy is **Q8** |
+| F9 | MAJOR | **defect** | Confirmed. Timeout warns only (`bobi/auth_bootstrap.py:701-705`); `finally` terminates without wait, kill or group signal (`:706-712`) against a `start_new_session=True` child (`:220-224`). -> A9 |
+| F10 | MAJOR | **defect** | Confirmed. Item 12 passes with 3c omitted (self-admitted in §7); no item asserts the outcome post. Rest derivative. Codex **retracts** the brief's "lanes are fictional" suspicion. -> A10 |
+| F11 | MINOR | 1 **invalid**, 2 **defect** | CLI "stale citations" **declined**: Appendix A already lists the same seven offsets codex reproduces. `gstack/guide.md:7-8` as a fourth `~/.codex/skills` ref and the root-write window at `docker/docker-entrypoint.sh:324-333` are both real. -> §9.4 |
+
+Totals: **10 defects folded, 1 claim retracted, 4 questions posed** (Q5-Q8). No finding was manufactured and none was dismissed without evidence.
+
+Codex independently confirmed 9 of this spec's premises as TRUE, listed at the end of its report, including the `_wait_for_code` mechanism (3.1), fan-out delivery, `CODEX_HOME` honouring, the `(home)`-only `spawn_login` fakes, that nothing reads `${CODEX_HOME}/skills`, and that Appendix A's `bobi/cli.py` re-based offsets are correct.
+
+### 9.1 Blockers
+
+**A1 (codex F1). The ask must be posted *after* the listener is connected, not before.**
+Section 3's step 2 posts the ask and step 3 then blocks; 3.2(c) factors the listener out of `_wait_for_code`, which registers it.
+So as written, the subscription is established after the message a human can already reply to.
+This repo's own contract is the opposite, stated twice: "Replay is recovery, not a substitute for establishing the requested live subscription first" (`bobi/events/client.py:207-211`) and "Subscribe before publish, and only publish once the subscription's WS is actually live" (`bobi/inbox.py:444-447`).
+A reply lost in that window is **unrecoverable**, not merely late: replay is cursor-based per deployment (`docs/EVENT_SERVER.md:432-441`), and each `register` call mints a fresh deployment id with a fresh session (`event-server/core/src/core.ts:1453`, `:1471`), so a deployment created after the event was published was never an indexed subscriber for it.
+The exposed window is from the post until `addSubscription` lands server-side (`event-server/core/src/core.ts:1467-1469`), and `_register_login_channel` plus `register` are remote calls, so it is not instantaneous.
+
+**Fold.** Invert the order in section 3: resolve the channel, register the listener, `wait_connected`, *then* post the ask, capture its `ts`, install the thread predicate, and consume what the queue already holds.
+`_wait_for_chat_event` therefore splits into connect and wait phases rather than being one call made after the post.
+Verification item 1 and 2 must assert `listener connected -> ask posted -> reply consumed -> spawn_login`, not just reply-before-spawn.
+
+**A2 (codex F2). Q3's "the residual race is cosmetic" is false. Concurrent runs starve the first one.**
+The waiter registers under the fixed literal name `"login-bootstrap"` (`bobi/auth_bootstrap.py:543-546`, and again on the `BubbleRejected` retry at `:559-562`).
+Registering an existing name in the same bubble deliberately **removes the prior deployment's subscriptions and the deployment itself** (`event-server/core/src/core.ts:1443-1451`, "Supersede any prior deployment with the same name in this bubble").
+So with two runs in flight, the second registration de-indexes the first listener.
+A human reply to the *first* ask is delivered only to the second listener, whose thread predicate rejects it, and the first command blocks to timeout having posted a live ask nobody can satisfy.
+Q3's third reason is the one that fails; its first two stand.
+
+**Fold.** Q3's recommendation is reversed, on refuted evidence rather than on preference:
+- Register the listener under a **unique** deployment name (`login-bootstrap-<pid>` or a uuid suffix), so two runs cannot de-index each other. This is the defect's direct cause and is required either way.
+- Take a **non-blocking** per-target lock before posting, and have the loser report the existing pending ask rather than posting a second one. A unique name alone still leaves two CLIs racing to write one credential file.
+- Verification: a real two-process test, asserting the first run still receives its reply.
+
+Q2's director-only policy remains the primary dedup point; the lock is the mechanism that makes the invariant true when the policy is violated, which is what the earlier "one invariant, two enforcers" objection assumed away.
+
+**A3 (codex F3). The new root `chown` lines are a symlink-dereference escalation path.**
+The entrypoint runs as root (`docker/docker-entrypoint.sh:5-8`) and makes the durable volume app-owned on first boot (`:370-373`), so the `bobi` user can create or replace anything under `${DATA_DIR}` between boots.
+`chown` without `-h` dereferences, and `mkdir -p` follows an existing symlink silently.
+Section 3c's `chown "${APP_USER}:${APP_USER}" "${DATA_DIR}/codex"` therefore transfers ownership of whatever that path points at: a worker that leaves `/data/codex -> /etc` gets `/etc` chowned to `bobi` on the next boot.
+Section 6's two `chown`s of `${CODEX_HOME}/auth.json` have the same shape against a single file, and `materialize_codex_api_key_auth`'s root `write_text` (`docker/docker-entrypoint.sh:324-330`) follows an `auth.json` symlink as well.
+Main today runs this unsafe directory `chown` only inside the codex-brain branch (`docker/docker-entrypoint.sh:485-488`); section 3c widens it to **every** brain, which is what makes it worth fixing now.
+
+**Fold.** Before any root operation on these paths, reject what is not the expected kind:
+- `${DATA_DIR}/codex`: if the path exists and is a symlink or not a directory, log loudly and remove the link itself (`rm -f`, which unlinks rather than following) before `mkdir -p`. Never `chown` it unchecked.
+- `${CODEX_HOME}/auth.json`: `[ -L ]` test and refuse, or `chown -h`, before any root write or ownership change. The same guard belongs in front of `materialize_codex_api_key_auth`'s write.
+- Verification: add a docker-lane case per planted symlink (a directory link at `/data/codex`, a file link at `auth.json`) asserting the protected target's ownership and content are untouched and the boot fails loudly rather than silently escalating.
+
+### 9.2 Majors
+
+**A4 (codex F4). The mandated `fields.thread_ts` filter makes Discord and WhatsApp permanently un-ready.**
+3.2(d) states the thread condition as `fields.thread_ts == <the ask's ts>` "on both paths", where both paths means legacy Slack and gateway.
+But the gateway path serves three sources, not one: `_resolve_login_channel` accepts `discord` and `whatsapp` (`bobi/auth_bootstrap.py:307-309`), and `test_run_bootstrap_posts_to_discord_conversation` (`tests/test_auth_bootstrap.py:637-701`) pins Discord as a supported login destination today.
+Neither source carries a thread anchor: the Discord adapter's `fields` are `user_id`, `user_name`, `channel_id`, `message_id`, `application_id` with no `thread_ts` (`event-server/core/src/adapters/discord.ts:108-114`), WhatsApp likewise (`event-server/core/src/adapters/whatsapp.ts:79-105`), and both declare `threads: false` (`event-server/core/src/channels.ts:483`, `:644`).
+So on either source no inbound event can satisfy the predicate, and the ask's own text ("reply to this message in a thread") is wrong there too.
+Section 3.1's claim that the event-bus path "already works on Slack, Discord and WhatsApp" is true of main and false of this design.
+
+**Fold.** The predicate cannot be stated once for all sources. The remedy is a scope choice, posed as **[Q5](#93-new-questions-for-zach)**; whichever Zach picks, 3.1's tri-channel sentence must be qualified and the ask text must stop naming threads on a threadless transport.
+
+**A5 (codex F5). An unvalidated `target` disables both guards while silently resolving to Claude.**
+`_active_spec()` falls back to Claude for any unrecognized `BRAIN_ENV` value (`bobi/auth_bootstrap.py:117-120`, `_SPECS.get(kind, _SPECS["claude"])`), and 3.3 gates both refusals on `target is None`.
+Two consequences the spec does not state:
+- `login-bootstrap typo` disables the gateway guard *and* the shadow-env guard, then runs the **Claude** flow. A typo is a guard bypass.
+- `login-bootstrap claude` disables the Claude shadow-env guard for the Claude credential it is about, which is exactly the invariant 3.3 argues the guards exist to protect.
+
+**Fold.** Validate `target` against the known brain kinds and reject an unknown value with a clear error instead of relying on `_active_spec`'s fallback; 3.3's one-line override only becomes safe once the input is closed.
+Scope the shadow-env guard by the **resolved** provider rather than by whether an argument was supplied: 3.3's own argument is that `OPENAI_API_KEY` does not shadow a codex credential on disk, which is a statement about codex, not about argument presence.
+`target="claude"` must keep both guards.
+The gateway-brain case is a policy question, posed as **[Q6](#93-new-questions-for-zach)**.
+
+**A6 (codex F6). The documented 401 recovery is a no-op against the credential state that produces a 401.**
+Codex validation only requires a non-blank `tokens.refresh_token` (`bobi/auth_bootstrap.py:162-171`); it never proves the token is live, unrevoked, or bound to the intended account.
+A structurally valid file short-circuits both entry points: `run_bootstrap` returns `True` at `bobi/auth_bootstrap.py:629-632`, and the CLI returns even earlier with "Subscription credentials already present" (`bobi/cli.py:827-829`).
+So the 3.5(b) recovery path, director runs `login-bootstrap codex` on a worker's 401, does nothing in the revoked, server-invalidated, and wrong-account cases, which are the common causes of a real 401.
+Section 6's "codex OAuth has no refresh expiry, so this is once per machine" is correct about the schema (the code comment says the same) and wrong as an availability claim: revocation is not expiry.
+
+**Fold.** Restate that bullet as "the schema carries no refresh-token expiry field", not "no expiry".
+A machine whose credential is present but rejected has **no shell-independent recovery** in this design; that is now stated rather than implied.
+The remedy needs a surface section 6 currently excludes, so it is posed as **[Q7](#93-new-questions-for-zach)**.
+
+**A7 (codex F7). Q1 covers only silence. It must cover the failures that abort before the timeout.**
+Q1's three options all assume the ask was posted and nobody answered. Three earlier failure modes land in the same unguarded `:575` call under `set -euo pipefail` (`:14`), before the supervisor exists (`:590-639`):
+- `BOBI_LOGIN_CHANNEL` unset or misconfigured raises immediately (`bobi/auth_bootstrap.py:648-653`): a permanent crash loop with no ask and no health surface.
+- `event_server_url` unconfigured or the event server unreachable raises in the waiter (`bobi/auth_bootstrap.py:521-526`), and registration makes remote calls before any wait begins. Under Option C this restarts fast and re-posts into the saved thread on every cycle, which is the Slack spam Option C exists to avoid.
+- A Slack post failure means no ask at all, and boot loops silently.
+
+**Fold, without deciding Q1.** Two additions to Q1 as posed:
+- A failure-state table covering post failure, registration failure, connection loss, timeout, and restart, for each of A, B and C. The options stay Zach's choice; the table is what makes them comparable.
+- Option C's `${DATA_DIR}/codex/.login-ask-<target>` is durable read-modify-write state and must use `atomic_write_text` plus `file_lock` (`bobi/fsutil.py:1-17`, `:161-172`, "only the lock keeps a concurrent updater's change from being overwritten"). Q1 as written specifies neither, and this repo's state module exists specifically to stop a seventh hand-rolled writer.
+- The ask text must name the agent, instance and target. Two machines in one fleet currently post indistinguishable asks, and under Option C they would share a thread.
+
+**A8 (codex F8). The widened sweep ships before the schema it depends on is observed.**
+Section 3.4 widens the subscription sweep from "delete recognized API-key auth" (`docker/docker-entrypoint.sh:553-562`) to "delete anything `credential-status` does not accept", and the accepted shape is only `tokens.refresh_token` (`bobi/auth_bootstrap.py:162-171`).
+Appendix A's "Could not verify" requires codex's `--device-auth` write shape to be re-confirmed "before this ships", but verification item 15 is filed under "Live, post-merge" and §8 step 7 schedules it **post-roll**.
+Those two cannot both hold.
+If the real device-auth file is compatible-looking but differently shaped, the first restart after a successful login deletes the credential that login just minted, on every machine.
+
+**Fold.** The contradiction is resolved in Q1's favour of safety, not by reordering a verification item on paper: either the fixture is obtained before merge, or the sweep stays conservative.
+Which one is **[Q8](#93-new-questions-for-zach)**.
+Independent of that answer, the sweep must not unconditionally delete an unclassifiable file: quarantine it with a recoverable rename and a loud log line.
+A destructive default on an unknown schema is the wrong failure direction for a credential the human minted by hand.
+
+**A9 (codex F9). Timeout warns, does not reap, and loses a late reply.**
+On device-flow timeout the code logs a warning and falls through (`bobi/auth_bootstrap.py:701-705`); the `finally` block calls `proc.terminate()` with no `wait`, no `kill` escalation, and no process-group signal (`:706-712`), while the child was spawned `start_new_session=True` (`:220-224`) and so is its own session leader.
+A login CLI that ignores SIGTERM survives as an orphan holding the pty.
+Separately, the single 600s budget spans ask-wait plus URL scrape plus device authorization, so a human who authorizes at minute eleven loses even though the device code is valid for fifteen; and a late reply cannot rescue the run, because the next fixed-name registration removed that deployment (A2).
+
+**Fold.** Give the ask wait, the URL scrape, the device authorization and the post-code exit **separate** budgets rather than one shared timeout, so a slow human does not consume the code's lifetime.
+On timeout, signal the process group, `wait` with a bound, escalate to `kill`, and reap.
+Post an explicit expired or cancelled outcome into the thread saying a fresh reply is required, so the thread does not end on "waiting for you to authorize".
+Verification: a fake that ignores `terminate`, and a reply arriving after the timeout.
+
+**A10 (codex F10). Verification items that pass a broken implementation.**
+Mostly derivative of A1 to A9, with two findings of its own:
+- **Item 12 passes if section 3c is omitted entirely.** It asserts only that each boot exits 0, and the spec says so outright ("there is nothing else to assert, because 3c creates no object whose kind can be wrong"). That is not a regression pin. It must assert the exported `CODEX_HOME` value, that `${DATA_DIR}/codex` is a real directory and bobi-owned, and that both hold across a brain switch.
+- **No item asserts the outcome post.** Section 3's step 6 posts the outcome into the thread; item 5 pins only the device code.
+
+**Fold.** Add items for: subscribe-before-post ordering (A1), two concurrent runs (A2), planted symlinks (A3), a non-Slack destination under whatever Q5 decides (A4), an invalid and a `claude` target (A5), a revoked-but-structurally-valid credential (A6), channel and event-server outage plus stored-ask corruption (A7), the quarantine path (A8), process reaping and a post-timeout reply (A9), and the outcome post.
+Item 12 is rewritten as above.
+
+Codex **retracts** the task brief's suspicion that the shell and docker lanes are fictional: items 11, 13 and 14 are implementable with the existing bind-volume and container harness. The defect is assertion strength, not the lane.
+
+### 9.3 New questions for Zach
+
+These four are not folded, because each one changes what this spec is for rather than fixing how it works.
+Sections 1 to 8 stand as written until they are answered.
+
+**Q5. Is ask-first login Slack-only in v1 (A4)?**
+- **Option A:** declare it Slack-only, refuse a `discord` or `whatsapp` `BOBI_LOGIN_CHANNEL` with a clear error, and qualify 3.1. Z1 names Slack specifically, so this gives up nothing Z1 asked for. It does remove a path main supports today and `tests/test_auth_bootstrap.py:637-701` pins, so that test changes meaning.
+- **Option B:** make correlation source-specific. Discord needs its adapter to expose the referenced-message id; WhatsApp needs a different rule entirely. This keeps three transports and adds a per-source branch to the one filter, against the standing "no cruft" bar.
+- No recommendation. Option A is smaller and matches Z1; Option B is the only one that keeps a supported path working.
+
+**Q6. May a gateway-brained team mint a direct provider credential for a CLI tool (A5)?**
+Scoping the gateway guard to `target is None` means `login-bootstrap codex` on a Claude-gateway team runs `codex login --device-auth` straight at OpenAI, outside the gateway that team authenticates through.
+The superseded plan treated that as bypassing the gateway's audit and spend boundary.
+3.3's argument (the guard is about the *brain's* credential) is sound for the brain and silent on this.
+This is a policy call about where provider spend is allowed to originate, not a technical constraint, so it is posed rather than answered.
+Verification item 8 currently asserts the bypass as intended behaviour, so it moves with the answer.
+
+**Q7. Does a rebind path belong in v1 (A6)?**
+Without one, a machine holding a revoked or wrong-account codex credential has no recovery that does not require `fly ssh`, which Z1 says cannot be assumed.
+Section 6 currently excludes `--rebind` and new flags as cruft, and that exclusion predates A6.
+The shape, if yes: after the human's ready reply, quarantine the existing credential and start a fresh login, gated on the same human reply that already gates minting, so it adds no new trust surface.
+Posing it because it reverses a stated scope exclusion.
+
+**Q8. Fixture before merge, or keep the sweep conservative (A8)?**
+- **Option A:** obtain and sanitize a real `--device-auth` `auth.json` before merge, which makes the widened sweep safe but blocks the PR on one human login.
+- **Option B:** keep the sweep deleting only recognized API-key auth, as main does, and handle malformed credentials only through Q7's explicit rebind. Unblocks the PR and drops a capability the spec claims.
+- No recommendation; the cost is a merge delay against a destructive default on unobserved data.
+
+### 9.4 Retracted, with evidence
+
+**Codex F11's first claim, that this spec's `bobi/cli.py` citations are stale against current main: declined.**
+Appendix A already states the drift and lists the corrected mapping: `:713 -> :807`, `:714-715 -> :808-809`, `:733 -> :827`, `:737 -> :831`, `:471-482 -> :514-525`, `:1129`/`:1195` -> `:1221`/`:1265`.
+Codex's "current CLI locations" list reproduces those same seven offsets exactly, so it confirms Appendix A rather than correcting it, and codex says as much ("The CLI drift is only an offset and does not invalidate the arguments").
+The body keeps the `83bebe49` numbers deliberately, with Appendix A as the single re-basing record; that is a documented convention, not an error.
+
+Codex F11's other two claims **are** folded, as corrections to Appendix A:
+- `bobi/tool_library/gstack/guide.md:7-8` ("with its skills linked under `~/.claude/skills/` (and `~/.codex/skills/`)") is a **fourth** in-repo `~/.codex/skills` reference. The round-3 Appendix row claiming "the only `~/.codex/skills` references in the tree are gstack's installer (`tool_library/gstack/tool.yaml:33`, `:35`, `:51`)" is stale: the round-4 row and §6's scope list both already name four. The round-3 row is wrong and the round-4 row is right.
+- An entrypoint path **does** produce a root-owned `auth.json`. `materialize_codex_api_key_auth` writes the file as root (`docker/docker-entrypoint.sh:324-330`) and only chowns afterwards (`:333`), so a death between the two leaves it root-owned. Section 6's "no sub-object that stays root-owned" is about `codex` invocations and should be qualified to say so; the write-then-chown window is a state the two new `chown` lines repair, which strengthens the case for them rather than weakening it.
