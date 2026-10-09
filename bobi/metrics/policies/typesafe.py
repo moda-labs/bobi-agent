@@ -12,14 +12,16 @@ from bobi.metrics.policy import PolicyConfig, PolicyError, PolicyRequest, Policy
 class TypeSafePolicy:
     name = "typesafe-jev"
 
-    def __init__(self, config: PolicyConfig) -> None:
+    def __init__(self, config: PolicyConfig, *, api_key: str | None = None) -> None:
         options = json.loads(config.options_json)
         if set(options) - {"endpoint", "instructions", "criteria"}:
             raise ValueError("unsupported TypeSafe policy options")
         self.endpoint = options.get("endpoint", "https://api.typesafe.ai/v1/systemone")
-        if not isinstance(self.endpoint, str):
+        if not isinstance(self.endpoint, str) or any(ord(char) <= 32 or ord(char) == 127 for char in self.endpoint):
             raise ValueError("invalid TypeSafe endpoint")
         endpoint = urlsplit(self.endpoint)
+        if endpoint.port == 0:
+            raise ValueError("invalid TypeSafe endpoint port")
         if (endpoint.scheme != "https" or not endpoint.hostname or endpoint.username
                 or endpoint.password or endpoint.query or endpoint.fragment):
             raise ValueError("TypeSafe endpoint requires HTTPS without credentials")
@@ -33,23 +35,25 @@ class TypeSafePolicy:
             raise ValueError("TypeSafe requires criteria for every candidate")
         self.secret_env_names = (config.credential_env,)
         self.credential_env = config.credential_env
+        self.api_key = api_key
         if config.version in {"jev-latest", "jev-preview"}:
             raise ValueError("TypeSafe requires a pinned model version")
 
     async def decide(self, request: PolicyRequest, *, timeout_s: float) -> PolicyResult:
-        key = os.environ.get(self.credential_env, "")
+        key = self.api_key if self.api_key is not None else os.environ.get(self.credential_env, "")
         if not key:
-            raise PolicyError("policy_unavailable", authentication=True)
+            raise PolicyError("policy_unauthenticated", authentication=True)
         if timeout_s <= 0:
             raise PolicyError("policy_timeout")
         if set(request.candidate_models) != set(self.criteria):
             raise PolicyError("policy_invalid_response")
         try:
-            payload = json.dumps({
+            outgoing = {
                 "model": request.pinned_version, "state": dict(request.features),
                 "questions": {"route": {"type": "choice",
                     "instructions": self.instructions, "criteria": self.criteria}},
-            }, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            }
+            payload = json.dumps(outgoing, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
             if len(payload) > 131072:
                 raise PolicyError("policy_invalid_response")
             async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=False) as client:
@@ -58,7 +62,7 @@ class TypeSafePolicy:
                     "Content-Type": "application/json",
                 }, content=payload) as response:
                     if response.status_code in {401, 403}:
-                        raise PolicyError("policy_unavailable", authentication=True)
+                        raise PolicyError("policy_unauthenticated", authentication=True)
                     if response.status_code == 429 or response.status_code >= 500:
                         raise PolicyError("policy_unavailable")
                     if response.status_code != 200:
@@ -69,6 +73,7 @@ class TypeSafePolicy:
                             raise PolicyError("policy_invalid_response")
                         content.extend(chunk)
             raw = json.loads(content)
+            json.dumps(raw, ensure_ascii=False, allow_nan=False).encode("utf-8")
             answer = raw["answers"]["route"]
             probabilities = answer["probabilities"]
             confidence = answer["confidence"]
@@ -86,10 +91,11 @@ class TypeSafePolicy:
             usage = raw["usage"]
             if any(type(usage[name]) is not int or usage[name] < 0 for name in ("input_tokens", "output_tokens")):
                 raise PolicyError("policy_invalid_response")
-            return PolicyResult(answer["choice"], confidence, None, raw["model"], None, None)
+            return PolicyResult(answer["choice"], confidence, None, raw["model"], None, None,
+                                probabilities, raw, outgoing)
         except httpx.TimeoutException:
             raise PolicyError("policy_timeout") from None
         except httpx.HTTPError:
             raise PolicyError("policy_unavailable") from None
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, RecursionError):
             raise PolicyError("policy_invalid_response") from None

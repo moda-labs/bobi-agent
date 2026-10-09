@@ -71,6 +71,57 @@ class ExperimentConfig:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> "ExperimentConfig":
+        if "candidate_models" in raw:
+            allowed = {
+                "experiment_id", "mode", "control_model", "candidate_models", "roles",
+                "instructions", "brain", "entry_points", "min_confidence", "deadline_ms",
+                "prompt_egress", "max_prompt_bytes", "criteria", "endpoint", "policy_version",
+                "router_name", "router_version", "feature_schema_version", "cohort",
+            }
+            if set(raw) - allowed:
+                raise ValueError("unsupported experiment config fields")
+            candidates = raw["candidate_models"]
+            if (not isinstance(candidates, list) or not candidates
+                    or any(not isinstance(model, str) or not model.strip() for model in candidates)):
+                raise ValueError("candidate_models must be non-empty model names")
+            candidates = [model.strip() for model in candidates]
+            mode = raw.get("mode", "enforce")
+            control = raw.get("control_model")
+            version = raw.get("policy_version", "jev-1.13.0")
+            options = {
+                "instructions": raw.get("instructions"),
+                "criteria": raw.get("criteria", {model: f"Choose {model} when the routing instructions recommend it."
+                                                   for model in candidates}),
+            }
+            if "endpoint" in raw:
+                options["endpoint"] = raw["endpoint"]
+            raw = {
+                "experiment_id": raw.get("experiment_id", "jev-routing-v1"), "control_model": control,
+                "router_name": raw.get("router_name", "jev-router"),
+                "router_version": raw.get("router_version", "v1"),
+                "feature_schema_version": raw.get("feature_schema_version", "jev-features-v1"),
+                "policy_version": version, "cohort": raw.get("cohort"),
+                "variants": [
+                    {"variant_id": "control", "model": control, "weight": 0.0},
+                    {"variant_id": "treatment_jev", "policy": "typesafe-jev", "weight": 1.0},
+                ],
+                "policy": {
+                    "name": "typesafe-jev", "version": version,
+                    "brain": raw.get("brain", "auto"), "mode": mode,
+                    "candidate_models": candidates,
+                    "scope": {"roles": raw.get("roles", ["director", "engineer"]), "entry_points": raw.get("entry_points", [
+                        "session_start", "subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start",
+                    ])},
+                    "egress": {"prompt": raw.get("prompt_egress", "none"),
+                               "max_prompt_bytes": raw.get("max_prompt_bytes", 8192)},
+                    "credential_env": "TYPESAFE_API_KEY", "options": options,
+                    "min_confidence": raw.get("min_confidence", 0.85),
+                    "deadline_ms": raw.get("deadline_ms", 3000),
+                },
+            }
+            from bobi.metrics.policies.typesafe import TypeSafePolicy
+
+            TypeSafePolicy(PolicyConfig.from_mapping(raw["policy"]))
         allowed = {
             "experiment_id", "variants", "router_name", "router_version",
             "policy_version", "feature_schema_version", "control_model",
@@ -143,10 +194,10 @@ class ExperimentConfig:
         config = cls(
             experiment_id=required("experiment_id"),
             variants=tuple(variants),
-            router_name=required("router_name"),
-            router_version=required("router_version"),
+            router_name=required("router_name") if "router_name" in raw else "jev-router",
+            router_version=required("router_version") if "router_version" in raw else "v1",
             policy_version=required("policy_version"),
-            feature_schema_version=required("feature_schema_version"),
+            feature_schema_version=required("feature_schema_version") if "feature_schema_version" in raw else "jev-features-v1",
             control_model=required("control_model"),
             cohort=cohort.strip() if isinstance(cohort, str) else None,
             policy=policy,

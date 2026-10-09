@@ -24,6 +24,7 @@ from bobi.brain import AssistantText, TurnResult, get_brain
 from bobi.brain.base import (
     ERROR_KIND_AUTHENTICATION,
     ERROR_KIND_CREDITS_EXHAUSTED,
+    ERROR_KIND_MAX_TURNS,
 )
 from bobi.brain_availability import observe_brain_turn
 from bobi.inbox import Inbox, Message
@@ -330,6 +331,9 @@ class Session:
         self.run_key = run_key
         self.experiment_subject = experiment_subject
         self._routing = routing
+        # The policy's decision while its chosen model has not yet completed a
+        # turn: a failure in that window retries once on the control model.
+        self._route_decision = None
         # ``fresh`` skips resuming this name's saved transcript. Session names
         # are deliberately stable — they name the worktree branch
         # (orchestrator._setup_worktree) and are what the launch admission
@@ -448,6 +452,17 @@ class Session:
             result_text=self._last_response,
             api_error_status=self._last_api_error_status,
         )
+
+    def _route_to_control(self, error: str) -> bool:
+        """Switch to the control model after the policy's choice failed; log it."""
+        from bobi.metrics.routing import candidate_failed
+
+        decision, self._route_decision = self._route_decision, None
+        control = candidate_failed(decision, session_name=self.name,
+            brain=getattr(self._routing, "brain", ""), model=self._session_model(), error=error)
+        if control:
+            self._extra_options["model"] = control
+        return bool(control)
 
     def _is_transient_turn_error(self) -> bool:
         """Whether the last turn's error is worth retrying.
@@ -1350,6 +1365,20 @@ class Session:
                 await self._client.query(msg.text)
                 response = await self._drain_turn()
 
+            if (self._last_is_error and self._route_decision is not None
+                    and self._state == "waiting_input"
+                    and self._last_error_kind != ERROR_KIND_MAX_TURNS
+                    and self._route_to_control(self.last_error())):
+                # The policy's model failed its first turn: rerun it once on the
+                # control model in a fresh session instead of failing the event.
+                await self._safe_disconnect(self._client)
+                self._client = self._make_brain_session(resume=None)
+                await self._client.connect()
+                await self._client.query(msg.text)
+                response = await self._drain_turn()
+            if response is not None:
+                self._route_decision = None
+
             if response is None:
                 log.error(
                     "Inbox message %s for '%s' did not reach a terminal result; "
@@ -1601,6 +1630,7 @@ class Session:
                 self._extra_options["model"] = outcome.model
             else:
                 self._extra_options.pop("model", None)
+            self._route_decision = outcome.decision
         saved_id = (
             "" if self._fresh
             else load_resumable_session_id(self.name, self._session_model())
@@ -1615,6 +1645,10 @@ class Session:
             if resume_id:
                 log.warning(f"Resume failed for '{self.name}', retrying fresh: {e}")
                 save_session_id(self.name, "", preserve_route=True)
+                self._client = self._make_brain_session(resume=None)
+                await self._client.connect()
+            elif self._route_to_control(f"{type(e).__name__}: {e}"):
+                # The policy's model could not start; the control model runs instead.
                 self._client = self._make_brain_session(resume=None)
                 await self._client.connect()
             else:

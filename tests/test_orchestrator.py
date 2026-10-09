@@ -876,6 +876,49 @@ class TestRunWorkflow:
         assert len(route_calls) == 1
         assert len(calls) == 1 and calls[0]["options"]["model"] == "cheap"
 
+    @pytest.mark.parametrize("failure", ["connect", "turn"])
+    def test_failed_policy_model_reruns_the_first_step_on_control(self, monkeypatch, failure):
+        from dataclasses import replace
+        from bobi.brain import TurnResult
+        from bobi.metrics.routing import RouteOutcome
+        from tests.metrics.helpers import decision
+
+        calls, incidents = [], []
+
+        class Client(FakeBrainClient):
+            def __init__(self, model):
+                super().__init__()
+                self.model = model
+            async def connect(self):
+                if failure == "connect" and self.model == "cheap":
+                    raise RuntimeError("unknown model cheap")
+                self.connected = True
+            async def receive_response(self):
+                if failure == "turn" and self.model == "cheap":
+                    yield TurnResult(session_id="s", is_error=True, error_message="model cheap is not available")
+                    return
+                async for message in FakeBrainClient.receive_response(self):
+                    yield message
+
+        class Brain:
+            def make_session(self, **kwargs):
+                calls.append(kwargs["options"]["model"])
+                return Client(kwargs["options"]["model"])
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: Brain())
+        async def route(ctx):
+            return RouteOutcome("cheap", replace(decision(), model_selected="cheap", control_model="control"))
+        monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+        monkeypatch.setattr("bobi.metrics.routing.log_routing_incident",
+                            lambda record, root=None: incidents.append(record))
+        wf = Workflow(name="t", steps=[
+            StepDef(name="discover", prompt="discover", agent="engineer"),
+            StepDef(name="build", prompt="build", agent="engineer"),
+        ])
+        # The policy's model failed; the run finished on the control model, later steps included.
+        assert self._mock_asyncio_run(wf, task="t", repo="r", cwd="/tmp", run_key="run-1")
+        assert calls == ["cheap", "control"]
+        assert [(item["attempted_model"], item["fallback_model"]) for item in incidents] == [("cheap", "control")]
+
     @pytest.mark.parametrize("explicit_model", ["", "operator-model"])
     def test_static_policy_workflow_reaches_brain_with_routed_model(self, tmp_path, monkeypatch, explicit_model):
         from bobi.metrics.runtime import MetricsRuntime

@@ -28,6 +28,7 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
 from bobi.brain.turns import drain_turn
+from bobi.metrics.routing import NO_MODEL_FALLBACK_KINDS
 from bobi.metrics.runtime import TurnObservation, observe_turn
 from bobi.subagent import _emit_lifecycle_event
 from bobi.timeutil import now_iso
@@ -803,6 +804,9 @@ async def _run_workflow_async(
     first_prompt_step = _first_prompt_step()
     first_prompt_model = _effective_step_model(first_prompt_step)
     routed_model = None
+    # The policy's decision until its model completes the first prompt step: a
+    # failure before then reruns once on the control model (candidate_failed).
+    route_decision = None
     route_record = None
     if first_prompt_step is not None:
         from bobi.brain import normalize_brain_kind, session_brain_label
@@ -824,6 +828,7 @@ async def _run_workflow_async(
         if outcome.decision is not None or outcome.reason is not None:
             routed_model = outcome.model
             first_prompt_model = outcome.model
+        route_decision = outcome.decision
         if outcome.decision is not None:
             route_record = {"brain": session_brain_label(), "decision": asdict(outcome.decision)}
             ctx.set_scope("_runtime", {
@@ -845,6 +850,7 @@ async def _run_workflow_async(
                         run_key=run_key, workflow_name=workflow.name):
                     runtime.discard_route(session_name)
                 first_prompt_model = routed_model
+                route_decision = None
                 route_record = None
                 ctx.set_scope("_runtime", {
                     **(ctx.scopes.get("_runtime", {}) or {}),
@@ -926,6 +932,20 @@ async def _run_workflow_async(
     # next step prompt. Set at session open and on any fresh mid-run rebuild.
     context_pending = False
 
+    def _route_to_control(error: str) -> bool:
+        """Switch the run to the control model after the policy's choice failed; log it."""
+        nonlocal current_model, routed_model, route_decision
+        from bobi.metrics.routing import candidate_failed
+
+        decision, route_decision = route_decision, None
+        if routed_model is None or current_model != routed_model:
+            return False
+        control = candidate_failed(decision, session_name=session_name,
+                                   brain=routing_context.brain, model=current_model, error=error)
+        if control:
+            routed_model = current_model = control
+        return bool(control)
+
     async def _open_session() -> bool:
         """Open the run's session: native resume when the saved transcript is
         usable, else fresh. Returns True when the transcript was resumed.
@@ -935,7 +955,7 @@ async def _run_workflow_async(
         now, so a construction failure cannot escape the terminal-honesty
         finally).
         """
-        nonlocal client, saved_id
+        nonlocal client, saved_id, current_model, routed_model, route_decision
         for attempt in range(2):
             resume_id = (saved_id or None) if attempt == 0 else None
             c = _make_session(
@@ -955,7 +975,14 @@ async def _run_workflow_async(
                     except Exception:
                         pass
                     continue
-                raise
+                if not _route_to_control(f"{type(e).__name__}: {e}"):
+                    raise
+                # The policy's model could not start: open the control model instead.
+                c = _make_session(
+                    None, agent_name=current_agent, model=current_model,
+                    effort=current_effort, max_turns=current_max_turns,
+                )
+                await c.connect()
             client = c
             return bool(resume_id)
         raise RuntimeError("session open fell through both attempts")
@@ -1407,6 +1434,37 @@ async def _run_workflow_async(
                     telemetry_context=telemetry_context,
                     observation=turn_observation,
                 )
+
+            if (drain.final_text is None and route_decision is not None
+                    and drain.error_kind not in NO_MODEL_FALLBACK_KINDS
+                    and _route_to_control(drain.error)):
+                # The policy's model failed the first prompt step: rerun the
+                # step once on the control model in a fresh session.
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                client = _make_session(
+                    None, agent_name=current_agent, model=current_model,
+                    effort=current_effort, max_turns=current_max_turns,
+                )
+                await client.connect()
+                telemetry_context["prompt_bytes"] = len(prompt.encode("utf-8"))
+                turn_observation = observe_turn(
+                    session_name,
+                    provider=getattr(client, "provider", "anthropic"),
+                    model_requested=current_model,
+                    **telemetry_context,
+                )
+                await client.query(prompt)
+                drain = await _drain_response(
+                    client,
+                    session_name,
+                    model=current_model,
+                    telemetry_context=telemetry_context,
+                    observation=turn_observation,
+                )
+            route_decision = None
 
             if drain.final_text is None:
                 step_observation.finish(

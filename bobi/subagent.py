@@ -28,7 +28,7 @@ from bobi.sdk import (
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
 from bobi.brain import normalize_brain_kind, session_brain_label
-from bobi.metrics.routing import RoutingContext, resolve_route
+from bobi.metrics.routing import NO_MODEL_FALLBACK_KINDS, RoutingContext, candidate_failed, resolve_route
 from bobi.brain.turns import drain_turn, timeout_error, tool_crash_error
 from bobi.transient import is_transient_api_error
 from bobi.env import (
@@ -414,11 +414,15 @@ async def _run_agent_supervised(
     model = _resolve_launch_model(role, cfg=_cfg)
     effort = _resolve_launch_effort(role, cfg=_cfg)
     max_turns = _resolve_launch_max_turns(role, explicit=max_turns, cfg=_cfg)
+    routing_brain = normalize_brain_kind(session_brain_label())
     outcome = await resolve_route(RoutingContext(
-        name, "subagent_supervised", normalize_brain_kind(session_brain_label()),
+        name, "subagent_supervised", routing_brain,
         model, False, prompt, role, fresh, repo_path=cwd, run_key=run_key, phase=phase,
     ))
     model = outcome.model
+    # Pending until the policy's model completes a turn; a failure before then
+    # retries once on the control model (bobi.metrics.routing.candidate_failed).
+    route_decision = outcome.decision
     saved_id = "" if fresh else load_resumable_session_id(name, model)
     registry = get_registry()
 
@@ -469,22 +473,31 @@ async def _run_agent_supervised(
                 await client.connect()
             except Exception as e:
                 if not saved_id:
-                    raise
-                # Stale/unresumable saved session: clear it and retry fresh once,
-                # matching Session._run and the workflow orchestrator. Without
-                # this, a bad token fails every subsequent monitor interval.
-                log.warning(
-                    "Resume failed for '%s' (stale session?), retrying fresh: %s",
-                    name, e,
-                )
-                save_session_id(name, "", preserve_route=True)
-                saved_id = ""
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                client = _build_client("")
-                await client.connect()
+                    # The policy's model could not start: run the control model instead.
+                    control = candidate_failed(route_decision, session_name=name, brain=routing_brain,
+                                               model=model, error=f"{type(e).__name__}: {e}")
+                    if not control:
+                        raise
+                    route_decision = None
+                    model = control
+                    client = _build_client("")
+                    await client.connect()
+                else:
+                    # Stale/unresumable saved session: clear it and retry fresh once,
+                    # matching Session._run and the workflow orchestrator. Without
+                    # this, a bad token fails every subsequent monitor interval.
+                    log.warning(
+                        "Resume failed for '%s' (stale session?), retrying fresh: %s",
+                        name, e,
+                    )
+                    save_session_id(name, "", preserve_route=True)
+                    saved_id = ""
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    client = _build_client("")
+                    await client.connect()
             # The task is turn 1, explicitly — connect() is never a turn
             # (#1016). Fresh and resumed sessions now take one identical path.
             from bobi.metrics.runtime import observe_turn
@@ -523,6 +536,35 @@ async def _run_agent_supervised(
                     _persist_terminal(registry, name, terminal,
                                       error=result.error, phase=phase)
                     return result
+
+                if (result_msg.is_error and route_decision is not None
+                        and result_msg.error_kind not in NO_MODEL_FALLBACK_KINDS):
+                    # The policy's model failed its first turn: rerun the task
+                    # once on the control model in a fresh session.
+                    control = candidate_failed(route_decision, session_name=name, brain=routing_brain,
+                                               model=model, error=result_msg.error_text())
+                    route_decision = None
+                    if control:
+                        model = control
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+                        client = _build_client("")
+                        await client.connect()
+                        turn_observation = observe_turn(
+                            name,
+                            provider=getattr(client, "provider", "anthropic"),
+                            role=role,
+                            run_key=run_key,
+                            trigger_kind="supervised",
+                            trigger_id=phase,
+                            model_requested=model,
+                            prompt_bytes=len(prompt.encode("utf-8")),
+                        )
+                        await client.query(prompt)
+                        continue
+                route_decision = None
 
                 result.session_id = result_msg.session_id
                 result.duration_ms += result_msg.duration_ms

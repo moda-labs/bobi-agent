@@ -93,7 +93,7 @@ earlier per-turn draft of this file.
 | D4 | Eligibility is decided **before** assignment. Sessions with an explicit model, no routing input, an out-of-scope role or entry point, a non-matching brain, or a pre-existing transcript are not enrolled and produce no router decision. |
 | D5 | `router_score` keeps its meaning (the HMAC bucket). Everything the policy returns lives under `metadata_json.policy`. The schema needs no new columns. |
 | D6 | Policies plug in through a generic `ModelPolicy` protocol and a name registry. The TypeSafe adapter is an optional extra. `bobi/` stays vendor-neutral. |
-| D7 | A process-wide circuit breaker (closed / open / half-open) protects every policy call. Any failure falls back to `control_model` and is recorded. The session never fails because of routing. |
+| D7 | A process-wide circuit breaker (closed / open / half-open) protects every policy call. Any policy-call failure falls back to `control_model` and is recorded; failures before a decision run the configured model and are recorded as session-level reasons (§11). The session never fails because of routing. |
 | D8 | Sending prompt text to the policy is opt-in, redacted, and size-capped. The control arm never sends anything. The policy's free-text reason is not stored by default. |
 | D9 | Decisions are sticky. A resumed session or suspended workflow reuses its recorded decision instead of routing again. |
 | D10 | Rollout starts in `shadow` mode: the policy is called and recorded, but the control model executes. `enforce` is a later config change, not a code change. |
@@ -243,7 +243,7 @@ not bias the arm comparison.
 |---|---|---|
 | 1 | Metrics disabled, no experiment loaded, or producer not started | Existing fail-open contract |
 | 2 | `ctx.explicit_model` | An operator's explicit choice always wins |
-| 3 | Active brain `!= policy.brain` | Candidate models are brain-specific |
+| 3 | `policy.brain` is not `auto` and differs from the active brain | Candidate models are brain-specific. Recorded as `routing_brain_mismatch` because the policy can never route this agent |
 | 4 | `ctx.entry_point` or `ctx.role` not in `policy.scope` | Enrollment is an allowlist |
 | 5 | `ctx.prompt` is empty after stripping | No routing input |
 | 6 | Not `fresh`, a saved session id exists, and no matching sticky record | A pre-existing transcript; routing it could force a fresh start |
@@ -342,8 +342,10 @@ contribute recommendation or cost metadata, including on version drift.
 
 1. `result.model` is in `policy.candidate_models`, else
    `policy_invalid_response`.
-2. `result.model_version == policy.version`, else `policy_version_drift`. A
-   server-side model change mid-experiment is a confound, not a detail.
+2. `result.model_version` is on the pinned release line, else
+   `policy_version_drift`. A patch bump or build suffix (`jev-1.13.2`,
+   `jev-1.13.0+b7` against `jev-1.13.0`) matches; a minor or major change is
+   a server-side model change mid-experiment, a confound, not a detail.
 3. `confidence >= policy.min_confidence` (default 0.85), else
    `policy_low_confidence`.
 4. `policy.mode == "shadow"`: execute `control_model`, record the
@@ -561,12 +563,23 @@ arm under intent-to-treat.
 | `fallback_reason` | Cause |
 |---|---|
 | `policy_timeout` | Deadline exceeded, including semaphore wait |
-| `policy_unavailable` | Transport error, HTTP 5xx/429, auth failure |
+| `policy_unavailable` | Transport error, HTTP 5xx/429 |
+| `policy_unauthenticated` | Credential missing, or HTTP 401/403. Opens the breaker for 600 seconds |
 | `policy_circuit_open` | Breaker open, or half-open with a probe already in flight |
 | `policy_invalid_response` | Malformed response, or model not in candidates |
 | `policy_version_drift` | Answered by a model version other than the pinned one |
 | `policy_low_confidence` | Confidence below `min_confidence` |
-| `admission_rejected` | Producer queue refused the admission. The session is **not enrolled**, which is the existing rule. |
+| `admission_rejected` | Producer queue refused the admission. The session is **not enrolled**, which is the existing rule. The store refused the record, so the reason is written to the `jev_routing_fallback` log only. |
+
+These session-level reasons run the agent's **configured model** (no decision
+is made) and are recorded in the session's `router_fallback` metadata:
+
+| `fallback_reason` | Cause |
+|---|---|
+| `routing_brain_mismatch` | The policy is pinned to a different brain than the agent runs |
+| `routing_sticky_stale` | A resumed session's saved route is missing or no longer matches the policy |
+| `routing_sticky_invalid` | Reading or validating the saved route raised an error |
+| `routing_config_missing`, `routing_config_invalid`, `routing_assignment_secret_missing`, `routing_policy_unavailable`, `routing_metrics_unavailable`, `routing_unavailable` | Configuration or runtime failures before a decision |
 | `preconfigured_client_model` | Legacy value from the per-turn path. Kept for reading old data; no longer written. |
 
 ## 12. Analysis

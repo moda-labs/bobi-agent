@@ -9,6 +9,7 @@ import os
 import re
 import time
 
+from bobi.brain.base import ERROR_KIND_AUTHENTICATION, ERROR_KIND_CREDITS_EXHAUSTED, ERROR_KIND_MAX_TURNS
 from bobi.metrics.events import uuid7
 from bobi.metrics.features import build_features, prepare_task
 from bobi.metrics.policy import PolicyRequest, call_policy, load_policy, policy_breaker
@@ -20,6 +21,48 @@ from bobi.metrics.runtime import MetricsRuntime, get_runtime
 from bobi.sdk import load_session_brain, load_session_id, load_session_model, load_session_route, save_session_route
 
 log = logging.getLogger(__name__)
+
+FALLBACK_LOG_NAME = "jev_routing_fallback.log"
+
+# Turn failures that are not the model's fault: the control model would fail the same way.
+NO_MODEL_FALLBACK_KINDS = (ERROR_KIND_AUTHENTICATION, ERROR_KIND_CREDITS_EXHAUSTED, ERROR_KIND_MAX_TURNS)
+
+
+def log_routing_incident(record: dict[str, object], root=None) -> None:
+    """Write one routing fallback to the agent log and its dedicated file.
+
+    ``state/jev_routing_fallback.log`` holds one JSON object per line, so an
+    operator can read every fallback without searching the manager log."""
+    line = json.dumps(record, sort_keys=True, ensure_ascii=True)
+    log.warning("metrics: %s", line, extra=dict(record))
+    try:
+        from bobi import paths
+        from bobi.logs import stamped
+
+        with open(paths.state_dir(root) / FALLBACK_LOG_NAME, "a", encoding="utf-8") as handle:
+            handle.write(stamped("WARNING", line) + "\n")
+    except OSError as exc:
+        log.debug("metrics: routing fallback log unavailable (%s)", type(exc).__name__)
+
+
+def candidate_failed(decision: RouterDecision | None, *, session_name: str, brain: str,
+                     model: str, error: str, root=None) -> str | None:
+    """The control model to retry on when a policy-chosen model failed, else None.
+
+    Only a session the policy moved off its control model qualifies; the
+    incident (attempted model, brain, provider, error, fallback) is logged."""
+    if decision is None or not decision.control_model or not model or model == decision.control_model:
+        return None
+    from bobi.costs import model_provider
+    from bobi.redact import redact_secrets
+
+    log_routing_incident({
+        "event": "jev_candidate_failed", "session": session_name, "attempted_model": model,
+        "brain": brain, "provider": model_provider(model) or "unknown",
+        "error": redact_secrets(str(error or "unknown error"))[0][:500],
+        "fallback_model": decision.control_model,
+    }, root)
+    return decision.control_model
 
 @dataclass(frozen=True)
 class RoutingContext:
@@ -49,6 +92,29 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
                         sticky_record: dict[str, object] | None = None) -> RouteOutcome:
     fallback = RouteOutcome(ctx.configured_model)
     stage = "runtime"
+
+    def recorded_fallback(reason: str, error_kind: str = "") -> RouteOutcome:
+        """Run the configured model and record why routing did not decide."""
+        log_routing_incident({"event": "jev_routing_fallback", "session": ctx.session_name,
+                              "fallback_reason": reason, "error_kind": error_kind},
+                             runtime.root if runtime is not None else None)
+        if runtime is not None:
+            try:
+                runtime.admit_route(ctx.session_name, None, brain=ctx.brain,
+                    role=ctx.role, run_key=ctx.run_key, workflow_name=ctx.workflow_name,
+                    fallback_reason=reason, error_kind=error_kind)
+            except Exception as recording_error:
+                log.warning("metrics: routing fallback recording failed (%s)", type(recording_error).__name__)
+        return RouteOutcome(ctx.configured_model, reason=reason)
+
+    def admission_rejected(model: str) -> RouteOutcome:
+        # The store refused the session record (turns already ran or the spool is
+        # full), so the reason can only go to the log.
+        log_routing_incident({"event": "jev_routing_fallback", "session": ctx.session_name,
+                              "fallback_reason": "admission_rejected", "error_kind": ""},
+                             runtime.root if runtime is not None else None)
+        return RouteOutcome(model, reason="admission_rejected")
+
     try:
         runtime = runtime or get_runtime()
         if ctx.explicit_model:
@@ -69,11 +135,14 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         fingerprint = hashlib.sha256(json.dumps(public_config(config), sort_keys=True,
                                                 separators=(",", ":")).encode()).hexdigest()
         policy_config = config.policy
-        if policy_config and (ctx.brain != policy_config.brain
-                or ctx.entry_point not in policy_config.entry_points or ctx.role not in policy_config.roles):
+        if policy_config and policy_config.brain not in ("auto", ctx.brain):
+            # A policy pinned to another brain can never route this agent; say so.
+            return recorded_fallback("routing_brain_mismatch")
+        if policy_config and (ctx.entry_point not in policy_config.entry_points or ctx.role not in policy_config.roles):
             return fallback
         saved_id = load_session_id(ctx.session_name, root=runtime.root)
         if not ctx.fresh and (saved_id or sticky_record):
+            stage = "sticky"
             from bobi.brain import session_brain_label
 
             provenance = session_brain_label()
@@ -88,20 +157,20 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
                     raw["expected_weights"] = tuple(tuple(item) for item in raw["expected_weights"])
                     decision = RouterDecision(**raw)
                     if saved_id and load_session_model(ctx.session_name, root=runtime.root) != decision.model_selected:
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     if (decision.assignment_unit not in {"experiment_subject", "run_key", "session_id"}
                             or not isinstance(decision.assignment_key_hash, str)
                             or not re.fullmatch(r"[0-9a-f]{64}", decision.assignment_key_hash)):
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     if (type(decision.decided_at_us) is not int or decision.decided_at_us <= 0
                             or isinstance(decision.router_latency_ms, bool)
                             or not isinstance(decision.router_latency_ms, (int, float))
                             or not math.isfinite(decision.router_latency_ms)
                             or decision.router_latency_ms < 0):
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     models = set(policy_config.candidate_models) if policy_config else {item.model for item in config.variants}
                     if decision.model_selected not in models or decision.variant_id not in {item.variant_id for item in config.variants}:
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     variant = next(item for item in config.variants if item.variant_id == decision.variant_id)
                     expected_candidates = policy_config.candidate_models if policy_config else tuple(
                         dict.fromkeys(item.model for item in config.variants if item.model))
@@ -109,7 +178,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
                             or decision.candidate_models != expected_candidates
                             or decision.router_reason not in {"control_arm", "fixed_arm", "policy_fallback", "policy_shadow", "policy_selected"}
                             or decision.fallback_reason not in {None, "policy_timeout", "policy_unavailable",
-                                "policy_circuit_open", "policy_invalid_response", "policy_version_drift",
+                                "policy_circuit_open", "policy_invalid_response", "policy_version_drift", "policy_unauthenticated",
                                 "policy_low_confidence", "route_persistence_failed"}
                             or decision.assignment_algorithm != ASSIGNMENT_ALGORITHM
                             or decision.router_name != config.router_name
@@ -124,38 +193,38 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
                             or (variant.policy and policy_config and policy_config.mode == "shadow"
                                 and decision.model_selected != config.control_model)
                             or (decision.fallback_reason and decision.model_selected != config.control_model)):
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     metadata = json.loads(decision.policy_metadata_json)
                     if not isinstance(metadata, dict):
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     if policy_config and any(metadata.get(name) != expected for name, expected in {
                         "name": policy_config.name, "version": policy_config.version,
                         "mode": policy_config.mode, "egress": policy_config.prompt_egress,
                     }.items()):
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     recommendation = metadata.get("recommended_model")
                     if recommendation is not None and recommendation not in models:
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     tier = metadata.get("tier")
                     if tier is not None and (not isinstance(tier, str)
                             or not re.fullmatch(r"[a-z0-9_]{1,64}", tier)):
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     if metadata.get("breaker_state") not in {None, "closed", "open", "half-open"}:
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     redactions = metadata.get("redactions")
                     if redactions is not None and (type(redactions) is not int or redactions < 0):
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     call_id = metadata.get("call_id")
                     if call_id is not None and (not isinstance(call_id, str)
                             or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", call_id)):
-                        return fallback
+                        return recorded_fallback("routing_sticky_stale")
                     for name in ("confidence", "cost_usd", "latency_ms"):
                         value = metadata.get(name)
                         if value is not None and (isinstance(value, bool)
                                 or not isinstance(value, (int, float))
                                 or not math.isfinite(value) or value < 0
                                 or (name == "confidence" and value > 1)):
-                            return fallback
+                            return recorded_fallback("routing_sticky_stale")
                     metadata = {name: value for name, value in metadata.items() if name in {
                         "status", "name", "version", "mode", "egress", "call_id",
                         "latency_ms", "breaker_state", "redactions", "recommended_model",
@@ -171,8 +240,8 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
                     if runtime.admit_route(ctx.session_name, decision, brain=ctx.brain,
                             role=ctx.role, run_key=ctx.run_key, workflow_name=ctx.workflow_name):
                         return RouteOutcome(decision.model_selected, decision)
-                    return RouteOutcome(decision.model_selected, reason="admission_rejected")
-            return fallback
+                    return admission_rejected(decision.model_selected)
+            return recorded_fallback("routing_sticky_stale")
         if not ctx.prompt.strip() or (not ctx.fresh and ctx.existing_transcript):
             return fallback
         stage = "policy"
@@ -235,7 +304,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         )
         if not runtime.admit_route(ctx.session_name, decision, brain=ctx.brain,
                 role=ctx.role, run_key=ctx.run_key, workflow_name=ctx.workflow_name):
-            return RouteOutcome(config.control_model, reason="admission_rejected")
+            return admission_rejected(config.control_model)
         if ctx.entry_point == "workflow_start":
             return RouteOutcome(model, decision)
         from bobi.brain import session_brain_label
@@ -261,13 +330,6 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             reason = "routing_config_missing"
         elif stage == "metrics":
             reason = "routing_metrics_unavailable"
-        metadata = {"event": "jev_routing_fallback", "fallback_reason": reason, "error_kind": type(exc).__name__}
-        log.warning("metrics: %s", json.dumps(metadata, sort_keys=True), extra=metadata)
-        if runtime is not None:
-            try:
-                runtime.admit_route(ctx.session_name, None, brain=ctx.brain,
-                    role=ctx.role, run_key=ctx.run_key, workflow_name=ctx.workflow_name,
-                    fallback_reason=reason, error_kind=type(exc).__name__)
-            except Exception as recording_error:
-                log.warning("metrics: routing fallback recording failed (%s)", type(recording_error).__name__)
-        return RouteOutcome(ctx.configured_model, reason=reason)
+        elif stage == "sticky":
+            reason = "routing_sticky_invalid"
+        return recorded_fallback(reason, type(exc).__name__)

@@ -81,7 +81,8 @@ class PolicyConfig:
         if mode not in ("shadow", "enforce"):
             raise ValueError("invalid policy mode")
         brain = text("brain")
-        if brain not in ("claude", "codex"):
+        # "auto" routes for whichever brain the agent runs.
+        if brain not in ("auto", "claude", "codex"):
             raise ValueError("invalid policy brain")
         credential_env = text("credential_env")
         if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", credential_env):
@@ -161,6 +162,9 @@ class PolicyResult:
     model_version: str
     reason_text: str | None
     cost_usd: float | None
+    probabilities: Mapping[str, float] | None = None
+    raw_response: Mapping[str, object] | None = None
+    outgoing_payload: Mapping[str, object] | None = None
 
 
 class ModelPolicy(Protocol):
@@ -242,11 +246,27 @@ def guard_result(result: PolicyResult, config: PolicyConfig) -> str | None:
         or not math.isfinite(result.cost_usd) or result.cost_usd < 0
     ):
         return "policy_invalid_response"
-    if result.model_version != config.version:
+    if not version_matches(result.model_version, config.version):
         return "policy_version_drift"
     if confidence < config.min_confidence:
         return "policy_low_confidence"
     return None
+
+def _release(version: str) -> tuple[str, str, str] | None:
+    match = re.fullmatch(r"(.*?)(\d+)\.(\d+)(?:\.\d+)?(?:[-+].*)?", version)
+    return match.groups() if match else None
+
+
+def version_matches(returned: str, pinned: str) -> bool:
+    """True when the policy answered with the pinned release line.
+
+    A patch bump or build suffix (``jev-1.13.2``, ``jev-1.13.0+b7`` against
+    ``jev-1.13.0``) is the same model; a minor or major change is drift."""
+    if returned == pinned:
+        return True
+    ours, theirs = _release(pinned), _release(returned)
+    return ours is not None and ours == theirs
+
 
 class CircuitBreaker:
     def __init__(self, *, clock=time.monotonic) -> None:
@@ -362,10 +382,11 @@ async def call_policy(policy: ModelPolicy, request: PolicyRequest, config: Polic
         failure = "policy_timeout"
         return None, failure
     except PolicyError as exc:
-        failure = exc.reason if isinstance(exc.reason, str) and exc.reason in {
+        authentication = exc.authentication is True
+        # A missing or rejected credential is not an outage: name it so the operator fixes the key.
+        failure = "policy_unauthenticated" if authentication else exc.reason if isinstance(exc.reason, str) and exc.reason in {
             "policy_timeout", "policy_unavailable", "policy_invalid_response",
         } else "policy_unavailable"
-        authentication = exc.authentication is True
         return None, failure
     except asyncio.CancelledError:
         cancelled = True

@@ -52,6 +52,69 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tests.metrics.helpers import assignment_vectors, configured, context, decision
 
+def concise_config():
+    return {"experiment_id": "exp_deepseek_v1", "mode": "enforce",
+            "control_model": "ds/deepseek-flash",
+            "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
+            "roles": ["director", "engineer"],
+            "instructions": "Route coding & complex logic to Pro; trivial queries to Flash."}
+
+def test_minimal_jev_config_has_stable_defaults_and_legacy_fingerprint():
+    raw = {key: concise_config()[key] for key in ("control_model", "candidate_models", "instructions")}
+    config = ExperimentConfig.from_mapping(raw)
+    assert config.experiment_id == "jev-routing-v1"
+    assert config.policy.roles == ("director", "engineer")
+    assert config.policy.mode == "enforce" and config.policy.prompt_egress == "none"
+    assert config == ExperimentConfig.from_mapping(dict(reversed(list(raw.items()))))
+    assert public_config(config) == public_config(ExperimentConfig.from_mapping(public_config(config)))
+    assert assign_variant(config, b"test-secret", assignment_unit="session_id", assignment_key="stable") == assign_variant(
+        ExperimentConfig.from_mapping(raw), b"test-secret", assignment_unit="session_id", assignment_key="stable")
+    for field, value in (("experiment_id", "explicit"), ("router_name", "custom"),
+                         ("router_version", "v7"), ("feature_schema_version", "features-v2")):
+        assert getattr(ExperimentConfig.from_mapping({**raw, field: value}), field) == value
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_concise_jev_config_compiles_to_the_legacy_contract(mode):
+    raw = {**concise_config(), "mode": mode}
+    config = ExperimentConfig.from_mapping(raw)
+    assert (config.router_name, config.router_version, config.feature_schema_version) == (
+        "jev-router", "v1", "jev-features-v1")
+    assert config.policy.mode == mode
+    assert config.policy.version == "jev-1.13.0"
+    assert config.policy.prompt_egress == "none"
+    assert config.policy.brain == "auto"
+    assert config.variants[1].policy == "typesafe-jev" and config.variants[1].weight == 1
+    assert "session_start" in config.policy.entry_points
+    assert json.loads(config.policy.options_json)["instructions"] == raw["instructions"]
+    assert ExperimentConfig.from_mapping(public_config(config)) == config
+    TypeSafePolicy(config.policy)
+    loaded, secret = load_experiment({"BOBI_METRICS_EXPERIMENT_JSON": json.dumps(raw),
+        "BOBI_METRICS_ASSIGNMENT_SECRET": "private-assignment"})
+    assert loaded == config and secret == b"private-assignment"
+
+@pytest.mark.parametrize("field,value", [
+    ("mode", "typo"), ("candidate_models", []), ("candidate_models", "flash"),
+    ("candidate_models", [False]), ("candidate_models", ["ds/deepseek-flash", "ds/deepseek-flash"]),
+    ("control_model", "unknown"), ("roles", []), ("instructions", ""),
+    ("criteria", {"ds/deepseek-flash": "only one"}), ("endpoint", "http://localhost"),
+    ("policy_version", "jev-latest"), ("prompt_egress", "raw"),
+    ("variants", []), ("policy", {}), ("options_json", "{}"),
+    ("experiment_id", None), ("experiment_id", ""), ("roles", None),
+    ("router_name", None), ("router_version", ""), ("feature_schema_version", False),
+])
+def test_concise_jev_config_rejects_invalid_or_mixed_schemas(field, value):
+    with pytest.raises(ValueError):
+        ExperimentConfig.from_mapping({**concise_config(), field: value})
+
+def test_legacy_telemetry_headers_have_defaults_without_changing_explicit_values():
+    raw = policy_config()
+    original = ExperimentConfig.from_mapping(raw)
+    for field in ("router_name", "router_version", "feature_schema_version"):
+        raw.pop(field)
+    defaulted = ExperimentConfig.from_mapping(raw)
+    assert defaulted.router_name == "jev-router" and defaulted.router_version == "v1"
+    assert defaulted.policy == original.policy and defaulted.variants == original.variants
+
 
 def test_shared_redaction_preserves_setup_import():
     assert setup_redact is redact_secrets
@@ -475,7 +538,7 @@ def test_auth_errors_open_breaker_without_exposing_error_text():
         async def decide(self, request, *, timeout_s):
             raise PolicyError("policy_unavailable", authentication=True)
     breaker = CircuitBreaker()
-    assert asyncio.run(call_policy(Policy(), request(), policy_runtime_config(), breaker=breaker)) == (None, "policy_unavailable")
+    assert asyncio.run(call_policy(Policy(), request(), policy_runtime_config(), breaker=breaker)) == (None, "policy_unauthenticated")
     assert breaker.health()["state"] == "open"
 
 
@@ -1193,8 +1256,8 @@ def fault_server():
     ("session_start", "enforce", "5xx", "policy_unavailable"),
     ("session_start", "enforce", "invalid_model", "policy_invalid_response"),
     ("session_start", "enforce", "version", "policy_version_drift"),
-    ("session_start", "enforce", "401", "policy_unavailable"),
-    ("session_start", "enforce", "403", "policy_unavailable"),
+    ("session_start", "enforce", "401", "policy_unauthenticated"),
+    ("session_start", "enforce", "403", "policy_unauthenticated"),
     ("session_start", "enforce", "429", "policy_unavailable"),
     ("session_start", "enforce", "malformed", "policy_invalid_response"),
     ("session_start", "enforce", "low_confidence", "policy_low_confidence"),
@@ -1375,7 +1438,7 @@ def test_real_wire_contract_is_one_bounded_call(monkeypatch):
 
 
 @pytest.mark.parametrize("status,reason,auth", [
-    (401, "policy_unavailable", True), (403, "policy_unavailable", True),
+    (401, "policy_unauthenticated", True), (403, "policy_unauthenticated", True),
     (429, "policy_unavailable", False), (529, "policy_unavailable", False),
     (422, "policy_invalid_response", False), (302, "policy_invalid_response", False),
 ])
@@ -1390,7 +1453,7 @@ def test_http_errors_are_redacted_and_never_retried(monkeypatch, status, reason,
     assert "private" not in str(caught.value) and len(calls) == 1
 
 
-@pytest.mark.parametrize("mutation", ["unknown", "nan", "sum", "usage", "oversized"])
+@pytest.mark.parametrize("mutation", ["unknown", "nan", "sum", "usage", "oversized", "nested", "surrogate"])
 def test_malformed_vendor_response_fails_closed(monkeypatch, mutation):
     raw = body()
     if mutation == "unknown":
@@ -1401,6 +1464,12 @@ def test_malformed_vendor_response_fails_closed(monkeypatch, mutation):
         raw["answers"]["route"]["probabilities"]["control"] = 0.5
     elif mutation == "usage":
         raw["usage"]["input_tokens"] = True
+    elif mutation == "surrogate":
+        raw["extra"] = "\ud800"
+    elif mutation == "nested":
+        with pytest.raises(PolicyError, match="policy_invalid_response"):
+            run(monkeypatch, lambda request: httpx.Response(200, content=b"[" * 2000 + b"0" + b"]" * 2000))
+        return
     else:
         raw["extra"] = "x" * 65536
     with pytest.raises(PolicyError, match="policy_invalid_response"):
@@ -1636,3 +1705,179 @@ async def test_session_explicit_model_bypasses_policy(bobi_install, monkeypatch,
     with pytest.raises(StopConstruction):
         await session._run("initial task")
     assert runtime.close(timeout=2)
+
+
+@pytest.mark.parametrize("returned,matches", [
+    ("jev-1.13.0", True), ("jev-1.13.4", True), ("jev-1.13.0+build7", True), ("jev-1.13", True),
+    ("jev-1.14.0", False), ("jev-2.13.0", False), ("other-1.13.0", False), ("jev-latest", False),
+])
+def test_policy_version_tolerates_patch_bumps_only(returned, matches):
+    from bobi.metrics.policy import version_matches
+
+    assert version_matches(returned, "jev-1.13.0") is matches
+
+
+def _recorded_fallbacks(runtime, monkeypatch):
+    recorded = []
+    admit = runtime.admit_route
+    def spy(session_name, decision, **kwargs):
+        if decision is None:
+            recorded.append(kwargs["fallback_reason"])
+        return admit(session_name, decision, **kwargs)
+    monkeypatch.setattr(runtime, "admit_route", spy)
+    return recorded
+
+
+@pytest.mark.parametrize("policy_brain,agent_brain,routed", [
+    ("auto", "codex", True), ("auto", "claude", True), ("codex", "codex", True), ("codex", "claude", False),
+])
+def test_policy_brain_auto_follows_the_agent(monkeypatch, tmp_path, policy_brain, agent_brain, routed):
+    raw = configured()
+    raw["policy"].update(brain=policy_brain, mode="enforce")
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    recorded = _recorded_fallbacks(runtime, monkeypatch)
+    try:
+        outcome = asyncio.run(resolve_route(replace(context(raw, "treatment"), brain=agent_brain), runtime=runtime))
+        if routed:
+            assert outcome.model == "cheap" and recorded == []
+        else:
+            # A policy pinned to another brain is recorded, not silently skipped.
+            assert outcome.model == "configured" and outcome.reason == "routing_brain_mismatch"
+            assert recorded == ["routing_brain_mismatch"]
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_stale_sticky_route_records_why_the_session_kept_its_model(monkeypatch, tmp_path, caplog):
+    raw = configured()
+    raw["policy"]["mode"] = "enforce"
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex-test")
+    ctx = context(raw, "treatment")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    assert asyncio.run(resolve_route(ctx, runtime=runtime)).model == "cheap"
+    save_session_id("agent", "provider-session", model="cheap", root=tmp_path)
+    assert runtime.close(timeout=2)
+    raw["policy"]["version"] = "changed"
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    recorded = _recorded_fallbacks(runtime, monkeypatch)
+    try:
+        outcome = asyncio.run(resolve_route(replace(ctx, fresh=False), runtime=runtime))
+        assert outcome.model == "configured" and outcome.reason == "routing_sticky_stale"
+        assert recorded == ["routing_sticky_stale"]
+        assert any(getattr(record, "fallback_reason", None) == "routing_sticky_stale" for record in caplog.records)
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_sticky_route_read_failure_is_not_called_a_config_error(monkeypatch, tmp_path):
+    raw = configured()
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+    save_session_id("agent", "provider-session", model="cheap", root=tmp_path)
+    def unreadable(*args, **kwargs):
+        raise ValueError("corrupt route record")
+    monkeypatch.setattr("bobi.metrics.routing.load_session_route", unreadable)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        outcome = asyncio.run(resolve_route(replace(context(raw, "treatment"), fresh=False), runtime=runtime))
+        assert outcome.model == "configured" and outcome.reason == "routing_sticky_invalid"
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_rejected_admission_is_logged_with_its_reason(monkeypatch, tmp_path, caplog):
+    raw = configured()
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
+    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    monkeypatch.setattr(runtime, "admit_route", lambda *args, **kwargs: False)
+    try:
+        outcome = asyncio.run(resolve_route(context(raw, "treatment"), runtime=runtime))
+        assert outcome.model == "control" and outcome.reason == "admission_rejected"
+        assert any(getattr(record, "fallback_reason", None) == "admission_rejected" for record in caplog.records)
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def _fallback_log(root):
+    from bobi import paths
+
+    path = paths.state_path(root) / "jev_routing_fallback.log"
+    return [json.loads(line.split(" ", 2)[2]) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+@pytest.mark.asyncio
+async def test_session_retries_on_control_when_the_routed_model_cannot_start(bobi_install, monkeypatch):
+    from bobi.metrics.routing import RouteOutcome
+
+    routed = replace(decision(), model_selected="broken-model", control_model="control")
+    context = RoutingContext("agent", "session_start", "claude", "configured", False, "", "engineer", True)
+    session = Session("agent", str(bobi_install.repo_path), fresh=True, routing=context)
+    async def route(ctx):
+        return RouteOutcome("broken-model", routed)
+    connects = []
+    class Done(Exception):
+        pass
+    class Client:
+        def __init__(self, model):
+            self.model = model
+        async def connect(self):
+            connects.append(self.model)
+            if self.model == "broken-model":
+                raise RuntimeError("model broken-model not found API_KEY=private-value")
+            raise Done
+    monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+    monkeypatch.setattr(session, "_make_brain_session", lambda resume=None: Client(session._extra_options["model"]))
+    with pytest.raises(Done):
+        await session._run(None)
+    assert connects == ["broken-model", "control"]
+    [incident] = _fallback_log(bobi_install.repo_path)
+    assert incident["event"] == "jev_candidate_failed" and incident["attempted_model"] == "broken-model"
+    assert incident["fallback_model"] == "control" and incident["brain"] == "claude"
+    assert "not found" in incident["error"] and "private-value" not in incident["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routed_model,error_kind,expected", [
+    ("broken-model", "", ["broken-model", "control"]),
+    ("control", "", ["control"]),
+    ("broken-model", "max_turns_reached", ["broken-model"]),
+])
+async def test_session_reruns_a_failed_first_turn_on_control(bobi_install, monkeypatch, routed_model, error_kind, expected):
+    from bobi.inbox import Message
+
+    session = Session("agent", str(bobi_install.repo_path), fresh=True,
+                      routing=RoutingContext("agent", "session_start", "claude", "configured", False, "", "engineer", True))
+    session._extra_options["model"] = routed_model
+    session._route_decision = replace(decision(), model_selected=routed_model, control_model="control")
+    session._set_state("waiting_input")
+    turns = []
+    class Client:
+        def __init__(self, model):
+            self.model = model
+        async def connect(self):
+            pass
+        async def query(self, text):
+            turns.append(self.model)
+    async def drain():
+        session._last_is_error = session._client.model == "broken-model" or (error_kind and routed_model == "control")
+        session._last_error_kind = error_kind if session._last_is_error else ""
+        session._last_error_message = "model not available" if session._last_is_error else ""
+        return "done"
+    async def disconnect(client):
+        pass
+    session._client = Client(routed_model)
+    monkeypatch.setattr(session, "_make_brain_session", lambda resume=None: Client(session._extra_options["model"]))
+    monkeypatch.setattr(session, "_drain_turn", drain)
+    monkeypatch.setattr(session, "_safe_disconnect", disconnect)
+    monkeypatch.setattr(session, "_is_transient_turn_error", lambda: False)
+    await session._process_message(Message(id="m1", sender="launch", text="do the task"))
+    assert turns == expected
+    assert session._route_decision is None
+    logged = [item["attempted_model"] for item in _fallback_log(bobi_install.repo_path)]
+    assert logged == (["broken-model"] if expected == ["broken-model", "control"] else [])
