@@ -693,3 +693,172 @@ Codex raises a different window that the spec is silent on. After validation pas
 
 This is a pre-existing property of the event server that this change neither introduces nor misstates, and fixing it is event-server work beyond this spec's declared surface.
 Flagging it rather than folding it: say whether it belongs in this ticket, a follow-up, or neither.
+
+## Amendment 2026-10-09: codex adversarial re-review (round 6)
+
+Insertion-only. Nothing above this line is rewritten, including the round-5 amendment.
+
+Round 6 was run by OpenAI Codex v0.144.5, model `gpt-5.6-sol`, reasoning effort high, read-only sandbox, against spec sha `99eed6ee` with read access to `origin/main` at `70db2e10`.
+It was asked to grade its own round-5 findings against the fold, attack the fold's 158 new lines, and re-check the citations.
+Verdict: REQUEST CHANGES.
+Full verbatim output: `plans/reviews/2026-10-09-952-codex-review-2.md`.
+
+Round-5 resolution, as graded and then re-verified against `70db2e10`:
+
+| Round-5 finding | Fold | Status |
+| --- | --- | --- |
+| F1 reserved topic edits | A1 | partially resolved, see B1 |
+| F2 deaf-reconnect writer | A2 | resolved |
+| F3 PUT/record crash atomicity | A3 | not resolved, see B2 |
+| F4 deployment record as liveness | A4 | resolved |
+| F5 `list` does not show routing | Q3 | not resolved, Zach's call, sharpened below |
+| F6 malformed means schema-invalid | A5 | partially resolved, see B3 |
+| F7 PUT propagation retry | A6 | resolved |
+| F8 non-atomic server replace | Q4 | not resolved, Zach's call, sharpened below |
+| F9 concurrent-add test | A7 | resolved |
+| F10 stale citations | A8 | partially resolved, see B7 |
+
+Four resolved, three partially resolved, three not resolved.
+Of the three not resolved, two were routed to Zach as Q3 and Q4 and one (F3) was folded without picking a design.
+
+Eight items below. All eight are defects, verified against `70db2e10`; none are retracted as invalid.
+One codex qualification was examined and is NOT a defect, recorded at the end.
+Line numbers in this amendment are `70db2e10` line numbers.
+
+### B1. A1's reserved-prefix rule is both incomplete and overbroad (codex F1 partial, blocker)
+
+A1 requires rejecting the four prefixes `inbox/`, `reply/`, `monitor/`, `agent/`.
+The derived layer is not describable by those prefixes, in either direction.
+
+It is incomplete because two of the three composition sites emit BOTH the source-qualified topic and the bare delivered type.
+`lifecycle_subscription_keys` returns `session.completed` and `session.failed` alongside their `agent/` forms (`bobi/events/subscriptions.py:100-105`, from `LIFECYCLE_EVENTS` at `:85`).
+`monitor_subscription_keys` does the same for every configured monitor event, so a team with `monitor/support.email` also has bare `support.email` composed (`bobi/events/subscriptions.py:127-130`).
+Both are appended into the manager's subscription list at `bobi/service.py:639-647`.
+A bare derived key IS a legal workspace entry, so an operator can `add session.completed` and later `remove session.completed`: that is a real workspace delta, it passes A1's "actually present in the workspace list" gate at `spec.md:563`, and the authoritative PUT then drops framework-owned lifecycle routing.
+A1 closes the `inbox/` path and leaves this one open.
+
+It is overbroad because `agent/` is a real event namespace and not a synonym for the two lifecycle keys.
+`agent/auto_dispatch.failed` is published by the reactor (`bobi/events/reactor.py:382`), documented as a subscribable topic (`docs/EVENT_SERVER.md:371`, `docs/MONITORS.md:256`), and already used as an `auto_dispatch` rule event in tests (`tests/test_reactor.py:554`).
+A rule cannot fire on an event the deployment does not receive, so blanket-rejecting `agent/` makes a documented topic unsubscribable and silently narrows D1's generic surface (`spec.md:34-40`) without saying so.
+`monitor/` has the same shape for any source-qualified monitor event not produced by this project's own `effective_monitors()`, though I could not name a concrete in-use example.
+
+Required change: replace the prefix rule with an ownership rule.
+Compute the derived set the manager would compose (the three sites above), and reject a workspace edit when, and only when, it would remove a key that set contains or add a key that set reserves for a different session's identity (`inbox/`, `reply/`).
+Everything else, including `agent/auto_dispatch.failed`, stays addable.
+New tests: `remove session.completed` and `remove support.email` rejected; `add agent/auto_dispatch.failed` accepted and PUT; `add inbox/<other session>` and `remove inbox/<manager>` still rejected.
+
+### B2. A3 must pick one recovery architecture (codex F3, blocker)
+
+A3 names the two shapes of a fix, a pending journal or dropping the local record for server-side read-back, and then picks neither (`spec.md:586-587`).
+Those have materially different boot, reconnect, error-reporting and cleanup semantics, so no implementer can build from the pair.
+A blocker is not closed by enumerating its candidate fixes.
+
+A3 also made its own resolution conditional on Q3, which makes a correctness blocker wait on a scope answer.
+It must not: the journal shape works whether or not Zach adds introspection.
+
+Required change: specify the journal as the design, with its on-disk shape, who writes it, who resolves it, the resolution order against the accepted record, and what happens when resolution itself fails.
+Then state separately that if Q3 is answered toward live introspection, read-back subsumes the journal's reconciliation step, and say which parts drop.
+Keep A3's two tests.
+
+### B3. A5 must state the duplicate and unknown-key policy, not require that one be stated (codex F6 partial, major)
+
+A5's required change ends "with a stated policy for duplicates and for unknown keys" (`spec.md:612`) and does not state either policy.
+Both are semantic, not cosmetic: duplicates decide what `remove` does when a topic appears twice, and unknown-key handling decides whether a typo (`subscriptions:` for `subscribe:`) fails closed or silently becomes "subscribe to nothing", which is the exact hazard A5 exists to close.
+
+Required change: state both. My recommendation is reject duplicates with the offending topic named, and reject unknown top-level keys, because this file is machine-written by the CLI and a hand edit that does not round-trip should fail loudly rather than be normalised.
+Add the two cases to A5's test list.
+
+### B4. The document now holds six contradictory instruction pairs (codex new, blocker)
+
+The spec is insertion-only across six rounds, so body text an amendment supersedes is still in the document and an implementer still reads it.
+Six pairs now conflict, and in three of them the later text does not supply a replacement:
+
+| Body says | Amendment says | Replacement given? |
+| --- | --- | --- |
+| reuse the existing parser (`spec.md:184`, `:354`) | separate strict validator (`:612`) | yes |
+| helper has no retry (`:371-373`) | helper retries once (`:624`) | yes |
+| three writers hold the lock across apply (`:280`, `:366`) | four writers (`:576`), or maybe lock only the record RMW (`:671-672`) | no |
+| missing state files select persist-only (`:308`, `:332-333`) | manager liveness selects it (`:600`) | partial, see B5 |
+| PUT then save the record (`:327`) | a journal, or drop the record (`:586-588`) | no, see B2 |
+| GET is unnecessary and out of scope (`:509-510`, `:519-521`) | GET may be required (`:676-687`) | no, Q3 |
+
+The lock row is the sharpest: A2 at `:576` requires the reconnect hook to hold the record lock across its PUT, while A9 at `:671-672` offers an architecture that stops holding that lock across any apply.
+My own two amendments contradict each other.
+The GET row is also worse than codex states: `spec.md:519` asserts "Revision 5 closes the original Q1, the read-back mechanism" while Q3 at `:676` reopens that same question.
+
+Required change: the implementing PR opens with a single rewritten design section, not a seventh amendment.
+One source-of-truth list, one writer list, one algorithm, one test plan, with the superseded body text deleted rather than layered over.
+This amendment is the last insertion-only round.
+
+### B5. A4 needs a liveness-and-identity truth table (codex new, major)
+
+`service.team_status(project_path).manager_running` is the right signal and exists: it reads the manager pid and probes it live (`bobi/service.py:842-847`, `_pid_alive` at `:288-291`), it is importable from the CLI the way the CLI already imports `bobi.service` lazily (`bobi/cli.py:53`, `:577`, `:1232`), and because it probes the pid rather than the file it answers correctly even when `_cleanup` never ran (`bobi/service.py:662-665`), which covers stopped direct, stopped systemd, stopped launchd and a restart-delay window.
+So A4's selector is sound.
+
+What A4 does not do is reconcile with the body it supersedes.
+`manager_running` answers liveness only; it supplies neither the deployment identity nor the accepted baseline that steps 5 to 8 need.
+The body still routes on file presence (`spec.md:308`, `:332-333`), including the deliberate pre-upgrade case where a LIVE manager with no accepted record is persist-only.
+Liveness alone cannot express that case.
+
+Required change: state the full table, each row naming the path taken: manager false with stale records present; manager true with both records; manager true with no deployment record; manager true with a deployment record and no accepted record (the pre-upgrade row, which stays persist-only); and the manager's state changing during step 3's slow discovery.
+New tests: one per row.
+
+### B6. A9 states a required change and no tests (codex new, major)
+
+Every other amendment in round 5 ends in a "New tests" line. A9 does not: its section runs `spec.md:659-672` and has none.
+A bounded-lock protocol is exactly the kind of change that passes review and then regresses silently.
+
+Required change: A9's tests are a stalled holder not blocking manager boot past the deadline; a reconnect under contention not reasserting stale state; a timeout leaving state the next writer can reconcile; and the losing writer reporting or retrying per the chosen protocol.
+
+### B7. A8's citation rebase is required but unexecuted, so the document carries two coordinate systems (codex F10 partial, minor)
+
+A8 requires restating every citation against `70db2e10` and stating the read sha in the header (`spec.md:657`).
+Neither has happened, because a fold cannot edit line 7: the header still assigns the body to `83bebe49` (`spec.md:7`) while `:548` assigns the amendments to `70db2e10`.
+Codex independently confirmed all eight of A8's drift mappings are correct, sampled 18 of the unchanged citations with no failures, and confirmed the 85/8 split, so the translation table is trustworthy; the document is just not rebased.
+
+This is unambiguous only to a reader who notices `:548`.
+An implementer who opens "Exact changes per file" and follows `bobi/cli.py:4168` lands on `def kb_remove(name):`.
+
+Required change: the single-coordinate rebase happens in B4's rewritten design section, against the sha that is current when the implementing PR opens, with that sha in the header. Until then, A8's table is authoritative over the body's numbers.
+
+### B8. Two precision errors in my own A9 text
+
+Codex flagged both and both are mine, so they are corrected here rather than argued.
+
+A9 says "The spec states the rule it then breaks" and quotes "the lock must not be held across a network round-trip" as if it were a general rule.
+It is not: `spec.md:312` states that specifically about the workspace-file lock, with discovery's Slack and Linear calls as the reason.
+The availability defect A9 describes is unaffected, because `file_lock` is a blocking `LOCK_EX` with no deadline and no `LOCK_NB` (`bobi/fsutil.py:180`) and the design does hold it across network work; only the claim that the spec contradicted itself in advance is withdrawn.
+
+A9's "about 70 seconds" is a nominal sum of six 10-second authorize calls (`bobi/events/server.py:650-655`, called per topic at `:781-784`) plus a 10-second PUT.
+It is not an upper bound: it ignores retries, TCP-level stalls and a suspended holder, against which there is no bound at all.
+Read it as the illustrative case, not the worst one.
+
+### Examined and NOT a defect
+
+Codex noted that A3 cites `event-server/core/src/core.ts:1531-1536` for commit-before-response while the removals actually begin at `:1522`.
+It then states the cited range supports the claim, and it does: `:1531-1536` is the commit-then-return sequence A3 is describing.
+Recorded here so a later round does not re-raise it. No change.
+
+### Questions for Zach, sharpened (numbering preserved)
+
+**Q3 (unchanged question, sharper condition).** Codex rejects the deferral as currently framed.
+Its point: Q3 is a legitimate product decision ONLY in the branch where you revise D4's wording.
+D4 today says `list` shows "what the event server actually routes" (`spec.md:42`), and a recorded PUT response provably cannot satisfy that, because the codebase states the index can go stale after acceptance (`bobi/events/client.py:437-439`) and the reconnect hook exists to repair exactly that (`bobi/subagent.py:1977-1980`).
+So the two branches are: relax D4 to "last accepted at T", which makes the cache correct and keeps GET out of scope; or leave D4 as written, in which case live introspection is required and calling it out of scope would be laundering a defect as a scope ruling.
+There is no third branch where D4 stands unchanged and the cache satisfies it.
+
+**Q4 (unchanged question, reclassified).** Codex disagrees with my framing of Q4 as scope and I now think it is right.
+The non-atomic replace is pre-existing (`event-server/core/src/core.ts:285-292` for the interface, `:1522-1536` for the unrolled-back sequence), but this change is what turns it into an operator-triggered authoritative mutation and then builds local recovery state on its presumed outcome.
+So the decision is not "is this in scope" but "do you accept this failure mode".
+Either answer is fine; silence is not. If you accept it, the spec records the acceptance and states how an operator detects and recovers from a partial replace. If you do not, it becomes work in this ticket or a named blocking follow-up.
+
+### Why six rounds keep finding the same class of defect
+
+Codex's closing observation, which I agree with and could not have written about my own spec.
+
+Every round has found the same shape in a new place: round 1 lost `inbox/<self>` to recomposition, round 2 clobbered the credential record, round 3 raced the manager restart, round 4 mis-scoped the lock, round 5 found a fourth writer and a crash boundary, round 6 finds derived-topic ownership and an unbounded lock.
+Each is an unmodeled writer or an unmodeled stale-state boundary, and each fold patches the instance.
+
+What the spec has never had is one distributed-state section: the named sources of truth, their invariants, which layer owns derived versus declared topics, the complete writer list, the serialization rule, every crash point, and the reconciliation behaviour at each.
+Without it a seventh round finds a seventh instance.
+B4 is that section, and it is the reason this amendment asks for a rewrite rather than another fold.
