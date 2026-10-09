@@ -81,7 +81,8 @@ def test_agent_help_lists_runtime_commands(bobi_install):
     result = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "--help"])
     assert result.exit_code == 0, result.output
     for cmd in ["start", "stop", "status", "workflows", "monitors",
-                "subagents", "event-server", "login-bootstrap", "otel"]:
+                "subagents", "event-server", "login-bootstrap", "otel",
+                "install-service", "uninstall-service"]:
         assert cmd in result.output
 
 
@@ -1493,6 +1494,89 @@ class TestFindTranscript:
         assert find("worker") is None
 
 
+def _install_systemd_unit(monkeypatch, agent_name):
+    """Make the real service detection resolve to systemd for ``agent_name``.
+
+    Writes a unit at the sandboxed path the ``_no_real_service_manager``
+    conftest fixture redirects ``systemd_path`` to, so ``configured_manager``
+    and ``stop_manager`` run for real without ever reading the developer's
+    own ~/.config.
+    """
+    import subprocess
+
+    from bobi import service_manager
+
+    unit = service_manager.systemd_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Unit]\n"
+        f"Description=Bobi Agent {agent_name}\n"
+        "[Service]\n"
+        f"ExecStart=/usr/local/bin/bobi agent {agent_name} supervise\n"
+    )
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr(
+        service_manager,
+        "_run",
+        lambda command, timeout=30: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_command"),
+    [
+        (["stop", "--force"], f"bobi agent {TEST_AGENT_NAME} stop --force"),
+        (["restart", "--fresh"], f"bobi agent {TEST_AGENT_NAME} restart --fresh"),
+    ],
+)
+def test_lifecycle_command_is_refused_with_a_service_configured(
+    bobi_install, monkeypatch, arguments, expected_command,
+):
+    """The refusal must be reached before the service branch returns.
+
+    MOD-305 pinned it on the direct signal path only, so once `--force` was
+    handled inside the service branch the guard went out of reach and
+    `bobi agent <name> stop --force` from inside the runtime dispatched to
+    systemd, SIGKILLing the manager that was running the caller.
+    """
+    from bobi import cli, service
+
+    _install_systemd_unit(monkeypatch, TEST_AGENT_NAME)
+
+    # Both commands take the service branch at this configuration. Pinning it
+    # here stops the arm decaying into the direct-signal path, which is how
+    # the original regression test went inert.
+    assert cli._configured_service_manager(TEST_AGENT_NAME) == "systemd"
+    assert cli._stop_service_manager(TEST_AGENT_NAME) == "systemd"
+
+    monkeypatch.setattr(service, "caller_is_manager_descendant", lambda root: True)
+    monkeypatch.setattr(
+        cli,
+        "_service_action",
+        lambda manager, action: pytest.fail(f"{action} reached {manager}"),
+    )
+    monkeypatch.setattr(
+        service,
+        "clear_manager_session",
+        lambda *args, **kwargs: pytest.fail("restart wiped the manager session"),
+    )
+    monkeypatch.setattr(
+        service,
+        "stop_team",
+        lambda *args, **kwargs: pytest.fail("stop reached the manager signal path"),
+    )
+
+    result = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, *arguments]
+    )
+
+    assert result.exit_code != 0
+    assert "cannot run from inside the target runtime" in result.output
+    assert expected_command in result.output
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected_command"),
     [
@@ -1503,9 +1587,12 @@ class TestFindTranscript:
 def test_lifecycle_command_is_refused_inside_target_runtime(
     bobi_install, monkeypatch, arguments, expected_command,
 ):
-    from bobi import service
+    """Same refusal with no service installed, on the direct signal path."""
+    from bobi import cli, service
 
-    monkeypatch.setattr("bobi.cli._has_systemd_service", lambda: False)
+    assert cli._configured_service_manager(TEST_AGENT_NAME) is None
+    assert cli._stop_service_manager(TEST_AGENT_NAME) is None
+
     monkeypatch.setattr(service, "caller_is_manager_descendant", lambda root: True)
     monkeypatch.setattr(
         service,
