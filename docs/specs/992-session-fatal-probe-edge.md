@@ -1384,3 +1384,233 @@ Keeping it preserves §2.3's measured table and stays blind to sparse outages.
 Switching to "the newest failure is fresh, and the last N terminal outcomes since
 the last success share a signature" covers the sparse case and invalidates that
 table, which would have to be re-measured.
+
+---
+
+## 14. Amendment 2026-10-09: the cross-model re-review (round 6)
+
+§13 folded the first cross-model leg.
+This section folds the **audit of that fold** by the same model, run as a second
+pass: `codex-cli 0.144.5`, model `gpt-5.6-sol`, read-only sandbox, reviewing the
+fold diff `c7c9d9e2..6b32ba29` against `main` @ `70db2e10`.
+Its full output is committed verbatim at
+`plans/reviews/2026-10-09-992-codex-review-2.md`.
+
+**Codex verdict: still not ready for Gate 1.**
+The fold's insertion-only claim is confirmed true (+280 / -0 on this file).
+Of the eight findings §13 folded, three are resolved, four are partially
+resolved, and one is an acknowledged deferral to Gate 1.
+Seven new findings, numbered **B1-B7** here, continue §13's A-series.
+All seven were re-verified against `main` @ `70db2e10` before being folded, and
+all seven held.
+None were retracted as invalid.
+
+This section is insertion-only and rewrites no prose above it, so every line
+reference in §13 and earlier remains valid.
+
+### 14.1 Resolution of §13's folds
+
+| §13 fold | Status | Why |
+|---|---|---|
+| A1 (F1) rich observation | **Resolved** | The design is implementable against `CompositeObserver`'s one-state fanout and keeps the single scan. Stale prose remains: B6. |
+| A2 (F2) verdict before the guard | **Partial** | The behaviour is right; the scope table was not updated for it: B2. |
+| A3 (F3) the close rule | **Deferred to Q12** | A legitimate deferral: the boundary is a product decision. Q12's own premise is wrong: B4. |
+| A4 (F4) N=3 and sparse blindness | **Partial** | The retraction and the limitation both land. The Q13 alternative is not yet selectable: B3. |
+| A5 (F5) Slack redaction | **Partial** | The Slack path is fixed; the heartbeat path is not: B1. |
+| A6 (F6) `done` | **Partial** | The semantics are now clear and contradict a planned test: B5. |
+| A7 (F7) the denominator | **Resolved** | 75.5 days / 10.8 weeks is correct. |
+| A8 (F8) the logs pointer | **Resolved** | Implementable: both local service types write to `manager.log` (`bobi/service_manager.py:118`, `:140`). |
+
+### 14.2 B1 (major): the verbatim error is on an outbound publish, not a local surface
+
+**Defect, confirmed, and the most important one remaining.**
+A5's fold says the raw error stays verbatim "in the registry and in the published
+`session_health` block, both already-private local surfaces" (`§13.5:1283-1284`).
+The registry is local.
+The heartbeat is not.
+`bobi/supervisor/telemetry.py:10-12` states the layer is "outbound-only" and that
+heartbeats are "bubble-signed HTTP publishes to `fleet/heartbeat`", and
+`bobi/supervisor/telemetry.py:174` is the publish call itself.
+This document's own data-flow diagram says the same at `§5.1:413`.
+So §4.2's block, which quotes the error verbatim (`§4.2:295-300`, `§4.2:310-313`),
+carries an unredacted and unbounded `str(exception)` off the host.
+That is the exact boundary `_safe_detail` exists to hold
+(`bobi/brain_availability.py:68-74`).
+A5 therefore fixed the smaller of the two leaks and declared the larger one safe.
+
+**Fold.** The bounded redaction helper applies to **both** external surfaces: the
+Slack notice and the `session_health.error` field in the published heartbeat.
+Only the registry keeps the raw value.
+This supersedes A5's "already-private local surfaces" for the heartbeat, and
+supersedes §4.2's "verbatim" for the published `error` field; the field's shape,
+its two-field contract and the `ADMIN_PROTOCOL` schema are unchanged.
+`since` is unaffected.
+
+Verification: the redaction tests A5 already requires assert on the published
+heartbeat key as well as the Slack text, so one credential-shaped error is
+checked on both surfaces in one test.
+
+### 14.3 B2 (major): A2 moves work into `telemetry.py`, which §9 excludes
+
+**Defect, confirmed.**
+A2 requires the manager verdict to be derived once before session detection and
+carried on `SupervisorState`, with telemetry and the detector both reading that
+one value (`§13.2:1192-1194`).
+On `main` that verdict is derived **inside** telemetry, in
+`Telemetry._publish_heartbeat` (`bobi/supervisor/telemetry.py:127-162`), and it
+owns cross-poll debounce state to do it: `_last_status` carries the last
+confirmed verdict through an unconfirmed health miss
+(`bobi/supervisor/telemetry.py:68-73`, applied at `:156-161`).
+`_publish_heartbeat` also owns the operator-stopped special case (`:137-139`).
+Moving the derivation out means editing `telemetry.py` to consume instead of
+derive, and relocating that debounce state to whatever new owner holds the
+verdict.
+§9's scope list is ten files, does not contain `telemetry.py`, and still assigns
+population to `_report` (`§9:859`, `§9:865`).
+§11's Q2 treats `telemetry.py` rejoining that list as a separate, non-blocking
+option (`§11:1081-1084`), so its absence is deliberate and A2 contradicts it
+silently.
+
+**Fold.** §9's list becomes **eleven files** and gains `bobi/supervisor/telemetry.py`
+with the change "reads the derived manager verdict off `SupervisorState` instead
+of deriving it; `_last_status` debounce moves with the derivation".
+The new owner is `Supervisor._cycle`, before `_report`, which is where
+`child_alive`, `ever_healthy` and `health_fail_count` already live
+(`bobi/supervisor/supervision.py:687-777`).
+This supersedes §9:865's `_report` placement, completing what A2 started, and is
+independent of §11's Q2, which is about the lifecycle episode pair and not about
+the verdict.
+§7's budget neutrality is still unaffected: restart decisions keep reading raw
+`/health`.
+
+Verification: A2's integration case asserts the heartbeat's `derived_status` is
+unchanged across the move, so relocating the debounce cannot regress the fleet
+view.
+
+### 14.4 B3 (major): Q13's alternative is not selectable as posed
+
+**Defect in the question, not in the design.**
+Q13 offers "the last N terminal outcomes since the last success share a
+signature" and prices the switch at one cost: §2.3's measured false-positive
+table would need re-measuring (`§13.9:1382-1386`).
+That price is incomplete.
+The reader is bounded by mtime: it parses only entries whose `state.json`
+`st_mtime` falls inside the lookback (`§5.4:614-615`), and the streak is then
+computed from in-window `terminal_at` alone (`§5.4:627-628`).
+"Since the last success" is unbounded in time, so the failures and the success it
+needs can sit outside the lookback and are never parsed.
+Choosing Q13 therefore also requires either a full-tree scan, which §5.4's growth
+measurement is the argument against, or new persisted detector state that
+remembers the last success across polls.
+
+**Fold.** Q13's cost statement gains that second consequence.
+The choice stays Gate 1's; only its price is corrected.
+If Q13 is chosen, the reader bound and §5.4's performance invariant are
+re-specified in the same change, not inherited.
+
+### 14.5 B4 (major): Q12 overstates what scoping costs
+
+**Defect, confirmed, factual.**
+Q12 tells Gate 1 that scoping recovery "requires that boundary to be populated at
+register time, which neither dispatch path does today" (`§13.9:1376-1377`).
+That is true only of `model` and `provider`.
+`SessionEntry` carries six candidate boundary fields (`bobi/sdk.py:282-283`,
+`:285-286`, `:291-292`), and both dispatch paths populate `role`, `run_key`,
+`phase` and `project` at register time: `bobi/subagent.py:1507-1509` and
+`bobi/workflow/orchestrator.py:322-324`.
+Only `model` and `provider` are left empty by both.
+A3's own evidence says this correctly (`§13.3:1219-1223`); Q12 then generalizes it
+into a blanket claim.
+
+**Fold.** Q12's premise is corrected: a role-, run-, phase- or project-scoped
+recovery boundary is available today with no schema change, and only a
+provider- or model-scoped boundary needs register-time population added.
+The decision is still Gate 1's, and the ABANDON option is unaffected, but it is
+now priced correctly.
+
+### 14.6 B5 (major): A6's `done` rule contradicts test 3
+
+**Defect, confirmed.**
+A6 makes `done` a success for recovery and states it is "explicitly **not** a
+streak-breaker, because the real writer leaves it unorderable"
+(`§13.6:1314-1316`).
+Test 3 requires that a success interleaved in the streak yields null, and
+parametrizes that over `completed` **and** `done` (`§10:948-949`).
+Those cannot both hold: under A6 an interleaved `done` leaves the streak intact
+and the detector returns the block, not null.
+A6's own remedy makes the clash unavoidable rather than hiding it, because it
+requires the entry be created through the real `registry.mark_done`
+(`§13.6:1319-1320`), which writes no `terminal_at` (`bobi/sdk.py:541-542`).
+
+**Fold.** Test 3 is parametrized over `completed` only, and gains a `done`
+variant with the **opposite** expectation: a real `mark_done` entry interleaved
+in the streak does **not** break it, and the detector still returns the block.
+That variant is the regression test for A6's rule.
+Test 14 is unaffected: recovery tests `started_at`, which `mark_done` does leave
+usable, so `done` stays parametrized there (`§10:993-994`).
+
+### 14.7 B6 (minor): A1 did not supersede the old data-flow contract
+
+**Defect, confirmed.**
+§13 promises that "where a fold changes a design decision, the fold says which
+earlier statement it supersedes" (`§13:1132-1134`).
+A1 names §4.2 and §5.4 as preserved but never names §5.1, whose data-flow
+diagram still says `SupervisorState.session_health` is "a block, or None"
+(`§5.1:407`) passed unchanged to both consumers (`§5.1:409-413`).
+Under A1 the state carries the rich `SessionHealthObservation` and each consumer
+gets a different projection of it.
+
+**Fold.** `§5.1:396-413`'s diagram is superseded by A1 on one point: the field on
+`SupervisorState` is the observation, and `fleet/heartbeat` receives the
+projected two-field block.
+The diagram's load-bearing claim, one read per poll feeding two consumers, is
+unchanged and is why A1 is implementable.
+
+### 14.8 B7 (minor): the Q numbering does not continue §11
+
+**Defect, confirmed.**
+§13.9 says its questions "continue §11's numbering" (`§13.9:1355`) and then opens
+at Q10.
+§11 holds Q1, Q2 and Q3 (`§11:1053`, `:1072`, `:1089`).
+There is no Q4 through Q9 anywhere in this document.
+
+**Fold.** The numbering is **not** a continuation; it is a reserved block, chosen
+so §13's questions stay distinguishable from §11's in the review record.
+Q10-Q13 keep their numbers, because the issue thread already cites them by
+number.
+§13.9's "continue" sentence is superseded by this one: Q4 through Q9 do not
+exist and are not missing.
+
+### 14.9 Citation corrections
+
+Codex re-checked 73 unique citation targets introduced by §13 and found 8 that do
+not resolve exactly.
+None of the eight falsifies the claim it supports; each points at the anchor line
+of an item rather than the line carrying the cited content, or at adjacent code.
+Corrected here, insertion-only:
+
+| §13 wrote | Resolves at |
+|---|---|
+| `§5.2:469` for the `down`/`wedged` exclusion | `§5.2:470` |
+| `§10:958` for test 7's four values | `§10:960` |
+| `§10:940` for test 1's 13-entry fixture | `§10:942-944` |
+| `§10:948` and `§10:993` for the `done` parametrizations | `§10:949` and `§10:994` |
+| `bobi/brain_availability.py:136-148` for the account-boundary key | constructed at `:126-127`, used at `:136-148` |
+| `bobi/brain_availability.py:140-158` for redact-before-publish | `_safe_detail` applied at `:140-142`, published at `:195` |
+| `bobi/supervisor/__main__.py:81-82` for the shared entrypoint | the OS-service marker is at `:81-82`; the shared `Telemetry` / `SlackAlerter` / `Supervisor` construction is at `:117-137` |
+
+Two corrections to the review record itself, outside this document:
+§13's fold is **+280 / -0** on this file, not the +439 / -0 reported on the
+issue, which was the two-commit total including the 159-line verbatim report.
+§13 carries **49** self-references and 26 code references, not the 38 and 26
+reported, and 8 of the 75 are the imprecise ones listed above, so "every citation
+mechanically verified" was too strong.
+
+### 14.10 What is left
+
+Five of the seven new findings are spec defects with the fix stated above and no
+decision required: B1, B2, B5, B6, B7.
+Two correct the price of questions that remain Gate 1's: B3 on Q13, B4 on Q12.
+No new question is opened, and Q10-Q13 stand as posed, with B3's and B4's
+corrections applied.
+The blocking state is unchanged: no code until Q1 is answered.
