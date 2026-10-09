@@ -2,16 +2,35 @@
 
 Status: **awaiting Gate 1** (design approval). No code written.
 Issue: [#992](https://github.com/moda-labs/bobi-agent/issues/992)
-Author: engineer agent, 2026-08-11. Re-validated 2026-08-21 against `main` @ [`ac2471e6`](https://github.com/moda-labs/bobi-agent/commit/ac2471e6).
+Author: engineer agent, 2026-08-11.
+Re-validated 2026-08-21 against `main` @ [`ac2471e6`](https://github.com/moda-labs/bobi-agent/commit/ac2471e6).
+**Re-validated 2026-10-09 against `main` @ [`83bebe49`](https://github.com/moda-labs/bobi-agent/commit/83bebe49).**
 
-Every file:line in this document was re-read at `ac2471e6`. Citations from the
-2026-08-11 draft that pointed at `7025981` are corrected, not carried forward.
+Every file:line in this document was re-read at `83bebe49`.
+Citations that pointed at `ac2471e6` are corrected in place, not carried forward.
 
 ---
 
 ## 1. Re-validation verdict
 
-The spec is still valid and **smaller than it was**. Three changes on `main`:
+**VALID WITH UPDATES.** Every premise and every design claim survives.
+No code on `main` has implemented any part of this, and nothing has invalidated it.
+What changed is citations, measurements, and the evidence behind two guards.
+
+### 1.1 2026-10-09 pass (`ac2471e6` -> `83bebe49`, 7 weeks)
+
+| # | What changed | Effect |
+|---|---|---|
+| W1 | **The whole design surface is byte-identical.** `git diff ac2471e6 83bebe49` is empty for `bobi/supervisor/probe.py`, `snapshot.py`, `telemetry.py`, `bobi/brain_availability.py`, `bobi/brain/`, `bobi/reconcile.py`, `bobi/webapp/event_bus.py`, `bobi/webapp/static/shell.js`, and `docs/ADMIN_PROTOCOL.md` | §5's fork-deciding claims, §2's three gaps, and P1/P2 need no re-argument |
+| W2 | One supervisor change: [#1097](https://github.com/moda-labs/bobi-agent/pull/1097) moved `_save()` ahead of the budget alert in `alerting.py::_on_exhausted` | Shifts `alerting.py` cites after `:189` by +4. Changes no claim, and corroborates §7.2: persistence order inside the incident file is load-bearing |
+| W3 | [#1099](https://github.com/moda-labs/bobi-agent/pull/1099) added an `inbox` key to `/health`'s sessions projection | **P3 reworded.** The block now carries four keys, still none of the three the detector needs. P4's conclusion is unchanged |
+| W4 | `bobi/sdk.py`, `subagent.py`, `orchestrator.py`, `session.py` grew (#1081, #1091, #1095, #1099, #1101, #1105, #1111) | Line cites moved, semantics did not. §6.3's inventory is the same ten writers, re-derived |
+| W5 | **The restart-reap false positive has a live instance.** 2026-08-03 21:09:09-10: three sessions reaped `crashed` with one byte-identical `DIED_WITHOUT_TERMINAL` inside **one second** | §6.2's restart grace and test 10 move from review hypothesis to measured. See §3.1 |
+| W6 | **A new shared-signature cluster exists and is correctly excluded.** ~150 `turn failed (kind=unknown, api_status=none)` entries on one monitor session, 2026-08-02 to 2026-10-01 | §6.3's `status="error"` exclusion is now load-bearing rather than theoretical. New risk R4 in §6.2 |
+| W7 | Registry grew 2125 -> **3684** directories; full parse 12.6 -> **20.0 ms** | §6.4 re-measured. The bounded read and the 500 cap are the growth-proofing, and the growth is real |
+| W8 | **Simplicity pass: two config knobs and two spec components cut.** §9 drops from four knobs to two | Smaller surface, same behaviour. See §1.3 |
+
+### 1.2 2026-08-21 pass (`7025981` -> `ac2471e6`), unchanged and still true
 
 | # | What changed | Effect |
 |---|---|---|
@@ -19,10 +38,19 @@ The spec is still valid and **smaller than it was**. Three changes on `main`:
 | V2 | [#903](https://github.com/moda-labs/bobi-agent/issues/903) shipped ([#1022](https://github.com/moda-labs/bobi-agent/pull/1022)): load grace published `load_grace` as an **orthogonal additive heartbeat block**, not a new `manager.status` value | Settles Q1 (the only blocking question) by precedent. See §5.4 |
 | V3 | The terminal-writer inventory gained four sites | §6.3 re-derived; one new false-positive surface, R3 |
 
-Nothing invalidates the design. The premise table (§4) survives re-verification
-with every claim intact and most line numbers moved.
+### 1.3 What this pass cut
 
-**What Gate 1 is now being asked to approve** is narrower than the 2026-08-11
+Zach's standing bar is the simplest practical solution with no cruft.
+Four things were removed, none of which costs any capability.
+
+| Cut | Was | Why |
+|---|---|---|
+| `WATCHDOG_SESSION_FAIL_LOOKBACK` | A tunable lookback window | Nobody has asked to tune it, and promoting a constant to a knob later is additive and free |
+| `WATCHDOG_SESSION_FAIL_RESTART_GRACE` | A tunable restart grace | It is a correctness guard, not a preference. A knob invites setting it to 0 and getting the §3.1 false positive back |
+| Session lifetime in the published block and the alert | "recorded and reported" beside the error | It is not a gate, no consumer reads it, and the registry still has it for anyone diagnosing by hand |
+| Test 16 (a raising `post_fn` does not propagate) | A new alerter test | `_post` is shared with the crash-loop path and the existing suite already covers it |
+
+**What Gate 1 is being asked to approve** is narrower than the 2026-08-11
 draft: an outcome-shaped backstop plus the fleet-visibility half, not the whole
 "nobody is told" problem. §2 bounds it.
 
@@ -36,25 +64,28 @@ emits `system/brain.recovered` with `outage_seconds` when a later turn
 succeeds. It runs on `bobi/brain/turns.py:98`, inside `drain_turn`, which
 **both** dispatch drivers import (`bobi/subagent.py:30`,
 `bobi/workflow/orchestrator.py:30`).
+All four files are byte-identical to the 2026-08-21 baseline (W1).
 
 That is Shape M (§5.3) already built, for two causes. Three gaps remain, each
 verified here rather than argued.
 
 **G1. The classifier does not match this deployment's actual outage.**
 `classify_brain_unavailability` (`bobi/brain/base.py:130-145`) matches fixed
-substrings. Run against §3's evidence at `ac2471e6`:
+substrings. Re-run against §3's evidence at `83bebe49`, unchanged, plus the new cluster from §3.2:
 
 ```
-$ python3 -c "from bobi.brain.base import classify_brain_unavailability as c; ..."
+$ PYTHONPATH=<worktree> python3 -c "from bobi.brain.base import classify_brain_unavailability as c; ..."
 '<no match>'            <- "You've hit your session limit · resets 12:40am (UTC)"
 'credits_exhausted'     <- "You've hit your usage limit · resets 12:40am (UTC)"
 '<no match>'            <- "agent process died without reporting a terminal status"
 'authentication_failed' <- "Failed to authenticate: OAuth session expired"
+'<no match>'            <- "turn failed (kind=unknown, api_status=none)"
 ```
 
 `_CREDIT_ERROR_TEXT` (`base.py:118-127`) carries `"you've hit your usage
 limit"`. The string that took this box down for 102 minutes says **session**
 limit. It does not match, and today's `main` would not alert on it.
+The §3.2 cluster, now the largest shared-signature group in the registry, does not match either.
 
 This is deliberate, not a typo to patch: the classifier's docstring reserves
 itself for "messages that say the operator must sign in or replenish an
@@ -64,16 +95,17 @@ resetting session limit would re-open the exact transient/terminal confusion
 
 **G2. A `connect()`-time death is structurally invisible to it.**
 `observe_brain_turn` fires only on a `TurnResult` (`brain/turns.py:96-102`).
-`connect()` is never a turn (`subagent.py:477-478`, #1016), and a raise there
-propagates to `subagent.py:546-551`, which records `crashed` in the registry
+`connect()` is never a turn (`subagent.py:462`, `:480`, #1016), and a raise there
+propagates to `subagent.py:550-553`, which records `crashed` in the registry
 and emits no brain-availability alert. P6 shows `connect()` is one of the two
 paths a revoked credential takes.
 
 **G3. The alert reaches the bus, not a person.** `system/brain.auth.failed`,
 `system/brain.credits.exhausted`, and `system/brain.recovered` are documented
-(`docs/EVENT_SERVER.md:307-309`) and emitted. Nothing in this repo or in this
+(`docs/EVENT_SERVER.md:368-370`) and emitted. Nothing in this repo or in this
 deployment's installed package subscribes to them (`grep -rn "system/brain"`
-over `agents/` and the installed `run/package/` returns no subscriber). Routing
+over `agents/`, `bobi/monitors/`, and the installed `run/package/` returns no
+subscriber, re-run 2026-10-09). Routing
 them is a deployment change, not this spec's work, but it means the "a human
 found it hours later" harm is not yet closed in practice.
 
@@ -96,7 +128,7 @@ there is no open sibling to merge with.
 The issue cites Barndoor's 2026-08-05 outage (revoked OAuth token)
 second-hand. The same failure class is in **this deployment's own registry**
 (`/data/.bobi/agents/eng-team/run/state/sessions/`), from a different root
-cause. Re-run 2026-08-21, unchanged:
+cause. Re-run 2026-10-09, unchanged:
 
 ```
 window 07-30 22:35:15 .. 07-31 00:17:05 UTC  (101.8 min)
@@ -145,37 +177,112 @@ Three consequences for the design:
 This window is also G1's proof: none of these 13 entries would classify under
 `classify_brain_unavailability` today.
 
+Two claims in it were re-checked rather than carried forward, because the
+detector's streak guard depends on them:
+
+- **Zero `completed` sessions ended inside the window.** Re-measured against
+  `terminal_at` (not `started_at`) over all 848 parsed entries: 0. The streak
+  is one continuous run of 13, not segments.
+- **Opening latency.** The detector sees `terminal_at`, so the N=3 open lands at
+  23:04:15, not the 23:03:14 `started_at` of the third failure. §6.2's table is
+  stated in `started_at`; the 28-minute figure is right either way.
+
+### 3.1 The restart-reap false positive, now measured
+
+A review pass predicted it (§14.2 finding 7) and §6.2 guards it. This
+deployment's registry contains an instance:
+
+```
+08-03 21:09:09  crashed  wf-issue-lifecycle-eng-team-858
+08-03 21:09:09  crashed  wf-issue-lifecycle-eng-team-851
+08-03 21:09:10  crashed  wf-pr-closed-eng-team-adhoc-fa0b931d
+
+  every one:  error = "agent process died without reporting a terminal status"
+  span: 1 second
+```
+
+Three sessions, one byte-identical signature (`DIED_WITHOUT_TERMINAL`,
+`sdk.py:50`), one second apart. That is the mass-orphan shape a manager restart
+or a host reboot produces, and it is indistinguishable from this spec's
+condition on signature alone.
+
+Without the restart grace, the detector opens an incident here and the operator
+gets a session-fatal alert for a restart that the crash-loop path is already
+alerting. The guard is not defensive decoration; it is the difference between
+one alert and two contradictory ones.
+
+### 3.2 Simulated against the full registry: three opens, all explained
+
+The §6.2 condition was run over every terminal entry in this deployment's
+registry (662 entries with `terminal_at > 0`, all of recorded history):
+
+| Opened | Signature | Verdict |
+|---|---|---|
+| 07-30 22:39 | `you've hit your session limit · resets #:#am (utc)` | **True positive.** The incident this spec exists for |
+| 07-30 23:48 | same | **Same incident**, re-opened only because the simulation resets on the 1h lookback. One incident in production |
+| 08-03 21:09 | `agent process died without reporting a terminal status` | **False positive, already guarded** (§3.1, §6.2 restart grace) |
+
+Three opens in 14 weeks of history, every one accounted for, and the only
+unguarded one is the condition the spec is for. That is the false-positive rate
+measured rather than argued.
+
+The largest shared-signature cluster in the registry does **not** appear above,
+and that is the `status="error"` exclusion (§6.3) earning its place:
+`turn failed (kind=unknown, api_status=none)` recurs roughly 150 times on one
+monitor session between 2026-08-02 and 2026-10-01. Most land as
+`status="error"`, which is not in `FAILED_STATUSES`. The ~24 that land as
+`failed` are days apart with completions interleaved, so neither the streak nor
+the lookback holds. Recorded as R4 in §6.2.
+
+### 3.3 No new burst since July
+
+Re-checked 2026-10-09 across the whole registry: entries whose error mentions a
+session limit, usage limit, credits, quota, OAuth, authentication, 401, or 403
+number 16 in total, 13 of them inside the July window. The other three are
+isolated singles (2026-08-23, 2026-08-24, 2026-09-21), none of which forms a
+streak.
+
+The premise is therefore unchanged and the frequency is now bounded: **one
+burst in 14 weeks, 102 minutes long, with nothing told.** That is the harm this
+spec addresses, and it is rare rather than routine. Rarity is the argument for
+the kill switch and against new machinery, not an argument against alerting.
+
 ---
 
-## 4. Premises, re-verified at `ac2471e6`
+## 4. Premises, re-verified at `83bebe49`
 
 | # | Claim (from the issue) | Verdict | Evidence |
 |---|---|---|---|
-| P1 | `probe.py::derive_manager_status` fuses three manager-only signals into the verdict | **TRUE** | `bobi/supervisor/probe.py:88-132`. The file is byte-identical to the 2026-08-11 baseline |
+| P1 | `probe.py::derive_manager_status` fuses three manager-only signals into the verdict | **TRUE** | `bobi/supervisor/probe.py:88-132`. `git diff ac2471e6 83bebe49 -- bobi/supervisor/probe.py` is EMPTY: the file is still byte-identical to the 2026-08-11 baseline |
 | P2 | An alive-but-brainless manager reads as `idle` | **TRUE** | `probe.py:118-119` returns the reported status verbatim when a process is alive and not wedged |
-| P3 | `manager_health.py`'s `/health` body already carries a `sessions` block | **TRUE, useless here** | `bobi/manager_health.py:87`, `146-151`: `_session_status_from_registry` returns `list_active()` projected to `{name, role, status}` |
-| P4 | "The data already exists" in that block | **FALSE** | It lists only ACTIVE sessions and carries no `error`, `terminal_at`, or `started_at`. A terminally-failed session is absent by construction. See §6.1 |
-| P5 | Since #949 a session that dies on startup persists `TERMINAL_FAILED` | **TRUE, narrower than stated** | #949's D067 fixed the unreachable `asyncio.TimeoutError` handler only (`bobi/subagent.py:448-456`, `542-545`). The general error-result persist predates it (`subagent.py:517-540`, `c2f9956`, #694) |
-| P6 | Consecutive birth-deaths are observable in the registry | **TRUE, richer than claimed** | An auth failure lands on one of two paths: a raise at `client.connect()` -> `TERMINAL_CRASHED` (`subagent.py:546-551`), or an error `TurnResult` -> `TERMINAL_FAILED` (`subagent.py:517-540`). **Key on `FAILED_STATUSES = ("failed", "crashed")`, not `TERMINAL_FAILED` alone** (`bobi/sdk.py:44`) |
-| P7 | `SessionRegistry` carries what a detector needs | **TRUE** | `SessionEntry` has `status`, `error`, `started_at`, `terminal_at`, `role`, `name` (`sdk.py:268-326`); `mark_terminal` writes `status` + `terminal_at` + `error` durably before any bus POST (`sdk.py:509-532`) |
+| P3 | `manager_health.py`'s `/health` body already carries a `sessions` block | **TRUE, useless here** | `bobi/manager_health.py:87`, `169-185`: `_session_status_from_registry` returns `list_active()` projected to `{name, role, status, inbox}`. [#1099](https://github.com/moda-labs/bobi-agent/pull/1099) added the fourth key; the heartbeat's own copy still projects three (`snapshot.py:126-132`) |
+| P4 | "The data already exists" in that block | **FALSE** | It lists only ACTIVE sessions, and all four keys miss: no `error`, no `terminal_at`, no `started_at`. A terminally-failed session is absent by construction. See §6.1 |
+| P5 | Since #949 a session that dies on startup persists `TERMINAL_FAILED` | **TRUE, narrower than stated** | #949's D067 fixed the unreachable `asyncio.TimeoutError` handler only (`bobi/subagent.py:452-460`, `546-549`). The general error-result persist predates it (`subagent.py:521-545`, `c2f9956`, #694) |
+| P6 | Consecutive birth-deaths are observable in the registry | **TRUE, richer than claimed** | An auth failure lands on one of two paths: a raise at `client.connect()` (`subagent.py:462`, `:480`) -> `TERMINAL_CRASHED` (`subagent.py:550-554`), or an error `TurnResult` -> `TERMINAL_FAILED` (`subagent.py:521-545`). **Key on `FAILED_STATUSES = ("failed", "crashed")`, not `TERMINAL_FAILED` alone** (`bobi/sdk.py:44`) |
+| P7 | `SessionRegistry` carries what a detector needs | **TRUE** | `SessionEntry` has `status`, `error`, `started_at`, `terminal_at`, `role`, `name` (`sdk.py:279-335`); `mark_terminal` writes `status` + `terminal_at` + `error` durably before any bus POST (`sdk.py:544-567`) |
 | P8 | `SlackAlerter` dedups incidents on an on-volume file | **TRUE** | `bobi/supervisor/alerting.py:53`, `96`, `108-128`; `STATE_FILE = "supervisor-incident.json"` under `paths.state_path` |
-| P9 | This edge must not charge the restart budget | **TRUE, already structurally free** | `derive_manager_status` still has exactly one non-test caller, `telemetry.py:141`. `Supervisor._cycle` (`supervision.py:687`) derives restarts from the RAW `/health` body, never from the derived verdict. No new machinery satisfies point 3, in either shape. See §8 |
-| P10 | A session that dies at `connect()` has already left a durable record | **TRUE** | Dispatch registers `state.json` with `status="running"` *before* the brain is touched: `orchestrator.py:321` vs its first `client.connect()` at `:872`. `registry.update` no-ops on a missing file (`sdk.py:363-366`), so registration order is what makes the earliest-dying sessions detectable |
+| P9 | This edge must not charge the restart budget | **TRUE, already structurally free** | `derive_manager_status` still has exactly one non-test caller, `telemetry.py:141` (re-derived from `grep -rn derive_manager_status bobi/ tests/`: 1 definition, 1 caller, 6 test call sites). `Supervisor._cycle` (`supervision.py:687`) derives restarts from the RAW `/health` body (`supervision.py:730-731`), never from the derived verdict. No new machinery satisfies point 3, in either shape. See §8 |
+| P10 | A session that dies at `connect()` has already left a durable record | **TRUE** | Dispatch registers `state.json` with `status="running"` *before* the brain is touched: `orchestrator.py:321` vs its first `client.connect()` at `:1172`. `registry.update` no-ops on a missing file (`sdk.py:377-399`), so registration order is what makes the earliest-dying sessions detectable |
 
 ### 4.1 Two facts the issue does not mention
 
-**F1. `list_active()` writes.** It calls `_reap_if_dead`, which calls
-`mark_terminal` on any active entry with a dead pid (`sdk.py:544-565`). A
-sidecar calling it would mutate the manager's registry from outside and steal
-the reconciler's crash-closing branch, which `list_all`'s docstring explicitly
-reserves (`sdk.py:571-580`). **The detector must use `list_all(reap_dead=False)`
-semantics, or read `state.json` directly.**
+**F1. `list_active()` writes.** It calls `_reap_if_dead` (`sdk.py:579-600`),
+which calls `mark_terminal` on any active entry with a dead pid
+(`sdk.py:592-593`). A sidecar calling it would mutate the manager's registry
+from outside and steal the reconciler's crash-closing branch, which `list_all`'s
+docstring explicitly reserves (`sdk.py:606-617`). **The detector must use
+`list_all(reap_dead=False)` semantics, or read `state.json` directly.**
+
+W3 sharpens this: since #1099, `/health` itself calls `list_active()`
+(`manager_health.py:174`), so serving the health body now reaps. That is the
+manager writing its own registry and is fine. It is also the reason the
+detector must not take the same route from outside the process.
 
 **F2. An active director already crash-loops on this class, and does charge
 the budget.** If the director takes a turn and its brain fails fatally,
-`session.py:689-690` sets `status="error"`, which the supervisor's
-`DEAD_STATES` path restarts with no `confirm_polls` debounce
-(`supervision.py:740-745`).
+`session.py:701` sets `status="error"`, which the supervisor's
+`DEAD_STATES` path (`DEAD_STATES = frozenset({"error"})`, `supervision.py:68`)
+restarts with no `confirm_polls` debounce (`supervision.py:740-745`).
 
 Load grace (V2) narrowed this but did not remove it. `_defer_for_load`
 (`supervision.py:741`) defers a `dead_director` verdict only while the host is
@@ -209,7 +316,12 @@ three. Both consumers that exist today fail quietly:
   status outside `(None, "stopped", "exited", "down")`, so a brainless box
   still reports **running**.
 - `bobi/webapp/static/shell.js:121-132` - `healthChip` special-cases only
-  `"wedged"`, so the dashboard renders a calm green **running** chip.
+  `"wedged"`, then falls through to `a.running`, which is that same deny-list's
+  output. The dashboard renders a calm green **running** chip.
+
+Both files are byte-identical to the 2026-08-21 baseline (W1), so the
+fork-deciding claim needs no re-argument. They are also not independent: it is
+one deny-list surfaced twice.
 
 Under S the state is computed and published, and the fleet view still lies.
 
@@ -343,9 +455,10 @@ STATE MACHINE
 
 Extending `/health`'s `sessions` block puts the signal **behind the very
 process whose health is in question**, and
-`_session_status_from_registry` would need to start returning terminal
-sessions plus three more fields, changing a payload other consumers read
-(`snapshot.py:130`). The sidecar already reads the registry directly for
+`_session_status_from_registry` (`manager_health.py:169-185`) would need to
+start returning terminal sessions plus three more fields, changing a payload
+other consumers read (`snapshot.py:130`). The sidecar already reads the
+registry directly for
 `status_file_age`, so the registry path costs no new capability.
 
 Reading the lifecycle bus instead is worse again, and there is a live defect
@@ -360,9 +473,9 @@ before any POST (P7), so it is unaffected.
 
 > **The manager reads `running` or `idle`**, AND the last **N** (default 3)
 > dispatched sessions to reach a terminal outcome, within a lookback window
-> (default 1h), are **all** in `FAILED_STATUSES` and **share one normalized
+> (1h, a constant), are **all** in `FAILED_STATUSES` and **share one normalized
 > error signature**, with no `completed` session interleaved, AND no manager
-> restart occurred within the restart grace (default 300s).
+> restart occurred within the restart grace (300s, a constant).
 
 The three guards beyond the streak each close a false positive found in review:
 
@@ -373,11 +486,13 @@ The three guards beyond the streak each close a false positive found in review:
 - **Restart grace.** When the supervisor restarts the manager, every in-flight
   session is orphaned and the next list read reaps them all as `crashed` with
   one identical string, the named constant `DIED_WITHOUT_TERMINAL`
-  (`sdk.py:50`, used at `sdk.py:557` and `reconcile.py:132`). Three in flight
+  (`sdk.py:50`, used at `sdk.py:592` and `reconcile.py:132`). Three in flight
   at restart time is ordinary, so without this guard a crash loop reliably
   manufactures a spurious session-fatal incident on top of itself. The alerter
   already receives `manager_restarted` (`alerting.py:134`), so the grace needs
   no new wiring.
+  **§3.1 is a measured instance of exactly this**, which is why the grace is a
+  constant rather than a knob (§1.3).
 - **No `completed` interleaved.** Below.
 
 **Why the shared error signature is the primary gate, and short lifetime is
@@ -396,8 +511,9 @@ strings. One dead credential does. The signature is both the sharper
 discriminator and the thing the operator needs, since their next action depends
 entirely on that string.
 
-Lifetime is still **recorded and reported** (it distinguishes "died on its
-first brain turn" from "died at the end"), just not used as an opening gate.
+Lifetime is **not** recorded in the published block or the alert (§1.3 cut).
+It is not a gate, no consumer reads it, and `started_at` / `terminal_at` are
+already in the registry for anyone diagnosing by hand.
 
 **Signature normalization.** ONE function in `probe.py`, used by both the
 detector and the alert message builder so the two cannot drift: first line of
@@ -410,7 +526,7 @@ chars. Digits must be collapsed or §3's cluster would not match itself
 only when truthy:
 
 ```python
-# bobi/sdk.py:521-523
+# bobi/sdk.py:556-558
 updates: dict = {"status": status, "pid": 0, "terminal_at": time.time()}
 if error:
     updates["error"] = error
@@ -421,42 +537,59 @@ equality test all such entries share the empty signature and match *each
 other*, so three unrelated causes would open an incident whose alert quotes
 nothing. The rule: a normalized signature that is empty or whitespace-only is
 **not a signature**. It cannot open a streak, cannot extend one, and yields
-`unknown` rather than `failing`. Still latent rather than live: 0 of the 38
+`unknown` rather than `failing`. Still latent rather than live: 0 of the 64
 failed/crashed entries in this deployment's registry have an empty error
-(re-measured 2026-08-21; was 0 of 33). P2 severity, on a verified codepath.
+(re-measured 2026-10-09; was 0 of 38, and 0 of 33 before that). P2 severity, on
+a verified codepath.
 
 **N=3 is the proposed default.** The table above is the argument for making it
 tunable, not the argument for 2: N=2 buys 4 minutes and doubles the
 false-positive surface.
+N is the one knob kept (§1.3), because it is the one value Q2 says is genuinely
+arguable.
+
+**R4 (new 2026-10-09). A recurring same-signature cluster already exists, and
+the `status="error"` exclusion is what keeps it out.** Roughly 150 entries
+between 2026-08-02 and 2026-10-01 carry the signature
+`turn failed (kind=unknown, api_status=none)`, all on one monitor session
+(§3.2). Most are `status="error"`, which §6.3 excludes because it is not in
+`FAILED_STATUSES`. The ~24 recorded as `failed` are days apart with completions
+interleaved, so neither the streak nor the lookback holds, and the §3.2
+simulation confirms the detector never opens on them. No guard needed. Recorded
+because it means a single long-running monitor can mint a durable shared
+signature, and any later change that widened the status set or dropped the
+interleave rule would start firing on it.
 
 ### 6.3 Which sessions count - mechanical inventory
 
-Every writer of a terminal status at `ac2471e6`, from
+Every writer of a terminal status at `83bebe49`, from
 `grep -rn "TERMINAL_FAILED\|TERMINAL_CRASHED\|mark_terminal" bobi/ --include=*.py`,
-with every hit classified. The 2026-08-11 draft listed seven sites; four more
-now exist.
+with every hit classified. Re-derived 2026-10-09: **the same ten writers, no new
+ones.** Every line moved; no semantics did.
 
 | Site | Writes | Counts? | Why |
 |---|---|---|---|
-| `subagent.py:334` (`_persist_terminal`) | `failed` / `crashed` / `completed` | **yes** | The one-shot dispatch path. §3's outage is this path |
-| `subagent.py:1492` | `failed` | **yes**, see R3 | `Workflow '<name>' not found`, closing a `starting` corpse (#850) |
-| `subagent.py:1518` | `crashed` | **yes** | Wait-mode backstop: `wait-mode run died: <exc>` |
-| `subagent.py:1569` | `crashed` | **yes** | Detached launch failed to spawn. A real dispatch death |
-| `subagent.py:2023` | `failed` | **yes**, see R3 | Same `Workflow '<name>' not found` text, from the CLI entry |
+| `subagent.py:326-338` (`_persist_terminal`) | `failed` / `crashed` / `completed` | **yes** | The one-shot dispatch path. §3's outage is this path |
+| `subagent.py:1554` | `failed` | **yes**, see R3 | `Workflow '<name>' not found`, closing a `starting` corpse (#850) |
+| `subagent.py:1580` | `crashed` | **yes** | Wait-mode backstop: `wait-mode run died: <exc>` |
+| `subagent.py:1631` | `crashed` | **yes** | Detached launch failed to spawn. A real dispatch death |
+| `subagent.py:2102-2105` | `failed` | **yes**, see R3 | Same `Workflow '<name>' not found` text, from the CLI entry |
 | `reconcile.py:133` | `crashed` | **yes** | Dead-man reconciler closing a dead-pid run |
 | `reconcile.py:205` | `failed` | **yes** | Reconciler closing a run past its declared deadline |
-| `orchestrator.py:1414` | `failed` / `completed` | **yes** | Workflow run outcomes. §3's incident is entirely this path |
-| `sdk.py:558` (`_reap_if_dead`) | `crashed` | **yes** | Dead-pid crash marking on a list read |
+| `orchestrator.py:1440` | `failed` / `completed` | **yes** | Workflow run outcomes. §3's incident is entirely this path |
+| `sdk.py:593` (`_reap_if_dead`) | `crashed` | **yes** | Dead-pid crash marking on a list read. §3.1's cluster is this site |
 | `webapp/run_actions.py:181` | `"cancelled"` | **no** | Operator close. Excluded *for free*: `cancelled` is not in `FAILED_STATUSES` |
 
 Non-writing hits from the same grep, all imports, constants, or read-side
 classification, none of which can open an incident: `sdk.py:39-55`,
-`subagent.py:27,193,259,452,492,537`, `reconcile.py:37-40,176,182`,
+`subagent.py:27,263,456,496-498,541`, `reconcile.py:36-40,136,139,182`,
 `orchestrator.py:28`, `launch_lineage.py:27`, `webapp/runtime.py:537-549`,
 `webapp/runs.py:107-117`.
 
-`status="error"` (55 entries in this deployment's registry) is written only by
-`bobi/session.py`, the persistent-session path, and is not in `FAILED_STATUSES`
+`status="error"` (**135** entries in this deployment's registry, re-counted
+2026-10-09; was 55) is written only by `bobi/session.py` (`:701`, `:992`,
+`:1085`, `:1119`, `:1149`, `:1386`, `:1408`), the persistent-session path, and
+is not in `FAILED_STATUSES`
 (`sdk.py:44`). Deliberately excluded: it is the director's own state, already
 handled by `DEAD_STATES` (§4.1 F2), and counting it would double-report.
 
@@ -468,17 +601,25 @@ failure. It is still a true instance of the condition the alert actually claims
 false positive, and the operator's next action is still the quoted string. No
 guard needed. Named so Gate 1 sees it and test 5a pins it.
 
-### 6.4 Read cost, re-measured 2026-08-21
+### 6.4 Read cost, re-measured 2026-10-09
 
-Against this deployment's live registry: **2125 session directories, 510 with
-`state.json`, 23 MB on disk (0.4 MB of it `state.json`), full parse 12.6 ms**.
-The 2026-08-11 draft measured 1376 / 352 / 12.1 ms. Nothing prunes the tree, so
-the directory count grew 54% in ten days and will keep growing.
+Against this deployment's live registry: **3684 session directories, 848 with
+`state.json`, 0.66 MB of `state.json`, full parse 20.0 ms**.
+
+| Measured | Dirs | `state.json` | Full parse |
+|---|---|---|---|
+| 2026-08-11 | 1376 | 352 | 12.1 ms |
+| 2026-08-21 | 2125 | 510 | 12.6 ms |
+| **2026-10-09** | **3684** | **848** | **20.0 ms** |
+
+Nothing prunes the tree. The directory count is up 73% in seven weeks and 168%
+since the draft, and parse cost now tracks it roughly linearly. This is the one
+number in the spec that is getting worse on its own.
 
 The reader therefore bounds itself: `os.scandir` + `stat`, parse only entries
 whose `state.json` `st_mtime` falls inside the lookback window.
 `SessionRegistry.update` stamps `last_activity = time.time()` on every write
-(`sdk.py:384`), so mtime tracks terminal writes reliably. This is an
+(`sdk.py:398`), so mtime tracks terminal writes reliably. This is an
 established in-repo idiom: the same `stat().st_mtime` + cutoff shape is at
 `bobi/workflow/state.py:236` and `bobi/monitors/scheduler.py:530,579`. Match
 those.
@@ -488,6 +629,9 @@ part that grows without bound, so it takes a hard cap: examine at most the 500
 most-recent entries by mtime and stop. A box dispatching more than 500 sessions
 inside the lookback window is not a box this detector can help. Registry
 pruning is the real fix and is **out of scope** (§10).
+For scale: 662 of this deployment's 848 parsed entries are terminal with a
+`terminal_at`, accumulated over 14 weeks, so the cap is roughly 100x the real
+hourly rate here.
 
 **One read per poll, not two.** An earlier draft had telemetry and the alerter
 each call the detector, justified by the codebase's "re-derive rather than
@@ -500,8 +644,9 @@ operator reconciling Slack against the dashboard would be looking at two
 observations of the same instant.
 
 The detector is therefore **single-flight**, memoized on the poll timestamp:
-one scan, one observation, both consumers. That also halves the cost, to ~12 ms
-per 30 s (0.04% duty).
+one scan, one observation, both consumers. That also halves the cost, to ~20 ms
+per 30 s (0.07% duty) at today's registry size, and the bounded read keeps it
+there as the tree grows.
 
 ---
 
@@ -509,7 +654,7 @@ per 30 s (0.04% duty).
 
 ### 7.1 Incident model
 
-Mirrors the crash-loop incident (`alerting.py:170-231`):
+Mirrors the crash-loop incident (`alerting.py:170-235`):
 
 - **OPEN**: the condition in §6.2 first holds. One SOFT Slack notice carrying
   the shared error string verbatim, the failure count, and the affected session
@@ -530,7 +675,7 @@ incident opened proves the brain works now. §3 shows the overlap window is
 real: sessions there ran 60-260s while dispatches arrived every 2-13 minutes.
 
 `brain_availability.py` reaches the same conclusion by a different route: it
-clears an incident only on a turn that actually succeeded (`:164-174`), never
+clears an incident only on a turn that actually succeeded (`:164-189`), never
 on elapsed time.
 
 **Limitation.** The detector observes only what is dispatched. On a box with no
@@ -557,6 +702,12 @@ A second file, same directory, same `atomic_write_json`, same fail-open
 load/save, costs nothing and needs no migration.
 `brain_availability.py:23` took the same route with its own `STATE_FILE`.
 
+[#1097](https://github.com/moda-labs/bobi-agent/pull/1097) corroborates this
+since the last pass: it had to move `_save()` ahead of the budget alert
+(`alerting.py:192-196`) because persistence order inside that one file is
+load-bearing across a process-exit boundary. Sharing the file would put this
+spec's close path into that same ordering contract.
+
 ### 7.3 Message shape
 
 ```
@@ -580,7 +731,8 @@ conditions worth alerting on, and neither is a dead credential. The error
 string is quoted verbatim and the diagnosis is left to it.
 
 **It says restart is not coming, and why.** The crash-loop alert promises
-escalation (`alerting.py:269-272`). An operator reading this one must not wait
+escalation in so many words: "Escalates to a machine restart at budget
+exhaustion" (`alerting.py:275-276`). An operator reading this one must not wait
 for an escalation that will never arrive.
 
 ---
@@ -592,10 +744,11 @@ one line of discipline.
 
 **Budget neutrality is free.** `derive_manager_status` has exactly one non-test
 caller, `telemetry.py:141`, and the restart state machine never consults it:
-`Supervisor._cycle` reads the raw `/health` body (`supervision.py:687`).
-Nothing added to the derived verdict, in either shape, can reach a restart
-decision. Re-verified at `ac2471e6` after load grace added 181 lines to
-`supervision.py`.
+`Supervisor._cycle` (`supervision.py:687`) reads the raw `/health` body
+(`supervision.py:730-731`). Nothing added to the derived verdict, in either
+shape, can reach a restart decision. Re-derived mechanically at `83bebe49` from
+`grep -rn derive_manager_status bobi/ tests/`: one definition, one caller, six
+test call sites, nothing in `supervision.py`.
 
 **Fail-open** follows the established pattern: every new path wrapped, every
 exception logged and swallowed, an unreadable registry yielding
@@ -615,14 +768,21 @@ New `WATCHDOG_*` env knobs, matching the existing convention
 
 | Var | Default | Meaning |
 |---|---|---|
-| `WATCHDOG_SESSION_FAIL_STREAK` | `3` | N consecutive same-cause failures to open |
-| `WATCHDOG_SESSION_FAIL_LOOKBACK` | `3600` | Seconds of registry history considered |
-| `WATCHDOG_SESSION_FAIL_RESTART_GRACE` | `300` | Seconds after a manager restart during which the edge cannot open (§6.2) |
 | `WATCHDOG_SESSION_FATAL_ENABLED` | `1` | Kill switch |
+| `WATCHDOG_SESSION_FAIL_STREAK` | `3` | N consecutive same-cause failures to open |
 
-The kill switch exists because this reads a shared on-disk surface the manager
+Two knobs, down from four (§1.3). The lookback (3600s) and the restart grace
+(300s) are module constants instead:
+
+- The lookback has no requester, and promoting a constant to an env knob later
+  is additive and free.
+- The restart grace is a correctness guard against a false positive this
+  deployment has actually produced (§3.1). Exposing it invites setting it to 0.
+
+The kill switch stays because this reads a shared on-disk surface the manager
 owns concurrently; an operator must be able to turn it off without a rollback.
-Load grace shipped the same way (`WATCHDOG_LOAD_GRACE`, `config.py:81`).
+Load grace shipped the same way (`WATCHDOG_LOAD_GRACE`,
+`bobi/supervisor/config.py:81`, `:105`).
 
 ---
 
@@ -633,7 +793,7 @@ Load grace shipped the same way (`WATCHDOG_LOAD_GRACE`, `config.py:81`).
 | File | Change |
 |---|---|
 | `bobi/supervisor/probe.py` | detector, signature normalizer, bounded single-flight reader |
-| `bobi/supervisor/config.py` | the four knobs in §9 |
+| `bobi/supervisor/config.py` | the two knobs in §9 |
 | `bobi/supervisor/snapshot.py` | `build_heartbeat` carries the `session_health` key |
 | `bobi/supervisor/telemetry.py` | calls the detector, edge-triggers the two lifecycle events |
 | `bobi/supervisor/alerting.py` | the incident edge and its second state file |
@@ -648,6 +808,10 @@ is the literal dict the payload is assembled from. Load grace touched the same
 five sidecar files plus one new module, which is the closest available estimate
 of this shape's real cost.
 
+This spec adds no new module: the detector lives in `probe.py` beside
+`status_file_age`, which already does the same kind of bounded registry read
+from outside the manager.
+
 **Out, deliberately:**
 
 - **Widening `classify_brain_unavailability`** to catch §3's string. It is
@@ -656,9 +820,10 @@ of this shape's real cost.
 - **Routing `system/brain.*` to an operator** (G3). A deployment
   subscription change, not framework work, and it belongs with whoever owns the
   team's subscription list.
-- **Registry pruning.** Nothing prunes `state/sessions/`; 2125 directories here
-  and growing (§6.4). The detector caps its own sweep so it does not depend on
-  a fix, but the unbounded directory is a runtime-wide problem. Separate issue.
+- **Registry pruning.** Nothing prunes `state/sessions/`; **3684** directories
+  here, up 73% in seven weeks (§6.4). The detector caps its own sweep so it does
+  not depend on a fix, but the unbounded directory is a runtime-wide problem.
+  Separate issue.
 - **The dashboard chip.** Rendering `session_health` in `healthChip` /
   `_is_running` is a separate UI change with its own design-system review. The
   heartbeat carries the truth after this PR; the console shows it in a
@@ -683,13 +848,15 @@ of this shape's real cost.
 
 Unit tests alongside the existing supervisor suites
 (`tests/test_supervisor_telemetry.py`, 24 tests; `tests/test_supervisor_alerting.py`,
-18; driven by injected doubles and a `Clock`). `tests/test_supervisor_load.py`
-(25 tests, added by #1022) is the closest model for a new sidecar signal's test
-shape.
+**19** after #1097; driven by injected doubles and a `Clock`).
+`tests/test_supervisor_load.py` (25 tests, added by #1022) is the closest model
+for a new sidecar signal's test shape. Counts re-derived 2026-10-09 with
+`grep -c 'def test_'`.
 
 **Detector** (`tests/test_supervisor_telemetry.py`):
 
 1. N same-cause failures -> `failing`; the shared error string is carried through.
+   Fixture: §3's 13 real entries, so the test asserts against the incident the spec exists for.
 2. N failures with *different* signatures -> `ok`. The discriminator is the signature, not the count.
 3. A `completed` interleaved in the streak -> `ok`.
 4. Signature normalization: `resets 12:40am` and `resets 1:05am` match after digit collapse.
@@ -699,7 +866,7 @@ shape.
 7. Only entries inside the lookback window are considered.
 8. **The detector performs no writes.** Assert `state.json` mtimes are unchanged across a detection run. The direct regression test for §4.1 F1.
 9. A `wedged` / `down` manager with N failed sessions -> no session-fatal edge (§6.2 manager-alive guard).
-10. **N sessions reaped `crashed` right after a `manager_restarted` -> no edge.** The regression test for the restart-grace guard, and the highest-likelihood false positive in the design.
+10. **N sessions reaped `crashed` right after a `manager_restarted` -> no edge.** The regression test for the restart-grace guard, and the only false positive this deployment has actually produced. Fixture: §3.1's three real entries, one second apart, sharing `DIED_WITHOUT_TERMINAL`.
 10a. **N failures with EMPTY error strings -> `unknown`, never `failing`** (§6.2 empty-signature rule).
 10b. Signature normalizer as a unit: multi-line error takes the first line only; >120 chars truncates; digit runs collapse; an all-digits error does not become a universal match.
 10c. A legacy entry with `terminal_at == 0.0` is skipped, not sorted to the beginning of time.
@@ -711,14 +878,16 @@ shape.
 12. RECOVERED on a `completed` session that started after the incident opened, with duration.
 13. **A `completed` session that started BEFORE the incident opened does NOT close it.** The regression test for the overlap hole in §7.1.
 14. Incident survives a simulated process restart via the state file.
-15. **Closing a session-fatal incident leaves an open crash-loop incident and its `exhaust_cycles` intact** (§7.2).
-16. A raising `post_fn` does not propagate.
+15. **Closing a session-fatal incident leaves an open crash-loop incident and its `exhaust_cycles` intact** (§7.2). Also asserts the inverse: a crash-loop `_clear()` does not erase an open session-fatal incident.
 
-**Integration** (`tests/test_supervision_restart.py`, extending
+Cut from this list (§1.3): "a raising `post_fn` does not propagate". `_post` is
+shared with the crash-loop path and the existing suite already covers it.
+
+**Integration** (`tests/test_supervision_restart.py`, 5 tests, extending
 `tests/fixtures/supervisor_stub_manager.py` with a `brainless` mode beside the
-existing `always-idle` / `dead-then-recover` / `busy-wedge-then-recover`:
-registers a healthy `idle` director, serves `/health`, writes N failed session
-entries):
+existing `wedge-then-recover` / `always-idle` / `dead-then-recover` /
+`busy-wedge-then-recover` (`supervisor_stub_manager.py:43-44`): registers a
+healthy `idle` director, serves `/health`, writes N failed session entries):
 
 17. **A real `Supervisor` over a real stub manager in `brainless` mode performs ZERO restarts and the restart budget count stays 0**, while the alerter posts exactly one notice. Point 3 proven end to end rather than argued from §8.
 
@@ -726,25 +895,50 @@ Per `CLAUDE.md`, no real-Claude e2e leg: the change is brain-agnostic (it reads
 persisted registry state and posts Slack), so the stub path is where the risk
 lives.
 
-Plus `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ -q`, and
-§3's script re-run against this deployment's registry with the detector wired
-in, to confirm it opens on real historical data.
+Plus `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ -q`.
+
+And one acceptance check the §3.2 simulation already specifies the expected
+answer for: **run the detector over this deployment's whole registry and assert
+it opens exactly three times** - the two §3 segments and §3.1's restart reap -
+and that with the restart grace enabled it opens only on §3. That turns a
+historical measurement into a regression test with a known-good number.
 
 ---
 
 ## 12. Open questions for Gate 1
 
-### Q1 (was blocking): S, R, or M?
+### Q1 (the one blocking question): S, R, or M?
 
-**Recommend R.** Load grace already answered this fork the same way on the
-adjacent failure mode (§5.4). Q1 is no longer blocking on the merits; it needs
-a yes rather than a decision. Overriding to S or M is still Zach's call, and
-either would change the shape of the code rather than a constant.
+**The question, stated once:** does the session-fatal condition become a new
+`failing` value in `manager.status` (**S**, the issue's sketch), a new
+orthogonal `session_health` heartbeat block (**R**, recommended), or an
+alerter-only change with no wire surface at all (**M**)?
+
+**Recommend R**, unchanged and now with more behind it:
+
+1. Both consumers of the `manager.status` enum render an unknown value as a
+   green **running** chip, so S alerts while the fleet view keeps lying. Both
+   files are byte-identical to the last pass (W1), and they are one deny-list
+   surfaced twice rather than two independent surfaces.
+2. The protocol's compatibility promise covers new *fields*, not new
+   inhabitants of a documented enum whose table it publishes
+   (`ADMIN_PROTOCOL.md:27-31`, `:314`, `:338-345`), and the doc tells consumers
+   to "switch on `running`/`idle` and on `down`" (`:348-350`).
+3. A brainless-but-quiet box has two true facts. `manager.status=idle` **and**
+   `session_health=failing` is the diagnosis; either alone is not.
+4. Load grace faced this exact fork on the inverse failure mode and chose R
+   (§5.4), publishing both an additive block and its own episode pair
+   (`ADMIN_PROTOCOL.md:376-377`).
+
+**This is a yes/no, not a research question.** Overriding to S or M is Zach's
+call and changes the shape of the code, not a constant. Nothing in this pass
+moved the balance; it only removed reasons to re-derive it.
 
 ### Q2 (non-blocking)
 
-- **N default.** 3 proposed. §6.2's table supports 2 as defensible (4 minutes
-  earlier); 3 is the more conservative read of a shared on-disk surface.
+- **N default.** 3 proposed, and the one knob kept (§9). §6.2's table supports 2
+  as defensible (4 minutes earlier); 3 is the more conservative read of a shared
+  on-disk surface.
 - **Alert channel.** Reuses `WATCHDOG_ALERT_CHANNEL` (`alerting.py:70`). Same
   channel as crash-loops, or its own?
 - **`unknown` in the heartbeat.** Publishing `state: "unknown"` for a box with
@@ -769,12 +963,13 @@ determines whether one routing change covers both or two are needed.
 |---|---|---|
 | [#855](https://github.com/moda-labs/bobi-agent/issues/855) brain auth failure recorded as a successful turn | **closed** ([#1041](https://github.com/moda-labs/bobi-agent/pull/1041), 2026-08-19) | **Overlaps, and covers the larger share.** Cause-shaped, fires at the point of failure, names the cause. This spec is the outcome-shaped backstop for its three gaps (G1 classifier miss, G2 `connect()` blind spot, G3 unrouted alert). Keep both; #855 stays primary |
 | [#903](https://github.com/moda-labs/bobi-agent/issues/903) busy worker's `last_activity` goes stale, healthy run reads as stalled | **closed** ([#1022](https://github.com/moda-labs/bobi-agent/pull/1022)) | **Inverse, and the design precedent.** #903 is a false *negative* verdict on a working box; this is a false *positive* verdict on a broken one. Its fix chose the additive-block shape this spec recommends, which is why §5.4 treats Q1 as settled. No code overlap: load grace reads `/proc`, this reads the registry |
-| [#1063](https://github.com/moda-labs/bobi-agent/issues/1063) otel tool probe basename fallback resolves the wrong agent | **closed** ([#1068](https://github.com/moda-labs/bobi-agent/pull/1068), today) | **Unrelated. Different "probe".** #1068 touched `bobi/tool_library/otel/tool.yaml`, `paths.agent_name`, and the dep-bootstrap preflight. `git show --stat 4309bb6d` contains no `bobi/supervisor/` file, and `bobi/supervisor/probe.py` is byte-identical to this spec's original baseline. Changes no premise here |
+| [#1063](https://github.com/moda-labs/bobi-agent/issues/1063) otel tool probe basename fallback resolves the wrong agent | **closed** ([#1068](https://github.com/moda-labs/bobi-agent/pull/1068), 2026-08-21) | **Unrelated. Different "probe".** #1068 touched `bobi/tool_library/otel/tool.yaml`, `paths.agent_name`, and the dep-bootstrap preflight. `git show --stat 4309bb6d` contains no `bobi/supervisor/` file, and `bobi/supervisor/probe.py` is still byte-identical to this spec's original baseline. Changes no premise here |
+| [#1097](https://github.com/moda-labs/bobi-agent/pull/1097) incident not persisted before the budget alert | **merged** 2026-09-24 | **Adjacent, and corroborating.** The only supervisor change since the last pass. It moved `_save()` ahead of the synchronous alert in `_on_exhausted` because persistence order inside `supervisor-incident.json` is load-bearing across the exit-70 boundary. That is an independent argument for §7.2's second state file: sharing the file would put this spec's close path inside that contract |
 | `session.completed` fires repeatedly for one session | **no issue filed** | **Adjacent, and an argument for §6.1.** `reconcile.py:176-188` re-emits any terminal entry whose `emit_confirmed` is False on every wake, so a box with failing bus POSTs streams stale completions. A lifecycle-bus detector would read that as health; the registry-reading detector is immune. Out of scope (§10), named because it motivates the read-source choice |
 
 None of these should be absorbed into #992, and #992 should not be folded into
-any of them: three are closed, and the fourth needs its own fix in
-`reconcile.py`. The one open question this raises is Q3.
+any of them: four are closed or merged, and the remaining one needs its own fix
+in `reconcile.py`. The one open question this raises is Q3.
 
 ---
 
@@ -784,20 +979,23 @@ any of them: three are closed, and the fourth needs its own fix in
 
 **This spec has had a same-model adversarial pass only.** Cross-model review is
 unavailable in this worker container, re-verified by running both tools on
-2026-08-21 rather than assumed:
+2026-10-09 rather than assumed:
 
 ```
 $ codex exec -s read-only "Reply with the single word OK." < /dev/null
 ERROR: unexpected status 401 Unauthorized: Missing bearer or basic
        authentication in header, url: https://api.openai.com/v1/responses
+$ ls /home/bobi/.codex/auth.json
+ls: cannot access '/home/bobi/.codex/auth.json': No such file or directory
 
 $ aichat "Reply with OK."
-(no response; terminated at the 60s bound - no config at
- /home/bobi/.config/aichat/config.yaml)
+Error: Failed to load config at '/home/bobi/.config/aichat/config.yaml'
+Caused by: No such file or directory (os error 2)
 ```
 
-`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AICHAT_PLATFORM`, and
-`ANTHROPIC_API_KEY` are all unset in this container.
+`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `AICHAT_PLATFORM`,
+`AICHAT_OPENROUTER_API_KEY`, and `ANTHROPIC_API_KEY` are all unset in this
+container. Unchanged across three passes (2026-08-11, 2026-08-21, 2026-10-09).
 
 The 2026-08-11 draft attributed this gap to "#522". That citation was wrong:
 [#522](https://github.com/moda-labs/bobi-agent/pull/522) is a merged PR
@@ -885,6 +1083,36 @@ Triggered by review feedback on
 | RV7 | The draft's "#522" citation for the cross-model gap was wrong; #522 is a merged PR. No open issue tracks it | §14.1 |
 | RV8 | `reconcile.py:176-188` re-emits terminal sessions whose bus POST never landed, on every wake. Strengthens the registry-over-bus choice | §6.1, §10, §13 |
 
+### 14.5 Re-validation pass, 2026-10-09
+
+Triggered by Zach on Slack: "can you recheck through PR #1008 and see if it also
+needs updating? Looks like a bug we should fix." Branch merged from `main`
+(`83bebe49`, no conflicts); every citation re-read, every behavioural claim
+re-run.
+
+**Verdict: VALID WITH UPDATES.** No claim fell. Nothing on `main` implemented
+any part of it. The design surface is byte-identical.
+
+| # | Finding | Folded into |
+|---|---|---|
+| X1 | `git diff ac2471e6 83bebe49` is EMPTY for probe.py, snapshot.py, telemetry.py, brain_availability.py, brain/, reconcile.py, event_bus.py, shell.js, ADMIN_PROTOCOL.md. The fork-deciding claims and the three #855 gaps need no re-argument | §1 W1, §2, §5.1, P1 |
+| X2 | #1099 added an `inbox` key to `/health`'s sessions projection: four keys now, still none of the three the detector needs | §1 W3, P3, P4 |
+| X3 | #1097 moved `_save()` ahead of the budget alert. Independent evidence that ordering inside `supervisor-incident.json` is load-bearing, which argues for §7.2's separate file | §1 W2, §7.2, §13 |
+| X4 | **The restart-reap false positive is real, not hypothetical.** 2026-08-03 21:09:09-10: three sessions, one `DIED_WITHOUT_TERMINAL` signature, one second apart | §3.1, §6.2, test 10 |
+| X5 | **The detector simulated over all 662 terminal entries opens exactly three times**, all explained, only one unguarded, and that one is the condition the spec is for | §3.2, §11 acceptance check |
+| X6 | A new ~150-entry shared-signature cluster exists on one monitor session. The `status="error"` exclusion carries it; the `failed` minority fails the streak and lookback | §3.2, §6.2 R4 |
+| X7 | Registry up 73% in seven weeks (2125 -> 3684 dirs), parse 12.6 -> 20.0 ms. The bounded read and the 500 cap are the growth-proofing and the growth is real | §6.4, §10 |
+| X8 | No new session-limit or auth burst since 2026-07-31. Three isolated singles, no streak. One burst in 14 weeks | §3.3 |
+| X9 | Terminal-writer inventory re-derived: same ten writers, every line moved, no semantics changed | §6.3 |
+| X10 | **Simplicity pass:** two knobs and two spec components cut, no capability lost | §1.3, §9, §6.2, §11 |
+
+**Not folded, and why.** Nothing was found that required a design change. The
+one judgement call was whether to cut the `sessions_failing` /
+`sessions_recovered` lifecycle pair as unconsumed. **Kept**: load grace ships
+its own documented episode pair (`ADMIN_PROTOCOL.md:376-377`) under the same
+precedent §5.4 leans on, so cutting it would make this the only sidecar signal
+without an episode record. That is inconsistency, not simplification.
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
@@ -892,7 +1120,8 @@ Triggered by review feedback on
 | Eng Review | `/gstack-plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 5 issues, 0 critical gaps, all folded in |
 | CEO Review | `/gstack-plan-ceo-review` | Scope & strategy | 0 | LENS ONLY | scope challenge answered inline (§14.3 Step 0); full skill not invoked |
 | Design Review | `/gstack-plan-design-review` | UI/UX gaps | 0 | NOT RUN | no UI surface in scope; §10 defers the only rendering work |
-| Codex Review | `codex exec` | Independent 2nd opinion | 0 | NOT RUN | codex 401 not authed, re-tested 2026-08-21 (§14.1) |
+| Codex Review | `codex exec` | Independent 2nd opinion | 0 | NOT RUN | codex 401 not authed, re-tested 2026-10-09 (§14.1) |
+| Independent citation check | fresh-context subagent | Verify every cite by running greps on current `main`; hunt over-design | 1 | see §14.6 | read-only, same model, no authorship context |
 | DX Review | `/gstack-plan-devex-review` | Developer experience gaps | 0 | NOT RUN | not bound for this role |
 
 Only the Eng leg ran as its skill. This role binds a three-leg spec review for
@@ -910,8 +1139,9 @@ pending the Q1 ruling, and the cross-model adversarial leg is still owed.
 
 **UNRESOLVED DECISIONS:**
 
-- **Q1**: shape S, R, or M. Recommend R, now with the `load_grace` precedent
-  behind it. Zach's call. No code until it is answered.
+- **Q1**: shape S, R, or M. Recommend R, with the `load_grace` precedent behind
+  it and both consumer surfaces re-verified byte-identical. Zach's call. No code
+  until it is answered.
 - **Q2**: N default of 3 vs 2; alert channel shared with crash-loops or its
   own; publish `session_health: unknown` or omit the block.
 - **Q3**: whether this alert should also fire a `system/brain.*`-style topic so
