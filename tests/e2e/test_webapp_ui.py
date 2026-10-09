@@ -26,9 +26,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -48,9 +50,396 @@ RESUME_URL = re.compile(r"/resume")
 
 # The runs table pages at 100. One row past it is the whole pager contract.
 PAGE_SIZE = 100
+METRICS_CAPTURES = Path(__file__).resolve().parents[2] / ".tmp/metrics-modernization/hardening/screenshots"
+
+
+def _metrics_capture(page, name):
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), name
+    METRICS_CAPTURES.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(METRICS_CAPTURES / f"{name}.png"), full_page=True, animations="disabled")
+
+
+def _metrics_bounds(page, selector):
+    failures = page.locator(selector).evaluate_all("""elements => elements
+        .filter(element => element.getClientRects().length)
+        .map(element => {
+            const bounds = element.getBoundingClientRect();
+            return {tag: element.tagName, id: element.id, width: bounds.width,
+                left: bounds.left, right: bounds.right, viewport: innerWidth};
+        }).filter(bounds => bounds.width < 24 || bounds.left < 0 || bounds.right > bounds.viewport + 1)""")
+    assert not failures, failures
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
 
 
 class TestMetricsView:
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    def test_metrics_model_input_filters_without_enter_while_loading(self, webapp, page, width):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        connection = connect(webapp.install.state_dir / "metrics/metrics.db")
+        connection.execute("UPDATE llm_invocations SET model_requested='claude-haiku-4-5', model_selected='claude-haiku-4-5' WHERE invocation_id='i0'")
+        connection.execute("UPDATE usage_measurements SET model='claude-haiku-4-5' WHERE measurement_id='u0'")
+        connection.commit()
+        connection.close()
+        held = []
+        requests = _record_requests(page, re.compile(r"/metrics/(?:summary|turns)\?"))
+        def hold_initial_summary(route):
+            if "model=" not in route.request.url:
+                held.append(route)
+            else:
+                route.continue_()
+        page.route("**/metrics/summary?**", hold_initial_summary)
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.goto(webapp.agent_url() + "/metrics")
+        model = page.get_by_role("textbox", name="Provider model filter")
+        model.fill("haik")
+        expect(model).to_be_focused()
+        expect(page.locator("#metrics-refresh")).to_have_attribute("aria-busy", "true")
+        page.wait_for_timeout(400)
+        assert len(held) == 1
+        held.pop().continue_()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(1)
+        expect(rows).to_contain_text("claude-haiku-4-5")
+        expect(page.locator(".metrics-tile strong").first).to_have_text("100")
+        assert any("/summary?" in url and "model=haik" in url for url in requests)
+        assert any("/turns?" in url and "model=haik" in url for url in requests)
+        expect(model).to_be_focused()
+        _metrics_capture(page, f"model-haik-{width}")
+        model.fill("  V4-PRO  ")
+        expect(rows).to_have_count(2)
+        expect(page.locator(".metrics-tile strong").first).to_have_text("620")
+        page.unroute("**/metrics/summary?**", hold_initial_summary)
+        model.fill("")
+        expect(rows).to_have_count(4)
+        expect(page.locator(".metrics-tile strong").first).to_have_text("720")
+
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    @pytest.mark.parametrize("failure", ["404", "500", "hung"])
+    def test_jev_header_falls_back_within_deadline(self, webapp, page, width, failure):
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        held = []
+        def fail_config(route):
+            if failure == "hung":
+                held.append(route)
+            else:
+                route.fulfill(status=int(failure), json={"error": "offline_config_unavailable"})
+        page.route("**/metrics/jev-config", fail_config)
+        page.clock.install()
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.goto(webapp.agent_url() + "/metrics")
+        expect(page.locator(".metrics-tile strong").first).to_have_text("720")
+        if failure == "hung":
+            assert held
+            page.clock.run_for(2500)
+        button = page.get_by_role("button", name="JEV: Disabled")
+        expect(button).to_be_visible(timeout=2500 if failure != "hung" else 250)
+        expect(button).to_be_enabled()
+        assert "Loading" not in button.inner_text()
+        _metrics_capture(page, f"jev-{failure}-disabled-{width}")
+        button.click()
+        dialog = page.get_by_role("dialog", name="JEV Routing Configuration")
+        if failure == "hung":
+            page.clock.run_for(2500)
+        expect(dialog).to_contain_text(re.compile(r"unavailable|could not|failed|timed out", re.I))
+        expect(dialog.locator("#jev-config-save")).to_have_count(0)
+        expect(dialog.locator("#jev-config-export, #jev-config-delete")).to_have_count(0)
+        dialog.get_by_role("button", name="Close dialog").click()
+        expect(dialog).to_be_hidden()
+        assert errors == []
+        for route in held:
+            route.abort()
+
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    @pytest.mark.parametrize("mode", ["enforce", "shadow"])
+    def test_jev_header_preserves_active_mode(self, webapp, page, width, mode):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        config = concise_config()
+        config["mode"] = mode
+        paths.env_path(webapp.install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + shlex.quote(json.dumps(config)) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=browser-only-assignment-seed\n")
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.goto(webapp.agent_url() + "/metrics")
+        button = page.get_by_role("button", name="JEV: " + mode.title())
+        expect(button).to_be_visible()
+        expect(button).to_have_class(re.compile(r"\bactive\b"))
+        expect(button).to_have_class(re.compile("mode-" + mode))
+        expect(page.get_by_role("button", name="JEV: Disabled")).to_have_count(0)
+        _metrics_capture(page, f"jev-{mode}-{width}")
+        button.click()
+        dialog = page.get_by_role("dialog", name="JEV Routing Configuration")
+        dialog.get_by_role("tab", name="Configure").click()
+        expect(dialog.locator("#jev-config-mode")).to_have_value(mode)
+
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    def test_metrics_maintenance_collapses_without_reclassifying_real_user(self, webapp, page, monkeypatch, width):
+        from bobi.metrics.store import connect
+
+        started = int((time.time() - 60) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+        connection = connect(webapp.install.state_dir / "metrics/metrics.db")
+        connection.execute("UPDATE sessions SET provider_session_id='e2e-worker-a' WHERE session_id='s1'")
+        connection.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        connection.execute("UPDATE turns SET trigger_kind='sleep_cycle', is_user_initiated=0 WHERE turn_id='t-routine'")
+        connection.execute("UPDATE turns SET trigger_kind='startup', is_user_initiated=0 WHERE turn_id='t-pro'")
+        connection.commit()
+        connection.close()
+        long_context = ("維護 context " * 500).rstrip()
+        prompts = [
+            "You are the **sleep cycle** for this agent team. You run out-of-band, on a schedule, as a monitor to process recent transcript deltas.\n" + long_context,
+            "You are an agent in a bobi deployment. Initialize the agent.\n" + long_context,
+            "Explain curator sleep cycle and memory compaction without reclassifying my message. " + "user-content-" * 600,
+        ]
+        entries = []
+        for index, prompt in enumerate(prompts):
+            at = datetime.fromtimestamp((started + index * 1_000_000 + 100_000) / 1_000_000, timezone.utc).isoformat()
+            entries.extend([_entry("user", prompt, at), _entry("assistant", "Completed safely", at)])
+        _seed_transcript(webapp, monkeypatch, "worker-a", entries)
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page.goto(webapp.agent_url() + "/metrics")
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(4)
+        for index, title in [(0, "Sleep Cycle & Memory Compaction"), (1, "Agent Startup & Initialization")]:
+            rows.filter(has_text=title).click()
+            dialog = page.get_by_role("dialog", name="Turn detail")
+            expect(dialog.get_by_role("heading", name="User Message", exact=True)).to_have_count(0)
+            heading = "System / Maintenance Prompt" if index == 0 else "Agent Startup & System Context"
+            expect(dialog.get_by_role("heading", name=heading, exact=True)).to_be_visible()
+            content = dialog.locator(".io-block-system .metrics-prompt-content")
+            expand = dialog.locator(".io-block-system .metrics-tool-expand")
+            expect(expand).to_be_visible()
+            expect(expand).to_have_attribute("aria-expanded", "false")
+            assert content.text_content() == prompts[index]
+            assert content.evaluate("element => element.clientHeight <= 180 && element.scrollHeight > element.clientHeight")
+            _metrics_capture(page, f"prompt-{'maintenance' if index == 0 else 'startup'}-collapsed-{width}")
+            expand.focus()
+            expand.press("Enter")
+            expect(expand).to_have_attribute("aria-expanded", "true")
+            assert content.evaluate("element => element.clientHeight > 180 && element.scrollHeight <= element.clientHeight + 1")
+            _metrics_capture(page, f"prompt-{'maintenance' if index == 0 else 'startup'}-expanded-{width}")
+            expand.click()
+            expect(expand).to_have_attribute("aria-expanded", "false")
+            assert content.evaluate("element => element.clientHeight <= 180")
+            dialog.get_by_role("button", name="Close", exact=True).click()
+        user_row = rows.filter(has_text="Explain curator sleep cycle")
+        expect(user_row.locator(".metrics-topic-title")).to_have_text("initial request")
+        expect(user_row.locator(".metrics-topic-meta")).to_contain_text("Explain curator sleep cycle")
+        user_row.click()
+        dialog = page.get_by_role("dialog", name="Turn detail")
+        expect(dialog.get_by_role("heading", name="User Message", exact=True)).to_be_visible()
+        expect(dialog.get_by_role("heading", name="System / Maintenance Prompt", exact=True)).to_have_count(0)
+        expect(dialog.locator(".metrics-full-prompt-details")).to_have_count(0)
+        user = dialog.locator(".io-block-user .metrics-markdown")
+        expect(user).to_contain_text(prompts[2])
+        assert user.evaluate("element => element.clientHeight <= 180 && element.scrollHeight > element.clientHeight")
+        _metrics_capture(page, f"prompt-real-user-collapsed-{width}")
+        expand = dialog.locator(".io-block-user .metrics-tool-expand")
+        expect(expand).to_have_attribute("aria-expanded", "false")
+        expand.click()
+        expect(expand).to_have_attribute("aria-expanded", "true")
+        assert user.evaluate("element => element.clientHeight > 180 && element.scrollHeight <= element.clientHeight + 1")
+        _metrics_capture(page, f"prompt-real-user-expanded-{width}")
+        expand.click()
+        expect(expand).to_have_attribute("aria-expanded", "false")
+        dialog.get_by_role("button", name="Copy Input / Prompt", exact=True).click()
+        expect(dialog.get_by_role("button", name="Copy Input / Prompt", exact=True)).to_have_text("copied")
+        assert page.evaluate("navigator.clipboard.readText()") == prompts[2]
+
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    def test_jev_sandbox_and_defensive_toolbar_layout(self, webapp, page, monkeypatch, width):
+        import httpx
+        from bobi import paths
+        from bobi.metrics.store import connect
+        from tests.metrics.test_routing import concise_config
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        database = webapp.install.state_dir / "metrics/metrics.db"
+        connection = connect(database)
+        connection.execute("UPDATE sessions SET session_name=?", ("session-name-" * 30,))
+        connection.commit()
+        before = "\n".join(connection.iterdump())
+        connection.close()
+        env_file = paths.env_path(webapp.install.repo_path)
+        config = concise_config()
+        config["endpoint"] = "https://api.typesafe.ai/v1/sandbox-test"
+        config["prompt_egress"] = "redacted"
+        env_file.write_text("# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(config) + "\n")
+        env_before = env_file.read_bytes()
+        client_class = httpx.AsyncClient
+        calls = []
+        def handler(request):
+            calls.append(json.loads(request.content))
+            assert request.headers["authorization"] == "Bearer browser-test-key"
+            assert calls[-1]["state"]["role"] == "curator"
+            assert calls[-1]["state"]["entry_point"] == "subagent_phase"
+            if calls[-1]["state"]["task"] == "Fail deliberately":
+                return httpx.Response(401, text="private vendor error")
+            return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
+                "type": "choice", "choice": "ds/deepseek-v4-pro", "confidence": 0.94,
+                "probabilities": {"ds/deepseek-flash": 0.03, "ds/deepseek-v4-pro": 0.97}}},
+                "usage": {"input_tokens": 12, "output_tokens": 4},
+                "debug": '<img src=x onerror="window.sandboxInjected=true">'})
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
+            lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.goto(webapp.agent_url() + "/metrics")
+        expect(page.locator(".metrics-tile strong").first).to_have_text("720")
+        toolbar = page.locator(".metrics-toolbar-card")
+        layout = toolbar.evaluate("""element => {
+            const outer = element.getBoundingClientRect();
+            const controls = [...element.children].map(child => {
+                const bounds = child.getBoundingClientRect();
+                return {left: bounds.left, right: bounds.right, top: Math.round(bounds.top), height: bounds.height};
+            });
+            return {left: outer.left, right: outer.right, controls,
+                rows: new Set(controls.map(control => control.top)).size,
+                overflow: document.documentElement.scrollWidth > innerWidth};
+        }""")
+        assert layout["rows"] == (1 if width == 1440 else 2), layout
+        assert not layout["overflow"], layout
+        assert all(control["height"] >= 36 and control["left"] >= layout["left"]
+                   and control["right"] <= layout["right"] for control in layout["controls"]), layout
+        _metrics_bounds(page, ".metrics-toolbar-card input:not([role=switch]), .metrics-toolbar-card select, .metrics-toolbar-card button, .metrics-switch-track")
+        _metrics_capture(page, f"toolbar-default-{width}")
+        search = page.get_by_role("searchbox", name="Search loaded turns")
+        search.focus()
+        expect(search).to_be_focused()
+        assert search.evaluate("element => getComputedStyle(element.closest('.search-turns-box')).boxShadow !== 'none'")
+        expect(page.locator(".search-turns-box .search-icon")).to_have_count(1)
+        search.fill("no-match")
+        expect(page.locator(".metrics-table-panel tbody tr")).to_have_count(0)
+        _metrics_capture(page, f"toolbar-focused-{width}")
+        clear = page.locator("#metrics-search-clear")
+        clear.focus()
+        clear.press("Enter")
+        expect(search).to_have_value("")
+        expect(search).to_be_focused()
+        expect(page.locator(".metrics-table-panel tbody tr")).to_have_count(4)
+        live = page.locator("#metrics-live")
+        expect(live).to_have_attribute("role", "switch")
+        live.focus()
+        assert page.locator(".metrics-switch-track").evaluate("element => parseFloat(getComputedStyle(element).outlineWidth)") >= 2
+        live.press("Space")
+        expect(live).not_to_be_checked()
+        with page.expect_response(re.compile(r"/metrics/summary\?")):
+            live.press("Space")
+        expect(live).to_be_checked()
+        page.get_by_role("combobox", name="Session lifecycle").select_option("s1")
+        assert page.locator(".metrics-session-chip span").evaluate("element => element.getBoundingClientRect().width") <= 280
+        _metrics_capture(page, f"toolbar-session-{width}")
+        page.get_by_role("button", name="JEV: Disabled").click()
+        dialog = page.get_by_role("dialog", name="JEV Routing Configuration")
+        dialog.get_by_role("tab", name="Configure").click()
+        dialog.locator("#jev-config-mode").select_option("enforce")
+        # Save and Apply is the only way out: no clipboard export, no endpoint field.
+        expect(dialog.locator("#jev-config-export")).to_have_count(0)
+        expect(dialog.get_by_text("Saved to agent environment (run/.env)")).to_be_visible()
+        dialog.locator("#jev-config-mode").select_option("off")
+        dialog.get_by_role("tab", name="Test Routing").click()
+        expect(dialog.get_by_label("TypeSafe endpoint", exact=True)).to_have_count(0)
+        expect(dialog.get_by_label("Entry Point", exact=True)).to_have_value("session_start")
+        expect(dialog.get_by_role("button", name="Save Changes")).to_be_hidden()
+        key = dialog.get_by_label("TYPESAFE_API_KEY", exact=True)
+        expect(key).to_have_attribute("type", "password")
+        key.fill("browser-test-key")
+        dialog.get_by_role("button", name="Show key").click()
+        expect(key).to_have_attribute("type", "text")
+        dialog.get_by_role("button", name="Hide key").click()
+        expect(key).to_have_attribute("type", "password")
+        dialog.get_by_label("Role", exact=True).select_option("curator")
+        dialog.get_by_label("Entry Point", exact=True).select_option("subagent_phase")
+        prompt = dialog.get_by_label("User Prompt / Task", exact=True)
+        prompt.fill("Write a distributed Raft consensus algorithm")
+        dialog.get_by_role("button", name="Simulate JEV Routing").click()
+        expect(dialog.locator(".jev-decision-banner > strong")).to_have_text("ds/deepseek-v4-pro")
+        expect(dialog.get_by_role("meter", name="Confidence", exact=True)).to_have_attribute("aria-valuenow", "94")
+        expect(dialog.get_by_role("meter", name="ds/deepseek-v4-pro", exact=True)).to_have_attribute("aria-valuenow", "97")
+        expect(dialog.locator("progress")).to_have_count(0)
+        expect(dialog.locator(".jev-probability-row")).to_have_count(2)
+        expect(dialog.locator(".jev-test-status")).to_contain_text("No metrics recorded")
+        _metrics_capture(page, f"jev-sandbox-{width}")
+        dialog.locator(".jev-wire-inspector").scroll_into_view_if_needed()
+        _metrics_capture(page, f"jev-sandbox-results-{width}")
+        dialog.locator(".jev-wire-inspector summary").click()
+        expect(dialog.locator(".jev-wire-inspector")).to_contain_text("Outgoing Payload")
+        expect(dialog.locator(".jev-wire-inspector")).to_contain_text("Raw JEV Response")
+        assert dialog.locator("img").count() == 0
+        assert page.evaluate("window.sandboxInjected") is None
+        assert dialog.evaluate("element => element.scrollWidth <= element.clientWidth")
+        assert dialog.locator("#jev-pane-sandbox").evaluate("""pane => {
+            const bounds = pane.getBoundingClientRect();
+            return [...pane.querySelectorAll('input, select, textarea, [role="meter"], .jev-decision-banner, .jev-probabilities')]
+                .every(element => {
+                    const rect = element.getBoundingClientRect();
+                    return rect.width >= 100 && rect.left >= bounds.left && rect.right <= bounds.right
+                        && element.scrollWidth <= element.clientWidth;
+                });
+        }""")
+        assert dialog.locator("#jev-pane-sandbox button").evaluate_all("""buttons => buttons
+            .filter(button => button.getClientRects().length)
+            .every(button => button.scrollWidth <= button.clientWidth)""")
+        prompt.fill("Fail deliberately")
+        dialog.get_by_role("button", name="Simulate JEV Routing").click()
+        # A 401 names the credential problem instead of reading like an outage.
+        expect(dialog.locator(".jev-test-status")).to_contain_text("TypeSafe rejected the API key")
+        expect(dialog.locator(".jev-test-results")).to_be_hidden()
+        expect(dialog.get_by_role("button", name="Simulate JEV Routing")).to_be_enabled()
+        prompt.fill("Retry the routing decision")
+        dialog.get_by_label("TYPESAFE_API_KEY", exact=True).press("Enter")
+        expect(dialog.locator(".jev-decision-banner > strong")).to_have_text("ds/deepseek-v4-pro")
+        assert len(calls) == 3 and env_file.read_bytes() == env_before
+        wire = dialog.locator(".jev-wire-inspector summary")
+        wire.focus()
+        wire.press("Tab")
+        expect(dialog.get_by_role("button", name="Close dialog")).to_be_focused()
+        dialog.get_by_role("button", name="Close dialog").press("Shift+Tab")
+        expect(wire).to_be_focused()
+        tab = dialog.get_by_role("tab", name="Test Routing")
+        tab.focus()
+        tab.press("ArrowLeft")
+        expect(dialog.get_by_role("tab", name="Configure")).to_be_focused()
+        page.keyboard.press("ArrowRight")
+        pending = []
+        page.route("**/metrics/test-route", lambda route: pending.append(route))
+        dialog.get_by_role("button", name="Simulate JEV Routing").click()
+        expect(dialog.get_by_role("button", name="Simulating")).to_be_disabled()
+        dialog.get_by_role("button", name="Cancel request").click()
+        expect(dialog.locator(".jev-test-status")).to_contain_text("Request cancelled")
+        expect(dialog.get_by_role("button", name="Simulate JEV Routing")).to_be_enabled()
+        for route in pending:
+            route.abort()
+        page.unroute("**/metrics/test-route")
+        page.emulate_media(reduced_motion="reduce")
+        assert float(dialog.locator(".jev-test-run").evaluate("element => getComputedStyle(element).transitionDuration").removesuffix("s")) <= 0.00001
+        page.once("dialog", lambda confirmation: confirmation.dismiss())
+        dialog.press("Escape")
+        expect(dialog).to_be_visible()
+        page.once("dialog", lambda confirmation: confirmation.accept())
+        dialog.press("Escape")
+        expect(dialog).to_be_hidden()
+        expect(page.locator("#jev-test-key")).to_have_value("")
+        assert len(calls) == 3 and env_file.read_bytes() == env_before
+        connection = connect(database)
+        assert "\n".join(connection.iterdump()) == before
+        connection.close()
+        assert errors == []
+        page.get_by_role("button", name="JEV: Disabled").click()
+        dialog.get_by_role("tab", name="Test Routing").click()
+        dialog.get_by_label("User Prompt / Task", exact=True).fill("Sandbox-only edits stay request-local")
+        confirmations = []
+        page.on("dialog", lambda confirmation: (confirmations.append(confirmation.message), confirmation.dismiss()))
+        dialog.press("Escape")
+        expect(dialog).to_be_hidden()
+        assert confirmations == [] and env_file.read_bytes() == env_before
+
     def test_turn_io_session_picker_and_unified_breakdown(self, webapp, page, monkeypatch):
         from bobi.metrics.store import connect
 
@@ -76,17 +465,20 @@ class TestMetricsView:
         page.goto(webapp.agent_url() + "/metrics")
         picker = page.get_by_role("combobox", name="Session lifecycle")
         expect(picker.locator("option")).to_have_count(3)
-        expect(picker.locator('option[value="s1"]')).to_contain_text("worker-a (s1)")
-        expect(picker.locator('option[value="s2"]')).to_contain_text("worker-a (s2)")
+        expect(picker.locator('option[value="s1"]')).to_contain_text("worker a ·")
+        expect(picker.locator('option[value="s2"]')).to_contain_text("worker a ·")
         picker.select_option("s1")
         expect(page.locator(".metrics-session-chip")).to_contain_text("Session: s1")
         rows = page.locator(".metrics-table-panel .runs tbody tr")
         expect(rows).to_have_count(3)
         routine = rows.filter(has_text="72%")
-        expect(routine).to_contain_text("Slack #eng-team")
+        thread = page.locator(".metrics-thread-card").filter(has=page.locator("tr", has_text="72%"))
         expect(routine).to_contain_text("Explain **WAL**")
-        expect(routine.locator("td").nth(1)).to_contain_text("Explain **WAL**")
-        expect(routine.get_by_role("link", name="Slack #eng-team", exact=False)).to_have_attribute(
+        expect(routine.locator(".metrics-topic-title")).to_have_text("initial request")
+        expect(thread.locator(".mth-title")).to_contain_text("Explain **WAL** and `SQLite`.")
+        # The thread header carries the Slack origin; turn rows do not repeat it.
+        expect(routine.locator(".metrics-conversation-badge")).to_have_count(0)
+        expect(thread.locator(".metrics-thread-head").get_by_role("link", name="Slack #eng-team", exact=False)).to_have_attribute(
             "href", "https://app.slack.com/client/T123/C123/thread/C123-1791360056.16")
         routine.focus()
         routine.press("Enter")
@@ -109,15 +501,15 @@ class TestMetricsView:
         detail.get_by_role("button", name="Copy Input / Prompt", exact=True).click()
         expect(detail.get_by_role("button", name="Copy Input / Prompt", exact=True)).to_have_text("copied")
         assert page.evaluate("navigator.clipboard.readText()") == prompt
-        detail.screenshot(path="/tmp/bobi-metrics-turn-io.png")
+        detail.screenshot(path=str(METRICS_CAPTURES / "turn-io.png"))
         detail.locator('[data-tab="technical"]').click()
         detail.locator(".panel-usage").scroll_into_view_if_needed()
-        detail.screenshot(path="/tmp/bobi-metrics-unified-breakdown.png")
+        detail.screenshot(path=str(METRICS_CAPTURES / "unified-breakdown.png"))
         detail.get_by_role("button", name="Close").click()
         picker.select_option("s2")
         expect(rows).to_have_count(1)
         expect(page.locator(".metrics-session-chip")).to_contain_text("Session: s2")
-        page.screenshot(path="/tmp/bobi-metrics-lifecycle-picker.png", full_page=True)
+        _metrics_capture(page, "lifecycle-picker")
 
     def test_metrics_navigation_filters_drilldown_and_refresh(self, webapp, page):
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
@@ -127,16 +519,16 @@ class TestMetricsView:
         page.get_by_role("link", name="metrics & routing", exact=True).click()
         expect(page.locator(".metrics-tile strong").first).to_have_text("720")
         expect(page.locator(".metrics-tile")).to_have_count(3)
-        expect(page.locator(".tile-input .tile-sub")).to_have_text("100 (13.9%) cache read (included)")
+        expect(page.locator(".tile-input .tile-sub")).to_have_text("100 (13.9% cache read)")
         expect(page.locator(".tile-input .tile-badge, .tile-output .tile-badge")).to_have_count(0)
-        expect(page.locator(".metrics-page")).to_contain_text("2 / 1")
+        expect(page.locator(".metrics-health-strip .is-warn")).to_have_text("coverage2 exact · 1 derived · 1 unknown")
         rows = page.locator(".metrics-table-panel .runs tbody tr")
         expect(rows).to_have_count(4)
         expect(rows.filter(has_text="Router Decision")).to_have_count(2)
         expect(rows.filter(has_text="Sticky Session")).to_have_count(1)
         expect(rows.filter(has_text="Fallback")).to_have_count(1)
         expect(rows.filter(has_text="Fallback").locator("td").nth(3)).to_have_text("—")
-        page.screenshot(path="/tmp/bobi-metrics-overview.png", full_page=True)
+        _metrics_capture(page, "metrics-overview")
         routine = rows.filter(has_text="72%")
         expect(routine).to_contain_text("100 tok")
         routine.click()
@@ -144,19 +536,19 @@ class TestMetricsView:
         detail.locator('[data-tab="technical"]').click()
         expect(detail).to_contain_text("ds/deepseek-flash")
         expect(detail).to_contain_text("deepseek-flash")
-        detail.screenshot(path="/tmp/turn-detail-tables.png")
+        detail.screenshot(path=str(METRICS_CAPTURES / "turn-detail-tables.png"))
         page.locator(".detail-nav-tabs [data-tab=technical]").click()
         expect(page.locator(".panel-routing")).to_be_hidden()
         expect(page.locator(".panel-usage")).to_be_visible()
-        detail.screenshot(path="/tmp/turn-detail-usage-tab.png")
+        detail.screenshot(path=str(METRICS_CAPTURES / "turn-detail-usage-tab.png"))
         page.locator(".detail-nav-tabs [data-tab=overview]").click()
         expect(page.locator(".panel-routing")).to_be_visible()
         expect(page.locator(".panel-usage")).to_be_hidden()
-        detail.screenshot(path="/tmp/turn-detail-routing-tab.png")
+        detail.screenshot(path=str(METRICS_CAPTURES / "turn-detail-routing-tab.png"))
         page.locator(".detail-nav-tabs [data-tab=technical]").click()
         expect(page.locator(".panel-routing")).to_be_hidden()
         expect(page.locator(".panel-usage")).to_be_visible()
-        page.screenshot(path="/tmp/bobi-metrics-dashboard.png", full_page=True)
+        _metrics_capture(page, "metrics-dashboard")
         with page.expect_response(re.compile(r"/metrics/summary\?")):
             page.wait_for_timeout(10500)
         expect(detail).to_be_visible()
@@ -221,7 +613,7 @@ class TestMetricsView:
         # Check margins
         box = detail.bounding_box()
         assert box is not None
-        assert box["width"] <= 1040
+        assert box["width"] <= 1320
         backdrop_padding_x = (1440 - box["width"]) / 2
         backdrop_padding_y = (900 - box["height"]) / 2
         assert backdrop_padding_x >= 48
@@ -233,7 +625,8 @@ class TestMetricsView:
         expect(detail.locator(".io-block-assistant")).to_contain_text("sleep cycle for this agent team")
 
         # Save screenshot for visual inspection
-        artifact_dir = "/Users/zodinet17/.gemini/antigravity-cli/brain/9cd6d59b-ad40-4739-84e0-f40111fa8838"
+        METRICS_CAPTURES.mkdir(parents=True, exist_ok=True)
+        artifact_dir = METRICS_CAPTURES
         page.screenshot(path=f"{artifact_dir}/verified_curator_modal_margins.png")
         detail.screenshot(path=f"{artifact_dir}/verified_curator_overview.png")
 
@@ -264,8 +657,9 @@ class TestMetricsView:
         held[0].continue_()
         expect(page.locator(".metrics-tile strong").first).to_have_text("620")
         held.clear()
-        page.get_by_role("button", name="refresh", exact=True).click()
-        expect(page.get_by_role("button", name="refresh", exact=True)).to_be_disabled()
+        page.locator("#metrics-refresh").click()
+        expect(page.locator("#metrics-refresh")).to_be_disabled()
+        expect(page.locator("#metrics-refresh")).to_have_attribute("aria-busy", "true")
         page.get_by_role("link", name=webapp.agent, exact=False).first.click()
         expect(page.locator(".metrics-page")).to_have_count(0)
         expect(page.locator("#health")).not_to_have_class("dot stale")
@@ -300,8 +694,11 @@ class TestMetricsView:
         assert edges[0] == edges[1] == edges[2]
         assert edges[0][1] == min(width, 1360)
         assert edges[0][2:] == ["18px", "18px"] if width <= 760 else edges[0][2:] == ["32px", "32px"]
+        expect(page.locator(".metrics-thread-card").first.locator("thead th")).to_have_text(
+            ["Turn", "Step", "Model & Decision", "Confidence", "Tokens / Cost", "Latency"])
+        page.get_by_role("button", name="Flat", exact=True).click()
         expect(page.locator(".metrics-table-panel thead th")).to_have_text(
-            ["Turn", "Session / Topic", "Model & Decision", "Confidence", "Tokens / Cost", "Latency"])
+            ["When", "Session / Topic", "Model & Decision", "Confidence", "Tokens / Cost", "Latency"])
         expect(page.locator(".metrics-active-filter-bar")).to_have_count(0)
         rows = page.locator(".metrics-table-panel tbody tr")
         expect(rows).to_have_count(4)
@@ -338,9 +735,9 @@ class TestMetricsView:
             });
         }""")
         assert all(item["ratio"] >= 4.5 for item in contrast), [item for item in contrast if item["ratio"] < 4.5]
-        detail.screenshot(path=f"/tmp/bobi-overhaul-overview-{width}.png")
+        detail.screenshot(path=str(METRICS_CAPTURES / f"overhaul-overview-{width}.png"))
         detail.locator('[data-tab="technical"]').click()
-        detail.screenshot(path=f"/tmp/bobi-overhaul-technical-{width}.png")
+        detail.screenshot(path=str(METRICS_CAPTURES / f"overhaul-technical-{width}.png"))
         detail.get_by_role("button", name="Close", exact=True).click()
         page.get_by_role("combobox", name="Session lifecycle").select_option("s1")
         expect(page.locator(".metrics-session-chip")).to_have_count(1)
@@ -350,12 +747,14 @@ class TestMetricsView:
         expect(rows).to_have_count(4)
         page.get_by_role("searchbox", name="Search loaded turns").fill("no-match")
         expect(rows).to_have_count(0)
-        page.get_by_role("checkbox", name="Auto-refresh").uncheck()
+        page.locator("#metrics-live").uncheck()
+        expect(page.locator("#metrics-live")).not_to_be_checked()
         with page.expect_response(re.compile(r"/metrics/summary\?")):
-            page.get_by_role("checkbox", name="Auto-refresh").check()
+            page.locator("#metrics-live").check()
+        expect(page.locator("#metrics-live")).to_be_checked()
         page.get_by_role("combobox", name="Time range").select_option("744")
         expect(page.get_by_role("combobox", name="Time range")).to_have_value("744")
-        page.screenshot(path=f"/tmp/bobi-overhaul-layout-{width}.png", full_page=True)
+        _metrics_capture(page, f"overhaul-layout-{width}")
 
     @pytest.mark.parametrize("mode,fallback,expected", [
         ("enforce", "policy_low_confidence", "Fallback"),
@@ -389,7 +788,9 @@ class TestMetricsView:
         else:
             expect(decision).to_contain_text("executed ds/deepseek-flash")
 
-    def test_tool_cards_are_compact_and_escape_transcript_text(self, webapp, page, monkeypatch):
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    @pytest.mark.parametrize("shape", ["multiline", "wrapped-single-line"])
+    def test_metrics_tool_cards_are_compact_and_escape_transcript_text(self, webapp, page, monkeypatch, width, shape):
         from bobi.metrics.store import connect
 
         started = int((time.time() - 60) * 1_000_000)
@@ -401,26 +802,353 @@ class TestMetricsView:
         conn.commit()
         conn.close()
         at = datetime.fromtimestamp((started + 200000) / 1_000_000, timezone.utc).isoformat()
+        result = "\n".join(f"line {index:03d}: " + "測試 <img src=x onerror=window.metricsInjected=true> " * 3 for index in range(160))
+        if shape == "wrapped-single-line":
+            result = "wrapped-result-" * 600
+        available = result[:4000]
+        if "\n" in available:
+            available = available[:available.rfind("\n") + 1]
         _seed_transcript(webapp, monkeypatch, "worker-a", [
             json.dumps({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "tool_use", "id": "ui-tool", "name": "Bash", "input": {"command": '<img src=x onerror="window.metricsInjected=true">'}}]}}),
+            json.dumps({"type": "user", "timestamp": at, "message": {"content": [{"type": "tool_result", "tool_use_id": "ui-tool", "content": result}]}}),
         ])
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
         page.goto(webapp.agent_url() + "/metrics")
         row = page.locator(".metrics-table-panel tbody tr", has_text="72%")
-        expect(row).to_contain_text("1 tool calls")
+        expect(row.locator(".metrics-conversation-badge").filter(has_text="tool call")).to_have_count(0)
         row.click()
         detail = page.get_by_role("dialog", name="Turn detail")
         expect(detail.locator(".metrics-tool-card")).to_have_count(1)
         assert not detail.locator(".metrics-tool-card").evaluate("el => el.open")
         detail.locator(".metrics-tool-card summary").click()
-        expect(detail.locator(".metrics-tool-body pre")).to_contain_text("metricsInjected")
+        blocks = detail.locator(".metrics-tool-body")
+        expect(blocks).to_have_count(2)
+        expect(blocks.first.locator("pre")).to_contain_text("metricsInjected")
+        expect(blocks.first.locator(".metrics-tool-expand")).to_be_hidden()
+        result_block = blocks.last
+        expect(result_block.locator(".metrics-tool-truncated")).to_contain_text("available preview only")
+        expect(result_block.locator(".metrics-tool-truncated")).to_contain_text(f"{len(result.encode('utf-8')):,}")
+        expand = result_block.locator(".metrics-tool-expand")
+        expect(expand).to_have_text(re.compile("Expand full"))
+        expect(expand).to_have_attribute("aria-expanded", "false")
+        collapsed = result_block.locator("pre").text_content()
+        assert len(collapsed.splitlines()) == (10 if shape == "multiline" else 1)
+        collapsed_height = result_block.locator("pre").evaluate("element => element.clientHeight")
+        assert collapsed_height <= 220
+        copy = result_block.get_by_role("button", name="Copy result", exact=True)
+        copy.click()
+        expect(result_block.get_by_role("status")).to_have_text("Copied")
+        assert page.evaluate("navigator.clipboard.readText()") == available
+        expect(copy).to_have_attribute("aria-label", "Copy result")
+        _metrics_bounds(page, ".metrics-tool-card, .metrics-tool-code, .metrics-tool-copy, .metrics-tool-expand")
+        for block in blocks.all():
+            assert block.locator(".metrics-tool-copy").evaluate("element => getComputedStyle(element).position") == "absolute"
+        result_block.locator(".metrics-tool-truncated").scroll_into_view_if_needed()
+        _metrics_capture(page, f"tool-{shape}-default-{width}")
+        expand.focus()
+        expand.press("Enter")
+        expect(expand).to_have_attribute("aria-expanded", "true")
+        expect(expand).to_have_text("Collapse")
+        region = result_block.locator("pre")
+        assert region.text_content() == available
+        if shape == "multiline":
+            assert len(region.text_content().splitlines()) > 10
+            assert available.endswith("\n") and result.startswith(available)
+        assert region.text_content().startswith(collapsed)
+        assert region.evaluate("element => element.getBoundingClientRect().height") <= 240
+        assert region.evaluate("element => element.scrollHeight > element.clientHeight && getComputedStyle(element).overflowY === 'auto'")
+        assert region.evaluate("element => element.scrollWidth <= element.clientWidth")
+        copy = result_block.get_by_role("button", name="Copy result", exact=True)
+        copy.focus()
+        copy.press("Enter")
+        expect(result_block.get_by_role("status")).to_have_text("Copied")
+        assert page.evaluate("navigator.clipboard.readText()") == region.text_content()
+        assert page.evaluate("navigator.clipboard.readText()") != result
+        region.evaluate("element => {element.scrollTop = element.scrollHeight}")
+        result_block.locator(".metrics-tool-truncated").scroll_into_view_if_needed()
+        _metrics_capture(page, f"tool-{shape}-expanded-{width}")
+        expand.click()
+        expect(expand).to_have_attribute("aria-expanded", "false")
+        assert region.text_content() == collapsed
         expect(detail.locator("img")).to_have_count(0)
         assert page.evaluate("window.metricsInjected") is None
+
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    def test_metrics_hides_estimate_labels_without_changing_backend_flags(self, webapp, page, width):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        connection = connect(webapp.install.state_dir / "metrics/metrics.db")
+        connection.execute("UPDATE usage_measurements SET is_estimated=1 WHERE measurement_id='u0'")
+        connection.commit()
+        connection.close()
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.goto(webapp.agent_url() + "/metrics")
+        expect(page.locator(".metrics-table-panel tbody tr")).to_have_count(4)
+        forbidden = re.compile(r"\best\b|\bestimated\b|token estimate", re.IGNORECASE)
+        assert not forbidden.search(page.locator(".metrics-page").inner_text())
+        expect(page.locator(".metrics-table-panel .metrics-conversation-badge")).to_have_count(0)
+        _metrics_capture(page, f"clean-badges-overview-{width}")
+        page.locator(".metrics-table-panel tbody tr", has_text="72%").click()
+        detail = page.get_by_role("dialog", name="Turn detail")
+        detail.locator('[data-tab="technical"]').click()
+        expect(detail.locator(".panel-usage")).to_be_visible()
+        assert not forbidden.search(detail.inner_text())
+        _metrics_capture(page, f"clean-badges-technical-{width}")
+        detail.locator('[data-tab="overview"]').click()
+        assert not forbidden.search(detail.inner_text())
+        payload = page.evaluate("""async agent => {
+            const response = await fetch(`/api/agents/${agent}/metrics/turns/t-routine`,
+                {headers: {'x-bobi-webui-token': 'e2e-webapp-token'}});
+            return response.json();
+        }""", webapp.agent)
+        assert any(item["is_estimated"] for item in payload["usage_measurements"])
+
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    def test_metrics_semantic_headlines_and_deduped_sessions(self, webapp, page, monkeypatch, width):
+        from bobi.metrics.store import connect
+
+        started = int((time.time() - 60) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+        connection = connect(webapp.install.state_dir / "metrics/metrics.db")
+        connection.execute("UPDATE sessions SET session_name='curator-curator-05ff2ed8-curator', role='curator', provider_session_id='e2e-curator' WHERE session_id='s1'")
+        connection.execute("UPDATE sessions SET provider_session_id='e2e-worker-a' WHERE session_id='s2'")
+        connection.execute("UPDATE turns SET trigger_kind=CASE turn_id WHEN 't-routine' THEN 'sleep_cycle' WHEN 't-pro' THEN 'compaction' ELSE 'idle' END WHERE session_id='s1'")
+        connection.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        for index, trigger in [(4, "inbox"), (5, "startup")]:
+            connection.execute("INSERT INTO turns(turn_id,session_id,turn_index,started_at_us,ended_at_us,status,trigger_kind,is_user_initiated) VALUES(?,'s2',?,?,?,'completed',?,0)",
+                ("t-" + trigger, index, started + index * 1_000_000, started + index * 1_000_000 + 900000, trigger))
+        connection.commit()
+        connection.close()
+        messages = [
+            "You are the **sleep cycle** for this agent team. You run out-of-band, on a schedule, as a monitor to process recent transcript deltas.",
+            "Compaction required for the session",
+            "No new events to process",
+        ]
+        entries = []
+        for index, prompt in enumerate(messages):
+            stamp = datetime.fromtimestamp((started + index * 1_000_000 + 100_000) / 1_000_000, timezone.utc).isoformat()
+            entries.extend([_entry("user", prompt, stamp), _entry("assistant", "Maintenance completed", stamp)])
+        _seed_transcript(webapp, monkeypatch, "curator", entries)
+        slack_at = datetime.fromtimestamp((started + 3_100_000) / 1_000_000, timezone.utc).isoformat()
+        worker_entries = [
+            _entry("user", "Event: slack/message\n  Fix metrics toolbar layout\n  conversation: slack:T123:channel:C123:thread:1791360056.16\n  channel_name: eng-team", slack_at),
+            _entry("assistant", "Toolbar fixed", slack_at),
+        ]
+        for index, prompt in [(4, "Process the inbox for incoming events"), (5, "You are an agent in a bobi deployment. Initialize the agent.")]:
+            stamp = datetime.fromtimestamp((started + index * 1_000_000 + 100_000) / 1_000_000, timezone.utc).isoformat()
+            worker_entries.extend([_entry("user", prompt, stamp), _entry("assistant", "Background event processed", stamp)])
+        _seed_transcript(webapp, monkeypatch, "worker-a", worker_entries)
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="Flat", exact=True).click()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(6)
+        titles = rows.locator(".metrics-topic-title")
+        expect(titles.filter(has_text="Sleep Cycle & Memory Compaction")).to_have_count(2)
+        expect(titles.filter(has_text="Idle Standby (No new events)")).to_have_count(1)
+        expect(titles.filter(has_text="Inbox Event Processing")).to_have_count(1)
+        expect(titles.filter(has_text="Agent Startup & Initialization")).to_have_count(1)
+        expect(rows.locator(".mth-agent-badge", has_text="curator")).to_have_count(3)
+        expect(rows.locator(".metrics-kind-tag.kind-system")).to_have_count(5)
+        expect(rows.locator(".metrics-kind-tag.kind-user")).to_have_count(1)
+        expect(rows.filter(has_text="Fix metrics toolbar layout").locator(".metrics-kind-tag")).to_have_text("user prompt")
+        expect(titles.filter(has_text="Fix metrics toolbar layout")).to_have_count(1)
+        slack = rows.get_by_role("link", name="Slack #eng-team", exact=False)
+        expect(slack).to_have_attribute("href", "https://app.slack.com/client/T123/C123/thread/C123-1791360056.16")
+        expect(slack).to_have_attribute("rel", "noopener noreferrer")
+        expect(slack).to_have_attribute("target", "_blank")
+        expect(slack.locator("svg")).to_have_count(1)
+        assert slack.evaluate("element => {const style=getComputedStyle(element); return parseFloat(style.fontWeight) >= 600 && element.getBoundingClientRect().height >= 28}")
+        expect(rows.locator(".metrics-conversation-badge")).to_have_count(1)
+        expect(rows.locator(".metrics-conversation-badge", has_text=re.compile(r"^(supervised|inbox|user|sleep_cycle|compaction|startup|idle)$"))).to_have_count(0)
+        slack.focus()
+        expect(slack).to_be_focused()
+        row_text = "\n".join(rows.all_inner_texts())
+        assert "You are an agent in a bobi deployment" not in row_text
+        assert "curator-curator" not in row_text
+        assert rows.locator(".metrics-topic-meta").count() == 6
+        assert rows.locator(".metrics-conversation-badge", has_text="tool call").count() == 0
+        geometry = rows.locator(".metrics-topic-cell").evaluate_all("""cells => cells.map(cell => {
+            const title = cell.querySelector('.metrics-topic-title');
+            const meta = cell.querySelector('.metrics-topic-meta');
+            const outer = cell.getBoundingClientRect();
+            const top = title.getBoundingClientRect();
+            const bottom = meta.getBoundingClientRect();
+            return {width: top.width, font: parseFloat(getComputedStyle(title).fontSize),
+                readable: top.width >= 160 && top.height >= 14,
+                twoLines: bottom.top >= top.bottom - 1,
+                inside: top.left >= outer.left && top.right <= outer.right + 1};
+        })""")
+        assert all(item["readable"] and item["twoLines"] and item["inside"] and item["font"] >= 12 for item in geometry), geometry
+        picker = page.locator("#metrics-session")
+        expect(picker.locator("option")).to_have_count(3)
+        labels = picker.locator("option").all_text_contents()
+        assert all("curator-curator" not in label for label in labels)
+        with page.expect_response(re.compile(r"/metrics/summary\?")):
+            page.locator("#metrics-refresh").click()
+        expect(picker.locator("option")).to_have_count(3)
+        assert picker.locator("option").all_text_contents() == labels
+        page.locator(".metrics-table-panel").scroll_into_view_if_needed()
+        _metrics_capture(page, f"recent-turns-{width}")
+        def unsafe_and_internal_origins(route):
+            response = route.fetch()
+            payload = response.json()
+            sources = ["supervised", "inbox", "slack"]
+            for index, turn in enumerate(payload["turns"]):
+                turn.setdefault("conversation", {})["origin"] = {
+                    "source": sources[index % len(sources)], "channel_name": "eng-team",
+                    "url": "javascript:window.metricsInjected=true", "thread_id": "1791360056.16",
+                }
+            route.fulfill(response=response, json=payload)
+        page.route("**/metrics/turns?**", unsafe_and_internal_origins)
+        with page.expect_response(re.compile(r"/metrics/turns\?")):
+            page.locator("#metrics-refresh").click()
+        expect(rows).to_have_count(6)
+        expect(rows.locator(".metrics-conversation-badge")).to_have_count(0)
+        expect(rows.locator('a[href^="javascript:"]')).to_have_count(0)
+        assert page.evaluate("window.metricsInjected") is None
+        _metrics_capture(page, f"no-unsafe-or-internal-origin-tags-{width}")
+
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
+    def test_jev_editor_save_validation_readback_and_reset(self, webapp, page, width, monkeypatch):
+        from bobi import paths
+
+        # The roster below uses gateway routing ids; without a gateway the save names the fix.
+        monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "https://gateway.invalid/v1")
+        from tests.metrics.test_routing import concise_config
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        env_file = paths.env_path(webapp.install.repo_path)
+        env_file.write_text("UNRELATED_SETTING=preserved\n# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        before = env_file.read_bytes()
+        requests = []
+        page.on("request", lambda request: requests.append((request.method, request.url, request.post_data)))
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="JEV: Disabled").click()
+        dialog = page.get_by_role("dialog", name="JEV Routing Configuration")
+        dialog.get_by_role("tab", name="Configure").click()
+        editor = dialog.locator("#jev-pane-guide")
+        mode = editor.locator("#jev-config-mode")
+        candidates = editor.locator("#jev-config-candidates")
+        instructions = editor.locator("#jev-config-instructions")
+        roles = editor.locator('input[name="jev-role"]')
+        mode.select_option("enforce")
+        while editor.locator(".jev-candidate-remove").count():
+            editor.locator(".jev-candidate-remove").first.click()
+        dialog.locator("#jev-config-save").click()
+        expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("candidate", re.I))
+        candidates.fill("ds/deepseek-flash")
+        candidates.press("Enter")
+        candidates.fill("ds/deepseek-v4-pro")
+        editor.locator("#jev-config-candidate-add").click()
+        candidates.fill("ds/deepseek-flash")
+        candidates.press("Enter")
+        expect(editor.locator(".jev-candidate-tag code")).to_have_text(["ds/deepseek-flash", "ds/deepseek-v4-pro"])
+        # The control model is picked from the candidates, so it cannot drift off the list.
+        control = editor.locator("#jev-config-control")
+        expect(control.locator("option")).to_have_text(["ds/deepseek-flash", "ds/deepseek-v4-pro"])
+        control.select_option("ds/deepseek-v4-pro")
+        expect(editor.locator(".jev-candidate-tag").nth(1)).to_contain_text("control")
+        editor.get_by_role("button", name="Remove ds/deepseek-v4-pro").click()
+        expect(control).to_have_value("ds/deepseek-flash")
+        candidates.fill("ds/deepseek-v4-pro")
+        candidates.press("Enter")
+        # Native models are picked from a filtered list; nothing to type, nothing to misspell.
+        picker = editor.locator("#jev-model-options")
+        expect(picker.locator(".jev-model-option").first).to_have_text("opus")
+        editor.locator("#jev-model-filter").fill("haiku-4")
+        expect(picker.locator(".jev-model-option")).to_have_text(["claude-haiku-4-5"])
+        picker.get_by_role("option", name="claude-haiku-4-5").click()
+        expect(picker.get_by_role("option", name="claude-haiku-4-5")).to_have_attribute("aria-selected", "true")
+        expect(editor.locator(".jev-candidate-tag code").last).to_have_text("claude-haiku-4-5")
+        picker.get_by_role("option", name="claude-haiku-4-5").click()
+        expect(editor.locator(".jev-candidate-tag code")).to_have_text(["ds/deepseek-flash", "ds/deepseek-v4-pro"])
+        editor.locator("#jev-model-filter").fill("haikuuu")
+        expect(editor.locator(".jev-model-empty")).to_be_visible()
+        editor.locator("#jev-model-filter").fill("")
+        candidates.fill("cx/gpt-5.6-lunna")
+        candidates.press("Enter")
+        expect(editor.locator(".jev-candidate-tag.is-unlisted")).to_have_text(re.compile("cx/gpt-5.6-lunna"))
+        editor.get_by_role("button", name="Remove cx/gpt-5.6-lunna").click()
+        expect(editor.locator("#jev-mode-hint")).to_contain_text("fall back to the control model")
+        expect(editor.locator("#jev-config-egress")).to_have_value("none")
+        editor.locator("#jev-config-egress").select_option("redacted")
+        expect(editor.locator("#jev-egress-hint")).to_contain_text("secrets, credentials and local paths removed")
+        for role in roles.all():
+            role.uncheck()
+        dialog.locator("#jev-config-save").click()
+        expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("role", re.I))
+        editor.locator('input[name="jev-role"][value="engineer"]').check()
+        instructions.fill("")
+        dialog.locator("#jev-config-save").click()
+        expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("instruction", re.I))
+        assert not [item for item in requests if item[0] == "POST" and item[1].endswith("/metrics/jev-config")]
+        assert env_file.read_bytes() == before
+        instructions.fill("Use Flash for simple changes; Pro for the agent's complex coding. <img src=x onerror=window.editorInjected=true>")
+        _metrics_bounds(page, ".jev-config-modal, #jev-pane-guide select, #jev-pane-guide textarea, #jev-pane-guide button, #jev-config-candidates, #jev-config-control")
+        assert editor.locator("textarea").evaluate_all("elements => elements.every(element => element.getBoundingClientRect().width >= 180)")
+        with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/metrics/jev-config")) as saved:
+            dialog.locator("#jev-config-save").click()
+        assert saved.value.status == 200
+        payload = saved.value.json()
+        assert payload["enabled"] and payload["mode"] == "enforce"
+        assert payload["candidate_models"] == ["ds/deepseek-flash", "ds/deepseek-v4-pro"]
+        assert payload["roles"] == ["engineer"] and payload["instructions"] == instructions.input_value()
+        assert payload["prompt_egress"] == "redacted" and payload["brain"] == "auto"
+        assert payload["restart_required"] and payload["applies_on"] == "agent_restart"
+        expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("restart", re.I))
+        assert not [item for item in requests if item[0] == "POST" and item[1].endswith("/restart")]
+        assert "UNRELATED_SETTING=preserved" in env_file.read_text()
+        assert page.evaluate("window.editorInjected") is None and dialog.locator("img").count() == 0
+        _metrics_capture(page, f"jev-save-{width}")
+        editor.locator("#jev-config-delete").scroll_into_view_if_needed()
+        _metrics_capture(page, f"editor-actions-{width}")
+        dialog.press("Escape")
+        page.reload()
+        page.get_by_role("button", name="JEV: Enforce").click()
+        dialog.get_by_role("tab", name="Configure").click()
+        expect(instructions).to_have_value(payload["instructions"])
+        expect(mode).to_have_value("enforce")
+        editor.locator("#jev-config-delete").click()
+        expect(dialog.locator("#jev-config-confirm")).to_be_visible()
+        confirmation = dialog.locator(".jev-confirm-card")
+        confirmation.evaluate("element => Promise.all(element.getAnimations().map(animation => animation.finished))")
+        assert confirmation.evaluate("element => getComputedStyle(element).opacity") == "1"
+        _metrics_bounds(page, ".jev-confirm-card, .jev-confirm-card button")
+        assert confirmation.evaluate("element => {const bounds=element.getBoundingClientRect(); return bounds.top >= 0 && bounds.bottom <= innerHeight}")
+        _metrics_capture(page, f"jev-reset-confirm-{width}")
+        dialog.locator(".jev-confirm-btn-cancel").click()
+        assert not [item for item in requests if item[0] == "DELETE"]
+        expect(editor.locator("#jev-config-delete")).to_be_focused()
+        page.emulate_media(reduced_motion="reduce")
+        editor.locator("#jev-config-delete").click()
+        assert float(confirmation.evaluate("element => getComputedStyle(element).animationDuration").removesuffix("s")) <= 0.00001
+        with page.expect_response(lambda response: response.request.method == "DELETE" and response.url.endswith("/metrics/jev-config")) as deleted:
+            dialog.locator("#jev-config-confirm").click()
+        assert deleted.value.status == 200 and not deleted.value.json()["enabled"]
+        assert deleted.value.json()["mode"] == "off"
+        assert not deleted.value.json()["raw_json"]
+        assert not any(line.startswith("# BOBI_METRICS_EXPERIMENT_JSON=") for line in env_file.read_text().splitlines())
+        assert "BOBI_METRICS_EXPERIMENT_JSON=\n" in env_file.read_text()
+        assert "UNRELATED_SETTING=preserved" in env_file.read_text()
+        _metrics_capture(page, f"jev-reset-{width}")
+        dialog.press("Escape")
+        page.reload()
+        expect(page.get_by_role("button", name="JEV: Disabled")).to_be_visible()
+        assert any(item[0] == "GET" and item[1].endswith("/metrics/jev-config") for item in requests)
+        page.get_by_role("button", name="JEV: Disabled").click()
+        dialog.get_by_role("tab", name="Configure").click()
+        expect(editor.locator(".jev-candidate-tag")).to_have_count(0)
 
     def test_metrics_unavailable_empty_and_untrusted_model_text(self, webapp, page):
         page.goto(webapp.agent_url() + "/metrics")
         expect(page.get_by_role("status")).to_contain_text("metrics database is not ready")
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
-        page.get_by_role("button", name="refresh", exact=True).click()
+        page.locator("#metrics-refresh").click()
         expect(page.locator(".metrics-tile strong").first).to_have_text("720")
         from bobi.metrics.store import connect
 
@@ -429,13 +1157,133 @@ class TestMetricsView:
         connection.execute("UPDATE router_decisions SET model_selected=?", (payload,))
         connection.commit()
         connection.close()
-        page.get_by_role("button", name="refresh", exact=True).click()
+        page.locator("#metrics-refresh").click()
         expect(page.locator(".metrics-page")).to_contain_text(payload)
         assert page.locator(".metrics-page img").count() == 0
         assert page.evaluate("window.metricsInjected") is None
         page.goto(webapp.agent_url() + "/metrics?session=absent")
         expect(page.locator(".metrics-page")).to_contain_text("No recorded turns in this window.")
         expect(page.locator(".metrics-tile strong").first).to_have_text("not recorded")
+
+    def test_metrics_in_thread_turn_navigation_and_wide_modal(self, webapp, page):
+        started = int((time.time() - 60) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+
+        page.set_viewport_size({"width": 1440, "height": 1200})
+        page.goto(webapp.agent_url() + "/metrics")
+        cards = page.locator(".metrics-thread-card")
+        expect(cards).to_have_count(2)
+        # Agent and role live on the thread header only; rows never repeat them.
+        expect(page.locator(".metrics-thread-head .mth-agent-badge")).to_have_count(2)
+        expect(page.locator(".mth-body .mth-agent-badge")).to_have_count(0)
+        expect(page.locator(".metrics-thread-head .metrics-kind-tag")).to_have_count(2)
+        head = cards.first.locator(".metrics-thread-head")
+        toggle = head.get_by_role("button", name="Toggle thread")
+        toggle.click()
+        expect(toggle).to_have_attribute("aria-expanded", "false")
+        expect(cards.first.locator(".mth-body")).to_be_hidden()
+        toggle.click()
+        expect(cards.first.locator(".mth-body")).to_be_visible()
+        page.locator(".metrics-table-panel").scroll_into_view_if_needed()
+        _metrics_capture(page, "threads-1440")
+        rows = page.locator(".metrics-table-panel .runs tbody tr")
+        expect(rows).to_have_count(4)
+
+        routine_row = rows.filter(has_text="72%")
+        routine_row.click()
+
+        detail = page.get_by_role("dialog", name="Turn detail")
+        expect(detail).to_be_visible()
+
+        box = detail.bounding_box()
+        assert box is not None
+        assert box["width"] >= 1200
+
+        prev_btn = detail.locator(".td-nav-prev")
+        next_btn = detail.locator(".td-nav-next")
+        counter = detail.locator(".td-nav-counter")
+        expect(prev_btn).to_be_disabled()
+        expect(next_btn).to_be_enabled()
+        expect(counter).to_have_text("Turn 1 of 3")
+
+        next_btn.click()
+        expect(counter).to_have_text("Turn 2 of 3")
+        expect(prev_btn).to_be_enabled()
+        expect(next_btn).to_be_enabled()
+
+        next_btn.click()
+        expect(counter).to_have_text("Turn 3 of 3")
+        expect(prev_btn).to_be_enabled()
+        expect(next_btn).to_be_disabled()
+
+        prev_btn.click()
+        expect(counter).to_have_text("Turn 2 of 3")
+
+        detail.get_by_role("button", name="Close").click()
+        expect(detail).to_be_hidden()
+
+        fallback_row = rows.filter(has_text="Fallback")
+        fallback_row.click()
+        expect(detail).to_be_visible()
+
+        expect(prev_btn).to_be_disabled()
+        expect(next_btn).to_be_disabled()
+        expect(counter).to_have_text("Turn #3")
+
+        detail.get_by_role("button", name="Close").click()
+
+        # Flat view: "#n" only where the session has more than one loaded turn.
+        page.get_by_role("button", name="Flat", exact=True).click()
+        flat = page.locator(".metrics-table-panel .runs tbody tr")
+        expect(flat).to_have_count(4)
+        expect(flat.locator(".metrics-turn-index")).to_have_count(3)
+        expect(flat.locator(".metrics-session-chip-inline")).to_have_count(4)
+        _metrics_capture(page, "flat-1440")
+
+    @pytest.mark.parametrize("width", [1440, 700])
+    def test_jev_card_prices_routing_against_its_candidate_envelope(self, webapp, page, width):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        page.set_viewport_size({"width": width, "height": 1100})
+        with page.expect_response(re.compile(r"/metrics/summary\?")) as response:
+            page.goto(webapp.agent_url() + "/metrics")
+        savings = response.value.json()["routing"]["savings"]
+        card = page.locator(".jev-summary-card")
+        net = card.locator(".jev-kpi.is-saved")
+        expect(net.locator(".jev-kpi-value")).to_have_text(re.compile(r"^\$0\.0000\d+$"))
+        expect(net).to_contain_text(f"{savings['saved_pct']:.1f}% cheaper than always ds/deepseek-v4-pro")
+        expect(card.locator(".jev-kpi")).to_have_count(4)
+        expect(card.locator(".jev-kpi").nth(1)).to_contain_text("3 of 4 turns routed")
+        expect(card.locator(".jev-dist-seg")).to_have_count(2)
+        # Real model names and shares, busiest first; no invented tier labels.
+        expect(card.locator(".jev-dist-item")).to_have_text(["ds/deepseek-v4-pro2 turns (67%)", "ds/deepseek-flash1 turn (33%)"])
+        table = card.locator(".jev-table")
+        expect(table.locator("thead th")).to_have_text(["Model", "Share / Turns", "Actual Spend", "Baseline Cost (Flagship)", "Net Savings"])
+        # One flat table: a row per picked model, no per-router divider rows.
+        expect(table.locator("tbody tr")).to_have_count(2)
+        expect(table.locator("tbody .jev-cell-model code")).to_have_text(["ds/deepseek-v4-pro", "ds/deepseek-flash"])
+        expect(table.locator("tbody td:nth-child(2)")).to_have_text(["67% / 2", "33% / 1"])
+        expect(card).not_to_contain_text(re.compile("Economy|Balanced|Tier"))
+        expect(table.locator("tbody tr").nth(0).locator(".jev-cell-saved")).to_have_text("—(Baseline)")
+        expect(table.locator("tfoot")).to_contain_text("100% / 3")
+        expect(table.locator("tfoot")).to_contain_text(f"({savings['saved_pct']:.1f}%)")
+        expect(card.locator(".jev-footnote")).to_contain_text("Baseline Cost (Flagship) prices every turn on the most expensive model")
+        expect(card).not_to_contain_text("not measurable")
+        # Telemetry health is a single strip, not a second card beside the value.
+        expect(page.locator(".metrics-health-strip")).to_contain_text("coverage")
+        expect(page.get_by_text("Telemetry Health & Coverage")).to_have_count(0)
+        card.scroll_into_view_if_needed()
+        _metrics_capture(page, f"jev-savings-{width}")
+
+        conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
+        conn.execute("UPDATE router_decisions SET candidate_models_json='[\"ds/deepseek-flash\",\"cx/gpt-7-nova\"]' "
+                     "WHERE turn_id='t-routine'")
+        conn.commit()
+        conn.close()
+        page.locator("#metrics-refresh").click()
+        # An unlisted candidate is named, never priced by guess.
+        expect(card.locator(".jev-footnote")).to_contain_text("1 routed turn left out: no list price for cx/gpt-7-nova")
 
 
 # --- opening a route --------------------------------------------------------
