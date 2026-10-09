@@ -535,3 +535,161 @@ With `filter_unauthorized=False`, an added topic with no grant is kept in the PU
 Keeping it treats the workspace list as the operator's declared intent and lets a later grant (usually the GitHub App install, moments later) make it live at the next boot or the next `add`.
 Rolling it back refuses to persist something that does not work today, at the cost of making the correct onboarding order fragile.
 My recommendation is to keep it, report the server's exact `unauthorized_topics` list, and exit non-zero so a script does not read the failure as success.
+
+## Amendment 2026-10-09: codex adversarial review (round 5)
+
+Insertion-only. Nothing above this line is rewritten.
+
+Round 5 was run by OpenAI Codex v0.144.5, model `gpt-5.6-sol`, reasoning effort high, read-only sandbox, against spec sha `7a4bac2` with read access to `origin/main` at `70db2e10`.
+Verdict: REQUEST CHANGES.
+Full verbatim output: `plans/reviews/2026-10-09-952-codex-review.md`.
+
+Every finding below was re-verified against `origin/main` at `70db2e10` before being accepted.
+Line numbers in this amendment are `70db2e10` line numbers, not the `83bebe49` numbers used above.
+Ten findings: eight folded as defects, two posed as questions for Zach, none retracted as invalid.
+
+### A1. The CLI must reject reserved topic prefixes (codex F1, blocker)
+
+The design has no topic validation, so the operator's argument reaches the accepted-set edit unfiltered.
+`inbox/` is not a global topic (`event-server/core/src/core.ts:411`), so it needs no resource grant, and the server stores whatever inbox key it is handed (`event-server/test/core.spec.ts:2260-2261`).
+
+Two concrete failures follow.
+`subscriptions remove inbox/<manager session>` does not change the workspace file, because that key was never in it, but step 5 applies the same edit to the accepted set and step 8 PUTs it authoritatively, which unsubscribes the manager's own inbox and makes it unreachable by `bobi agent <name> message` and `ask`.
+`subscriptions add inbox/<worker session>` subscribes the manager to another session's inbox, which is the 2026-06-12 cross-session class recorded at `bobi/events/state.py:21-25`.
+
+"Nothing is recomposed, so monitor, lifecycle and `inbox/` topics pass through untouched by construction" holds only while the operator does not name one.
+
+Required change: `add` and `remove` reject any topic matching a derived prefix (`inbox/`, `reply/`, `monitor/`, `agent/`), in the CLI and in the workspace reader, before any write or network call.
+A `remove` may only alter the accepted set for a topic that was actually present in the workspace list.
+New tests: removing the manager's own inbox, and adding another session's inbox, both rejected with a non-zero exit and no PUT.
+
+### A2. `_resubscribe_on_deaf` is a fourth mutator and must take the lock (codex F2, blocker)
+
+The spec enumerates three writers of the accepted-set record.
+The deaf-reconnect hook is a fourth authoritative mutator of server state: it runs on a daemon thread (`bobi/events/client.py:444-446`) and PUTs without any lock (`bobi/subagent.py:1982`).
+`file_lock` is advisory and "only serializes writers that also take it" (`bobi/fsutil.py:169`), so the CLI's step 5 to 8 lock does not exclude it.
+
+Sequence: the record holds `R0`; the CLI takes the lock and PUTs `R1`; before the CLI's save, the reconnect thread reads `R0` and PUTs `R0`; the CLI then saves `R1`.
+Final state is record `R1`, server routing `R0`, and `list` compares the file against the record and reports healthy.
+Round 4's fold moved the manager-vs-CLI race onto the daemon thread rather than closing it.
+
+Required change: the hook takes the same accepted-record lock across its read and its PUT.
+New test: a deterministic barrier that fires the hook between the CLI's PUT and its save, asserting the final server set equals the final record.
+
+### A3. The remote PUT and the local record write are not crash-atomic (codex F3, blocker)
+
+Step 8 PUTs and then records, as two separate operations.
+The server commits before responding (`event-server/core/src/core.ts:1531-1536`), so a kill, a read-only filesystem, or a full disk between the PUT and `save_accepted_subscriptions` leaves the server at `R1` and the record at `R0`.
+The absent-or-empty rule does not cover this: the record is present and non-empty, just stale.
+The next deaf reconnect then replays `R0` and reverts a change that had already succeeded, and a failed local write can also make the command report failure for an applied change.
+
+Required change: the spec must state a recovery protocol rather than add another lock.
+The two shapes are a pending journal written before the PUT and resolved on boot and on reconnect, or dropping the local record as a correctness source in favour of server-side read-back (which is Q3 below).
+New tests: fault injection after the server commit, and a disk-full accepted-record write.
+
+### A4. A deployment record does not prove the manager is running (codex F4, major)
+
+Step 2 infers liveness from the presence of the deployment record, and step 2's two "nothing live to update" states are both defined by file absence.
+Nothing unlinks the deployment record on stop: `grep -rn deployment_state_path bobi/` returns only the three definition and accessor sites in `bobi/events/state.py`.
+PR #1098 added an OS-service stop path that stops the unit and returns without touching event state (`bobi/cli.py:1223-1242`), and its generated units restart the manager unattended (`Restart=on-failure` at `bobi/service_manager.py:120`, `KeepAlive` at `:138`).
+Current main already exposes the real signal: `team_status` reads the pid and checks it is alive (`bobi/service.py:842-847`).
+
+So a stopped-but-supervised manager leaves both files in place, the CLI takes the live-apply path, may spawn an event server at step 7, mutates an idle deployment, and reports success.
+Unattended restarts also make step 5's "the manager restarted, re-run the command" abort a routine event rather than a rare one.
+
+Required change: select live-apply versus persist-only from `service.team_status(project_path).manager_running`, not from file existence.
+New tests: stopped direct, stopped systemd, stopped launchd, and a restart-delay window, each with a stale deployment record on disk.
+
+### A5. "Malformed" must mean schema-invalid, not just unparseable (codex F6, major)
+
+The design reuses the pack parser and raises `WorkspaceSubscriptionsError` on a parse error.
+That parser maps whole classes of wrong-but-valid YAML to `[]` rather than raising: a non-dict document root returns `[]` (`bobi/events/subscriptions.py:44-45`), an empty file becomes `{}` through `yaml.safe_load(...) or {}` (`:43`) and then `[]`, and any `subscribe:` value that is neither a string nor a list returns `[]` (`bobi/events/subscriptions.py:19-20`).
+
+Under the new semantics `[]` is authoritative, so a truncated file, `{}`, `subscribe: {}`, or a bare list at the document root silently becomes "subscribe to nothing" and the next boot drops every explicit GitHub, Slack and Linear topic.
+None of these raise `yaml.YAMLError`, so the new error class never fires and test 10 does not reach them.
+This is the same fall-through hazard the "Presence, not truthiness" section exists to close, arriving through the schema rather than through the parser.
+
+Required change: the workspace file gets its own strict validator, separate from the deliberately permissive pack parser: a non-empty mapping, `subscribe` present, its value a list, every element a non-empty string, with a stated policy for duplicates and for unknown keys.
+New tests: empty file, `{}`, missing `subscribe`, non-mapping root, non-list value, and non-string elements.
+
+### A6. `put_subscriptions` needs the register path's propagation retry (codex F7, major)
+
+Step 6 authorizes the newly added topics and step 8 PUTs immediately, which is the exact sequence `register()` already guards against.
+`register()` retries once after 0.5s on a `400 unauthorized_topics` because, after a successful authorize, it "almost always means Cloudflare KV has not yet propagated a just-written grant" (`bobi/events/server.py:856-868`).
+The PUT path re-checks the same grant (`event-server/core/src/core.ts:1506-1512`) and the specified `put_subscriptions` contract has no retry.
+
+So a correct new GitHub or Linear credential writes its grant, the immediate PUT reads stale KV, and the CLI exits non-zero reporting an authorization failure that does not exist.
+The in-memory local server cannot reproduce this, so it will not surface before production.
+
+Required change: `put_subscriptions` takes the same bounded single retry on `unauthorized_topics`.
+New test: the first PUT answers `unauthorized_topics` and the second succeeds.
+
+### A7. Test 12 passes while the losing topic is not live (codex F9, major)
+
+This is a test-plan defect, not a design defect.
+The design already specifies the behaviour: a step-5 abort exits non-zero and the re-run is idempotent.
+Test 12 asserts only that "two concurrent `add` calls both survive", which is a property of the workspace file under step 4's lock.
+Both topics do survive in the file while the loser aborts at step 5 and never reaches the server, so the test passes in exactly the state it is meant to rule out.
+
+Required change: test 12 asserts all three final states, meaning the workspace file, the accepted record, and the live server set, plus the loser's non-zero exit, then re-runs the loser and proves both topics route.
+
+### A8. Every `bobi/cli.py` and `bobi/service.py` citation is stale (codex F10, minor)
+
+The spec's header states it was read at `83bebe49`.
+PR #1098 landed on `main` after that, so `main` is now `70db2e10` and the two files it touched have moved.
+Verified mechanically across all 93 citations in this spec: 85 are unchanged between `83bebe49` and `70db2e10`, and 8 have drifted.
+Every underlying claim is still true at `70db2e10`; only the line numbers moved.
+
+| Spec citation | Current main | Claim |
+| --- | --- | --- |
+| `bobi/service.py:625-642` | `:630-647` | the composition block |
+| `bobi/service.py:759` | `:764` | `subscribe=subscribe` reaching the session |
+| `bobi/cli.py:2965` | `:3102` | `with_mutable_runtime_package` monitor write |
+| `bobi/cli.py:2992` | `:3129` | same |
+| `bobi/cli.py:3016` | `:3153` | same |
+| `bobi/cli.py:3155` | `:3292` | `main.add_command(monitors)` |
+| `bobi/cli.py:4168` | `:4305-4307` | the agent-group list |
+| `bobi/cli.py:4177-4179` | `:4313-4319` | the pop list |
+
+The two "Exact changes per file" citations are the ones that matter: at `70db2e10`, `cli.py:4168` is `def kb_remove(name):` and `:4177` is a bare `try:`, so an implementer following them edits unrelated KB code.
+The pop list is also now seven entries rather than three, because #1098 added `supervise`, `install-service` and `uninstall-service`.
+
+Required change: restate every citation against `70db2e10`, and state the read sha in the header.
+
+### A9. `file_lock` is untimed and the design puts it on the boot path (triage pass, major)
+
+Found while triaging the findings above, not raised by codex, and verified the same way.
+
+`file_lock` is a blocking `fcntl.flock(fd, LOCK_EX)` with no timeout and no `LOCK_NB` (`bobi/fsutil.py:180`), and no caller anywhere in `bobi/` uses a non-blocking or timed variant.
+The design holds it across network round-trips on both sides: the CLI from step 5 through step 8, and `_sync_saved_deployment` from `authorize_resources` through its assign.
+`authorize_resources` POSTs once per global topic at `timeout=10.0` each (`bobi/events/server.py:650-653`, called per topic at `:781-784`) and the PUT adds another 10s, so on this team's six GitHub and Linear topics the worst-case hold is about 70 seconds.
+
+`_sync_saved_deployment` is on the manager's boot path, so a CLI command stalled inside that window blocks a manager start indefinitely, with no timeout to degrade to.
+The spec states the rule it then breaks: step 3 keeps the workspace-file lock off the network path because "the lock must not be held across a network round-trip", and steps 5 to 8 hold the accepted-set lock across exactly that.
+Round 4's fold introduced this by extending the lock to cover each writer's apply.
+
+Required change: bound the hold. Either take the lock non-blocking with a deadline and fail the CLI command with a clear "another writer is applying" message, or keep the lock strictly around the record's read-modify-write and serialize the apply some other way.
+The spec must say which, because "hold it across the apply" and "never hold it across a network round-trip" cannot both stand.
+
+### Questions for Zach (not decided here)
+
+**Q3. Does D4's read-back require live server introspection?** (codex F5, which it rates a blocker)
+
+D4 asks that `list` show "what the event server actually routes", and prefers reusing the PUT response, adding a GET route "only if needed".
+The spec reads that condition as satisfied, because the PUT response returns the accepted set and the design records it.
+
+Codex's objection is that the recorded set is a command-time cache, not current routing, and the codebase says so in two places: the client re-asserts subscriptions after a deaf reconnect "in case the server-side subscription index went stale" (`bobi/events/client.py:437-439`), and the hook exists to repair a deployment "dropped from the index" (`bobi/subagent.py:1977-1980`).
+If the index loses a topic after acceptance, the record does not change, and `list` reports healthy while nothing routes.
+There is no authenticated GET route today: no `GET` handler for `/deployments/<id>/subscriptions` exists in `event-server/worker/src/index.ts`, `event-server/src/local.ts` or `event-server/core/src/core.ts`.
+
+So D4 as literally worded is not met by a cache, and meeting it means adding server introspection, which this spec lists as out of scope.
+That is a decision about D4's own "only if needed" clause and about scope, so it is yours.
+Either D4 is satisfied by "last accepted at T" and the wording relaxes, or the GET route comes back into scope and A3's recovery protocol can lean on it.
+
+**Q4. Is the event server's non-atomic replace in scope?** (codex F8, which it rates major)
+
+The spec's no-partial-write claim is correctly scoped: the authorization gate rejects the whole update before any write (`event-server/core/src/core.ts:1506-1512`).
+Codex raises a different window that the spec is silent on. After validation passes, `replace` runs independent storage operations in sequence with no transaction and no rollback (`event-server/core/src/core.ts:285-292` for the interface, `:1522-1536` for the loop), so a storage failure after some removals but before the additions or the `putDeployment` leaves the routing index partially changed while both the deployment record and the local accepted file keep the old set.
+
+This is a pre-existing property of the event server that this change neither introduces nor misstates, and fixing it is event-server work beyond this spec's declared surface.
+Flagging it rather than folding it: say whether it belongs in this ticket, a follow-up, or neither.
