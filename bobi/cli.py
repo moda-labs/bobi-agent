@@ -511,12 +511,6 @@ def _echo_stop_result(result) -> None:
         )
 
 
-def _has_systemd_service() -> bool:
-    """Check if bobi is managed by a systemd user service."""
-    from bobi.service_manager import configured_manager
-    return configured_manager() == "systemd"
-
-
 def _refuse_runtime_lifecycle(project_path: Path, command: list[str]) -> None:
     from bobi.service import caller_is_manager_descendant
 
@@ -1219,6 +1213,13 @@ def stop(force):
     """
     project_path = _detect_project_root()
     agent_name = paths.agent_name_for_root(project_path)
+    command = ["stop"]
+    if force:
+        command.append("--force")
+    # Above the service branch: a service stop ends the runtime the caller
+    # is running in just as surely as a direct signal does.
+    _refuse_runtime_lifecycle(project_path, command)
+
     active = _active_service_manager(agent_name)
     manager = _stop_service_manager(agent_name)
     if manager:
@@ -1240,10 +1241,6 @@ def stop(force):
                 _echo_stop_result(result)
         return
 
-    command = ["stop"]
-    if force:
-        command.append("--force")
-    _refuse_runtime_lifecycle(project_path, command)
     from bobi.service import stop_team
 
     _echo_stop_result(stop_team(project_path, force=force))
@@ -1260,6 +1257,13 @@ def restart(fresh):
     """
     project_path = _detect_project_root()
     agent_name = paths.agent_name_for_root(project_path)
+    command = ["restart"]
+    if fresh:
+        command.append("--fresh")
+    # Above the service branch, and above the --fresh session wipe it would
+    # otherwise reach first.
+    _refuse_runtime_lifecycle(project_path, command)
+
     manager = _configured_service_manager(agent_name)
     if manager:
         # Resolve before touching the service manager so a missing installation fails
@@ -1280,11 +1284,6 @@ def restart(fresh):
         log_path = paths.manager_log_path(project_path)
         click.echo(f"Bobi restarted (pid {pid}). Logs: {log_path}")
         return
-
-    command = ["restart"]
-    if fresh:
-        command.append("--fresh")
-    _refuse_runtime_lifecycle(project_path, command)
 
     ctx = click.get_current_context()
     ctx.invoke(stop)
