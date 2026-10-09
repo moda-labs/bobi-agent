@@ -16,6 +16,9 @@ This document states the design, the evidence in brief, and the tests.
 **One caveat Gate 1 needs and the reports do not carry:** all four rounds were
 same-model passes. `codex` returns 401 with no `~/.codex/auth.json` and `aichat`
 has no config in this container, so no cross-model adversarial leg has run.
+**Superseded 2026-10-09:** the cross-model leg has now run and its verdict is
+`not ready for Gate 1`. See §13 for the findings and the folds, and
+`plans/reviews/2026-10-09-992-codex-review.md` for the verbatim report.
 
 ---
 
@@ -1104,3 +1107,280 @@ determines whether one routing change covers both or two are needed.
 None of these should be absorbed into #992, and #992 should not be folded into
 any of them: three are closed or merged, and the remaining one needs its own fix
 in `reconcile.py`.
+
+---
+
+## 13. Amendment 2026-10-09: the cross-model review leg
+
+The caveat in this document's header is now resolved.
+A cross-model adversarial leg has run: `codex-cli 0.144.5`, model `gpt-5.6-sol`,
+read-only sandbox, reviewing this spec at `aa2e1512` with independent read
+access to `main` @ `70db2e10`.
+Its full output is committed verbatim beside the other rounds at
+`plans/reviews/2026-10-09-992-codex-review.md`.
+
+**Codex verdict: not ready for Gate 1.**
+Eight findings (1 blocking, 4 major, 3 minor) and three questions for the
+approver.
+Every finding was re-verified against `main` @ `70db2e10` before being folded
+here, and all eight held.
+None were retracted as invalid.
+Codex also found the review brief's own description of PR #1098 to be inverted,
+and verified against real `main` rather than trusting the brief, which is the
+behaviour this leg existed to get.
+
+This section is insertion-only and rewrites no prose above it.
+Where a fold changes a design decision, the fold says which earlier statement it
+supersedes.
+Line references to this document are against the file as of this amendment.
+
+### 13.1 A1 (blocking, from F1): the published block cannot drive the alerter
+
+**Defect, confirmed.** §4.2:292-300 gives `SupervisorState.session_health` only
+`null` or `{error, since}`, §4.2:310-313 fixes it at two fields, and §5.1:400-412
+passes that one object to both consumers.
+§6.1 then requires the alerter to hold the failure count and the affected session
+names (`§6.1:667-669`), a persisted `signature` for DEDUP and ROTATE
+(`§6.1:670`, `§6.1:688`), the `started_at` of candidate successes
+(`§6.1:699`), and a distinction between a computed null and a fail-open null
+(`§6.1:684`).
+None of those are in `{error, since}`.
+A second scan is forbidden by §5.4:648-657, and on main
+`bobi/supervisor/supervision.py:194-214` confirms `CompositeObserver` forwards
+one unchanged `SupervisorState` with no enrichment channel.
+
+This also makes round 4's J10 fold incomplete rather than complete.
+The sentence J10 asked for did land, at `§6.1:684`, but both nulls are the same
+`None` on one field, so the distinction that sentence promises cannot be
+implemented as specified.
+
+**Fold.** Separate the observation from its publication.
+The detector returns one internal `SessionHealthObservation` carrying at least
+`read_ok`, `condition`, the normalized `signature`, the raw `error`, `since`,
+the affected session names, and the candidate successes with their `started_at`.
+The supervisor attaches that object to `SupervisorState` once per cycle, so
+§5.4's one-read guarantee is preserved exactly.
+`snapshot.py` projects it to the public `{error, since}` block, so §4.2's
+published shape and the `ADMIN_PROTOCOL` contract are unchanged.
+The alerter consumes the full observation.
+`read_ok=False` is the fail-open null and does not advance the abandon clock;
+`read_ok=True` with `condition=False` is the computed null and does.
+
+Verification: assert exactly one registry scan per poll, and assert that a
+fail-open null and a computed null move the abandon clock differently.
+
+### 13.2 A2 (major, from F2): the manager guard runs before the verdict exists
+
+**Defect, confirmed.** §5.2:461-470 requires the manager to read `running` or
+`idle`, §5.2:469 excludes `down` and `wedged`, and test 7 (`§10:958`)
+parametrizes over `wedged`, `down`, `starting`, `stopped`.
+§9:865 populates `session_health` in `Supervisor._report`.
+On main, `_report` (`bobi/supervisor/supervision.py:781-795`) carries only the
+raw `/health` payload; the authoritative `running`/`idle`/`wedged`/`down`
+verdict is derived later, inside `Telemetry._publish_heartbeat`
+(`bobi/supervisor/telemetry.py:127-162`).
+So the guard as written has no verdict to read at the point it runs.
+Both readings fail: against the raw payload, `down` and `wedged` are never raw
+values, so test 7 is untestable; against the derived verdict, the value does not
+exist yet.
+`bobi/supervisor/probe.py:115-117` turns that into a real failure mode, because
+a raw `running` manager whose `status_file_age` exceeds `status_file_stale`
+derives `wedged`.
+The detector could therefore publish a block and open Slack in the same poll
+whose heartbeat reads `wedged`.
+
+**Fold.** Derive the manager verdict once per cycle before session detection,
+carry it on `SupervisorState`, and have both telemetry and the detector read
+that one value.
+§5.2's guard reads the derived verdict.
+This supersedes §9:865's placement of the detector call inside `_report`: the
+verdict is computed first and the detector reads it.
+§7's budget neutrality is unaffected, because restart decisions keep consuming
+raw `/health` in `_cycle` (`bobi/supervisor/supervision.py:687-777`) and the
+derived verdict stays observer-side.
+
+Verification: an integration case where raw status is `running`,
+`status_file_age` makes the derived verdict `wedged`, and `session_health` stays
+null.
+
+### 13.3 A3 (major, from F3): an unrelated success can falsely post RECOVERED
+
+**Defect confirmed; the remedy is a scope fork, posed as Q12.**
+§1:72-76 claims coverage for scoped causes, naming a bad model pin and a gateway
+misconfiguration.
+§6.1:673-675 closes an incident on the first session that started after
+`opened_at` and reached a success, with no scoping at all.
+A bad model pin fails only the sessions on that model, so a healthy session on
+another model posts RECOVERED while the pinned model keeps failing, standing the
+operator down mid-outage.
+The existing mechanism avoids exactly this by keying both the incident and its
+recovery to an account boundary (`bobi/brain_availability.py:136-148` and
+`bobi/brain_availability.py:165-176`).
+The registry carries `role`, `run_key`, `model` and `provider`
+(`bobi/sdk.py:281-293`), but neither dispatch path populates `model` or
+`provider` at register time (`bobi/subagent.py:1506-1514` and
+`bobi/workflow/orchestrator.py:321-331`), so a session that dies at connect time
+has neither field to scope on.
+
+**Fold.** The hole is recorded as real, and §6.1:673-675's close rule is not
+sound as written for the causes §1:72-76 claims.
+Which boundary replaces it has schema consequences, so it is posed as Q12 rather
+than decided here.
+Whichever answer Gate 1 gives, add a test where an unrelated post-open success
+does not close the incident.
+
+### 13.4 A4 (major, from F4): the N=3 argument, and sparse blindness
+
+**Two defects confirmed, plus one scope fork.**
+
+First, the argument for N=3 over N=2 is internally inconsistent.
+§2.3:207 and §5.2:552 both treat the extra open that N=2 produces as the reason
+to keep N=3.
+That extra open is the 08-20 two-session pair, which §2.1:161-163 has already
+certified: "a genuine deadline expiry is a correct fire by §6.3's own rule".
+A fire this document calls correct is not a cost of lowering the threshold.
+
+**Fold.** Withdraw the claim that measurement excludes N=2.
+The honest statement is that N=2 produces one additional **correct** alert, and
+N=3 is a noise-policy preference for carrying fewer true alerts, not avoidance
+of a measured false positive.
+The constant stays 3; only its justification changes.
+
+Second, the limitation list is incomplete.
+§6.1:743-748 names the zero-dispatch box as the uncovered case but not the
+sparse one.
+At the measured mean of 0.47 dispatches per hour (`§5.4:645`), with 82.0% of
+one-hour windows empty (`§6.1:720-721`), a box failing one or two dispatches per
+hour indefinitely never fits N=3 inside a single 3600s window and is never
+alerted.
+Test 1 (`§10:940`) uses the dense 13-failure July incident, so no planned test
+covers the sparse case.
+
+**Fold.** State sparse blindness in §6.1:743-748's limitation list beside the
+zero-dispatch case, so Gate 1 does not assume coverage the rule does not have.
+
+Third, codex proposes replacing the windowed rule with "the newest failure is
+fresh, and the last N terminal outcomes since the last success share a
+signature", which drops the one-hour constraint and so covers the sparse case.
+That changes the detector's core semantics and invalidates §2.3's measured
+false-positive table, so it is posed as Q13 rather than decided here.
+
+### 13.5 A5 (major, from F5): verbatim Slack text bypasses redaction
+
+**Defect, confirmed.** §4.2:310-313, §5.2:549 and §6.1:667-669 all require the
+complete error verbatim, and §6.3:773-786 puts it straight into the Slack
+message at `§6.3:780`.
+Connect-time exceptions reach the registry through `tool_crash_error`, which
+embeds `str(error)` with no redaction and no length bound
+(`bobi/brain/turns.py:44-48`, persisted at `bobi/subagent.py:550-554`).
+The existing external-publish path does both: `_safe_detail` collapses
+whitespace, truncates to 500 characters, and rewrites
+`api_key`/`authorization`/`token` values (`bobi/brain_availability.py:68-74`),
+and it is applied before publishing (`bobi/brain_availability.py:140-158`).
+None of §10:938-1027's nineteen planned tests covers redaction or message size,
+verified by grep over that range.
+
+**Fold.** The raw error stays verbatim in the registry and in the published
+`session_health` block, both already-private local surfaces.
+The Slack text passes through a shared bounded redaction helper, reusing
+`_safe_detail`'s behaviour rather than growing a second one.
+This supersedes "verbatim" for the Slack notice only; §4.2's published block is
+unchanged.
+
+Verification: tests for `token=...`, `authorization=...`, and an oversized
+multi-line exception.
+
+### 13.6 A6 (minor, from F6): `done` cannot be a success as specified
+
+**Defect confirmed, and this document closes it in the wrong place.**
+§5.3:577-583 already recognizes the hole, states that a `done` entry read
+literally "would neither break a streak nor close an incident", and closes it by
+adding `done` to the success tuple.
+Adding the word does not close it.
+The streak is computed from `terminal_at` alone (`§5.4:627-628`), candidates
+require `terminal_at > 0` (`§5.3:558`), and entries without one must be
+"skipped rather than sorted to the epoch" (`§5.3:566`).
+On main, `mark_done` writes only `status="done"` and `pid=0`
+(`bobi/sdk.py:541-542`), and `terminal_at` defaults to `0.0`
+(`bobi/sdk.py:319-320`).
+A mechanical grep of every `terminal_at` writer on main confirms `mark_done` is
+not among them: `bobi/sdk.py:556`, `bobi/sdk.py:600`, `bobi/reconcile.py:140`,
+`bobi/session.py:995`, `bobi/session.py:1593`.
+So a real `done` entry is skipped by the candidate rule and stays invisible to
+the streak, which is the hole §5.3:577-583 claims to have closed.
+Tests 3 and 14 (`§10:948`, `§10:993`) would pass on a synthetic fixture carrying
+a fabricated `terminal_at` while the real writer stayed unobserved.
+
+**Fold.** `done` is a success for recovery, which tests `started_at` and needs no
+`terminal_at` (`§6.1:699`), and is explicitly **not** a streak-breaker, because
+the real writer leaves it unorderable.
+§5.3:577-583's claim that one word in the success tuple closes the hole is
+superseded.
+Tests 3 and 14 create the entry through the real `registry.mark_done` writer
+rather than a fixture, so a fabricated timestamp cannot hide the gap.
+
+### 13.7 A7 (minor, from F7): the stated denominator is wrong
+
+**Defect, confirmed, arithmetic.** §2.3:204 and §2.3:213 both say "14 weeks".
+This document's own measurement puts the history at 75.5 days
+(`§6.1:720-721`), and review 2 records the entry span as 2026-07-25 to
+2026-10-09 (`plans/reviews/2026-10-09-992-review-2.md:85`), the same 75.5 days.
+That is 10.8 weeks, not 14.
+
+**Fold.** Read "14 weeks" as **75.5 days (10.8 weeks)** in both sentences.
+The rarity conclusion is unaffected: one open and one burst over 75.5 days is
+still the argument for the kill switch and against new machinery.
+Checked and sound by contrast: the "nine weeks" figure at §5.4:611 and §9:901
+measures a different span, 2026-08-11 to 2026-10-09, which is 8.4 weeks and
+rounds defensibly.
+
+### 13.8 A8 (minor, from F8): the remediation pointer is Fly-only
+
+**Defect, confirmed.** §6.3:785 ends the notice with `fly logs -a ...`
+unconditionally.
+Main supports user-level launchd and systemd supervision
+(`bobi/service_manager.py:1-24`, `bobi/service_manager.py:73-82`), reached
+through the same supervisor entrypoint
+(`bobi/supervisor/__main__.py:81-82`) and the same `SlackAlerter`.
+The existing helper is itself Fly-specific
+(`bobi/supervisor/alerting.py:263-264`).
+
+**Fold.** The pointer is platform-aware, or platform-neutral: a `bobi` command or
+a state path that resolves on a Fly machine and a local OS service alike.
+Repairing `_logs_pointer` for the existing crash-loop notice is in scope for the
+same PR, since one helper serves both messages.
+
+### 13.9 New questions for Gate 1
+
+Not decided here. These continue §11's numbering.
+
+**Q10. Generic backstop, or reported outage?**
+If the target is specifically auth, quota and session-limit silence, a fourth and
+smaller shape exists: extend `brain_availability.py` to observe connect-time
+exceptions, add a session-limit incident category, and route its existing events
+to an operator.
+That path already supplies durable dedup, recovery, account scoping and bounded
+error handling (`bobi/brain_availability.py:103-195`).
+It does not provide the broad unknown-cause outcome detector this document
+describes.
+Gate 1 should decide which promise #992 owns.
+
+**Q11. Is R's protocol surface worth carrying now?**
+After A1, R still has no in-repo fleet or dashboard consumer, and §4.4:365-372
+already concedes its one concrete gain today is the admin `status` reply.
+If that is not enough product value, Shape M remains the smaller honest shape.
+
+**Q12. What is the recovery boundary?** (from A3)
+A team-wide close rule is simple and is false for model-, provider-, role- and
+workflow-scoped failures.
+Scoping it to the affected boundary requires that boundary to be populated at
+register time, which neither dispatch path does today.
+A third option is to ABANDON generic incidents rather than claim recovery.
+The choice changes registry schema and incident behaviour, so it belongs to the
+approver.
+
+**Q13. Keep the one-hour window, or switch to since-last-success?** (from A4)
+Keeping it preserves §2.3's measured table and stays blind to sparse outages.
+Switching to "the newest failure is fresh, and the last N terminal outcomes since
+the last success share a signature" covers the sparse case and invalidates that
+table, which would have to be re-measured.
