@@ -326,6 +326,7 @@ class SessionEntry:
     timeout: int = 0
     # reconciled_at: set when the reconciler closed a stranded run (idempotency).
     reconciled_at: float = 0.0
+    ack_watermark: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "SessionEntry":
@@ -396,6 +397,21 @@ class SessionRegistry:
                 if k in data:
                     data[k] = v
             data["last_activity"] = time.time()
+            self._write_state(path, data)
+
+    def update_ack_watermark(self, name: str, snapshot: dict) -> None:
+        """Persist delivery diagnostics without claiming session activity."""
+        path = self._state_path(name)
+        if not path.exists():
+            return
+        with _state_file_lock(path):
+            if not path.exists():
+                return
+            try:
+                data = json.loads(path.read_text())
+            except (json.JSONDecodeError, TypeError):
+                return
+            data["ack_watermark"] = snapshot
             self._write_state(path, data)
 
     def update_inbox_stats(self, name: str, *, depth: int,

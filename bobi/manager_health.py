@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -48,6 +49,16 @@ class _HealthServer(ThreadingHTTPServer):
 
     allow_reuse_address = True
     daemon_threads = True
+
+    def server_bind(self):
+        # HTTPServer's implementation performs a synchronous reverse-DNS
+        # lookup after binding. Health startup must not depend on DNS: the
+        # manager cannot publish its port or continue booting until this
+        # constructor returns.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
 
 def _make_handler(manager_pid: int, project_name: str,
@@ -172,15 +183,22 @@ def _session_status_from_registry():
         from bobi.sdk import get_registry
         registry = get_registry()
         active = registry.list_active()
-        return [
-            {
-                "name": e.name,
-                "role": e.role,
-                "status": e.status,
-                "inbox": _inbox_status(e),
+        sessions = []
+        for entry in active:
+            session = {
+                "name": entry.name, "role": entry.role,
+                "status": entry.status, "inbox": _inbox_status(entry),
             }
-            for e in active
-        ]
+            if isinstance(entry.ack_watermark, dict) and entry.ack_watermark:
+                watermark = dict(entry.ack_watermark)
+                pending_at = watermark.pop("oldest_pending_at", 0.0)
+                watermark["oldest_age_seconds"] = (
+                    max(0.0, time.time() - pending_at)
+                    if watermark.get("pending_batches") and
+                    isinstance(pending_at, (int, float)) else 0.0)
+                session["ack_watermark"] = watermark
+            sessions.append(session)
+        return sessions
     except Exception:
         return []
 

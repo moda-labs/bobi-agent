@@ -375,6 +375,20 @@ resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
 events are published to both the bare `<type>` and the `<source>/<type>` form, and
 clients subscribe to both, for cross-version compatibility.
 
+The three `system/brain.*` edges are **also** posted straight to Slack, because
+the brain is what died and no deployment has ever subscribed to them (#992: a
+102-minute outage published nothing a human could read). The direct leg goes to
+`WATCHDOG_ALERT_CHANNEL` with a Slack bot token
+(`BOBI_SLACK_BOT_TOKEN` or `SLACK_BOT_TOKEN`), the same gate the supervisor's
+crash-loop and budget-exhaustion alerts use.
+With no channel configured it degrades to one log line.
+Delivery is deduped by the incident latch, so an outage is one message
+however many turns fail inside it, plus one on recovery.
+A team that also subscribes to the topics will see both.
+Error text on these edges is redacted and bounded before it leaves the host
+(`bobi/brain_availability.py::_safe_detail`): a rejected credential is routinely
+echoed back inside the error that rejected it.
+
 ### Declaring subscriptions
 
 Resolved in `bobi/events/subscriptions.py` + `adapters.py`:
@@ -443,6 +457,20 @@ sessions must not share a cursor):
   delivered inbox message. Queued messages, provider-error turns, and turns
   interrupted before their terminal result remain unacknowledged and replay
   after a process restart.
+- The session inbox normally serves chat before normal/bulk messages, FIFO
+  within each class. Once the oldest normal message has waited 120 seconds,
+  it takes one receive opportunity ahead of chat, then yields back to waiting
+  chat before another promotion. Active turns are not interrupted, and older
+  normal work can extend the wall-clock delivery time.
+- A pinned ACK watermark warns when its oldest batch reaches 300 seconds or
+  64 batches accumulate. Warnings include the session, pinning batch sequence,
+  event types, age and pending count, and repeat after 60, 120, 240, then every
+  300 seconds while activity continues; the backoff resets when the floor moves.
+- Manager `GET /health` exposes persisted per-session `ack_watermark` diagnostics
+  under `sessions`: `pinned_seq`, `pending_batches`, `oldest_event_type`, and
+  server-derived `oldest_age_seconds`. Old state omits the block until a drain
+  reports it; an empty watermark has a null sequence and zero count/age.
+  Diagnostic writes do not refresh session activity or acknowledge events.
 - `last_seen` is only the reconnect replay position. Local delivery health
   advances `last_acked_seq` and reduces `pending_events` only after a WebSocket
   ACK frame confirms processing; reconnecting past an in-memory queue does not

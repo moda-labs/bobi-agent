@@ -184,6 +184,27 @@ def test_promote_dev_advances_only_on_fully_green_main_push():
     assert checkout["with"]["fetch-depth"] == 0
 
 
+def test_macos_supervisor_load_reader_runs_on_real_darwin_ci():
+    job = _ci_workflow()["jobs"]["macos-supervisor-load"]
+
+    assert job["runs-on"] == "macos-latest"
+    test_step = next(
+        step for step in job["steps"]
+        if step.get("name") == "Smoke the real Darwin supervisor load-grace path"
+    )
+    assert (
+        "test_parses_real_ps_shapes_and_rejects_malformed_time"
+        in test_step["run"]
+    )
+    assert "test_default_reader_selects_darwin" in test_step["run"]
+    assert "test_unreadable_ps_fails_closed" in test_step["run"]
+    assert (
+        "tests/test_supervision_restart.py::"
+        "test_load_grace_smoke_defers_real_busy_wedge_then_reopens"
+    ) in test_step["run"]
+    assert "tests/test_supervision_restart.py " not in test_step["run"]
+
+
 def test_diy_install_lane_uses_one_wheel_across_supported_hosts():
     workflow = _ci_workflow()
     jobs = workflow["jobs"]

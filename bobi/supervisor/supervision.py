@@ -40,7 +40,6 @@ import collections
 import dataclasses
 import logging
 import math
-import os
 import signal
 import subprocess
 import sys
@@ -313,10 +312,13 @@ class Supervisor:
         return manager_health.health(f"http://127.0.0.1:{port}")
 
     def _default_load_fn(self, manager_pid, previous):
-        from .load import load_evidence
-        return load_evidence(manager_pid, previous,
-                             pegged_ratio=self.config.load_pegged_ratio,
-                             tree_cpu_ratio=self.config.load_tree_cpu_ratio)
+        from .load import default_load_evidence
+        return default_load_evidence(
+            manager_pid,
+            previous,
+            pegged_ratio=self.config.load_pegged_ratio,
+            tree_cpu_ratio=self.config.load_tree_cpu_ratio,
+        )
 
     # --- child lifecycle --------------------------------------------------
 
@@ -400,16 +402,9 @@ class Supervisor:
             except Exception:
                 log.exception("supervisor: escalation announce hook failed")
             return
-        token = (os.environ.get("BOBI_SLACK_BOT_TOKEN")
-                 or os.environ.get("SLACK_BOT_TOKEN"))
-        channel = os.environ.get("WATCHDOG_ALERT_CHANNEL")
-        if not (token and channel):
-            log.warning("supervisor: WATCHDOG_ALERT_CHANNEL / Slack token not "
-                        "set - budget-exhaustion escalation is log-only")
-            return
         try:
-            from bobi.slack import post_slack_message
-            post_slack_message(token, channel, message)
+            from bobi.slack import post_operator_alert
+            post_operator_alert(message, what="supervisor escalation")
         except Exception:
             log.exception("supervisor: failed to post escalation to Slack")
 
@@ -507,7 +502,7 @@ class Supervisor:
 
         The busy-descendant check diffs cpu ticks across two samples, so the
         FIRST verdict of a heavy period already needs a baseline from the
-        previous poll. Cheap (one /proc walk per poll interval) and fail-open:
+        previous poll. Cheap (one process-table read per poll) and fail-open:
         a read failure just leaves the baseline stale for this poll. The
         evidence is cached for the verdict path so a same-poll verdict uses
         this full-interval delta instead of re-reading /proc moments later (a
@@ -695,7 +690,7 @@ class Supervisor:
             return self._handle_child_exit(rc)
         self._child_alive = True
 
-        # Per-poll load baseline: one /proc walk so a verdict that fires THIS
+        # Per-poll load baseline: one process-table read so a verdict firing THIS
         # poll already has a full-interval CPU delta to judge against.
         self._refresh_load_baseline()
 

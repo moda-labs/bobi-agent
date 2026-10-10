@@ -597,9 +597,21 @@ class LocalRuntime(TeamRuntime):
         return agent_card(name)
 
     def start_team(self, name: str) -> dict:
-        from bobi import service
+        from bobi import service, service_manager
 
         root = self._resolve(name)
+        manager = service_manager.configured_manager(name)
+        if manager:
+            if service_manager.active_manager(name):
+                pid = service_manager.wait_for_manager_pid(root, timeout=0.5) or 0
+                raise TeamAlreadyRunning(pid)
+            try:
+                service_manager.service_action(manager, "restart")
+            except RuntimeError as exc:
+                raise TeamLifecycleError(str(exc)) from exc
+            pid = service_manager.wait_for_manager_pid(root, timeout=3.0) or 0
+            return {"ok": True, "pid": pid}
+
         try:
             with self._spawn_lock:
                 result = service.spawn_team(root)
@@ -612,9 +624,25 @@ class LocalRuntime(TeamRuntime):
         return {"ok": True, "pid": result.startup.pid}
 
     def stop_team(self, name: str) -> dict:
-        from bobi import service
+        from bobi import service, service_manager
 
         root = self._resolve(name)
+        manager = service_manager.stop_manager(name)
+        if manager:
+            pid = service_manager.wait_for_manager_pid(root, timeout=0.1) or 0
+            try:
+                service_manager.service_action(manager, "stop")
+            except RuntimeError as exc:
+                raise TeamLifecycleError(str(exc)) from exc
+            result = service.stop_team(root)
+            return {
+                "ok": result.stopped or result.killed or result.stale
+                      or result.pid == 0,
+                "stopped": result.stopped,
+                "pid": pid or result.pid,
+                "still_running": result.still_running,
+            }
+
         result = service.stop_team(root)
         return {
             "ok": result.stopped or result.killed or result.stale
@@ -625,9 +653,18 @@ class LocalRuntime(TeamRuntime):
         }
 
     def restart_team(self, name: str) -> dict:
-        from bobi import service
+        from bobi import service, service_manager
 
         root = self._resolve(name)
+        manager = service_manager.configured_manager(name)
+        if manager:
+            try:
+                service_manager.service_action(manager, "restart")
+            except RuntimeError as exc:
+                raise TeamLifecycleError(str(exc)) from exc
+            pid = service_manager.wait_for_manager_pid(root, timeout=3.0) or 0
+            return {"ok": True, "pid": pid}
+
         stop = service.stop_team(root)
         if stop.still_running:
             raise TeamDidNotStop(stop.pid)

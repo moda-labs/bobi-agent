@@ -103,7 +103,14 @@ ERROR_KIND_AUTHENTICATION = "authentication_failed"
 # until its credits, quota, or workspace spend allowance is replenished.
 ERROR_KIND_CREDITS_EXHAUSTED = "credits_exhausted"
 
-_AUTH_ERROR_KINDS = frozenset({ERROR_KIND_AUTHENTICATION, "not_logged_in"})
+_AUTH_ERROR_KINDS = frozenset({
+    ERROR_KIND_AUTHENTICATION,
+    "not_logged_in",
+    # The vendor's own kind for a revoked or rejected credential. Barndoor's
+    # 2026-08-05 outage reported it as "authentication_error: OAuth access
+    # token has been revoked" (#992).
+    "authentication_error",
+})
 _CREDIT_ERROR_KINDS = frozenset({
     ERROR_KIND_CREDITS_EXHAUSTED,
     "out_of_credits",
@@ -114,6 +121,9 @@ _AUTH_ERROR_TEXT = (
     "not logged in",
     "authentication required",
     "not signed in",
+    # A subscription token revoked upstream mid-flight: the credential is gone,
+    # not expired, so no refresh recovers it (#992).
+    "oauth access token has been revoked",
 )
 _CREDIT_ERROR_TEXT = (
     "you're out of usage credits",
@@ -121,6 +131,10 @@ _CREDIT_ERROR_TEXT = (
     "usage credits exhausted",
     "you've hit your usage limit",
     "you have hit your usage limit",
+    # The subscription-session cap, distinct from the usage limit above and the
+    # string 13 consecutive dispatches died on for 102 silent minutes (#992).
+    "you've hit your session limit",
+    "you have hit your session limit",
     "workspace is out of credits",
     "workspace credit limit",
     "usage limit reached",
