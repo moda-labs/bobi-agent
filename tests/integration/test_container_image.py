@@ -1252,13 +1252,14 @@ if [ "$1" = "agent" ] && [ "$2" = "--help" ]; then
   exit 0
 fi
 case "$*" in
-  *supervise*) env > /data/manager.env ;;
+  *supervise*) env > "/data/${BOOT_ENV_DUMP:-manager.env}" ;;
 esac
 exit 0
 """
 
 
 def _boot_with_shim(image: str, data: Path, shim: Path, brain: str,
+                    dump: str = "manager.env",
                     extra_env: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
     """Run the REAL entrypoint to completion with `bobi` shimmed.
 
@@ -1274,6 +1275,7 @@ def _boot_with_shim(image: str, data: Path, shim: Path, brain: str,
         "-v", f"{data}:/data",
         "-v", f"{shim}:/shim:ro",
         "-e", "PATH=/shim:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "-e", f"BOOT_ENV_DUMP={dump}",
         "-e", "BOBI_AUTH=subscription",
         "-e", f"BOBI_AGENT={brain}-smoke",
         "-e", f"BOBI_BRAIN={brain}",
@@ -1286,9 +1288,14 @@ def _boot_with_shim(image: str, data: Path, shim: Path, brain: str,
     return _run(*args)
 
 
-def _manager_env(data: Path) -> dict[str, str]:
-    """The environment the shimmed manager was handed."""
-    dump = data / "manager.env"
+def _manager_env(data: Path, dump: str = "manager.env") -> dict[str, str]:
+    """The environment the shimmed manager was handed.
+
+    Read, never removed: the dump is written inside the container as `bobi` and
+    the entrypoint chowns the bind mount, so the host user cannot unlink it.
+    Each boot therefore writes its own file.
+    """
+    dump = data / dump
     assert dump.is_file(), "the entrypoint never reached the manager handoff"
     env = {}
     for line in dump.read_text().splitlines():
@@ -1313,10 +1320,12 @@ def test_codex_home_is_on_the_volume_for_a_claude_brain(image: str, tmp_path: Pa
     data.mkdir()
 
     for boot in ("first", "restart"):
-        (data / "manager.env").unlink(missing_ok=True)
-        proc = _boot_with_shim(image, data, tmp_path / f"shim-{boot}", "claude")
+        proc = _boot_with_shim(
+            image, data, tmp_path / f"shim-{boot}", "claude",
+            dump=f"manager-{boot}.env",
+        )
         assert proc.returncode == 0, f"{boot} boot:\n{proc.stdout}\n{proc.stderr}"
-        env = _manager_env(data)
+        env = _manager_env(data, f"manager-{boot}.env")
         assert env.get("CODEX_HOME") == "/data/codex", f"{boot} boot: {env!r}"
         # `env` without `-i` inherits, so HOME is present too; that is what
         # proves the export was inherited rather than the variable re-set.
