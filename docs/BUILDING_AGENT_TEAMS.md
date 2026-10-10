@@ -126,7 +126,7 @@ monitors:                   # polling that fills webhook gaps
     interval: 5m
     event: email/received
 
-subscribe:                  # explicit subscription override — rarely needed;
+subscribe:                  # explicit subscription SEED - rarely needed;
   - github:org/repo         # omitting it enables auto-detection (preferred)
 ```
 
@@ -135,6 +135,14 @@ with `events: true` resolves itself — github from the project's git
 remote (or, when the project root is not a git repo, from each immediate
 child repo — the director-at-`~/dev` layout), slack workspace from the
 bot token, linear teams from the API key.
+
+`subscribe:` is the seed, not the live source of truth. A running team can
+change its own topics with `bobi agent <name> subscriptions add|remove`, which
+writes `<run>/workspace/subscriptions.yaml` and applies the change without a
+restart; from then on that file is what resolves and the pack list is no longer
+read. Omitting `subscribe:` still means auto-detection, and nothing creates the
+workspace file until an operator runs one of those commands. See
+`docs/EVENT_SERVER.md` "Declaring subscriptions".
 
 ### Launch caps
 

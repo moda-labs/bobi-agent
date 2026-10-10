@@ -158,6 +158,16 @@ like a healthy idle director. It also includes an `inbox` block with the queued
 message count and oldest-message age; every active session entry carries the
 same block. `bobi agent <name> status` prints that backlog when it is non-empty.
 
+Two further routes live on the same server and are **token-gated**:
+`POST /subscriptions/reload` and `GET /subscriptions` (`bobi agent <name>
+subscriptions`). The token is minted into
+`/data/project/run/state/manager-health.token` at mode 0600 beside the port file
+and unlinked with it on a graceful stop. `/health` and `/ready` stay
+unauthenticated so orchestrator probes are unaffected. The token is what makes
+`BOBI_HEALTH_BIND=0.0.0.0` safe here: without it, anything on the pod network
+could trigger credential-bearing authorize POSTs and state-changing
+subscription writes.
+
 ## Build it yourself
 
 You do not need to; the published image is the supported path. If you do:

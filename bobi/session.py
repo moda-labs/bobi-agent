@@ -1654,10 +1654,11 @@ class Session:
         the saved cursor. A transient timeout must not kill the session: we boot
         now and retry registration in the background until it lands.
         """
-        keys = [f"inbox/{self.name}"]
-        for key in self._subscribe:
-            if key not in keys:
-                keys.append(key)
+        # EXTRA topics only. `inbox/<self>` and (for the manager) the declared,
+        # monitor and lifecycle layers are composed inside
+        # `_start_event_subscription` (#952), so a reload can re-derive the full
+        # set from the files instead of replaying a snapshot taken here.
+        keys = list(self._subscribe)
         # Clear any stop signal from a prior lifecycle so a reused Session can
         # subscribe again (Sessions are single-use today, but a stuck flag here
         # would silently disable all reconnects).

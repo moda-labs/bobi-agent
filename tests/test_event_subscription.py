@@ -1,5 +1,10 @@
 """Tests for _start_event_subscription — registration retry and persistence.
 
+Since #952 the second argument is this session's EXTRA topics, not its full
+key list: the full list is composed inside `_start_event_subscription` by
+`compose_session_subscriptions`, which prepends `inbox/<session>`. These tests
+pass extras and assert on the composed shape.
+
 Regression coverage for the EC2 director crash: a transient TimeoutError
 during event server registration propagated uncaught and killed the
 manager daemon (register() had no retry, and the deployment was never
@@ -127,11 +132,11 @@ def test_deaf_reconnect_uses_filtered_registered_subscriptions(
         on_deaf()
 
     mock_register.assert_called_once()
-    assert mock_register.call_args.args[2] == ["inbox/self"]
+    assert mock_register.call_args.args[2] == ["inbox/sess", "inbox/self"]
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["inbox/self"],
+        "replace": ["inbox/sess", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
 
@@ -225,7 +230,7 @@ def test_saved_state_uses_put_not_register(mock_register,
     assert len(put_reqs) == 1
     assert str(put_reqs[0].url) == f"{REMOTE_URL}/deployments/dep-3/subscriptions"
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r"],
+        "replace": ["inbox/sess", "github:o/r"],
         "protocol": EVENT_PROTOCOL,
     }
     assert mock_client.call_args.kwargs["deployment_id"] == "dep-3"
@@ -359,11 +364,11 @@ def test_saved_state_keeps_unbacked_global_topics_and_resubscribes_same(
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 2
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r", "inbox/self"],
+        "replace": ["inbox/sess", "github:o/r", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
     assert json.loads(put_reqs[1].content) == {
-        "replace": ["github:o/r", "inbox/self"],
+        "replace": ["inbox/sess", "github:o/r", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
 
@@ -463,7 +468,7 @@ def test_configured_local_keeps_unbacked_topics_when_the_grant_is_denied(
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r", "inbox/self"],
+        "replace": ["inbox/sess", "github:o/r", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
     # The saved deployment survives — nothing was re-minted.
@@ -508,7 +513,7 @@ def test_authorization_raising_still_puts_the_raw_list(
     assert len(put_reqs) == 1
     assert str(put_reqs[0].url) == f"{LOCAL_URL}/deployments/dep-L/subscriptions"
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r"],
+        "replace": ["inbox/sess", "github:o/r"],
         "protocol": EVENT_PROTOCOL,
     }
     assert json.loads(state.read_text()) == {

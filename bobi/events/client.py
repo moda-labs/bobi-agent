@@ -498,11 +498,14 @@ class EventServerClient:
     def _safe_resubscribe(self, cb: callable) -> None:
         """Run the deaf-reconnect resubscribe hook.
 
-        The hook re-asserts this deployment's subscriptions (and re-registers on
-        failure) so a reconnect restores delivery even when the server-side
-        subscription index — not just the socket — went stale. Transport errors
-        remain best-effort; a confirmed protocol failure is terminal because the
-        reconnected client cannot safely continue receiving events.
+        The hook re-asserts this deployment's subscriptions so a reconnect
+        restores delivery even when the server-side subscription index, not
+        just the socket, went stale. It does NOT re-register: only
+        `_register_with_retry` does that, and the PUT's error path deliberately
+        retains the saved deployment and completion cursor instead
+        (`bobi/subagent.py`). Transport errors remain best-effort; a confirmed
+        protocol failure is terminal because the reconnected client cannot
+        safely continue receiving events.
         """
         try:
             cb()
@@ -516,4 +519,7 @@ class EventServerClient:
             )
             self.stop()
         except Exception as e:
-            log.debug("Resubscribe after deaf reconnect failed: %s", e)
+            # `warning`, not `debug`: this is a VOIDED repair PUT. The socket
+            # heals either way, so a silent failure here looks like a healthy
+            # reconnect while the server-side index stays stale.
+            log.warning("Resubscribe after deaf reconnect failed: %s", e)

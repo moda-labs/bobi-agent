@@ -3,6 +3,7 @@
 import json
 import os
 import socket
+import urllib.error
 import urllib.request
 
 import pytest
@@ -18,6 +19,7 @@ def _reset_server():
     manager_health._server = None
     manager_health._thread = None
     manager_health._port_file = None
+    manager_health._token_file = None
     yield
     manager_health.stop()
 
@@ -418,3 +420,113 @@ class TestManagerBlock:
         assert block["status"] == "error"
         assert block["error"] == "brain authentication failed"
         assert block["terminal_at"] == 120.0
+
+
+class TestSubscriptionRoutes:
+    """`POST /subscriptions/reload` and `GET /subscriptions` (#952).
+
+    Both are token-gated. `BOBI_HEALTH_BIND=0.0.0.0` ships in the reference
+    image, so an unauthenticated mutating route would let anything on the
+    network trigger credential-bearing authorize POSTs and state-changing
+    subscription writes. `/health` and `/ready` stay open so Kubernetes and Fly
+    probes are unaffected.
+    """
+
+    @staticmethod
+    def _start(tmp_path, session="mgr"):
+        state = tmp_path / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        port = manager_health.start(state, "test-project",
+                                    session_status_fn=lambda: [],
+                                    manager_session=session)
+        token = (state / "manager-health.token").read_text().strip()
+        return port, token, state
+
+    @staticmethod
+    def _request(port, path, *, token=None, method="GET"):
+        url = f"http://127.0.0.1:{port}{path}"
+        req = urllib.request.Request(url, method=method)
+        if token is not None:
+            req.add_header(manager_health.RELOAD_TOKEN_HEADER, token)
+        if method == "POST":
+            req.data = b""
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    class _Controller:
+        def __init__(self):
+            self.calls = []
+
+        def reload(self, *, authorize):
+            self.calls.append(authorize)
+            return {"status": "applied", "subscriptions": ["inbox/mgr"],
+                    "added_topics": [], "removed_topics": [],
+                    "at": "2026-10-10T18:22:04+00:00"}
+
+        def accepted_record(self):
+            return {"session": "mgr", "subscriptions": ["inbox/mgr"],
+                    "at": "2026-10-10T18:22:04+00:00"}
+
+    def test_reload_without_the_token_is_401_and_triggers_no_put(self, tmp_path,
+                                                                 monkeypatch):
+        from bobi import subagent
+
+        controller = self._Controller()
+        monkeypatch.setattr(subagent, "get_live_subscription",
+                            lambda s: controller)
+        port, token, _ = self._start(tmp_path)
+
+        assert self._request(port, "/subscriptions/reload",
+                             method="POST")[0] == 401
+        assert self._request(port, "/subscriptions/reload", token="wrong",
+                             method="POST")[0] == 401
+        assert self._request(port, "/subscriptions")[0] == 401
+        # The gate runs BEFORE the lookup, so nothing was applied.
+        assert controller.calls == []
+
+        status, body = self._request(port, "/subscriptions/reload",
+                                     token=token, method="POST")
+        assert status == 200
+        assert body["status"] == "applied"
+        # The operator-triggered path authorizes, so a newly declared global
+        # topic has its grant written before the PUT.
+        assert controller.calls == [True]
+
+        status, body = self._request(port, "/subscriptions", token=token)
+        assert status == 200
+        assert body == controller.accepted_record()
+
+    def test_health_and_ready_stay_unauthenticated(self, tmp_path):
+        port, _token, _ = self._start(tmp_path)
+        assert self._request(port, "/health")[0] == 200
+        assert self._request(port, "/ready")[0] in (200, 503)
+
+    def test_no_live_subscription_is_409_on_both_routes(self, tmp_path,
+                                                        monkeypatch):
+        from bobi import subagent
+
+        monkeypatch.setattr(subagent, "get_live_subscription", lambda s: None)
+        port, token, _ = self._start(tmp_path)
+        status, body = self._request(port, "/subscriptions/reload",
+                                     token=token, method="POST")
+        assert status == 409
+        assert body == {"status": "no_live_subscription", "session": "mgr"}
+        assert self._request(port, "/subscriptions", token=token)[0] == 409
+
+    def test_the_token_file_is_0600_and_unlinked_by_stop(self, tmp_path):
+        import stat
+
+        _port, token, state = self._start(tmp_path)
+        token_file = state / "manager-health.token"
+        assert token
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+        manager_health.stop()
+        assert not token_file.exists()
+        assert not (state / "manager-health.port").exists()
+
+    def test_an_unknown_post_path_is_404(self, tmp_path):
+        port, token, _ = self._start(tmp_path)
+        assert self._request(port, "/nope", token=token, method="POST")[0] == 404
