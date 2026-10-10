@@ -112,10 +112,19 @@ def test_fresh_state_registers_even_when_a_bubble_already_exists(
 @patch("bobi.events.drain.drain_loop")
 @patch("bobi.events.client.EventServerClient")
 @patch("bobi.events.server.register")
-def test_deaf_reconnect_uses_filtered_registered_subscriptions(
+def test_deaf_reconnect_reasserts_the_recomposed_desired_set(
         mock_register, mock_client, _drain, project):
-    """If fresh registration drops an unbacked global topic, the deaf reconnect
-    resubscribe must not later PUT the raw unfiltered subscribe list."""
+    """The deaf reconnect re-DERIVES its desired set rather than replaying a cache.
+
+    Before #952 it replayed `active_subscriptions`, the FILTERED list register
+    returned, which is why a PUT whose response was lost reverted a change the
+    server had already accepted. It now recomposes, so an unbacked global topic
+    is re-asserted unfiltered and the server stays authoritative: it rejects the
+    update if the grant is truly absent, which is the accepted D7 consequence.
+
+    Register itself still filters - an unbacked topic must never hard-reject a
+    FRESH registration - so the two lists differ here on purpose.
+    """
     mock_register.return_value = ("dep-1", "key-1")
     captured = []
 
@@ -132,11 +141,13 @@ def test_deaf_reconnect_uses_filtered_registered_subscriptions(
         on_deaf()
 
     mock_register.assert_called_once()
+    # Register dropped the ungranted github topic.
     assert mock_register.call_args.args[2] == ["inbox/sess", "inbox/self"]
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
+    # The reconnect asserted the full composed set, not the filtered one.
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["inbox/sess", "inbox/self"],
+        "replace": ["inbox/sess", "github:o/r", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
 
