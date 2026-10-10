@@ -94,10 +94,8 @@ def _prepare_chat_events(events: list[dict]) -> list[dict]:
     return result
 
 
-# A pending map this large means the cursor floor has been pinned for a long
-# time (a message dropped un-acked, or a no-inbox drop) - warn so a wedged
-# watermark is visible in logs instead of surfacing as a giant replay later.
-_WATERMARK_PENDING_WARN = 512
+_WATERMARK_PENDING_WARN = 64
+_WATERMARK_AGE_WARN = 300.0
 
 
 class _AckWatermark:
@@ -116,27 +114,67 @@ class _AckWatermark:
     floor so a restart replays it.
     """
 
-    def __init__(self, ack: Callable[[int], None]) -> None:
+    def __init__(self, ack: Callable[[int], None], session_name: str = "") -> None:
         self._ack = ack
+        self._session_name = session_name
         self._lock = threading.Lock()
+        self._report_lock = threading.Lock()
         self._pending: dict[int, int] = {}  # seq -> outstanding references
+        self._metadata: dict[int, tuple[float, float, str]] = {}
+        self._warned_seq: int | None = None
+        self._next_warning = 0.0
+        self._warning_interval = 60.0
         self._acked = 0    # newest ackable seq decided so far
         self._sent = 0     # last seq actually handed to self._ack
         self._sending = False
 
-    def open_batch(self, seq: int) -> "_BatchAck":
-        self._add(seq)
+    def open_batch(self, seq: int, event_type: str = "unknown") -> "_BatchAck":
+        self._add(seq, event_type)
+        self._report()
         return _BatchAck(self, seq)
 
-    def _add(self, seq: int) -> None:
+    def _add(self, seq: int, event_type: str = "unknown") -> None:
         with self._lock:
+            if seq not in self._pending:
+                self._metadata[seq] = (time.monotonic(), time.time(), event_type)
             self._pending[seq] = self._pending.get(seq, 0) + 1
-            if len(self._pending) == _WATERMARK_PENDING_WARN:
-                log.warning(
-                    "Ack watermark has %d outstanding batches - cursor "
-                    "pinned near seq %d (a message was likely dropped "
-                    "un-acked; a restart will replay from there)",
-                    len(self._pending), min(self._pending))
+
+    def _report(self) -> None:
+        with self._report_lock:
+            with self._lock:
+                pinned_seq = min(self._pending) if self._pending else None
+                started, pending_at, event_type = self._metadata.get(
+                    pinned_seq, (0.0, 0.0, ""))
+                now = time.monotonic()
+                age = max(0.0, now - started) if pinned_seq is not None else 0.0
+                if pinned_seq != self._warned_seq:
+                    self._warned_seq = pinned_seq
+                    self._next_warning = 0.0
+                    self._warning_interval = 60.0
+                if (pinned_seq is not None and now >= self._next_warning and
+                        (age >= _WATERMARK_AGE_WARN or
+                         len(self._pending) >= _WATERMARK_PENDING_WARN)):
+                    log.warning(
+                        "Ack watermark for %s has %d pending batches - cursor "
+                        "pinned at seq %d (%s), age %.1fs; unprocessed events "
+                        "remain replayable",
+                        self._session_name or "unknown", len(self._pending),
+                        pinned_seq, event_type, age)
+                    self._next_warning = now + self._warning_interval
+                    self._warning_interval = min(self._warning_interval * 2, 300.0)
+                snapshot = {
+                    "pinned_seq": pinned_seq,
+                    "pending_batches": len(self._pending),
+                    "oldest_pending_at": pending_at,
+                    "oldest_event_type": event_type,
+                }
+            if self._session_name:
+                try:
+                    from bobi.sdk import get_registry
+                    get_registry().update_ack_watermark(self._session_name, snapshot)
+                except Exception:
+                    log.warning("Could not persist ACK watermark for %s",
+                                self._session_name, exc_info=True)
 
     def _done(self, seq: int) -> None:
         with self._lock:
@@ -148,10 +186,21 @@ class _AckWatermark:
             for s in sorted(self._pending):
                 if self._pending[s] <= 0:
                     del self._pending[s]
+                    del self._metadata[s]
                     self._acked = max(self._acked, s)
                 else:
                     break
-        self._flush()
+        # The real cursor ACK goes first (#1110). _report() persists the
+        # snapshot under a cross-process fcntl lock on the session state
+        # file, and the completion callback that lands here is bounded by
+        # MESSAGE_ACK_TIMEOUT (bobi/session.py) - a contended snapshot write
+        # ahead of the ACK burns that whole budget and marks the session
+        # terminally errored. Diagnostics stay best-effort but still run, so
+        # a failing ACK cannot skip the snapshot that explains it.
+        try:
+            self._flush()
+        finally:
+            self._report()
 
     def _flush(self) -> None:
         """Send the newest ackable seq via self._ack, outside the state lock.
@@ -230,7 +279,7 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
         formatter = format_event_for_manager
     from bobi.inbox import get_local_inbox, Message, _msg_id
 
-    tracker = _AckWatermark(cursor_ack) if cursor_ack else None
+    tracker = _AckWatermark(cursor_ack, session_name) if cursor_ack else None
 
     log.info("Drain loop active — delivering events to session inbox")
 
@@ -250,7 +299,8 @@ def drain_loop(session_name: str, queue: SimpleQueue | None = None,
             batch.append(nxt)
 
         max_seq = max((e.get("seq", 0) for e in batch), default=0)
-        batch_ack = (tracker.open_batch(max_seq)
+        event_types = ", ".join(sorted({str(e.get("type", "unknown")) for e in batch}))
+        batch_ack = (tracker.open_batch(max_seq, event_types)
                      if tracker and max_seq > 0 else None)
 
         # The drain runs in the same process as its session, so it pushes

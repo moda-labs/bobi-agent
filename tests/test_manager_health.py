@@ -1,6 +1,7 @@
 """Unit tests for bobi.manager_health — the manager health endpoint."""
 
 import json
+import os
 import socket
 import urllib.request
 
@@ -22,6 +23,51 @@ def _reset_server():
 
 
 class TestHealthServer:
+    @pytest.mark.parametrize("watermark", ["invalid", {
+        "pending_batches": 1, "oldest_pending_at": "invalid"}])
+    def test_malformed_watermark_does_not_hide_session_health(self,
+                                                           tmp_path,
+                                                           monkeypatch,
+                                                           watermark):
+        from bobi import sdk
+
+        registry = sdk.SessionRegistry(root=tmp_path)
+        registry.register(sdk.SessionEntry(
+            name="director", pid=os.getpid(), status="idle",
+            ack_watermark=watermark))
+        monkeypatch.setattr(sdk, "get_registry", lambda: registry)
+        assert manager_health._session_status_from_registry()[0]["name"] == "director"
+
+    def test_health_reads_watermark_from_persisted_session_state(self,
+                                                               tmp_path,
+                                                               monkeypatch):
+        from bobi import sdk
+
+        registry = sdk.SessionRegistry(root=tmp_path)
+        registry.register(sdk.SessionEntry(
+            name="director", pid=os.getpid(), status="running",
+            last_activity=10.0))
+        state_path = registry._state_path("director")
+        state = json.loads(state_path.read_text())
+        state["ack_watermark"] = {
+            "pinned_seq": 223, "pending_batches": 98,
+            "oldest_pending_at": 100.0,
+            "oldest_event_type": "agent/session.completed"}
+        state_path.write_text(json.dumps(state))
+        monkeypatch.setattr(sdk, "get_registry", lambda: registry)
+        monkeypatch.setattr(manager_health.time, "time", lambda: 450.0)
+        registry.update_inbox_stats("director", depth=3, oldest_age=25.0)
+        port = manager_health.start(tmp_path / "state", "test-project")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health",
+                                    timeout=2) as response:
+            data = json.loads(response.read())
+        assert data["sessions"][0]["ack_watermark"] == {
+            "pinned_seq": 223, "pending_batches": 98,
+            "oldest_event_type": "agent/session.completed",
+            "oldest_age_seconds": 350.0}
+        assert data["sessions"][0]["inbox"] == {
+            "depth": 3, "oldest_age_seconds": 25.0}
+        assert registry.get("director").last_activity == 10.0
 
     def test_start_does_not_wait_for_reverse_dns(self, tmp_path, monkeypatch):
         state_dir = tmp_path / "state"

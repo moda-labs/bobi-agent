@@ -11,6 +11,7 @@ that topic (``Inbox.respond``).
 
 import os
 import queue
+import threading
 import time
 import logging
 from unittest.mock import patch
@@ -53,6 +54,14 @@ class TestInboxQueue:
         msg = inbox.recv(timeout=1)
         assert msg is not None and msg.text == "hello"
         inbox.close()
+
+    def test_recv_preserves_unbounded_and_negative_timeout_behavior(self):
+        inbox = Inbox("test-timeout-compatibility")
+        message = Message(id="1", sender="s", text="hello")
+        inbox.push(message)
+        with pytest.raises(ValueError, match="non-negative"):
+            inbox.recv(timeout=-1)
+        assert inbox.recv(timeout=None) is message
 
     def test_multiple_messages_in_order(self):
         inbox = Inbox("test-order")
@@ -157,6 +166,92 @@ class TestChatPriority:
         received = [inbox.recv(timeout=1).text for _ in range(4)]
         assert received == ["chat-1", "chat-2", "bulk-1", "bulk-2"]
         inbox.close()
+
+    def test_bulk_is_promoted_after_two_minutes_of_continuous_chat(self,
+                                                                  monkeypatch):
+        now = [0.0]
+        monkeypatch.setattr("bobi.inbox.time.monotonic", lambda: now[0])
+        inbox = Inbox("test-aging")
+        bulk = Message(id="bulk", sender="worker", text="completed")
+        inbox.push(bulk)
+        for elapsed in (0, 30, 60, 90, 119.999):
+            now[0] = elapsed
+            chat = Message(id=str(elapsed), sender="human", text="chat")
+            inbox.push(chat, priority=True)
+            assert inbox.recv(timeout=0) is chat
+        now[0] = 120.0
+        chat = Message(id="last-chat", sender="human", text="chat")
+        inbox.push(chat, priority=True)
+        assert inbox.recv(timeout=0) is bulk
+        assert inbox.recv(timeout=0) is chat
+        assert inbox.empty()
+
+    def test_aging_keeps_bulk_fifo_and_resumes_chat_priority(self, monkeypatch):
+        now = [0.0]
+        monkeypatch.setattr("bobi.inbox.time.monotonic", lambda: now[0])
+        inbox = Inbox("test-aging-fifo")
+        inbox.push(Message(id="old-1", sender="s", text="old-1"))
+        inbox.push(Message(id="old-2", sender="s", text="old-2"))
+        now[0] = 120.0
+        inbox.push(Message(id="young", sender="s", text="young"))
+        inbox.push(Message(id="chat", sender="s", text="chat"), priority=True)
+        assert [inbox.recv(timeout=0).id for _ in range(4)] == [
+            "old-1", "chat", "old-2", "young"]
+
+    def test_promotion_credit_is_regranted_for_each_aged_normal(self,
+                                                               monkeypatch):
+        now = [0.0]
+        monkeypatch.setattr("bobi.inbox.time.monotonic", lambda: now[0])
+        inbox = Inbox("test-aging-repeat")
+        try:
+            inbox.push(Message(id="old-1", sender="s", text="old-1"))
+            inbox.push(Message(id="old-2", sender="s", text="old-2"))
+            now[0] = 120.0
+            order = []
+            # Keep chat queued at every receive so each aged normal needs
+            # another promotion after yielding back to chat (#1074).
+            for i in range(4):
+                inbox.push(Message(id=f"chat-{i}", sender="s", text="chat"),
+                           priority=True)
+                order.append(inbox.recv(timeout=0).id)
+            assert order == ["old-1", "chat-0", "old-2", "chat-1"]
+        finally:
+            inbox.close()
+
+    def test_promoted_bulk_updates_stats_without_losing_chat_age(self,
+                                                               monkeypatch):
+        now = [10.0]
+        monkeypatch.setattr("bobi.inbox.time.monotonic", lambda: now[0])
+        samples = []
+        inbox = Inbox("test-aging-stats", stats_callback=lambda depth, age:
+                      samples.append((depth, age)))
+        try:
+            bulk = Message(id="bulk", sender="worker", text="bulk")
+            chat = Message(id="chat", sender="human", text="chat")
+            inbox.push(bulk)
+            now[0] = 20.0
+            inbox.push(chat, priority=True)
+            now[0] = 130.0
+
+            assert inbox.recv(timeout=0) is bulk
+            assert samples[-1] == (1, 110.0)
+            assert inbox.oldest_age() == 110.0
+            assert inbox.recv(timeout=0) is chat
+            assert samples[-1] == (0, 0.0)
+        finally:
+            inbox.close()
+
+    def test_blocked_receiver_wakes_for_a_producer(self):
+        inbox = Inbox("test-wakeup")
+        received = []
+        receiver = threading.Thread(
+            target=lambda: received.append(inbox.recv(timeout=1)))
+        receiver.start()
+        message = Message(id="wake", sender="s", text="wake")
+        inbox.push(message, priority=True)
+        receiver.join(timeout=2)
+        assert not receiver.is_alive()
+        assert received == [message]
 
 
 class TestLocalInboxRegistry:
