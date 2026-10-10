@@ -1664,22 +1664,66 @@ def test_ask_first_orders_connect_post_reply_spawn_device_poll(
 
 # 2. A bot reply is not ready.
 
-def test_bot_reply_is_not_ready_but_a_following_human_is(
+def test_a_bot_reply_alone_never_satisfies_the_wait(
     slack_config, ask_state_home, monkeypatch,
 ):
-    """Item 2: `fields.bot_id` disqualifies; the next human event satisfies."""
+    """Item 2, first leg. A third-party bot posting in the ask's thread must
+    not start a login. Asserting the timeout is what makes this leg real:
+    counting consumptions cannot tell a bot reply from a human one."""
+    with pytest.raises(TimeoutError, match="no human replied"):
+        ab.run_bootstrap(
+            slack_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("a bot reply must not spawn the login CLI")),
+            post_message=lambda t, c, x, thread_ts="": {
+                "ok": True, "ts": "1700000000.000001"},
+            connect_listener=lambda p, c, t: _FakeListener(
+                [_slack_event("ready", thread_ts="1700000000.000001",
+                              ts="1700000000.000009", bot_id="B0THIRDPARTY")],
+                channel=c),
+        )
+
+
+def test_a_human_reply_after_a_bot_one_is_the_one_consumed(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 2, second leg. The bot event is skipped and the HUMAN message is
+    the one recorded as consumed - pinned by id, because a consumption count
+    alone passes whichever message satisfied the wait."""
     codex_creds = ask_state_home / "auth.json"
-    events = [
-        _slack_event("ready", thread_ts="1700000000.000001", bot_id="B0THIRDPARTY"),
-        _slack_event("ready", thread_ts="1700000000.000001"),
-    ]
-    ok, log, posts = _run_ask_first(
-        slack_config, events=events, monkeypatch=monkeypatch, target="codex",
-        creds_writer=lambda: codex_creds.write_text(
-            json.dumps({"tokens": {"refresh_token": "r"}})),
+    listener = _FakeListener([
+        _slack_event("ready", thread_ts="1700000000.000001",
+                     ts="1700000000.000009", bot_id="B0THIRDPARTY"),
+        _slack_event("ready", thread_ts="1700000000.000001",
+                     ts="1700000000.000010"),
+    ], channel=None)
+
+    def connect(project_path, channel, timeout):
+        listener.channel = channel
+        return listener
+
+    monkeypatch.setattr(
+        ab, "_scrape_login",
+        lambda fd, t, spec: ("https://auth.openai.com/codex/device", "ABCD-12345"))
+
+    class FakeProc:
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            codex_creds.write_text(json.dumps({"tokens": {"refresh_token": "r"}}))
+            return 0
+
+    ok = ab.run_bootstrap(
+        slack_config, target="codex",
+        spawn_login=lambda h: (FakeProc(), -1),
+        post_message=lambda t, c, x, thread_ts="": {
+            "ok": True, "ts": "1700000000.000001"},
+        connect_listener=connect,
     )
     assert ok is True
-    assert log.count("ready reply consumed") == 1
+    assert set(listener.consumed_ids) == {"1700000000.000010"}, (
+        "the human reply is the consumed one, not the bot's")
 
 
 # 3. Correlation, channel destination: thread_ts only, never the event type.
@@ -2586,3 +2630,66 @@ def test_two_concurrent_listeners_get_unique_deployment_names(
     second.stop()
     assert len(set(names)) == 2, f"both runs registered as {names}"
     assert all(n.startswith("login-bootstrap-") for n in names)
+
+
+def test_gateway_posts_with_no_inbound_ref_are_still_thread_anchored(
+    slack_gateway_config, ask_state_home, monkeypatch,
+):
+    """Item 7/8 on the gateway path, where no inbound conversation ref exists.
+
+    The URL and outcome posts normally reply to the inbound event's own ref,
+    which is already thread-anchored - so they pass even if `_threaded_ref` is
+    broken. The timeout outcome has no inbound ref: it must be anchored by
+    appending `:thread:<ask ts>` to the destination, which is the only thing
+    that threads a post when nobody replied.
+    """
+    import bobi.events.gateway as gateway_mod
+    import bobi.events.server as server_mod
+
+    sent = []
+    monkeypatch.setattr(
+        server_mod, "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"})
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T1"])
+    monkeypatch.setattr(
+        gateway_mod, "channels_send",
+        lambda project, conv, text, mode="post": (
+            sent.append((conv, text)) or {"ok": True, "ts": "1700000000.000001"}))
+
+    with pytest.raises(TimeoutError, match="no human replied"):
+        ab.run_bootstrap(
+            slack_gateway_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("must not spawn")),
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+        )
+    assert sent[0][0] == "slack:T1:channel:C0LOGIN42", "the ask opens the thread"
+    assert sent[-1][0] == "slack:T1:channel:C0LOGIN42:thread:1700000000.000001"
+    assert "nobody replied" in sent[-1][1]
+
+
+def test_the_catch_up_read_targets_the_thread_on_a_gateway_destination(
+    slack_gateway_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """The gateway branch of the history ref. A legacy Slack destination
+    assembles its ref from the team id, so a legacy-only assertion leaves the
+    gateway branch - the one production refs take - unpinned."""
+    import bobi.events.gateway as gateway_mod
+
+    destination = "slack:T1:channel:C0LOGIN42"
+    (ask_state_home / ".login-ask-codex").write_text(
+        json.dumps({"destination": destination, "ts": "1700000000.000001"}))
+    reads = []
+    monkeypatch.setattr(
+        gateway_mod, "channels_history",
+        lambda project, conv, limit=100: reads.append(conv) or [])
+
+    with pytest.raises(TimeoutError, match="no human replied"):
+        ab.run_bootstrap(
+            slack_gateway_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("must not spawn")),
+            post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "x"},
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+        )
+    assert reads == ["slack:T1:channel:C0LOGIN42:thread:1700000000.000001"]
