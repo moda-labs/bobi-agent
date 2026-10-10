@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -252,8 +251,6 @@ class _CodexSession:
 
     def _build_argv(self) -> list[str]:
         flags = list(_EXEC_FLAGS)
-        if os.environ.get("BOBI_REAL_GH"):
-            flags += ["-c", "allow_login_shell=false", "-c", "features.shell_snapshot=false"]
         if self._model:
             flags += ["-m", self._model]
         if self._effort:

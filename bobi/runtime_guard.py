@@ -288,8 +288,7 @@ def prepare_brain_runtime(runtime_root: Path | None = None) -> GuardReport:
     """Prepare the runtime environment before an agent session or workflow step.
 
     1. Enforces File Integrity Monitoring (FIM) over the Bobi framework distribution.
-    2. Installs the secret-redacting GitHub CLI shim in the agent tool PATH.
-    3. Applies read-only permissions to the bound team package image.
+    2. Applies read-only permissions to the bound team package image.
     """
     if runtime_root is None:
         try:
@@ -297,8 +296,6 @@ def prepare_brain_runtime(runtime_root: Path | None = None) -> GuardReport:
         except Exception:
             runtime_root = None
     verify_framework_integrity_or_raise()
-    from bobi.github_redaction import install_github_comment_redaction
-    install_github_comment_redaction()
     return apply_runtime_write_policy(runtime_root)
 
 

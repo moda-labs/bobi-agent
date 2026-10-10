@@ -32,27 +32,8 @@ be served over TLS.
   `Config.load()` resolves them at runtime through one path.
 - **Never committed.** `run/.env` and the bubble key live under `run/` and are
   gitignored. Treat them like any credential; never copy them off the host.
-- **GitHub publications are scrubbed.** Bobi redacts recognizable credentials
-  from feedback issue titles/bodies and recurrence comments before sending them.
-  The agent `gh` wrapper covers issue/PR comments, creation, edits, closing
-  comments, PR reviews, and release creation/edits (including `release new`).
-  It inspects `--body`/`-b`, `--body-file`/`-F`, closing `--comment`/`-c`,
-  release `--notes`/`-n` and `--notes-file`/`-F`, and `--title`/`-t`.
-  File flags accept `-` for stdin; source files remain unchanged.
-  Comment, create, and review commands require explicit inspectable text
-  (except body-free approval reviews); missing, unreadable, or ambiguous text
-  fails closed. Metadata-only edits/closes and genuine help/delete-only modes
-  pass through. Publication redaction detects prefixed GitHub, Anthropic,
-  OpenAI project, Slack, Linear, AWS, Google, Venn, and Fly.io credentials,
-  JWTs, and private keys. It preserves commit SHAs, test identifiers, and prose
-  by avoiding generic long-string, bare `sk-`, bearer, and key/value heuristics.
-  The wrapper preserves unrelated commands.
-  Claude's Bash hook restores the wrapper after
-  shell startup; Codex disables login shells and shell snapshots while the
-  wrapper is installed. The wrapper loads its own Bobi package in isolated
-  Python mode, ignoring project modules and inherited `PYTHONPATH`.
-  It protects the standard runtime tool PATH,
-  not absolute-path CLI calls, custom HTTP clients, or shells that replace PATH.
+- **`bobi feedback` output is scrubbed.** Everything `bobi feedback` sends to
+  GitHub runs through `redact_secrets` first, its duplicate search included.
 - **Deployed secrets** are stored as Fly secrets (the runtime store) and reconciled
   to the team's declared set on each deploy, so the store converges on exactly what
   `agent.yaml` declares (see the private deploy repo's

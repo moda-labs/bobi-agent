@@ -110,8 +110,7 @@ def agent_spawn_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
     A copy of *base* (default ``os.environ``) with the user-bin dirs
     (:func:`_user_bin_dirs`) prepended to ``PATH``, de-duplicated while
-    preserving order. The GitHub comment-redaction shim is then placed first;
-    user-bin dirs still win over system dirs. Used by both ``subagent.py``'s
+    preserving order so the user-bin dirs win. Used by both ``subagent.py``'s
     detached agent launch and ``validate.py``'s MCP preflight probe so the two
     can never diverge (MDS-64).
     """
@@ -126,8 +125,6 @@ def agent_spawn_env(base: dict[str, str] | None = None) -> dict[str, str]:
             seen.add(p)
             ordered.append(p)
     env["PATH"] = os.pathsep.join(ordered)
-    from bobi.github_redaction import install_github_comment_redaction
-    install_github_comment_redaction(env)
     return env
 
 

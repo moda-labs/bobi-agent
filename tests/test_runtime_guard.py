@@ -808,26 +808,6 @@ def test_session_prepares_runtime_before_brain_session():
     brain.make_session.assert_called_once()
 
 
-def test_prepare_brain_runtime_installs_github_comment_redaction(monkeypatch):
-    from bobi.runtime_guard import prepare_brain_runtime
-
-    monkeypatch.setattr(
-        "bobi.runtime_guard.verify_framework_integrity_or_raise", lambda: None,
-    )
-    monkeypatch.setattr(
-        "bobi.runtime_guard.apply_runtime_write_policy",
-        lambda runtime_root: "report",
-    )
-    installed = []
-    monkeypatch.setattr(
-        "bobi.github_redaction.install_github_comment_redaction",
-        lambda: installed.append(True),
-    )
-
-    assert prepare_brain_runtime() == "report"
-    assert installed == [True]
-
-
 @pytest.mark.asyncio
 async def test_supervised_agent_prepares_runtime_before_provider_client(monkeypatch):
     from tests.test_subagent_blocking import _CapturingBrainSession

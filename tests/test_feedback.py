@@ -486,80 +486,141 @@ def test_comment_rejects_a_url_for_another_issue():
     assert exc.value.code == "github_invalid_response"
 
 
-def test_comment_redacts_secrets_before_posting():
-    seen = {}
-    secret = "github_pat_" + "A" * 30
+def _feedback_context():
+    return FeedbackContext(
+        bobi_version="1.2.3", agent_slot="eng", package="eng-team",
+        package_version="0.1.0", brain_kind="claude", platform="linux",
+        python="3.12",
+    )
 
+
+def _recording_feedback_client(matches, urls, payloads):
+    """A client that records every outbound request `submit_feedback` makes."""
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["body"] = json.loads(request.content)["body"]
-        return httpx.Response(201, json={
-            "html_url": (
-                "https://github.com/example/support/issues/12#issuecomment-1"
-            ),
-        })
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-
-    comment_on_issue(
-        "example/support", 12, f"diagnostic output: {secret}",
-        token="t", client=client,
-    )
-
-    assert secret not in seen["body"]
-    assert seen["body"] == "diagnostic output: [redacted]"
-
-
-def test_issue_creation_redacts_title_and_body_before_posting():
-    seen = {}
-    secret = "github_pat_" + "A" * 30
-
-    def handler(request):
-        seen.update(json.loads(request.content))
-        return httpx.Response(201, json={
-            "html_url": "https://github.com/example/support/issues/42",
-            "number": 42,
-        })
-
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = create_github_issue(
-            "example/support", "bug", f"Failure with {secret}",
-            f"Logs contain {secret}", ["bug"], token="t", client=client,
-        )
-
-    assert seen == {
-        "title": "Failure with [redacted]",
-        "body": "Logs contain [redacted]", "labels": ["bug"],
-    }
-    assert result.title == seen["title"]
-
-
-@pytest.mark.parametrize("create", [False, True])
-def test_feedback_publication_preserves_diagnostic_content(create):
-    content = (
-        "Verdict: LANDABLE @ 346a17ba8f31028d73ee5d1fd8ddfb54331181b9\n"
-        "test_comment_redacts_secrets_before_posting_to_github\n"
-        "The api_key: is documented. Bearer authentication is supported."
-    )
-    seen = {}
-
-    def handler(request):
-        seen.update(json.loads(request.content))
-        return httpx.Response(201, json={
-            "html_url": "https://github.com/example/support/issues/42" + (
-                "" if create else "#issuecomment-1"
-            ),
-            "number": 42,
-        })
-
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        if create:
-            create_github_issue(
-                "example/support", "bug", content, content, [], token="t", client=client,
-            )
-            assert seen["title"] == content
+        urls.append(str(request.url))
+        if "/search/" in str(request.url):
+            return httpx.Response(200, json={"items": matches})
+        payloads.append(json.loads(request.content))
+        path = request.url.path
+        if path.endswith("/comments"):
+            number = path.split("/issues/")[1].split("/")[0]
+            url = (f"https://github.com/example/support/issues/{number}"
+                   "#issuecomment-1")
         else:
-            comment_on_issue("example/support", 42, content, token="t", client=client)
-    assert seen["body"] == content
+            number, url = "42", "https://github.com/example/support/issues/42"
+        return httpx.Response(201, json={"html_url": url, "number": int(number)})
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_feedback_sends_no_secret_on_any_request():
+    """The duplicate search carries the title too, so redacting only at the
+    writers would still have shipped a secret-shaped title to GitHub."""
+    secret = "ghp_" + "B" * 36
+    urls, payloads = [], []
+    client = _recording_feedback_client([], urls, payloads)
+
+    submit_feedback(
+        "example/support", "bug", f"crash with {secret} token",
+        f"log line: {secret}", [], _feedback_context(), token="t", client=client,
+    )
+
+    assert len(urls) == 2, urls  # the duplicate search, then the issue POST
+    probe = secret.casefold()[len("ghp_"):]  # the search casefolds its terms
+    for url in urls:
+        assert probe not in url.casefold(), url
+    assert secret not in json.dumps(payloads)
+    assert payloads[0]["title"] == "crash with [redacted] token"
+    assert payloads[0]["body"].startswith("log line: [redacted]")
+
+
+def test_feedback_comment_path_redacts_before_posting():
+    secret = "github_pat_" + "A" * 30
+    match = {
+        "number": 12, "title": "crash with [redacted] token", "state": "open",
+        "html_url": "https://github.com/example/support/issues/12",
+    }
+    urls, payloads = [], []
+    client = _recording_feedback_client([match], urls, payloads)
+
+    outcome = submit_feedback(
+        "example/support", "bug", "crash with [redacted] token",
+        f"log line: {secret}", [], _feedback_context(), token="t", client=client,
+    )
+
+    assert outcome.action == "commented"
+    assert secret not in json.dumps(payloads)
+    assert "log line: [redacted]" in payloads[0]["body"]
+
+
+def test_feedback_dedupe_still_matches_a_recurring_secret_title():
+    """Redaction must not break the one-issue-per-bug invariant: the searched
+    title and the stored title are both redacted, so they still match."""
+    secret = "github_pat_" + "A" * 30
+    title = f"monitor dropped {secret} on publish"
+    first_urls, first_payloads = [], []
+    client = _recording_feedback_client([], first_urls, first_payloads)
+    submit_feedback(
+        "example/support", "bug", title, "first sighting", [],
+        _feedback_context(), token="t", client=client,
+    )
+    stored = first_payloads[0]["title"]
+
+    match = {
+        "number": 42, "title": stored, "state": "open",
+        "html_url": "https://github.com/example/support/issues/42",
+    }
+    again_urls, again_payloads = [], []
+    client = _recording_feedback_client([match], again_urls, again_payloads)
+    outcome = submit_feedback(
+        "example/support", "bug", title, "seen again", [],
+        _feedback_context(), token="t", client=client,
+    )
+
+    assert outcome.action == "commented", (
+        "a recurring report opened a duplicate issue instead of commenting"
+    )
+    assert duplicate_ratio(stored, stored) == 1.0
+
+
+@pytest.mark.parametrize("text, published", [
+    # The redactor is blunter than publication would choose. Each of these is a
+    # fidelity cost of reusing it, accepted so there is one redactor.
+    ("Verdict: LANDABLE @ 346a17ba8f31028d73ee5d1fd8ddfb54331181b9",
+     "Verdict: LANDABLE @ [redacted]"),
+    ("test_comment_redacts_secrets_before_posting_to_github is flaky",
+     "[redacted] is flaky"),
+    ("The api_key: is documented.", "The api_key: [redacted] documented."),
+    ("Bearer authentication is supported.", "[redacted] is supported."),
+])
+def test_feedback_publication_loses_long_and_keyword_adjacent_text(text, published):
+    urls, payloads = [], []
+    client = _recording_feedback_client([], urls, payloads)
+
+    submit_feedback(
+        "example/support", "bug", "stable title", text, [],
+        _feedback_context(), token="t", client=client,
+    )
+
+    assert payloads[0]["body"].startswith(published)
+
+
+@pytest.mark.parametrize("token, survives", [
+    ("b1f02e8", True),                 # a short SHA is well under the floor
+    ("x" * 39, True),                  # 39 opaque characters: kept
+    ("x" * 40, False),                 # 40: the floor, redacted
+])
+def test_feedback_publication_keeps_text_below_the_opaque_run_floor(token, survives):
+    urls, payloads = [], []
+    client = _recording_feedback_client([], urls, payloads)
+
+    submit_feedback(
+        "example/support", "bug", "stable title", f"Fixed in {token} today.",
+        [], _feedback_context(), token="t", client=client,
+    )
+
+    body = payloads[0]["body"]
+    assert (token in body) is survives
+    assert ("[redacted]" in body) is not survives
 
 
 def test_recurrence_comment_is_short_and_carries_no_second_footer():
