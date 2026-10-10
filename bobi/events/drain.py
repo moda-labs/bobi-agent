@@ -190,8 +190,17 @@ class _AckWatermark:
                     self._acked = max(self._acked, s)
                 else:
                     break
-        self._report()
-        self._flush()
+        # The real cursor ACK goes first (#1110). _report() persists the
+        # snapshot under a cross-process fcntl lock on the session state
+        # file, and the completion callback that lands here is bounded by
+        # MESSAGE_ACK_TIMEOUT (bobi/session.py) - a contended snapshot write
+        # ahead of the ACK burns that whole budget and marks the session
+        # terminally errored. Diagnostics stay best-effort but still run, so
+        # a failing ACK cannot skip the snapshot that explains it.
+        try:
+            self._flush()
+        finally:
+            self._report()
 
     def _flush(self) -> None:
         """Send the newest ackable seq via self._ack, outside the state lock.

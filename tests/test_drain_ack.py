@@ -520,3 +520,68 @@ class TestWatermarkDiagnostics:
         assert ["seq 1" in record.message for record in caplog.records] == [
             True, False]
         assert "seq 2" in caplog.records[-1].message
+
+
+class TestAckPrecedesDiagnostics:
+    """The real cursor ACK must not queue behind the diagnostics write.
+
+    _report() persists the watermark snapshot through
+    SessionRegistry.update_ack_watermark, which takes a cross-process
+    fcntl.flock on the session state file. The completion callback that
+    reaches _done() is bounded by MESSAGE_ACK_TIMEOUT (bobi/session.py), and
+    blowing that bound marks the session terminally errored. So a contended
+    snapshot write ahead of the ACK starves the thing the budget exists for.
+    """
+
+    def test_stalled_diagnostic_write_does_not_delay_the_real_ack(
+            self, monkeypatch):
+        from bobi.events.drain import _AckWatermark
+
+        acked = threading.Event()
+        released = threading.Event()
+        tracker = _AckWatermark(lambda seq: acked.set())
+        batch = tracker.open_batch(1)
+        done = batch.attach()
+        batch.close()
+
+        def stalled_report(self):
+            # Stands in for a contended state-file flock: returns only once
+            # the ACK has already gone out.
+            released.wait(timeout=5)
+
+        monkeypatch.setattr(_AckWatermark, "_report", stalled_report)
+        worker = threading.Thread(target=done)
+        worker.start()
+        try:
+            assert acked.wait(timeout=5), (
+                "cursor ACK was gated behind the diagnostics write")
+        finally:
+            released.set()
+            worker.join(timeout=5)
+        assert not worker.is_alive()
+
+    def test_failing_ack_still_persists_the_diagnostic_snapshot(
+            self, monkeypatch):
+        # The ACK running first must not hand it a veto over diagnostics:
+        # ack_through -> _save_cursor raises on a cursor-file write failure,
+        # and that is exactly when the snapshot explaining it matters.
+        from bobi.events.drain import _AckWatermark
+
+        def unwritable_cursor(seq):
+            raise OSError("read-only cursor file")
+
+        reports = []
+        original_report = _AckWatermark._report
+
+        def recording_report(self):
+            reports.append(self._acked)
+            original_report(self)
+
+        tracker = _AckWatermark(unwritable_cursor)
+        batch = tracker.open_batch(1)
+        done = batch.attach()
+        batch.close()
+        monkeypatch.setattr(_AckWatermark, "_report", recording_report)
+        with pytest.raises(OSError):
+            done()
+        assert reports == [1], "diagnostics skipped when the ACK raised"
