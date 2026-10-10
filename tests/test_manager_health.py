@@ -23,6 +23,20 @@ def _reset_server():
 
 class TestHealthServer:
 
+    def test_start_does_not_wait_for_reverse_dns(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        def fail_reverse_dns(_host):
+            raise AssertionError("health startup must not resolve its bind host")
+
+        monkeypatch.setattr(socket, "getfqdn", fail_reverse_dns)
+
+        port = manager_health.start(state_dir, "test-project")
+
+        assert port > 0
+        assert manager_health._server.server_name == "127.0.0.1"
+
     def test_start_returns_port_and_writes_port_file(self, tmp_path):
         state_dir = tmp_path / "state"
         state_dir.mkdir()
