@@ -681,3 +681,52 @@ Step 2 must not precede step 1: the director prompt would otherwise name command
 None.
 D1 through D9 were settled on 2026-10-09 and D10 through D13 on 2026-10-10.
 The items that would otherwise be open are in "Accepted risks" with their cost of coverage, per D13, as discussion items rather than blockers.
+
+## Amendment, 2026-10-10 (implementation)
+
+One spec defect, found by the codex review of the implementation and fixed in
+the implementing PR (#1116). The design is unchanged; one predicate is.
+
+**The degraded-detection guard's test was wrong.** "Reload, and the one lock"
+specifies that `reload(authorize=False)` refuses to PUT when there is no
+workspace file AND the recomposed set is "a strict subset of the last accepted
+set". A strict subset is the wrong test for the hazard this spec itself names.
+When auto-detection fails, `discover_subscriptions` falls through to
+`[project_path.name]` (`bobi/events/subscriptions.py:78` at `f712372d`), which
+ADDS a topic. A Slack-only team whose detector failed therefore recomposes to a
+set that is NOT a subset of what it had, the guard does not fire, and the
+reconnect PUTs it and drops Slack routing - exactly the outcome the guard exists
+to prevent.
+
+The implemented test is: refuse when there is no workspace file AND the
+recomposed set LOSES any topic in the last accepted set. Same three lines, same
+state, and it covers the fall-through the original predicate let through. With a
+workspace file present a loss is still a legitimate operator removal and is
+applied, unchanged.
+
+Two further notes, neither a design change:
+
+- The reload token is created at mode 0600 rather than minted by
+  `webui_common.launcher.write_secret`, which writes the file and chmods it
+  afterwards. "The reload route" names `write_secret`; `CLAUDE.md` names this
+  exact exception to the fsutil rule, with `events.state.save_bubble_state` as
+  the precedent. Here the token is the only boundary for a server that may bind
+  `0.0.0.0`, so a window at 0644 is not acceptable.
+- R4's bound is weaker than stated. "The CLI's POST timeout is set ABOVE that
+  bound" holds for one caller; every reload serializes on the apply lock, so a
+  queued caller can wait out another reload's full bound first. The
+  implementation budgets for one queued apply and, when the budget does expire,
+  reports that the apply may still have landed and points at `subscriptions
+  list` - which is R4's own recorded recovery - rather than claiming the manager
+  is down.
+
+**One item goes back to the director, not decided here.** "The CLI" states that
+an absent port file or a refused connection "is the whole liveness test. It is
+self-evidencing". It is not quite: `manager_health.stop()` unlinks the port and
+token files only on a GRACEFUL stop, so a SIGKILLed, OOM-killed, or host-lost
+manager leaves both behind. The CLI then POSTs the token to whatever later bound
+that port. The outcome is safe (an unrecognised response exits non-zero), but
+the token does leave the process. Closing it costs one authenticated `GET
+/health` before the POST, reusing `manager_health.health()`. That is new
+machinery the spec deliberately excluded, so it is recorded here rather than
+added.
