@@ -4,7 +4,7 @@
 > **Tracking issue:** moda-labs/bobi-agent#958 · **Spec PR:** #959 (draft) · **Written:** 2026-10-09
 >
 > **Size:** ~120 lines across 10 files in `bobi-agent`, plus ~25 lines of prompt and doc text in `moda-agents`.
-> One open fork is posed in [8](#8-open-question); everything else is decided.
+> Every design question is decided; no open forks remain.
 >
 > Every `file:line` below was read from a grep run against `origin/main` at `70db2e1059fdf8f35751b17806496cb91f427b09`.
 > [Appendix A](#appendix-a-verification-record) is the verification record, including what was executed live.
@@ -51,7 +51,7 @@ Zach, Slack `#bobi-eng-team`, 2026-10-09. Quoted, not relitigated.
 | **Z4** | "I think the brain can also use ask-first. You can change the prompt to 'reply to this message in a thread when you are ready, and then I will begin the login flow.'" | Ask-first is unconditional, including the brain at boot. |
 | **Z5** | "then you can judge any user message as 'ready'" | Any human message counts. No keyword, no allowlist. |
 
-Zach ruled on eight design questions the same day. These are decided, not open.
+Zach ruled on nine design questions, D1 to D8 on 2026-10-09 and D9 on 2026-10-10. These are decided, not open.
 
 | # | Ruling | Where it lands |
 |---|---|---|
@@ -63,6 +63,7 @@ Zach ruled on eight design questions the same day. These are decided, not open.
 | **D6** | **No new guard** for a gateway-brained team minting a direct provider credential. State it as a limitation. | [5](#5-scope), accepted and stated |
 | **D7** | **Yes to a human-gated in-flight rebind in v1**, so a revoked or wrong-account credential heals without `fly ssh`. Quarantine happens there and only there. | [3.5](#35-change-4---human-gated-rebind) |
 | **D8** | The boot sweep stays **conservative**: recognized API-key shape only. The `--device-auth` fixture is observed, so nothing blocks on it. | [3.4](#34-change-3---codex_home-on-the-durable-volume) |
+| **D9** | **Option A on catch-up-read authorship**: accept the gap, no event-server change. "this is an acceptable gap" (Zach, 2026-10-10). The bound: during a restart window a third-party bot reply in the ask's thread can start a login. It never finishes one and never mints a credential, because a human must still authorize at the provider's device page. | [5](#5-scope), accepted and stated |
 
 Standing bar: simplest practical solution, no cruft.
 
@@ -544,7 +545,7 @@ It also names a thread only when the destination is a channel, reusing the same 
 - **A codex tool login is permitted alongside an ambient `OPENAI_API_KEY`** (3.3). The on-disk OAuth file wins, because codex reads only that file (`docker/docker-entrypoint.sh:535-536`), and the non-clobber guard keeps that true across boots on a non-codex brain. On a codex-brained `api_key` team the pre-existing `:544` arm still rewrites its one credential every boot; that arm is out of scope here.
 - **Concurrent runs are prevented by prompt policy only** (D3). If the policy is violated, two asks post and two login CLIs race to write one file. The unique deployment name means both listeners still receive their own replies, and codex writes `auth.json` by replacement, so the outcome is one valid credential rather than a corrupt one. The residual cost is duplicate Slack messages. The cheap local fix if that ever matters is a pidfile in the agent's run dir, not a new mode on `file_lock`, which takes `fcntl.LOCK_EX` unconditionally (`bobi/fsutil.py:180`).
 - **An unclassifiable `${CODEX_HOME}/auth.json` survives every boot untouched and silently.** That is main's behaviour today (`:336-355` exits 1 on anything it cannot parse) and D8 keeps it. No boot diagnostic is emitted for a non-brain tool credential, because section 4's `credential-status` call checks the **brain's** path (`:567-571`); the reason is reported by `login-bootstrap codex` when the director fires it.
-- **The catch-up read cannot prove a human wrote the message it finds.** The live path rejects `fields.bot_id`, which the Slack adapter preserves (`event-server/core/src/adapters/chat-sdk-slack.ts:168`), but the history path has no authorship field at all: `toConversationMessage` keeps `{user, text, ts, files}` and discards `bot_id` and `subtype` (`event-server/core/src/channels.ts:280-295`, the interface at `:119-124`). A non-empty `user` is the strongest available signal, so a **third-party** bot posting in the ask's thread during a restart gap would satisfy the re-attach predicate where it would be rejected live. The blast radius is one spurious device URL and code posted into that thread plus a login that times out: no credential is minted, because minting still requires a human authorizing at the provider's own device page. Our own bots are excluded on both paths, live by `:99-100` and on history by the bot-user-id baseline. Closing it properly means `is_bot` on `ConversationMessage`, preserved by each adapter, which is an event-server change; see [8](#8-open-question).
+- **The catch-up read cannot prove a human wrote the message it finds.** The live path rejects `fields.bot_id`, which the Slack adapter preserves (`event-server/core/src/adapters/chat-sdk-slack.ts:168`), but the history path has no authorship field at all: `toConversationMessage` keeps `{user, text, ts, files}` and discards `bot_id` and `subtype` (`event-server/core/src/channels.ts:280-295`, the interface at `:119-124`). A non-empty `user` is the strongest available signal, so a **third-party** bot posting in the ask's thread during a restart gap would satisfy the re-attach predicate where it would be rejected live. The blast radius is one spurious device URL and code posted into that thread plus a login that times out: no credential is minted, because minting still requires a human authorizing at the provider's own device page. Our own bots are excluded on both paths, live by `:99-100` and on history by the bot-user-id baseline. Closing it properly means `is_bot` on `ConversationMessage`, preserved by each adapter, which is an event-server change; D9 declines it.
 - **The listener shares the manager's `cursor.json`.** `EventServerClient` is constructed with no `cursor_path` (`:561`), which the client's own comment warns against across deployments. Benign and pre-existing: only `bobi/events/drain.py` ever acks, so nothing is written back, and a fresh deployment's replay buffer is empty regardless.
 - **On a claude-brained machine that has never booted codex, `codex exec` does not see gstack's codex-side skill links** (3.4). Nothing in this repo reads `${CODEX_HOME}/skills`, codex creates its own `skills/.system` there on first invocation, and the baked team skills never reached `~/.codex/skills` in the first place.
 - **`CODEX_HOME` moves codex's state to the volume.** Measured on a fresh `CODEX_HOME` after one `codex exec`: ~105 MB, of which ~103 MB is a plugins git clone under `.tmp/`, plus four sqlite databases with WALs, `sessions/`, `shell_snapshots/` and `skills/.system`. Live `~/.codex` is 107 MB and `/data` has 8.9 GB free of 15 GB.
@@ -643,21 +644,6 @@ Not to be started until Gate 1 is approved.
 8. Review gate, full test run, PR.
 9. The `moda-agents` companion PR (3.6).
 10. Post-roll: tests 28-29 on the issue.
-
-## 8. Open question
-
-One question this fold raises is a genuine fork rather than a defect, so it is posed instead of decided.
-Everything above is written to the first option, so silence means take the spec as written.
-
-**Q. Should the catch-up read be able to prove human authorship, at the cost of an event-server change?**
-
-The re-attach path reads chat history, and history carries no authorship field: `toConversationMessage` discards `bot_id` and `subtype` (`event-server/core/src/channels.ts:280-295`), so the predicate can only ask whether `user` is non-empty and is not this bot's own id.
-The live path does better, because the adapter preserves `fields.bot_id` (`adapters/chat-sdk-slack.ts:168`) and the spec rejects it.
-
-- **Option A, as written.** Accept the asymmetry and state it (`5`). A third-party bot posting in the ask's thread during a restart gap can start a login. It cannot finish one: no credential exists until a human authorizes at the provider's device page, so the cost is a spurious device code in a private channel and a timed-out run.
-- **Option B.** Add `is_bot` (or an authoritative `author_id`) to `ConversationMessage` and preserve it in each adapter, then apply one human-only rule on both paths. This is correct rather than bounded, and it is also what would make the catch-up read work on Discord, whose history reports `author.username` as `user` (`event-server/core/src/channels.ts:612-618`). It is a change in the event-server tier with its own deploy, for a precondition that needs a third-party bot in a private login channel.
-
-The reason this is Zach's and not mine: it trades a small, bounded trust gap on a credential-minting path against scope in another tier, and "how much trust gap is acceptable on an auth flow" is a judgment call, not a measurement.
 
 ## Appendix A: verification record
 
