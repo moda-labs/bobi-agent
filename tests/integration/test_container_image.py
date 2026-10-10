@@ -1234,3 +1234,96 @@ def test_codex_api_key_auth_file_is_materialized(image: str):
 # it bypasses the code path that would have stopped it is not coverage of the
 # shipped behaviour. That is the same failure mode as the stale-copy problem
 # these tests came here to escape, one level down.
+
+
+# ---------------------------------------------------------------------------
+# #958 - CODEX_HOME on the durable volume, in the real image
+# ---------------------------------------------------------------------------
+
+@requires_docker
+@pytest.mark.timeout(400)
+def test_codex_home_is_on_the_volume_for_a_claude_brain(image: str, tmp_path: Path):
+    """#958 item 26. On a CLAUDE brain the entrypoint still moves codex's config
+    dir onto the volume, so a credential minted by `login-bootstrap codex`
+    survives a roll and the workers share it.
+
+    `/data/codex` must exist, be bobi-owned, be a real directory (not a
+    symlink), `CODEX_HOME` must resolve to it in the manager's environment, the
+    credential path must resolve under it, and all of that must survive a
+    restart on the same volume.
+    """
+    data = tmp_path / "data-claude"
+    data.mkdir()
+
+    for boot in ("first", "restart"):
+        probe = _run(
+            "docker", "run", "--rm",
+            "-v", f"{data}:/data",
+            "-e", "BOBI_AUTH=subscription",
+            "-e", "BOBI_AGENT=claude-smoke",
+            "-e", "BOBI_BRAIN=claude",
+            "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+            "--entrypoint", "sh", image,
+            "-c",
+            "timeout 10 /usr/local/bin/docker-entrypoint.sh >/tmp/log 2>&1 || true; "
+            # The manager's own view: gosu + env, exactly as section 5 hands off.
+            "gosu bobi env \"HOME=/home/bobi\" sh -c '"
+            "  echo CODEX_HOME=$CODEX_HOME;"
+            "  echo OWNER=$(stat -c %U /data/codex);"
+            "  echo ISDIR=$(test -d /data/codex && echo yes || echo no);"
+            "  echo ISLINK=$(test -L /data/codex && echo yes || echo no);"
+            "  echo CREDPATH=$(python -c \""
+            "import os;"
+            "os.environ[\\\"BOBI_BRAIN\\\"]=\\\"codex\\\";"
+            "from bobi import auth_bootstrap as a;"
+            "print(a.credentials_path())\")'",
+        )
+        out = probe.stdout + probe.stderr
+        assert probe.returncode == 0, out
+        assert "CODEX_HOME=/data/codex" in out, f"{boot} boot:\n{out}"
+        assert "OWNER=bobi" in out, f"{boot} boot:\n{out}"
+        assert "ISDIR=yes" in out, f"{boot} boot:\n{out}"
+        assert "ISLINK=no" in out, f"{boot} boot:\n{out}"
+        assert "CREDPATH=/data/codex/auth.json" in out, f"{boot} boot:\n{out}"
+
+
+@requires_docker
+@pytest.mark.timeout(400)
+def test_codex_brain_still_boots_clean_with_section_3c(image: str, tmp_path: Path):
+    """#958 item 27, the regression pin for the abort an earlier shape of
+    section 3c reproduced.
+
+    That shape needed one persistent path to be a different kind of object per
+    brain - a real directory owned by 3b on a codex brain, a symlink out to the
+    image HOME on any other - and an `ln` over 3b's real directory aborted the
+    boot. The settled shape creates no sub-object, so a codex brain boots clean
+    and its own credential is left intact.
+    """
+    data = tmp_path / "data-codex"
+    (data / "codex").mkdir(parents=True)
+    credential = json.dumps({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {"refresh_token": "refresh-token-value", "account_id": "acct"},
+    })
+    (data / "codex" / "auth.json").write_text(credential)
+
+    probe = _run(
+        "docker", "run", "--rm",
+        "-v", f"{data}:/data",
+        "-e", "BOBI_AUTH=subscription",
+        "-e", "BOBI_AGENT=codex-smoke",
+        "-e", "BOBI_BRAIN=codex",
+        "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+        "--entrypoint", "sh", image,
+        "-c",
+        "timeout 10 /usr/local/bin/docker-entrypoint.sh >/tmp/log 2>&1 || true; "
+        "echo EXIT_LOG_START; cat /tmp/log; echo EXIT_LOG_END; "
+        "gosu bobi env \"HOME=/home/bobi\" sh -c 'echo CODEX_HOME=$CODEX_HOME'",
+    )
+    out = probe.stdout + probe.stderr
+    assert probe.returncode == 0, out
+    assert "FATAL" not in out, out
+    assert "CODEX_HOME=/data/codex" in out, out
+    # 3b still owns ~/.codex on a codex brain, and the credential is untouched.
+    assert (data / "codex" / "auth.json").read_text() == credential
