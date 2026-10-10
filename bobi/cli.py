@@ -831,12 +831,14 @@ def login_bootstrap(tool, timeout, rebind):
     from bobi import auth_bootstrap
     project_path = _detect_project_root()
 
-    # Target-aware: on a Claude brain with a `codex` target, checking the
-    # brain's credential would report "already present" for the wrong file.
-    if not rebind and auth_bootstrap.credentials_exist(target=tool):
-        click.echo("Subscription credentials already present — nothing to do.")
-        return
     try:
+        # Target-aware: on a Claude brain with a `codex` target, checking the
+        # brain's credential would report "already present" for the wrong file.
+        # Inside the handler because resolving the target validates it, so an
+        # unknown TOOL is a clean error rather than a traceback.
+        if not rebind and auth_bootstrap.credentials_exist(target=tool):
+            click.echo("Subscription credentials already present — nothing to do.")
+            return
         ok = auth_bootstrap.run_bootstrap(
             project_path, target=tool, rebind=rebind, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error

@@ -546,12 +546,20 @@ def _is_channel_destination(channel: LoginChannel) -> bool:
     is the only correlation available; a DM has nothing to correlate against,
     so the conversation is the correlation. The same predicate decides whether
     "reply in a thread" is the right thing to ask for.
+
+    A legacy destination is a raw Slack id, and the *path* it arrived by says
+    nothing about which kind it is: ``D...`` is a 1:1 DM, while ``C...``
+    (public) and ``G...`` (legacy private group) are shared channels. Keying on
+    "is it the legacy path" would demand a thread anchor from a legacy DM, and a
+    plain Slack DM reply never carries one - the exact bug this one rule exists
+    to fix. A legacy DM id is a documented, supported configuration, so that
+    would be a login which can never start.
     """
+    if channel.legacy_slack_channel:
+        return not channel.legacy_slack_channel.upper().startswith("D")
     return (
         channel.source in {"discord", "slack"}
         and ":channel:" in channel.destination
-    ) or (
-        channel.source == "slack" and bool(channel.legacy_slack_channel)
     )
 
 
@@ -576,8 +584,14 @@ def _event_fields(event: dict) -> dict:
 
 
 def _event_message_id(event: dict) -> str:
-    """The inbound message's own id (``fields.ts``), or "" when absent."""
-    return str(_event_fields(event).get("ts") or "")
+    """The inbound message's own id, or "" when absent.
+
+    Slack's adapter names it ``ts``; Discord's names it ``message_id``. Read
+    both, because this id is the consumed-reply watermark and a transport whose
+    id never resolves silently loses that protection.
+    """
+    fields = _event_fields(event)
+    return str(fields.get("ts") or fields.get("message_id") or "")
 
 
 def _event_is_human(event: dict) -> bool:
@@ -686,8 +700,17 @@ def _paste_back_instruction(channel: LoginChannel) -> str:
 
 
 def _extract_code(event: dict, channel: LoginChannel | str,
-                  consumed_ids: object = ()) -> str | None:
+                  consumed_ids: object = (), anchor: str = "") -> str | None:
     """Pull an auth code out of a chat event for the login destination.
+
+    Correlated the same way as the ready reply, because this value is written
+    straight into the login CLI's stdin: human-only, and - when *anchor* is
+    given - inside the ask's own thread. Without the anchor check a bot or an
+    unrelated message in a shared login channel could supply the code.
+
+    *anchor* is empty only for a caller with no ask to correlate against, which
+    is today's predicate and has no production caller: ``run_bootstrap`` always
+    establishes an ask first and carries its anchor on the listener.
 
     ``consumed_ids`` holds the message ids already spent satisfying an earlier
     phase. Rejecting them matters: this predicate accepts any non-empty text
@@ -696,6 +719,12 @@ def _extract_code(event: dict, channel: LoginChannel | str,
     as the OAuth code.
     """
     if not _event_for_destination(event, channel):
+        return None
+    if not _event_is_human(event):
+        return None
+    if anchor and isinstance(channel, LoginChannel) and not _anchor_matches(
+        event, channel, anchor
+    ):
         return None
     text = _event_text(event)
     if not text:
@@ -722,6 +751,10 @@ class ChatListener:
     queue: object
     channel: LoginChannel
     consumed_ids: set = field(default_factory=set)
+    #: The ask's thread anchor, set once the ask is established. The pasted-code
+    #: phase correlates against it, so a reply from elsewhere in a shared login
+    #: channel cannot supply the code.
+    anchor: str = ""
 
     def stop(self) -> None:
         self.client.stop()
@@ -830,7 +863,9 @@ def _wait_for_code(project_path: Path, channel: LoginChannel | str,
         code = _wait_for_chat_event(
             listener, timeout,
             lambda event: _extract_code(
-                event, listener.channel, listener.consumed_ids),
+                event, listener.channel, listener.consumed_ids,
+                getattr(listener, "anchor", ""),
+            ),
         )
     finally:
         if own:
@@ -996,8 +1031,8 @@ def _catch_up_read(project_path: Path, cfg: Config, channel: LoginChannel,
     return replace(channel, thread_ts=anchor), str(message.get("ts") or "")
 
 
-def _recover_ask_id(project_path: Path, cfg: Config,
-                    channel: LoginChannel) -> str:
+def _recover_ask_id(project_path: Path, cfg: Config, channel: LoginChannel,
+                    kind: str) -> str | None:
     """Recover a posted ask's id from the destination's own history.
 
     Covers the one window "one ask ever" cannot close: a death between a post
@@ -1005,9 +1040,17 @@ def _recover_ask_id(project_path: Path, cfg: Config,
     visible ask with no stored id, and the next boot would post a second one.
     An unanchored ref reads channel history rather than thread replies. A real
     duplicate then requires the post to have failed *and* this read to miss it.
+
+    Matches on the login *kind* as well as the ask's wording. One channel can
+    carry two kinds' asks (a claude brain plus the codex tool) and two agents'
+    asks, and the state is per-kind: a wording-only match could adopt another
+    kind's newer ask and post this login's device URL into its thread.
+
+    Returns None when the transport has no usable history - which is NOT the
+    same answer as "", "I looked and there is no ask".
     """
     if _skip_history(channel, "Ask-id recovery"):
-        return ""
+        return None
     from bobi.events.gateway import channels_history
 
     team_id, bot_user_id = _slack_identity(cfg)
@@ -1017,7 +1060,8 @@ def _recover_ask_id(project_path: Path, cfg: Config,
             continue
         if str(message.get("user") or "") != bot_user_id:
             continue
-        if _ASK_MARKER in str(message.get("text") or ""):
+        text = str(message.get("text") or "")
+        if _ASK_MARKER in text and f"`{kind}`" in text:
             return str(message.get("ts") or "")
     return ""
 
@@ -1052,7 +1096,7 @@ def _ask_text(project_path: Path, channel: LoginChannel,
 def _establish_ready_reply(
     project_path: Path, cfg: Config, channel: LoginChannel,
     spec: SubscriptionLogin, listener: ChatListener, ask_timeout: float,
-    post_message,
+    post_message, rebind: bool = False,
 ) -> tuple[LoginChannel, LoginChannel | None]:
     """Re-attach or ask, then block for a human reply (Z2, Z4, D1).
 
@@ -1065,14 +1109,37 @@ def _establish_ready_reply(
     when nobody replied inside *ask_timeout*.
     """
     state = _read_ask_state(spec.kind)
+    if state and rebind:
+        # A rebind is an explicit human-initiated recovery, so it always posts a
+        # fresh ask. Re-attaching would be worse than useless: the thread it
+        # re-attaches to already ends in this bot's own outcome post, so the
+        # catch-up read finds no human after it and the run blocks to timeout -
+        # wedging the one recovery path that exists for a revoked credential.
+        log.info("Rebind: ignoring the stored ask and posting a fresh one.")
+        state = {}
     stored = str(state.get("destination") or "")
     reattached = bool(state) and stored == channel.destination
     ask_ts = str(state.get("ts") or "") if reattached else ""
 
     if reattached and not ask_ts:
-        ask_ts = _recover_ask_id(project_path, cfg, channel)
-        if ask_ts:
+        recovered = _recover_ask_id(project_path, cfg, channel, spec.kind)
+        if recovered:
+            ask_ts = recovered
             _write_ask_state(spec.kind, channel.destination, ask_ts)
+        elif recovered == "":
+            # The history read ran and found no ask of this kind, so the post
+            # genuinely failed and there is nothing to re-attach to. Post a
+            # fresh one: the design already accepts a duplicate in exactly this
+            # case (it needs the post to have failed AND the read to miss it),
+            # and a marker that can never be satisfied wedges login forever.
+            log.info(
+                "A marker with no id, and no ask of kind '%s' in the "
+                "destination's history: treating it as absent.", spec.kind,
+            )
+            reattached = False
+        # recovered is None when the transport has no usable history. There the
+        # marker is all we have, so re-attach and block rather than risk a
+        # duplicate ask on every boot.
 
     if reattached:
         log.info(
@@ -1088,7 +1155,7 @@ def _establish_ready_reply(
                     listener.consumed_ids.add(message_id)
                 return replace(channel, thread_ts=anchor), reply_to
     else:
-        if state:
+        if state and stored != channel.destination:
             log.info(
                 "The stored ask went to %s but the resolved destination is %s; "
                 "treating it as absent and posting a fresh ask.",
@@ -1102,6 +1169,8 @@ def _establish_ready_reply(
         _write_ask_state(spec.kind, channel.destination, ask_ts)
         anchor = _reply_anchor(channel, ask_ts)
 
+    # The pasted-code phase correlates against the same anchor (3.2(c)).
+    listener.anchor = anchor
     reply_to = _wait_for_chat_event(
         listener, ask_timeout,
         lambda event: _ready_reply(event, channel, anchor, listener.consumed_ids),
@@ -1299,7 +1368,7 @@ def run_bootstrap(
     try:
         thread, reply_to = _establish_ready_reply(
             project_path, cfg, login_channel, spec, listener, ask_timeout,
-            post_message,
+            post_message, rebind,
         )
         if reply_to is None:
             # Say so in the thread rather than ending on "waiting for you",
@@ -1318,62 +1387,24 @@ def run_bootstrap(
                 f"{ask_timeout:.0f}s"
             )
 
-        quarantined = _quarantine_credential(home) if rebind else None
-
-        proc, master = spawn_login(home)
         try:
-            if spec.flow == "paste_back":
-                # Claude: scrape the URL, post it, wait for the human to paste
-                # the code back over chat, write it into the pty.
-                url = _read_until_url(master, url_timeout)
-                log.info(
-                    "Captured login URL; posting to %s login channel %s.",
-                    login_channel.source, login_channel.destination,
-                )
-                _post_login_message(
-                    project_path, cfg, reply_to,
-                    "🔐 *bobi subscription login*\n"
-                    + _paste_back_instruction(login_channel)
-                    + url,
-                    post_message,
-                )
-                code = wait_for_code(
-                    project_path, reply_to, timeout, listener=listener,
-                )
-                _write_line(master, code)
-                try:
-                    proc.wait(timeout=60)
-                except subprocess.TimeoutExpired:
-                    log.warning("login did not exit within 60s after the code.")
-            else:
-                # Codex device-poll: scrape the URL **and** the one-time code,
-                # post both, then just wait - the CLI polls until the human
-                # authorizes; nothing is pasted back. Authorization finishing
-                # and the CLI exiting are the same event, so `proc.wait` is the
-                # only signal this flow has.
-                url, code = scrape_login(master, url_timeout, spec)
-                log.info(
-                    "Captured device URL + code; posting to %s login channel %s.",
-                    login_channel.source, login_channel.destination,
-                )
-                _post_login_message(
-                    project_path, cfg, reply_to,
-                    "🔐 *bobi subscription login*\n"
-                    "Open this link, sign in, then enter the one-time code:\n"
-                    f"{url}\n"
-                    f"Code: `{code}`\n"
-                    "_Waiting for you to authorize…_",
-                    post_message,
-                )
-                try:
-                    proc.wait(timeout=device_timeout)
-                except subprocess.TimeoutExpired:
-                    log.warning("device login was not authorized within %.0fs.",
-                                device_timeout)
-        finally:
-            _reap_login(proc, master)
+            ok, quarantined = _drive_login(
+                project_path, cfg, spec, home, login_channel, reply_to,
+                listener, rebind,
+                timeout, url_timeout, device_timeout,
+                spawn_login, post_message, wait_for_code, scrape_login,
+            )
+        except Exception as exc:  # noqa: BLE001 - say so in the thread, then re-raise
+            # Without this the thread ends on "Waiting for you to authorize"
+            # and a human who comes back has no way to read what happened.
+            _post_message_best_effort(
+                project_path, cfg, reply_to,
+                f"❌ *bobi subscription login* failed: {exc}\n"
+                f"Fallback: `fly ssh console` then `{login_cmd_str}`.",
+                post_message,
+            )
+            raise
 
-        ok = credentials_exist(home)
         result_msg = (
             "✅ Subscription login complete — starting up."
             if ok else
@@ -1391,6 +1422,76 @@ def run_bootstrap(
         return ok
     finally:
         listener.stop()
+
+
+def _drive_login(
+    project_path: Path, cfg: Config, spec: SubscriptionLogin, home: Path,
+    login_channel: LoginChannel, reply_to: LoginChannel,
+    listener: ChatListener, rebind: bool,
+    timeout: float, url_timeout: float, device_timeout: float,
+    spawn_login, post_message, wait_for_code, scrape_login,
+) -> tuple[bool, Path | None]:
+    """Run the login CLI now that a human has said they are ready.
+
+    Returns ``(credentials landed, the quarantined path or None)``. Raising is
+    allowed and expected; the caller posts the outcome either way.
+    """
+    quarantined = _quarantine_credential(home) if rebind else None
+
+    proc, master = spawn_login(home)
+    try:
+        if spec.flow == "paste_back":
+            # Claude: scrape the URL, post it, wait for the human to paste
+            # the code back over chat, write it into the pty.
+            url = _read_until_url(master, url_timeout)
+            log.info(
+                "Captured login URL; posting to %s login channel %s.",
+                login_channel.source, login_channel.destination,
+            )
+            _post_login_message(
+                project_path, cfg, reply_to,
+                "🔐 *bobi subscription login*\n"
+                + _paste_back_instruction(login_channel)
+                + url,
+                post_message,
+            )
+            code = wait_for_code(
+                project_path, reply_to, timeout, listener=listener,
+            )
+            _write_line(master, code)
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                log.warning("login did not exit within 60s after the code.")
+        else:
+            # Codex device-poll: scrape the URL **and** the one-time code,
+            # post both, then just wait - the CLI polls until the human
+            # authorizes; nothing is pasted back. Authorization finishing
+            # and the CLI exiting are the same event, so `proc.wait` is the
+            # only signal this flow has.
+            url, code = scrape_login(master, url_timeout, spec)
+            log.info(
+                "Captured device URL + code; posting to %s login channel %s.",
+                login_channel.source, login_channel.destination,
+            )
+            _post_login_message(
+                project_path, cfg, reply_to,
+                "🔐 *bobi subscription login*\n"
+                "Open this link, sign in, then enter the one-time code:\n"
+                f"{url}\n"
+                f"Code: `{code}`\n"
+                "_Waiting for you to authorize…_",
+                post_message,
+            )
+            try:
+                proc.wait(timeout=device_timeout)
+            except subprocess.TimeoutExpired:
+                log.warning("device login was not authorized within %.0fs.",
+                            device_timeout)
+    finally:
+        _reap_login(proc, master)
+
+    return credentials_exist(home), quarantined
 
 
 def _post_message_best_effort(project_path: Path, cfg: Config,

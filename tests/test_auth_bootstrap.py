@@ -2186,7 +2186,8 @@ def test_reattach_posts_nothing_and_consumes_a_gap_reply(
     monkeypatch.setattr(
         gateway_mod, "channels_history",
         lambda project, conv, limit=100: [
-            {"user": "U0BOT", "text": "reply when you are ready, and then "
+            {"user": "U0BOT", "text": "🔐 *bobi subscription login* - `codex`\n"
+                                      "Reply when you are ready, and then "
                                       "I will begin the login flow", "ts": "1.0"},
             {"user": "U0HUMAN", "text": "ready", "ts": "2.0"},
         ])
@@ -2267,8 +2268,10 @@ def test_marker_with_no_id_recovers_it_from_channel_history(
             return [{"user": "U0BOT", "text": "ask", "ts": "1.0"},
                     {"user": "U0HUMAN", "text": "ready", "ts": "2.0"}]
         return [{"user": "U0BOT",
-                 "text": "reply when you are ready, and then I will begin "
-                         "the login flow", "ts": "1700000000.000042"}]
+                 "text": "🔐 *bobi subscription login* - `codex` on eng-team\n"
+                         "Reply to this message in a thread when you are "
+                         "ready, and then I will begin the login flow",
+                 "ts": "1700000000.000042"}]
 
     monkeypatch.setattr(gateway_mod, "channels_history", fake_history)
     ok, log, posts = _run_ask_first(
@@ -2693,3 +2696,252 @@ def test_the_catch_up_read_targets_the_thread_on_a_gateway_destination(
             connect_listener=lambda p, c, t: _FakeListener([], channel=c),
         )
     assert reads == ["slack:T1:channel:C0LOGIN42:thread:1700000000.000001"]
+
+
+# --- #958 review findings: the pasted code is correlated too ----------------
+
+@pytest.mark.parametrize(("label", "event", "accepted"), [
+    ("human reply in the ask's thread",
+     _slack_event("ABC-123", thread_ts="1700000000.000001"), True),
+    # The three the uncorrelated predicate accepted, each of which would have
+    # been written straight into the login CLI's stdin.
+    ("a BOT message in the ask's thread",
+     _slack_event("ABC-123", thread_ts="1700000000.000001",
+                  bot_id="B0THIRDPARTY"), False),
+    ("a human reply in ANOTHER thread",
+     _slack_event("ABC-123", thread_ts="1799999999.000001"), False),
+    ("a top-level message in the login channel",
+     _slack_event("ABC-123", thread_ts=None), False),
+])
+def test_the_pasted_code_is_correlated_like_the_ready_reply(label, event, accepted):
+    """The code this returns is written into the OAuth pty, so it carries the
+    same human-only and thread-anchor rule as the ready reply.
+
+    Without it, any bot or unrelated message in a shared login channel supplies
+    the authorization code.
+    """
+    channel = ab.LoginChannel(
+        destination="C0LOGIN42", source="slack", topic="slack:T1:app:A1",
+        legacy_slack_channel="C0LOGIN42",
+    )
+    got = ab._extract_code(event, channel, (), "1700000000.000001")
+    assert (got == "ABC-123") is accepted, label
+
+
+def test_the_pasted_code_wait_uses_the_asks_anchor(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """End to end: the anchor established by the ask reaches the code phase, so
+    a code posted outside the ask's thread is ignored and the run times out."""
+    listener = _FakeListener([], channel=None)
+
+    def connect(project_path, channel, timeout):
+        listener.channel = channel
+        return listener
+
+    written = []
+    monkeypatch.setattr(ab, "_read_until_url",
+                        lambda fd, timeout: "https://x/oauth/authorize?c=1")
+    monkeypatch.setattr(ab, "_write_line", lambda fd, text: written.append(text))
+    # Ready in the ask's thread, then a code from somewhere else entirely.
+    listener.queue.put(_slack_event("ready", thread_ts="1700000000.000001",
+                                    ts="1700000000.000002"))
+    listener.queue.put(_slack_event("WRONG-CODE", thread_ts="1799999999.000001",
+                                    ts="1700000000.000003"))
+
+    with pytest.raises(TimeoutError, match="auth code not received"):
+        ab.run_bootstrap(
+            slack_config, timeout=0.3,
+            spawn_login=lambda h: (_FakeLoginProc(), -1),
+            post_message=lambda t, c, x, thread_ts="": {
+                "ok": True, "ts": "1700000000.000001"},
+            connect_listener=connect,
+        )
+    assert written == [], "a code from another thread must never reach the pty"
+    assert listener.anchor == "1700000000.000001"
+
+
+# --- #958 review findings: the initial-post failure must not wedge ----------
+
+def test_a_failed_initial_ask_post_does_not_wedge_the_next_boot(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """A marker with no id, plus a history read that finds no ask, means the
+    post genuinely failed: post a fresh ask rather than re-attaching to an
+    anchor that can never be satisfied.
+
+    Re-attaching with an empty anchor wedges a shared-channel login forever -
+    every later boot blocks to timeout and no reply can ever match.
+    """
+    import bobi.events.gateway as gateway_mod
+
+    state = ask_state_home / ".login-ask-codex"
+    # Boot 1: the post fails after the marker is written.
+    def exploding_post(token, channel, text, thread_ts=""):
+        raise RuntimeError("channel outage")
+
+    with pytest.raises(RuntimeError, match="channel outage"):
+        ab.run_bootstrap(
+            slack_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("must not spawn")),
+            post_message=exploding_post,
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+        )
+    assert json.loads(state.read_text()) == {
+        "destination": "C0LOGIN42", "ts": ""}, "the marker records the attempt"
+
+    # Boot 2: history holds no ask, so a fresh one is posted.
+    monkeypatch.setattr(gateway_mod, "channels_history",
+                        lambda project, conv, limit=100: [])
+    codex_creds = ask_state_home / "auth.json"
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})))
+    assert ok is True
+    assert any("you are ready" in text for _c, text, _t in posts), (
+        "a fresh ask must be posted, not a re-attach to nothing")
+
+
+def test_ask_id_recovery_does_not_adopt_another_kinds_ask(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """One channel can carry two kinds' asks (a claude brain plus the codex
+    tool), and the state is per-kind. A wording-only match would adopt the
+    other kind's newer ask and post this login's device URL into its thread.
+    """
+    import bobi.events.gateway as gateway_mod
+
+    _ask_state(ask_state_home, "codex", "C0LOGIN42", "")
+    monkeypatch.setattr(
+        gateway_mod, "channels_history",
+        lambda project, conv, limit=100: [{
+            "user": "U0BOT",
+            "text": "🔐 *bobi subscription login* - `claude` on eng-team\n"
+                    "Reply to this message in a thread when you are ready, "
+                    "and then I will begin the login flow",
+            "ts": "1700000000.000777",
+        }])
+    codex_creds = ask_state_home / "auth.json"
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})))
+    assert ok is True
+    # A fresh codex ask, and nothing posted into claude's thread.
+    assert any("you are ready" in text for _c, text, _t in posts)
+    assert all(t != "1700000000.000777" for _c, _text, t in posts)
+
+
+# --- #958 review findings: rebind, failure posts, Discord ids, CLI errors ---
+
+def test_rebind_posts_a_fresh_ask_over_stale_state(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """A crash between the credential landing and the state clear leaves stale
+    state. `--rebind` must still post a fresh ask: re-attaching lands in a
+    thread that ends in this bot's own success post, so the catch-up read finds
+    no human after it and the one recovery path for a revoked credential wedges.
+    """
+    import bobi.events.gateway as gateway_mod
+
+    codex_creds = ask_state_home / "auth.json"
+    codex_creds.write_text(json.dumps({"tokens": {"refresh_token": "revoked"}}))
+    _ask_state(ask_state_home, "codex", "C0LOGIN42", "1700000000.000001")
+    monkeypatch.setattr(
+        gateway_mod, "channels_history",
+        lambda project, conv, limit=100: (_ for _ in ()).throw(
+            AssertionError("a rebind must not re-attach, so it must not read "
+                           "the old thread")))
+
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex", rebind=True,
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "fresh"}})))
+    assert ok is True
+    assert any("you are ready" in text for _c, text, _t in posts)
+
+
+def test_a_failure_after_the_ask_still_closes_the_thread(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """A scrape or code-wait failure must not leave the thread on "Waiting for
+    you to authorize" with nothing after it."""
+    posts = []
+
+    def boom(fd, timeout, spec):
+        raise TimeoutError("did not see the codex login URL/code within 120s")
+
+    monkeypatch.setattr(ab, "_scrape_login", boom)
+    with pytest.raises(TimeoutError, match="did not see the codex login"):
+        ab.run_bootstrap(
+            slack_config, target="codex",
+            spawn_login=lambda h: (_FakeLoginProc(), -1),
+            post_message=lambda t, c, x, thread_ts="": (
+                posts.append((x, thread_ts))
+                or {"ok": True, "ts": "1700000000.000001"}),
+            connect_listener=lambda p, c, t: _FakeListener(
+                [_ready_event_for(c)], channel=c),
+        )
+    assert "failed" in posts[-1][0]
+    assert posts[-1][1] == "1700000000.000001", "the failure lands in the thread"
+    assert "fly ssh console" in posts[-1][0]
+
+
+def test_a_discord_message_id_is_recorded_as_consumed():
+    """Discord's adapter names the id `message_id`, not `ts`. Reading only `ts`
+    silently loses the consumed-reply watermark on that transport."""
+    event = {
+        "source": "discord", "type": "discord.dm", "text": "ready",
+        "conversation": "discord:111:dm:222",
+        "fields": {"user_id": "U", "message_id": "9988776655"},
+    }
+    assert ab._event_message_id(event) == "9988776655"
+    channel = ab.LoginChannel(destination="discord:111:dm:222", source="discord",
+                              topic="discord:111")
+    assert ab._ready_reply(event, channel, "") is not None
+    assert ab._ready_reply(event, channel, "", {"9988776655"}) is None
+
+
+def test_cli_reports_an_unknown_tool_cleanly(cli_login_install, monkeypatch):
+    """An unknown TOOL is a user error, so it must read as one rather than as a
+    traceback. The pre-check resolves the target, so it can raise."""
+    from click.testing import CliRunner
+
+    from bobi.cli import main
+    from tests.conftest import TEST_AGENT_NAME
+
+    result = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, "login-bootstrap", "nonesuch"])
+    assert result.exit_code == 1
+    assert "Login bootstrap failed:" in result.output
+    assert "is not one of: claude, codex" in result.output
+
+
+@pytest.mark.parametrize(("destination", "is_channel"), [
+    ("C0LOGIN42", True),     # public channel
+    ("G0LEGACY99", True),    # legacy private group
+    ("D0B51JP1N4C", False),  # 1:1 DM
+])
+def test_a_legacy_destination_is_classified_by_its_id_shape(destination, is_channel):
+    """A legacy `$BOBI_LOGIN_CHANNEL` is a raw Slack id, and the path it came by
+    says nothing about which kind it is.
+
+    Keying on "is it the legacy path" demands a thread anchor from a legacy DM,
+    and a plain Slack DM reply never carries one - so the login could never
+    start on a documented, supported configuration. The legacy path is also the
+    only one that runs in production today.
+    """
+    channel = ab.LoginChannel(
+        destination=destination, source="slack", topic="slack:T1:app:A1",
+        legacy_slack_channel=destination,
+    )
+    assert ab._is_channel_destination(channel) is is_channel
+    # A plain DM reply, with no anchor at all, is ready only on the DM branch.
+    reply = _slack_event("ready", thread_ts=None, channel=destination)
+    assert (ab._ready_reply(reply, channel, "1700000000.000001") is not None) is (
+        not is_channel)

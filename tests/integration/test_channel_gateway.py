@@ -550,5 +550,8 @@ class TestLoginBootstrapCatchUpRead:
             source="whatsapp", topic="whatsapp:15550000000",
         )
         assert ab._catch_up_read(project, Config(), channel, "400.000") is None
-        assert ab._recover_ask_id(project, Config(), channel) == ""
+        # None, not "": the transport has no usable history, which is a
+        # different answer from "I looked and there is no ask" - the caller
+        # blocks on the former and posts a fresh ask on the latter.
+        assert ab._recover_ask_id(project, Config(), channel, "codex") is None
         assert stub.named("conversations.replies") == []
