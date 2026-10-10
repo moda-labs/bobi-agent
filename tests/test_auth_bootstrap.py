@@ -16,12 +16,60 @@ from bobi import auth_bootstrap as ab
 
 
 @pytest.fixture(autouse=True)
-def default_claude_brain(monkeypatch):
+def default_claude_brain(monkeypatch, tmp_path):
     from bobi.brain import BRAIN_ENV
 
     monkeypatch.setenv(BRAIN_ENV, "claude")
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    # The ask state lives under codex's config dir, which with CODEX_HOME unset
+    # is ~/.codex. Keep HOME inside tmp_path so no test can write into a real
+    # codex home; the config fixtures below override it with their own.
+    monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+
+
+def _ready_event_for(channel, ask_ts="1700000000.000001", *,
+                     ts="1700000000.000002", text="ready"):
+    """A human "ready" reply shaped the way the real adapter delivers one."""
+    anchor = ab._reply_anchor(channel, ask_ts)
+    is_channel = ab._is_channel_destination(channel)
+    fields = {"user_id": "U0HUMAN", "ts": ts}
+    if is_channel:
+        fields["thread_ts"] = anchor
+    conversation = ""
+    if channel.legacy_slack_channel:
+        fields["channel"] = channel.legacy_slack_channel
+    else:
+        conversation = channel.destination
+        if is_channel and ":thread:" not in conversation:
+            conversation = f"{conversation}:thread:{anchor}"
+    event = {
+        "source": channel.source,
+        "type": f"{channel.source}.thread_reply",
+        "text": text,
+        "fields": fields,
+    }
+    if conversation:
+        event["conversation"] = conversation
+    return event
+
+
+@pytest.fixture(autouse=True)
+def ready_reply_listener(monkeypatch, request):
+    """Ask-first is unconditional (Z4), so every `run_bootstrap` test needs a
+    live listener and a human reply before the login CLI is spawned.
+
+    Tests that are *about* the ask - ordering, correlation, re-attach - pass
+    their own `connect_listener=`. Tests that exercise the real subscription
+    and registration path carry `@pytest.mark.real_listener`.
+    """
+    if request.node.get_closest_marker("real_listener"):
+        return
+
+    def connect(project_path, channel, timeout):
+        return _FakeListener([_ready_event_for(channel)], channel=channel)
+
+    monkeypatch.setattr(ab, "_connect_chat_listener", connect)
 
 
 # --- credentials / needs_bootstrap ------------------------------------------
@@ -605,10 +653,11 @@ def test_run_bootstrap_happy_path(
     monkeypatch.setattr(ab, "_read_until_url", lambda fd, timeout: "https://x/oauth/authorize?c=1")
     monkeypatch.setattr(ab, "_write_line", lambda fd, text: written.append(text))
 
-    def fake_post(token, channel, text):
-        posts.append((token, channel, text))
+    def fake_post(token, channel, text, thread_ts=""):
+        posts.append((token, channel, text, thread_ts))
+        return {"ok": True, "ts": "1700000000.000001"}
 
-    def fake_wait(project_path, channel, timeout):
+    def fake_wait(project_path, channel, timeout, listener=None):
         # Simulate the human pasting the code; claude then writes creds.
         creds.parent.mkdir(parents=True)
         creds.write_text(json.dumps({
@@ -669,12 +718,15 @@ def test_run_bootstrap_posts_to_discord_conversation(discord_config, monkeypatch
             }],
         },
     )
-    monkeypatch.setattr(gateway_mod, "channels_send", lambda project, conv, text, mode="post": sent.append((conv, text, mode)))
+    monkeypatch.setattr(gateway_mod, "channels_send",
+                        lambda project, conv, text, mode="post": (
+                            sent.append((conv, text, mode))
+                            or {"ok": True, "ts": "1700000000.000001"}))
 
     def fake_spawn(home):
         return FakeProc(), -1
 
-    def fake_wait(project_path, channel, timeout):
+    def fake_wait(project_path, channel, timeout, listener=None):
         assert channel == ab.LoginChannel(
             destination="discord:111222333444555666:dm:999888777666555444",
             source="discord",
@@ -696,8 +748,14 @@ def test_run_bootstrap_posts_to_discord_conversation(discord_config, monkeypatch
 
     assert ok is True
     assert written == ["the-code"]
-    assert sent[0][0] == "discord:111222333444555666:dm:999888777666555444"
-    assert "oauth/authorize" in sent[0][1]
+    assert all(
+        conv == "discord:111222333444555666:dm:999888777666555444"
+        for conv, _text, _mode in sent
+    )
+    # Ask-first: the ask lands before anything credential-granting does.
+    assert "I will begin the login flow" in sent[0][1]
+    assert "oauth/authorize" not in sent[0][1]
+    assert any("oauth/authorize" in text for _conv, text, _mode in sent)
     assert "complete" in sent[-1][1]
 
 
@@ -707,7 +765,7 @@ def test_run_bootstrap_rejects_discord_paste_back_on_remote_event_server(
 ):
     monkeypatch.setattr(
         ab,
-        "_ensure_discord_paste_back_ready",
+        "_ensure_discord_inbound_ready",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError(
             "Discord subscription-login paste-back requires an event server "
             "with the local Discord Gateway driver."
@@ -717,7 +775,7 @@ def test_run_bootstrap_rejects_discord_paste_back_on_remote_event_server(
         ab.run_bootstrap(remote_discord_config, spawn_login=lambda h: None)
 
 
-def test_ensure_discord_paste_back_ready_rejects_event_server_without_gateway(
+def test_ensure_discord_inbound_ready_rejects_event_server_without_gateway(
     discord_config,
     monkeypatch,
 ):
@@ -736,7 +794,7 @@ def test_ensure_discord_paste_back_ready_rejects_event_server_without_gateway(
     )
 
     with pytest.raises(RuntimeError, match="connected Gateway"):
-        ab._ensure_discord_paste_back_ready(
+        ab._ensure_discord_inbound_ready(
             discord_config,
             ab.Config.load(discord_config),
             ab.LoginChannel(
@@ -748,7 +806,7 @@ def test_ensure_discord_paste_back_ready_rejects_event_server_without_gateway(
         )
 
 
-def test_ensure_discord_paste_back_ready_allows_internal_local_hostname(
+def test_ensure_discord_inbound_ready_allows_internal_local_hostname(
     discord_config,
     monkeypatch,
 ):
@@ -781,7 +839,7 @@ def test_ensure_discord_paste_back_ready_allows_internal_local_hostname(
         },
     )
 
-    ab._ensure_discord_paste_back_ready(
+    ab._ensure_discord_inbound_ready(
         discord_config,
         ab.Config.load(discord_config),
         ab.LoginChannel(
@@ -855,6 +913,7 @@ def test_run_bootstrap_requires_channel(slack_config, monkeypatch):
         ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
 
 
+@pytest.mark.real_listener
 def test_wait_for_code_subscribes_to_app_qualified_slack_topic(slack_config, monkeypatch):
     import bobi.events.client as client_mod
     import bobi.events.server as server_mod
@@ -949,6 +1008,7 @@ def test_register_login_channel_remints_after_stale_bubble_rejection(
     ]
 
 
+@pytest.mark.real_listener
 def test_wait_for_code_recovers_if_bubble_stales_after_channel_registration(
     slack_config,
     monkeypatch,
@@ -1015,6 +1075,7 @@ def test_wait_for_code_recovers_if_bubble_stales_after_channel_registration(
     ]
 
 
+@pytest.mark.real_listener
 def test_wait_for_code_subscribes_to_discord_app_topic(discord_config, monkeypatch):
     import bobi.events.client as client_mod
     import bobi.events.server as server_mod
@@ -1065,6 +1126,7 @@ def test_wait_for_code_subscribes_to_discord_app_topic(discord_config, monkeypat
     assert registered["topics"] == ["discord:111222333444555666"]
 
 
+@pytest.mark.real_listener
 def test_wait_for_code_subscribes_to_whatsapp_number_topic(whatsapp_config, monkeypatch):
     import bobi.events.client as client_mod
     import bobi.events.server as server_mod
@@ -1115,6 +1177,7 @@ def test_wait_for_code_subscribes_to_whatsapp_number_topic(whatsapp_config, monk
     assert registered["topics"] == ["whatsapp:111222333444555666"]
 
 
+@pytest.mark.real_listener
 def test_wait_for_code_refuses_missing_slack_app_identity(slack_config, monkeypatch):
     import bobi.slack as slack_mod
 
@@ -1201,8 +1264,9 @@ def test_run_bootstrap_codex_device_poll(slack_config, monkeypatch):
     def fake_scrape(fd, timeout, spec):
         return "https://auth.openai.com/codex/device", "5RAR-HF15T"
 
-    def fake_post(token, channel, text):
-        posts.append((token, channel, text))
+    def fake_post(token, channel, text, thread_ts=""):
+        posts.append((token, channel, text, thread_ts))
+        return {"ok": True, "ts": "1700000000.000001"}
 
     ok = ab.run_bootstrap(
         slack_config,
@@ -1278,7 +1342,7 @@ def _fake_login_seams(monkeypatch, tmp_path) -> list[tuple[str, str]]:
         def wait(self, timeout=None):
             return 0
 
-    def fake_wait(project_path, channel, timeout):
+    def fake_wait(project_path, channel, timeout, listener=None):
         # Stand in for the human pasting the code back; claude writes creds.
         creds.parent.mkdir(parents=True, exist_ok=True)
         creds.write_text(json.dumps({
@@ -1289,8 +1353,11 @@ def _fake_login_seams(monkeypatch, tmp_path) -> list[tuple[str, str]]:
     monkeypatch.setattr(ab, "_spawn_login", lambda home: (FakeProc(), -1))
     monkeypatch.setattr(ab, "_read_until_url", lambda fd, timeout: FAKE_LOGIN_URL)
     monkeypatch.setattr(ab, "_write_line", lambda fd, text: None)
-    monkeypatch.setattr(ab, "post_slack_message",
-                        lambda token, channel, text: posts.append((channel, text)))
+    monkeypatch.setattr(
+        ab, "post_slack_message",
+        lambda token, channel, text, thread_ts="": (
+            posts.append((channel, text))
+            or {"ok": True, "ts": "1700000000.000001"}))
     monkeypatch.setattr(ab, "_wait_for_code", fake_wait)
     return posts
 
@@ -1362,11 +1429,10 @@ def test_login_bootstrap_posts_only_to_the_configured_channel(
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("ref,expected_topic", [
-    ("discord:guild1:channel:123", "discord:guild1"),
     # The 6-part threaded form is part of the shared grammar; the private
     # parser this now delegates to (Q012) accepted it too, so a ref that used
     # to resolve must still resolve.
-    ("discord:guild1:channel:123:thread:456", "discord:guild1"),
+    ("discord:guild1:dm:123:thread:456", "discord:guild1"),
     ("whatsapp:acct1:dm:15551234567", "whatsapp:acct1"),
 ])
 def test_resolve_login_channel_accepts_shared_grammar_refs(ref, expected_topic):
@@ -1398,3 +1464,244 @@ def test_auth_bootstrap_keeps_no_private_copy_of_the_grammar():
     """Q012: the grammar has one Python implementation. A re-inlined private
     parser here is the drift this guards against."""
     assert not hasattr(ab, "_parse_conversation")
+
+
+# --- #958 ask-first: stage 1 (ordering, human-only, one correlation rule) ---
+#
+# These drive the real `_ready_reply` predicate through a faked transport: the
+# injected listener hands `run_bootstrap` a real SimpleQueue the test fills, so
+# the correlation rule itself is under test rather than a stub of it.
+
+def _slack_event(text="ready", *, conversation="", thread_ts=None, channel="C0LOGIN42",
+                 ts="1700000000.000100", bot_id=None, source="slack",
+                 event_type="slack.thread_reply"):
+    fields = {"channel": channel, "user_id": "U0HUMAN", "ts": ts}
+    if thread_ts is not None:
+        fields["thread_ts"] = thread_ts
+    if bot_id is not None:
+        fields["bot_id"] = bot_id
+    event = {"source": source, "type": event_type, "text": text, "fields": fields}
+    if conversation:
+        event["conversation"] = conversation
+    return event
+
+
+class _ConsumedIds(set):
+    """Records the moment the implementation accepts a reply, for item 1."""
+
+    def __init__(self, log):
+        super().__init__()
+        self._log = log
+
+    def add(self, item):
+        self._log.append("ready reply consumed")
+        super().add(item)
+
+
+class _FakeListener:
+    """Stands in for the live event-bus listener; its queue is driven by the test."""
+
+    def __init__(self, events=(), log=None, channel=None):
+        from queue import SimpleQueue
+
+        self.queue = SimpleQueue()
+        for ev in events:
+            self.queue.put(ev)
+        self.stopped = False
+        self._log = log if log is not None else []
+        self.channel = channel
+        self.consumed_ids = _ConsumedIds(self._log)
+        self._log.append("listener connected")
+
+    @property
+    def client(self):
+        return self
+
+    def stop(self):
+        self.stopped = True
+
+
+@pytest.fixture
+def ask_state_home(tmp_path, monkeypatch):
+    """Isolate the ask state file (and codex's credential dir) under tmp_path."""
+    home = tmp_path / "codex-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    return home
+
+
+def _run_ask_first(project, *, events, monkeypatch, log=None, creds_writer=None,
+                   post_ts="1700000000.000001", **kwargs):
+    """Drive run_bootstrap's ask-first path with a faked transport.
+
+    Returns (ok, log, posts) where `log` is the ordered trace the ordering
+    assertion in verification item 1 needs.
+    """
+    log = log if log is not None else []
+    posts = []
+
+    class FakeProc:
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_spawn(home):
+        log.append("spawn_login")
+        if creds_writer is not None:
+            creds_writer()
+        return FakeProc(), -1
+
+    def fake_post(token, channel, text, thread_ts=""):
+        log.append("ask posted" if "ready" in text else "post")
+        posts.append((channel, text, thread_ts))
+        return {"ok": True, "ts": post_ts}
+
+    def fake_connect(project_path, channel, timeout):
+        return _FakeListener(events, log=log, channel=channel)
+
+    monkeypatch.setattr(ab, "_read_until_url",
+                        lambda fd, timeout: "https://x/oauth/authorize?c=1")
+    monkeypatch.setattr(ab, "_write_line", lambda fd, text: None)
+    monkeypatch.setattr(
+        ab, "_scrape_login",
+        lambda fd, timeout, spec: ("https://auth.openai.com/codex/device", "ABCD-12345"),
+    )
+    ok = ab.run_bootstrap(
+        project,
+        spawn_login=fake_spawn,
+        post_message=fake_post,
+        connect_listener=fake_connect,
+        **kwargs,
+    )
+    return ok, log, posts
+
+
+# 1. Ordering, both flows.
+
+def test_ask_first_orders_connect_post_reply_spawn_paste_back(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 1, paste_back: the listener is live before the ask is posted."""
+    creds = os.path.join(os.environ["HOME"], ".claude", ".credentials.json")
+
+    def write_creds():
+        os.makedirs(os.path.dirname(creds), exist_ok=True)
+        with open(creds, "w") as f:
+            f.write(json.dumps({"claudeAiOauth": {"refreshToken": "refresh"}}))
+
+    log = []
+
+    def fake_wait(project_path, channel, timeout, listener=None):
+        log.append("code pasted")
+        return "the-code"
+
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, log=log, creds_writer=write_creds,
+        wait_for_code=fake_wait,
+    )
+    assert ok is True
+    assert log[:4] == [
+        "listener connected", "ask posted", "ready reply consumed", "spawn_login",
+    ]
+
+
+def test_ask_first_orders_connect_post_reply_spawn_device_poll(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 1, device_poll: same guarantee on the codex branch."""
+    codex_creds = ask_state_home / "auth.json"
+
+    def write_creds():
+        codex_creds.write_text(json.dumps({"tokens": {"refresh_token": "r"}}))
+
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, creds_writer=write_creds, target="codex",
+    )
+    assert ok is True
+    assert log[:4] == [
+        "listener connected", "ask posted", "ready reply consumed", "spawn_login",
+    ]
+
+
+# 2. A bot reply is not ready.
+
+def test_bot_reply_is_not_ready_but_a_following_human_is(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 2: `fields.bot_id` disqualifies; the next human event satisfies."""
+    codex_creds = ask_state_home / "auth.json"
+    events = [
+        _slack_event("ready", thread_ts="1700000000.000001", bot_id="B0THIRDPARTY"),
+        _slack_event("ready", thread_ts="1700000000.000001"),
+    ]
+    ok, log, posts = _run_ask_first(
+        slack_config, events=events, monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})),
+    )
+    assert ok is True
+    assert log.count("ready reply consumed") == 1
+
+
+# 3. Correlation, channel destination: thread_ts only, never the event type.
+
+@pytest.mark.parametrize(
+    ("label", "event", "ready"),
+    [
+        ("thread_reply in the ask's thread",
+         _slack_event(thread_ts="1700000000.000001"), True),
+        ("thread_reply in another thread",
+         _slack_event(thread_ts="1700000000.999999"), False),
+        ("mention, top-level in the login channel",
+         _slack_event(event_type="slack.mention", thread_ts=None), False),
+        ("mention, inside the ask's thread",
+         _slack_event(event_type="slack.mention", thread_ts="1700000000.000001"), True),
+    ],
+)
+def test_channel_correlation_keys_on_thread_ts_only(label, event, ready):
+    """Item 3. The fourth leg is the one an event-type filter breaks (Z5)."""
+    channel = ab.LoginChannel(
+        destination="C0LOGIN42", source="slack", topic="slack:T1:app:A1",
+        legacy_slack_channel="C0LOGIN42",
+    )
+    got = ab._ready_reply(event, channel, "1700000000.000001")
+    assert (got is not None) is ready, label
+
+
+# 4. Correlation, DM destination: no anchor needed.
+
+@pytest.mark.parametrize(
+    ("source", "destination"),
+    [
+        ("slack", "slack:T1:dm:D0HUMAN"),
+        ("discord", "discord:111222333444555666:dm:999888777666555444"),
+        ("whatsapp", "whatsapp:15550000000:dm:15551111111"),
+    ],
+)
+def test_dm_correlation_accepts_a_reply_with_no_thread_anchor(source, destination):
+    """Item 4: the bug an anchor-always filter ships. A DM has no anchor."""
+    channel = ab.LoginChannel(
+        destination=destination, source=source, topic=f"{source}:x",
+    )
+    event = _slack_event(conversation=destination, thread_ts=None,
+                         channel="", source=source)
+    assert ab._ready_reply(event, channel, "1700000000.000001") is not None
+
+
+# 16c. A pre-threaded destination still correlates.
+
+def test_pre_threaded_destination_correlates_on_the_destination_thread():
+    """Item 16c: the ask-`ts` predicate this replaces would hang forever."""
+    root = "1699999999.000000"
+    destination = f"slack:T1:channel:C0LOGIN42:thread:{root}"
+    channel = ab.LoginChannel(
+        destination=destination, source="slack", topic="slack:T1:app:A1",
+    )
+    anchor = ab._reply_anchor(channel, ask_ts="1700000000.000001")
+    assert anchor == root, "the destination's own thread id is the anchor"
+    event = _slack_event(conversation=destination, thread_ts=root)
+    assert ab._ready_reply(event, channel, anchor) is not None
