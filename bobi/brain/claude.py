@@ -235,9 +235,15 @@ def _result_to_turn(
         error_message = assistant_error_message
 
     result_text = getattr(msg, "result", "") or ""
+    # Only a FAILED turn's text is an error string. On a successful turn
+    # ``result`` is the agent's own final answer, so classifying it would turn
+    # an agent that merely WRITES about an outage ("the sessions died on:
+    # you've hit your session limit") into a failed turn, discard its work, and
+    # open a false incident that then dedups away the next real one (#992).
+    failed = bool(getattr(msg, "is_error", False) or error_kind)
     unavailable_kind = classify_brain_unavailability(
         error_kind,
-        error_message or result_text,
+        error_message or (result_text if failed else ""),
     )
     if unavailable_kind:
         error_kind = unavailable_kind

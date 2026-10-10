@@ -40,7 +40,6 @@ import collections
 import dataclasses
 import logging
 import math
-import os
 import signal
 import subprocess
 import sys
@@ -400,16 +399,9 @@ class Supervisor:
             except Exception:
                 log.exception("supervisor: escalation announce hook failed")
             return
-        token = (os.environ.get("BOBI_SLACK_BOT_TOKEN")
-                 or os.environ.get("SLACK_BOT_TOKEN"))
-        channel = os.environ.get("WATCHDOG_ALERT_CHANNEL")
-        if not (token and channel):
-            log.warning("supervisor: WATCHDOG_ALERT_CHANNEL / Slack token not "
-                        "set - budget-exhaustion escalation is log-only")
-            return
         try:
-            from bobi.slack import post_slack_message
-            post_slack_message(token, channel, message)
+            from bobi.slack import post_operator_alert
+            post_operator_alert(message, what="supervisor escalation")
         except Exception:
             log.exception("supervisor: failed to post escalation to Slack")
 

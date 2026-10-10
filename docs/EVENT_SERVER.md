@@ -375,6 +375,20 @@ resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
 events are published to both the bare `<type>` and the `<source>/<type>` form, and
 clients subscribe to both, for cross-version compatibility.
 
+The three `system/brain.*` edges are **also** posted straight to Slack, because
+the brain is what died and no deployment has ever subscribed to them (#992: a
+102-minute outage published nothing a human could read). The direct leg goes to
+`WATCHDOG_ALERT_CHANNEL` with a Slack bot token
+(`BOBI_SLACK_BOT_TOKEN` or `SLACK_BOT_TOKEN`), the same gate the supervisor's
+crash-loop and budget-exhaustion alerts use.
+With no channel configured it degrades to one log line.
+Delivery is deduped by the incident latch, so an outage is one message
+however many turns fail inside it, plus one on recovery.
+A team that also subscribes to the topics will see both.
+Error text on these edges is redacted and bounded before it leaves the host
+(`bobi/brain_availability.py::_safe_detail`): a rejected credential is routinely
+echoed back inside the error that rejected it.
+
 ### Declaring subscriptions
 
 Resolved in `bobi/events/subscriptions.py` + `adapters.py`:
