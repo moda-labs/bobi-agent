@@ -3,7 +3,7 @@ Stage 4).
 
 The runtime preflight (``validate._async_probe_mcp``) verifies MCP servers by
 asking the *active brain's* session for its MCP status. Claude's SDK exposes
-``get_mcp_status`` for free; Codex's ``codex exec`` reads ``~/.codex/config.toml``
+``get_mcp_status`` for free; Codex's ``codex exec`` reads ``$CODEX_HOME/config.toml``
 but offers no status introspection (``codex mcp list`` only echoes config, it
 does not connect). So a brain that can't self-report needs a way to actually
 *reach* each configured server and confirm it answers ``initialize`` +

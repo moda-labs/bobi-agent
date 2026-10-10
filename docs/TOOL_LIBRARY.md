@@ -388,10 +388,12 @@ Each brain consumes that one `mcp_servers:` differently:
 - **Claude** reads it from a per-session option - `subagent.py` splats
   `cfg.mcp_servers` into the SDK at every agent spawn. The compose-time emission
   is all Claude needs.
-- **Codex** reads MCP servers from `~/.codex/config.toml` (nothing rides the CLI
-  invocation), so the codex brain renders the effective `mcp_servers` into that
-  file before the first `codex exec` (`bobi/brain/codex_config.py`). Only the
-  bobi-owned `mcp_servers` block is managed; any other config keys survive.
+- **Codex** reads MCP servers from `$CODEX_HOME/config.toml` (nothing rides the
+  CLI invocation; `$CODEX_HOME` is the durable volume dir on every brain, and
+  `~/.codex` only when it is unset), so the codex brain renders the effective
+  `mcp_servers` into that file before the first `codex exec`
+  (`bobi/brain/codex_config.py`). Only the bobi-owned `mcp_servers` block is
+  managed; any other config keys survive.
 
 Verification is a real `initialize` handshake, per brain, so a broken server
 fails preflight instead of silently degrading:

@@ -319,6 +319,17 @@ configure_brain_paths
 materialize_codex_api_key_auth() {
   local cred_dir="$1"
   [ -n "${OPENAI_API_KEY:-}" ] || return 0
+  # This runs as root, and both the write and the chmod below dereference, as
+  # does the trailing `chown -R` on its top-level argument. Refuse rather than
+  # repair: neither state is one any boot path creates.
+  if [ -L "${cred_dir}" ] || { [ -e "${cred_dir}" ] && [ ! -d "${cred_dir}" ]; }; then
+    log "FATAL: ${cred_dir} is not a directory; refusing to write Codex auth as root"
+    exit 1
+  fi
+  if [ -L "${cred_dir}/auth.json" ]; then
+    log "FATAL: ${cred_dir}/auth.json is a symlink; refusing to write through it as root"
+    exit 1
+  fi
   log "Writing Codex API-key auth file from OPENAI_API_KEY"
   mkdir -p "${cred_dir}"
   CODEX_CRED_DIR="${cred_dir}" OPENAI_API_KEY="${OPENAI_API_KEY}" python - <<'PY'
@@ -481,8 +492,10 @@ validate_auth_mode
 # --- 3b. Codex's durable OAuth dir on the volume (#485) ---------------------
 # Same idea for codex: ~/.codex (where `codex login`/`codex exec` keep auth.json)
 # points at a volume dir so the ChatGPT subscription survives a redeploy. claude
-# already gets this via CLAUDE_CONFIG_DIR above; codex has no config-dir override,
-# so we symlink the home dir directly.
+# already gets this via CLAUDE_CONFIG_DIR above. Codex does have a config-dir
+# override (CODEX_HOME, exported by 3c below, which is what makes the tool path
+# durable on any brain); on a codex brain the symlink is kept so the baked
+# skills link and ~/.codex stay the shape 3b's own block below expects.
 if [ "${ENTRYPOINT_ENGINE}" = "codex" ]; then
   mkdir -p "${BRAIN_CRED_DIR}"
   chown "${APP_USER}:${APP_USER}" "${BRAIN_CRED_DIR}"
@@ -531,10 +544,30 @@ if [ "${ENTRYPOINT_ENGINE}" = "codex" ]; then
   fi
 fi
 
+# --- 3c. Codex's durable config dir, both brains (#958) ---------------------
+# On a codex BRAIN this is already ~/.codex: section 3b points that at the same
+# directory, so the export just names it. On any other brain it moves codex's
+# config dir onto the volume so a human-minted auth.json survives a roll.
+# mkdir -p is required, not tidiness: codex exits 1 with "CODEX_HOME points to
+# ..., but that path does not exist". chown because the warm-boot chown list
+# above does not cover this path.
+# The lstat refusal is NOT defensive clutter: this runs as root against a path
+# the bobi user owns, and chown/mkdir -p both follow a symlink.
+# Placement is an interval, not a floor: the two follow-on uses below consume
+# ${CODEX_HOME}, and under `set -euo pipefail` a later placement is an
+# unbound-variable abort on every boot.
+if [ -L "${DATA_DIR}/codex" ] || { [ -e "${DATA_DIR}/codex" ] && [ ! -d "${DATA_DIR}/codex" ]; }; then
+  log "FATAL: ${DATA_DIR}/codex is not a directory; refusing to touch it as root"
+  exit 1
+fi
+mkdir -p "${DATA_DIR}/codex"
+chown "${APP_USER}:${APP_USER}" "${DATA_DIR}/codex"
+export CODEX_HOME="${DATA_DIR}/codex"
+
 # The Codex CLI also exists as an auxiliary tool for Claude-brained teams
 # (`tool_library: [codex]`). Unlike Claude, Codex does not read OPENAI_API_KEY
-# directly; it expects ~/.codex/auth.json. In subscription mode, never turn an
-# ambient API key into Codex auth: subscription OAuth must remain authoritative.
+# directly; it expects ${CODEX_HOME}/auth.json. In subscription mode, never turn
+# an ambient API key into Codex auth: subscription OAuth must remain authoritative.
 if [ "${BOBI_AUTH:-api_key}" != "subscription" ]; then
   if [ "${ENTRYPOINT_ENGINE}" = "codex" ]; then
     if [ "${ENTRYPOINT_IS_GATEWAY}" = "1" ]; then
@@ -544,7 +577,20 @@ if [ "${BOBI_AUTH:-api_key}" != "subscription" ]; then
       materialize_codex_api_key_auth "${BRAIN_CRED_DIR}"
     fi
   else
-    materialize_codex_api_key_auth "${HOME}/.codex"
+    # Codex as a tool on a non-codex brain. Under 3c the target is the durable
+    # volume dir, so an unconditional write would clobber a credential a human
+    # minted through `login-bootstrap codex`. Skip the write when a usable
+    # OAuth credential is already there.
+    # The guard is HERE and not inside materialize_codex_api_key_auth, which is
+    # shared with the codex-brain arm above: a guard inside the function would
+    # also stop a codex-brained api_key team from rewriting its own credential,
+    # which is main's behaviour and deliberately out of scope.
+    if codex_tool_cred="$(as_app python -m bobi.auth_bootstrap \
+        credential-status codex "${CODEX_HOME}/auth.json" 2>&1)"; then
+      log "Codex tool: ${codex_tool_cred} at ${CODEX_HOME}/auth.json - leaving it alone"
+    else
+      materialize_codex_api_key_auth "${CODEX_HOME}"
+    fi
   fi
 elif [ -n "${OPENAI_API_KEY:-}" ]; then
   log "Subscription mode: leaving OPENAI_API_KEY out of Codex auth materialization"
@@ -554,7 +600,13 @@ if [ "${BOBI_AUTH:-api_key}" = "subscription" ]; then
   if [ "${ENTRYPOINT_ENGINE}" = "codex" ]; then
     codex_dir="${BRAIN_CRED_DIR}"
   else
-    codex_dir="${HOME}/.codex"
+    # Where the file now lives (3c). The predicate itself is unchanged: it
+    # deletes only the recognized API-key shape and leaves anything it cannot
+    # classify alone. The sweep exists because codex treats an API-key file as
+    # "logged in", silently outranking subscription auth, and ask-first makes
+    # that matter MORE: the login now waits on a human for up to half an hour,
+    # and the machine would run on the stale key the whole time.
+    codex_dir="${CODEX_HOME}"
   fi
   if codex_auth_uses_api_key "${codex_dir}"; then
     log "Subscription mode: removing Codex API-key auth file so OAuth can be used"
