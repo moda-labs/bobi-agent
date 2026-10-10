@@ -207,3 +207,71 @@ def test_compose_rejects_a_hand_written_forbidden_topic(bobi_install):
     with pytest.raises(WorkspaceSubscriptionsError) as exc:
         compose_session_subscriptions(root, manager_session_name(root))
     assert str(path) in str(exc.value)
+
+
+def test_a_duplicate_subscribe_key_is_rejected(bobi_install):
+    """Codex review F5.
+
+    `yaml.safe_load` silently keeps the LAST duplicate mapping key, so this
+    document would have parsed as an authoritative `[]` and unsubscribed the
+    team from everything - the exact fail-closed hazard the strict validator
+    exists for.
+    """
+    root = bobi_install.repo_path
+    path = _write_workspace(
+        root, "subscribe:\n  - github:o/keep\nsubscribe: []\n")
+    with pytest.raises(WorkspaceSubscriptionsError) as exc:
+        workspace_subscriptions(root)
+    assert "duplicate key" in str(exc.value)
+    assert str(path) in str(exc.value)
+    with pytest.raises(WorkspaceSubscriptionsError):
+        discover_subscriptions(root)
+
+
+def test_an_invalid_file_appearing_between_discoverys_two_reads_still_raises(
+        bobi_install, monkeypatch):
+    """Codex review F6.
+
+    `discover_subscriptions` reads the file, then calls `explicit_subscriptions`
+    (which the D078 pin requires) and so reads it AGAIN. A hand edit landing in
+    between used to be swallowed by discovery's own `except Exception` and fall
+    through to auto-detection.
+    """
+    root = bobi_install.repo_path
+    from bobi.events import subscriptions as mod
+
+    calls = {"n": 0}
+    real = mod.workspace_subscriptions
+
+    def _appears_late(project_path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None          # first read: no file
+        _write_workspace(root, "subscribe: [a\n")
+        return real(project_path)
+
+    monkeypatch.setattr(mod, "workspace_subscriptions", _appears_late)
+    with pytest.raises(WorkspaceSubscriptionsError):
+        mod.discover_subscriptions(root)
+    assert calls["n"] >= 2
+
+
+def test_a_permissive_pack_seed_is_sanitized_before_it_is_written(bobi_install):
+    """Codex review F7.
+
+    The pack parser tolerates a duplicate and an `inbox/` topic that this
+    file's reader rejects. Seeding one verbatim would fail every later apply
+    with no way for `remove` to repair it, because the argument check refuses
+    to name a forbidden topic.
+    """
+    from bobi.events.subscriptions import sanitize_seed_topics
+
+    kept, dropped = sanitize_seed_topics(
+        ["github:o/r", "github:o/r", "inbox/worker-1", "reply/x", "  ",
+         "linear:MOD"])
+    assert kept == ["github:o/r", "linear:MOD"]
+    assert set(dropped) == {"github:o/r", "inbox/worker-1", "reply/x", "  "}
+    # And what survives is accepted by the reader it will be written for.
+    _write_workspace(bobi_install.repo_path,
+                     render_workspace_subscriptions(kept))
+    assert workspace_subscriptions(bobi_install.repo_path) == kept

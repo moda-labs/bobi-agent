@@ -267,3 +267,98 @@ def test_the_liveness_test_is_the_port_and_token_files(runtime):
     assert _manager_reload_endpoint(runtime) is None   # token still missing
     (state / "manager-health.token").write_text("tok")
     assert _manager_reload_endpoint(runtime) == ("http://127.0.0.1:51234", "tok")
+
+
+def test_a_timeout_mid_apply_is_not_reported_as_a_stopped_manager(
+        runtime, monkeypatch):
+    """Codex review F4.
+
+    Every reload serializes on the manager's apply lock, so a caller can time
+    out while the apply is still landing (risk R4). Collapsing that into "the
+    manager is not running" reported an apply-in-flight as a clean persist-only
+    edit and exited ZERO.
+    """
+    import httpx
+
+    from bobi import cli
+
+    _declare(runtime, ["github:o/one"])
+    monkeypatch.setattr(cli, "_manager_reload_endpoint",
+                        lambda p: ("http://127.0.0.1:1", "tok"))
+
+    def _timeout(url, **kwargs):
+        raise httpx.ReadTimeout("timed out", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", _timeout)
+    result = _run(["add", "github:o/two"])
+    assert result.exit_code != 0
+    assert "may still have landed" in result.output
+    assert "not running" not in result.output
+    # The change is persisted either way; re-running is safe.
+    assert workspace_subscriptions(runtime) == ["github:o/one", "github:o/two"]
+
+
+def test_nothing_listening_on_a_stale_port_is_persist_only(runtime, monkeypatch):
+    """The port and token files outlive a SIGKILLed manager, so a refused
+    connection is the common stale-file case and IS a clean persist-only edit."""
+    import httpx
+
+    from bobi import cli
+
+    _declare(runtime, ["github:o/one"])
+    monkeypatch.setattr(cli, "_manager_reload_endpoint",
+                        lambda p: ("http://127.0.0.1:1", "tok"))
+
+    def _refused(url, **kwargs):
+        raise httpx.ConnectError("refused", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", _refused)
+    result = _run(["add", "github:o/two"])
+    assert result.exit_code == 0, result.output
+    assert "Nothing is listening" in result.output
+    assert "next reload" in result.output
+
+
+def test_the_timeout_budget_allows_for_one_queued_apply(runtime):
+    from bobi.cli import _RELOAD_PER_TOPIC_S, _reload_timeout
+
+    topics = ["github:o/a", "github:o/b", "linear:MOD"]
+    one_apply = (len(topics) + 1) * _RELOAD_PER_TOPIC_S
+    assert _reload_timeout(topics) > 2 * one_apply
+
+
+def test_a_permissive_pack_seed_is_sanitized_not_written_verbatim(
+        runtime, monkeypatch):
+    """Codex review F7, through the real command.
+
+    The pack parser tolerates these; this file's reader does not. Writing them
+    would fail every later apply, and `remove` could not repair it because the
+    argument check refuses to name a forbidden topic.
+    """
+    from bobi.events import subscriptions as mod
+
+    monkeypatch.setattr(
+        mod, "discover_subscriptions",
+        lambda p: ["github:o/seed", "github:o/seed", "inbox/worker-1",
+                   "reply/x", "linear:MOD"])
+
+    result = _run(["add", "github:o/new"])
+    assert result.exit_code == 0, result.output
+    assert "Dropped from the seed" in result.output
+    assert workspace_subscriptions(runtime) == [
+        "github:o/seed", "linear:MOD", "github:o/new"]
+
+
+def test_an_invalid_existing_file_fails_with_a_message_not_a_traceback(runtime):
+    """And the command refuses to overwrite a file it cannot read."""
+    path = workspace_subscriptions_path(runtime)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("subscribe: [a\n")
+    original = path.read_text()
+
+    for args in (["add", "github:o/new"], ["remove", "github:o/new"], ["list"]):
+        result = _run(args)
+        assert result.exit_code != 0
+        assert "not a valid subscription file" in result.output
+        assert not isinstance(result.exception, AttributeError)
+    assert path.read_text() == original

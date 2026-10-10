@@ -2106,7 +2106,9 @@ def _start_event_subscription(session_name: str, extra_subscribe: list[str],
         EVENT server answered, so the CLI never has to tell "the route refused
         me" apart from "the topics were refused".
         """
-        from bobi.events.subscriptions import workspace_subscriptions
+        from bobi.events.subscriptions import (
+            WorkspaceSubscriptionsError, workspace_subscriptions,
+        )
 
         desired = _compose()
         previous = list(controller.accepted or [])
@@ -2114,20 +2116,26 @@ def _start_event_subscription(session_name: str, extra_subscribe: list[str],
         # Auto-detection swallows a transient Slack/Linear API failure into []
         # and discovery then falls through to [project_path.name]. On a team with
         # NO workspace file that would let a transport-recovery reconnect PUT a
-        # narrower set than the one already accepted and silently stop routing.
-        # With a workspace file a shrink is a legitimate operator removal.
+        # set missing a topic that is already routing, and silently stop
+        # delivering it. The test is "LOSES a previously accepted topic", not
+        # "is a strict subset": the fall-through ADDS the project-directory
+        # topic, so a degraded Slack-only team is not a subset of what it had
+        # and a subset test would wave it through. With a workspace file a
+        # shrink is a legitimate operator removal and is applied.
         if not authorize and previous:
             declared = None
             try:
                 declared = workspace_subscriptions(project_path)
+            except WorkspaceSubscriptionsError:
+                raise
             except Exception:
                 declared = None
-            if declared is None and set(desired) < set(previous):
+            lost = [t for t in previous if t not in desired]
+            if declared is None and lost:
                 log.warning(
                     "Skipping subscription re-assert for %s: source detection "
-                    "returned %d topic(s), a strict subset of the %d already "
-                    "accepted; leaving routing alone",
-                    session_name, len(desired), len(previous),
+                    "dropped %d already-accepted topic(s) %s; leaving routing "
+                    "alone", session_name, len(lost), lost,
                 )
                 return {"status": "skipped", "reason": "degraded_detection",
                         "subscriptions": desired}

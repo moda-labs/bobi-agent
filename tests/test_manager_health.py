@@ -530,3 +530,56 @@ class TestSubscriptionRoutes:
     def test_an_unknown_post_path_is_404(self, tmp_path):
         port, token, _ = self._start(tmp_path)
         assert self._request(port, "/nope", token=token, method="POST")[0] == 404
+
+    def test_the_token_is_never_observable_at_a_wider_mode(self, tmp_path):
+        """Codex review F2.
+
+        `write_secret` writes the file and chmods it AFTERWARDS, so on a 022
+        umask the secret is readable at 0644 in between and permanently so if
+        the process dies there. Here the token IS the boundary for a server
+        that may bind 0.0.0.0, so it is created at 0600.
+        """
+        import stat
+
+        state = tmp_path / "state"
+        state.mkdir(parents=True)
+        path = state / "manager-health.token"
+
+        observed = []
+        real_write = os.write
+
+        def _watch(fd, data):
+            # Mode at the instant the bytes land, not after the call returns.
+            try:
+                observed.append(stat.S_IMODE(os.fstat(fd).st_mode))
+            except OSError:
+                pass
+            return real_write(fd, data)
+
+        prior = os.umask(0o022)
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(os, "write", _watch)
+                token = manager_health._mint_token(path)
+        finally:
+            os.umask(prior)
+
+        assert token
+        assert observed == [0o600]
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_minting_replaces_a_leftover_world_readable_token(self, tmp_path):
+        """O_CREAT does not apply its mode to an EXISTING inode, so a file left
+        at 0644 by an older version would keep that mode."""
+        import stat
+
+        state = tmp_path / "state"
+        state.mkdir(parents=True)
+        path = state / "manager-health.token"
+        path.write_text("stale")
+        os.chmod(path, 0o644)
+
+        token = manager_health._mint_token(path)
+        assert token != "stale"
+        assert path.read_text() == token
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600

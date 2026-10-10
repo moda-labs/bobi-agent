@@ -291,6 +291,32 @@ def _configured_port() -> int:
     return port
 
 
+def _mint_token(path: Path) -> str:
+    """Mint the reload token, created at mode 0600 rather than chmod'd after.
+
+    Deliberately NOT `webui_common.launcher.write_secret`: that writes the file
+    and chmods it afterwards, so on a 022 umask the secret is observable at 0644
+    in between, and permanently so if the process dies there. For the local UIs
+    the loopback Host guard is the primary boundary; here the token IS the
+    boundary for a server that may bind 0.0.0.0. `events.state.save_bubble_state`
+    is the house precedent for a secret whose confidentiality depends on its
+    mode (CLAUDE.md names it as the one exception to the fsutil rule).
+    """
+    import secrets
+
+    token = secrets.token_urlsafe(24)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Unlink first: O_CREAT does not apply its mode to an EXISTING inode, so a
+    # leftover world-readable file from an older version would keep its mode.
+    path.unlink(missing_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, token.encode())
+    finally:
+        os.close(fd)
+    return token
+
+
 def start(state_dir: Path, project_name: str,
           session_status_fn=None, manager_session: str | None = None,
           manager_status_fn=None) -> int:
@@ -323,12 +349,8 @@ def start(state_dir: Path, project_name: str,
     else:
         manager_block_fn = lambda: _manager_block_from_registry(manager_session)
 
-    # Function-local, as bobi/service.py already imports this module's
-    # neighbours, so a UI-only dependency never loads on the manager boot path.
-    from bobi.webui_common.launcher import write_secret
-
     token_file = state_dir / "manager-health.token"
-    token = write_secret(token_file)
+    token = _mint_token(token_file)
 
     handler = _make_handler(manager_pid, project_name, status_fn,
                             manager_block_fn, manager_session, token)

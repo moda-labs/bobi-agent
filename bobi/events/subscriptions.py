@@ -46,6 +46,37 @@ WORKSPACE_SUBSCRIPTIONS_HEADER = """\
 """
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """A SafeLoader that REJECTS a duplicate mapping key.
+
+    `yaml.safe_load` silently keeps the last one, so
+
+        subscribe:
+          - github:o/keep
+        subscribe: []
+
+    would parse as an authoritative "subscribe to nothing" and unsubscribe the
+    team from everything. That is precisely the fail-closed hazard this
+    validator exists for, and it is one more reason the permissive pack parser
+    is not reused here.
+    """
+
+
+def _no_duplicate_keys(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise yaml.constructor.ConstructorError(
+                None, None, f"duplicate key {key!r}", key_node.start_mark)
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicate_keys)
+
+
 class WorkspaceSubscriptionsError(Exception):
     """``workspace/subscriptions.yaml`` exists but is not a valid document.
 
@@ -115,7 +146,7 @@ def workspace_subscriptions(project_path: Path) -> list[str] | None:
         raise WorkspaceSubscriptionsError(path, "is a directory, not a file") from exc
 
     try:
-        doc = yaml.safe_load(raw_text)
+        doc = yaml.load(raw_text, Loader=_StrictLoader)
     except yaml.YAMLError as exc:
         raise WorkspaceSubscriptionsError(path, f"is not valid YAML: {exc}") from exc
 
@@ -154,6 +185,30 @@ def workspace_subscriptions(project_path: Path) -> list[str] | None:
                 path, f"declares duplicate topic {topic!r}")
         topics.append(topic)
     return topics
+
+
+def sanitize_seed_topics(topics) -> tuple[list[str], list[str]]:
+    """Return (usable topics, dropped topics) for a list the operator did not type.
+
+    The pack `subscribe:` parser is permissive: it tolerates a duplicate and an
+    `inbox/`/`reply/` topic, both of which this file's STRICT reader rejects. The
+    first `subscriptions add` seeds from that list, so without this the CLI could
+    write a document its own reader fails on - and `remove` could not repair it,
+    because the argument check refuses to name a forbidden topic.
+    """
+    kept: list[str] = []
+    dropped: list[str] = []
+    for raw in topics:
+        try:
+            topic = validate_topic(raw, where="seeded topic")
+        except ValueError:
+            dropped.append(str(raw))
+            continue
+        if topic in kept:
+            dropped.append(topic)
+            continue
+        kept.append(topic)
+    return kept, dropped
 
 
 def render_workspace_subscriptions(topics: list[str]) -> str:
@@ -226,6 +281,12 @@ def discover_subscriptions(project_path: Path) -> list[str]:
         explicit = explicit_subscriptions(project_path)
         if explicit:
             return explicit
+    except WorkspaceSubscriptionsError:
+        # Never swallowed. The file is read twice - once above, and again inside
+        # `explicit_subscriptions`, which this call site must keep using per the
+        # D078 one-parser pin - so a hand edit landing between the two reads
+        # would otherwise reach the fall-through below.
+        raise
     except Exception:
         # An unreadable agent.yaml falls through to auto-detection rather than
         # failing the whole discovery — the pre-consolidation behavior here.

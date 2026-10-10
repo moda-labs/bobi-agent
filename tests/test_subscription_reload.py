@@ -573,3 +573,51 @@ def test_an_applied_reload_names_every_change_not_just_the_topic_typed(
     assert body["added_topics"] == ["github:o/three"]
     assert body["removed_topics"] == ["github:o/two"]
     assert EVENT_PROTOCOL
+
+
+@patch("bobi.events.drain.drain_loop")
+@patch("bobi.events.client.EventServerClient")
+def test_degraded_detection_also_catches_a_non_subset_fall_through(
+        mock_client, _drain, project):
+    """Codex review F1.
+
+    A strict-subset test waves this through. When detection fails on a
+    Slack-only team, `discover_subscriptions` falls through to
+    `[project_path.name]`, which ADDS a topic: the new set is NOT a subset of
+    what was accepted, so the reconnect would have PUT it and dropped Slack
+    routing. The guard tests "loses a previously accepted topic" instead.
+    """
+    session = _manager(project)
+    paths.agent_yaml_path(project).write_text(
+        "agent: test\nentry_point: manager\n"
+        f"event_server: {REMOTE_URL}\n"
+        "subscribe:\n  - slack:T1:app:A1:C1\n"
+    )
+    _saved_deployment(project, session)
+    _bubble(project)
+
+    captured = []
+
+    def handler(request):
+        captured.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    with patch.object(pooled, "_client",
+                      httpx.Client(transport=httpx.MockTransport(handler))):
+        _start_event_subscription(session, [], project)
+        controller = get_live_subscription(session)
+        assert "slack:T1:app:A1:C1" in controller.accepted
+        before = len(_replaced(captured))
+
+        # Detection degrades to nothing, so discovery falls through to the
+        # project directory name - a DIFFERENT topic, not a subset.
+        paths.agent_yaml_path(project).write_text(
+            "agent: test\nentry_point: manager\n"
+            f"event_server: {REMOTE_URL}\n"
+        )
+        body = controller.reload(authorize=False)
+
+    assert body["status"] == "skipped"
+    assert body["reason"] == "degraded_detection"
+    assert project.name in body["subscriptions"]       # the fall-through topic
+    assert len(_replaced(captured)) == before           # and NO PUT went out
