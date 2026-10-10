@@ -180,14 +180,45 @@ def subscription_credentials_status(
     return CredentialStatus(False, f"unsupported credential schema '{kind}'")
 
 
-def credentials_path(home: Path | None = None) -> Path:
-    """Path to the active brain's subscription OAuth credentials on the volume.
+def _resolve_target_kind(target: str | None) -> str | None:
+    """The login-spec kind *target* names, validated. None means "the brain's".
+
+    Validated against the login specs and not the brain registry: `_active_spec`
+    falls back to Claude for any unrecognized value, so an unvalidated target
+    would silently run the *Claude* flow - a guard bypass rather than a closed
+    input. The brain registry is the wrong allow-list: it carries `stub`, and
+    it misses the two aliases the rest of the tree honours (`gateway` ->
+    claude, `gateway-openai` -> codex).
+    """
+    if not target:
+        return None
+    kind = normalize_brain_kind(target)
+    if kind not in _SPECS:
+        raise RuntimeError(
+            f"login target '{target}' is not one of: {', '.join(sorted(_SPECS))}"
+        )
+    return kind
+
+
+def _spec_for(target: str | None) -> SubscriptionLogin:
+    """The login spec for *target*, or this process's brain when it is None."""
+    kind = _resolve_target_kind(target)
+    return _SPECS[kind] if kind else _active_spec()
+
+
+def credentials_path(home: Path | None = None, *,
+                     target: str | None = None) -> Path:
+    """Path to a subscription OAuth credential on the volume.
+
+    Defaults to the active brain's; *target* names a login spec instead, which
+    is what makes a pre-check for `login-bootstrap codex` read codex's file
+    rather than the brain's.
 
     Claude and Codex each support a provider-specific config directory override.
     Use it when present; otherwise retain the historical ``$HOME``-relative
     fallback used by local callers and tests.
     """
-    spec = _active_spec()
+    spec = _spec_for(target)
     if spec.credentials_dir_env:
         configured_dir = os.environ.get(spec.credentials_dir_env)
         if configured_dir:
@@ -196,11 +227,12 @@ def credentials_path(home: Path | None = None) -> Path:
     return Path(base, *spec.creds_relpath)
 
 
-def credentials_exist(home: Path | None = None) -> bool:
-    """True when the active brain has locally refreshable subscription OAuth."""
-    spec = _active_spec()
+def credentials_exist(home: Path | None = None, *,
+                      target: str | None = None) -> bool:
+    """True when locally refreshable subscription OAuth is already on disk."""
+    spec = _spec_for(target)
     return subscription_credentials_status(
-        credentials_path(home), spec.kind,
+        credentials_path(home, target=target), spec.kind,
     ).valid
 
 
@@ -1197,17 +1229,7 @@ def run_bootstrap(
     # spec lookups below (and the spawned login subprocess).
     cfg = Config.load(project_path)
 
-    # Validate the target against the login specs, not the brain registry.
-    # `_active_spec` falls back to Claude for any unrecognized value, so an
-    # unvalidated target would silently run the *Claude* flow - a guard bypass
-    # rather than a closed input. The brain registry is the wrong allow-list:
-    # it carries `stub`, and it misses the two aliases the rest of the tree
-    # honours (`gateway` -> claude, `gateway-openai` -> codex).
-    resolved_kind = normalize_brain_kind(target) if target else None
-    if target and resolved_kind not in _SPECS:
-        raise RuntimeError(
-            f"login target '{target}' is not one of: {', '.join(sorted(_SPECS))}"
-        )
+    resolved_kind = _resolve_target_kind(target)
     # Both brain-credential refusals below are arguments about *Claude's
     # credential path*, not about whether an argument was supplied. Scoping
     # them by the resolved provider newly permits exactly one case:

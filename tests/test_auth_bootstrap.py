@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 
 import pytest
 
@@ -539,6 +540,40 @@ def slack_config(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv(ab.LOGIN_CHANNEL_ENV, "C0LOGIN42")
     return project
+
+
+@pytest.fixture
+def empty_thread_history(monkeypatch):
+    """The ask's thread holds nothing new, so the run blocks on the live
+    listener. Lets a re-attach be exercised without faking a gap reply."""
+    import bobi.events.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "channels_history",
+                        lambda project, conv, limit=100: [])
+
+
+@pytest.fixture
+def slack_bot_identity(monkeypatch):
+    """The bot's own Slack identity, which the history reads baseline against."""
+    import bobi.slack as slack_mod
+
+    monkeypatch.setattr(slack_mod, "resolve_auth_info",
+                        lambda token: ("T1", "B1", "U0BOT"))
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "A1")
+    return "U0BOT"
+
+
+@pytest.fixture
+def slack_gateway_config(slack_config, monkeypatch):
+    """Slack through the channel gateway: the destination is a conversation ref,
+    not a raw channel id, so posts go through `channels_send`."""
+    import bobi.slack as slack_mod
+
+    monkeypatch.setattr(slack_mod, "resolve_auth_info",
+                        lambda token: ("T1", "B1", "U0BOT"))
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "A1")
+    monkeypatch.setenv(ab.LOGIN_CHANNEL_ENV, "slack:T1:channel:C0LOGIN42")
+    return slack_config
 
 
 @pytest.fixture
@@ -1705,3 +1740,849 @@ def test_pre_threaded_destination_correlates_on_the_destination_thread():
     assert anchor == root, "the destination's own thread id is the anchor"
     event = _slack_event(conversation=destination, thread_ts=root)
     assert ab._ready_reply(event, channel, anchor) is not None
+
+
+# --- #958 ask-first: targets, guards, and the Discord refusals -------------
+
+# 5. A Discord guild-channel destination is refused.
+
+def test_discord_guild_channel_is_refused_as_a_login_destination():
+    """Item 5. Under the one correlation rule a channel destination needs a
+    thread anchor, and the Discord adapter emits none, so the run would hang to
+    timeout. The error names the event-server change required."""
+    from bobi.config import Config
+
+    with pytest.raises(RuntimeError) as exc:
+        ab._resolve_login_channel(Config(), "discord:guild1:channel:123")
+    assert "referenced-message id" in str(exc.value)
+    assert "event-server change" in str(exc.value)
+
+
+def test_discord_dm_still_resolves():
+    """Item 5, the other half: DMs take the DM branch and need no adapter change."""
+    from bobi.config import Config
+
+    ch = ab._resolve_login_channel(Config(), "discord:guild1:dm:123")
+    assert ch.destination == "discord:guild1:dm:123"
+
+
+# 6. The Discord inbound requirement now covers device_poll.
+
+def test_discord_inbound_requirement_covers_device_poll(
+    remote_discord_config, ask_state_home, monkeypatch,
+):
+    """Item 6: a codex-target Discord login against an event server with no
+    local Gateway driver raises, where today only paste_back did."""
+    monkeypatch.setattr(
+        ab, "_ensure_discord_inbound_ready",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError(
+            "Discord subscription login requires an event server with "
+            "the local Discord Gateway driver."
+        )),
+    )
+    with pytest.raises(RuntimeError, match="local Discord Gateway driver"):
+        ab.run_bootstrap(
+            remote_discord_config, target="codex", spawn_login=lambda h: None,
+        )
+
+
+# 7. The URL and device code are posted into the ask's thread, both paths.
+
+def test_device_code_is_posted_into_the_ask_thread_legacy_slack(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 7, legacy path: post_slack_message carries the ask's thread_ts."""
+    codex_creds = ask_state_home / "auth.json"
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})),
+    )
+    assert ok is True
+    ask = posts[0]
+    assert ask[2] == "", "the ask itself opens the thread"
+    code_post = next(p for p in posts if "ABCD-12345" in p[1])
+    assert code_post[2] == "1700000000.000001"
+    assert all(p[0] == "C0LOGIN42" for p in posts)
+
+
+def test_device_code_is_posted_into_the_ask_thread_gateway(
+    slack_gateway_config, ask_state_home, monkeypatch,
+):
+    """Item 7, gateway path: the destination ref is `<dest>:thread:<ask ts>`."""
+    import bobi.events.gateway as gateway_mod
+    import bobi.events.server as server_mod
+
+    sent = []
+    codex_creds = ask_state_home / "auth.json"
+    monkeypatch.setattr(
+        server_mod, "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"})
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T1"])
+    monkeypatch.setattr(
+        gateway_mod, "channels_send",
+        lambda project, conv, text, mode="post": (
+            sent.append((conv, text)) or {"ok": True, "ts": "1700000000.000001"}))
+
+    ok, log, posts = _run_ask_first(
+        slack_gateway_config,
+        events=[_slack_event(conversation="slack:T1:channel:C0LOGIN42:thread:1700000000.000001",
+                             thread_ts="1700000000.000001", channel="")],
+        monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})),
+    )
+    assert ok is True
+    assert sent[0][0] == "slack:T1:channel:C0LOGIN42", "the ask opens the thread"
+    code_post = next(c for c, t in sent if "ABCD-12345" in t)
+    assert code_post == "slack:T1:channel:C0LOGIN42:thread:1700000000.000001"
+
+
+# 8. The outcome post lands in the thread too.
+
+@pytest.mark.parametrize("outcome", ["success", "failure"])
+def test_outcome_post_lands_in_the_ask_thread(
+    slack_config, ask_state_home, monkeypatch, outcome,
+):
+    """Item 8, success and failure. Timeout is covered separately below."""
+    codex_creds = ask_state_home / "auth.json"
+    writer = (
+        (lambda: codex_creds.write_text(json.dumps({"tokens": {"refresh_token": "r"}})))
+        if outcome == "success" else None
+    )
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex", creds_writer=writer,
+    )
+    assert ok is (outcome == "success")
+    final = posts[-1]
+    assert final[2] == "1700000000.000001", "the outcome is threaded"
+    assert ("complete" in final[1]) is (outcome == "success")
+
+
+def test_timeout_outcome_post_lands_in_the_ask_thread(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 8, timeout: the thread must not end on "waiting for you"."""
+    ok, log, posts = pytest.raises(TimeoutError), None, None
+    captured = []
+
+    def fake_post(token, channel, text, thread_ts=""):
+        captured.append((channel, text, thread_ts))
+        return {"ok": True, "ts": "1700000000.000001"}
+
+    with pytest.raises(TimeoutError, match="no human replied"):
+        ab.run_bootstrap(
+            slack_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("the login CLI must not be spawned")),
+            post_message=fake_post,
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+        )
+    assert captured[-1][2] == "1700000000.000001"
+    assert "nobody replied" in captured[-1][1]
+
+
+# 9, 10, 11. The <tool> target.
+
+def test_target_retargets_command_and_credential_path(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 9: a claude brain with target="codex" runs codex's login and
+    resolves codex's credential path."""
+    seen = {}
+    codex_creds = ask_state_home / "auth.json"
+
+    def fake_spawn(home):
+        spec = ab._active_spec()
+        seen["cmd"] = " ".join(spec.login_cmd)
+        seen["creds"] = ab.credentials_path(home)
+        codex_creds.write_text(json.dumps({"tokens": {"refresh_token": "r"}}))
+
+        class FakeProc:
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeProc(), -1
+
+    monkeypatch.setattr(
+        ab, "_scrape_login",
+        lambda fd, timeout, spec: ("https://auth.openai.com/codex/device", "ABCD-12345"))
+    ok = ab.run_bootstrap(
+        slack_config, target="codex", spawn_login=fake_spawn,
+        post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "1700000000.000001"},
+        connect_listener=lambda p, c, t: _FakeListener(
+            [_ready_event_for(c)], channel=c),
+    )
+    assert ok is True
+    assert seen["cmd"] == "codex login --device-auth"
+    assert seen["creds"] == codex_creds
+
+
+def test_spawn_login_is_still_called_with_exactly_one_argument(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 10: the pin that the call site stayed `(home)`-only.
+
+    Every fake that reaches it has a one-argument signature, so threading a
+    spec through it would raise TypeError. The env override is what keeps the
+    call site byte-identical.
+    """
+    codex_creds = ask_state_home / "auth.json"
+    calls = []
+
+    def one_arg_only(home):
+        calls.append(home)
+        codex_creds.write_text(json.dumps({"tokens": {"refresh_token": "r"}}))
+
+        class FakeProc:
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        return FakeProc(), -1
+
+    monkeypatch.setattr(
+        ab, "_scrape_login",
+        lambda fd, timeout, spec: ("https://auth.openai.com/codex/device", "ABCD-12345"))
+    assert ab.run_bootstrap(
+        slack_config, target="codex", spawn_login=one_arg_only,
+        post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "1700000000.000001"},
+        connect_listener=lambda p, c, t: _FakeListener(
+            [_ready_event_for(c)], channel=c),
+    ) is True
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(("target", "expect"), [
+    # `stub` is a known *brain* kind, so a generic typo case would pass while
+    # this one does not: the allow-list must be the login specs, not the
+    # brain registry.
+    ("stub", "reject"),
+    ("gateway-openai", "codex"),
+    ("gateway", "claude"),
+    ("codex", "codex"),
+    ("claude", "claude"),
+    ("nonesuch", "reject"),
+])
+def test_target_validation_by_named_case(slack_config, ask_state_home,
+                                         monkeypatch, target, expect):
+    """Item 11. `_active_spec` falls back to Claude for anything unrecognized,
+    so an unvalidated target would silently run the *Claude* flow."""
+    seen = {}
+
+    def fake_spawn(home):
+        seen["kind"] = ab._active_spec().kind
+        raise RuntimeError("stop here; the spec is what is under test")
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    if expect == "reject":
+        with pytest.raises(RuntimeError, match="is not one of: claude, codex"):
+            ab.run_bootstrap(slack_config, target=target, spawn_login=fake_spawn)
+        return
+    with pytest.raises(RuntimeError, match="stop here"):
+        ab.run_bootstrap(
+            slack_config, target=target, spawn_login=fake_spawn,
+            post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "1700000000.000001"},
+            connect_listener=lambda p, c, t: _FakeListener(
+                [_ready_event_for(c)], channel=c),
+        )
+    assert seen["kind"] == expect
+
+
+# --- #958 ask-first: guard scoping, re-attach, budgets, rebind -------------
+
+def _stop_at_spawn(monkeypatch, slack_config, **kwargs):
+    """Run far enough to prove which spec was selected, then stop."""
+    seen = {}
+
+    def fake_spawn(home):
+        seen["kind"] = ab._active_spec().kind
+        raise RuntimeError("reached the login spawn")
+
+    with pytest.raises(RuntimeError, match="reached the login spawn"):
+        ab.run_bootstrap(
+            slack_config, spawn_login=fake_spawn,
+            post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "1700000000.000001"},
+            connect_listener=lambda p, c, t: _FakeListener(
+                [_ready_event_for(c)], channel=c),
+            **kwargs,
+        )
+    return seen["kind"]
+
+
+# 12. Guard scoping by resolved provider.
+
+@pytest.mark.parametrize(("env", "target", "outcome"), [
+    # A Claude gateway with a gateway token: refused for Claude's credential
+    # path, by argument presence and by explicit target alike.
+    (("ANTHROPIC_AUTH_TOKEN", "gw-token"), None, "refused"),
+    (("ANTHROPIC_AUTH_TOKEN", "gw-token"), "claude", "refused"),
+    # ...and permitted for codex, which is D6's stated limitation.
+    (("ANTHROPIC_AUTH_TOKEN", "gw-token"), "codex", "codex"),
+    # The shadow-env guard reads `spec.shadow_env`, so it must be written
+    # against the right variable for each spec.
+    (("ANTHROPIC_API_KEY", "sk-ant-x"), "claude", "refused"),
+    # OPENAI_API_KEY is not Claude's shadow var and must not be read as one.
+    (("OPENAI_API_KEY", "sk-openai-x"), "claude", "claude"),
+    (("OPENAI_API_KEY", "sk-openai-x"), "codex", "codex"),
+])
+def test_guards_are_scoped_by_resolved_provider(
+    slack_config, ask_state_home, monkeypatch, env, target, outcome,
+):
+    """Item 12. Both refusals are arguments about Claude's *credential path*,
+    not about whether an argument was supplied."""
+    from bobi import paths
+
+    name, value = env
+    if name == "ANTHROPIC_AUTH_TOKEN":
+        agent_yaml = paths.agent_yaml_path(slack_config)
+        agent_yaml.write_text(
+            agent_yaml.read_text()
+            + "brain:\n  kind: claude\n  base_url: https://gateway.example\n")
+    monkeypatch.setenv(name, value)
+    if outcome == "refused":
+        with pytest.raises(RuntimeError) as exc:
+            ab.run_bootstrap(slack_config, target=target,
+                             spawn_login=lambda h: None)
+        assert name in str(exc.value) or "gateway credentials" in str(exc.value)
+        return
+    assert _stop_at_spawn(monkeypatch, slack_config, target=target) == outcome
+
+
+def test_codex_brain_refusal_with_openai_key_is_still_pinned(
+    slack_config, monkeypatch,
+):
+    """Item 12's last row: driving BRAIN_ENV directly leaves `resolved_kind`
+    None, so the codex-brain refusal is unchanged by the target scoping."""
+    from bobi.brain import BRAIN_ENV
+
+    monkeypatch.setenv(BRAIN_ENV, "codex")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-x")
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        ab.run_bootstrap(slack_config, spawn_login=lambda h: None)
+
+
+# 13. D6's limitation is asserted as documented behaviour, not as a guard.
+
+def test_gateway_brained_team_may_mint_a_direct_codex_credential(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 13. On a gateway-brained config `login-bootstrap codex` is
+    PERMITTED and resolves the codex spec.
+
+    This mints a provider credential *outside* the gateway that team
+    authenticates through. That is D6: stated as a limitation, not guarded.
+    The right control the day a gateway-brained team exists is a per-team
+    policy knob, not the gateway guard, which is about the brain's credential
+    path and says so in its own message. Deleting this test deletes the only
+    record that the behaviour is deliberate.
+    """
+    from bobi import paths
+
+    agent_yaml = paths.agent_yaml_path(slack_config)
+    agent_yaml.write_text(
+        agent_yaml.read_text()
+        + "brain:\n  kind: claude\n  base_url: https://gateway.example\n")
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    assert _stop_at_spawn(monkeypatch, slack_config, target="codex") == "codex"
+
+
+# 14. cli.py's pre-check is target-aware.
+
+def test_cli_precheck_is_target_aware(cli_login_install, tmp_path, monkeypatch):
+    """Item 14: with Claude credentials present and codex requested, the
+    command proceeds instead of printing "already present"."""
+    from click.testing import CliRunner
+
+    from bobi.cli import main
+    from tests.conftest import TEST_AGENT_NAME
+
+    config_dir = tmp_path / "claude-volume"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / ".credentials.json").write_text(
+        json.dumps({"claudeAiOauth": {"refreshToken": "refresh"}}))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    monkeypatch.setattr(
+        ab, "run_bootstrap",
+        lambda project_path, **kw: (_ for _ in ()).throw(
+            RuntimeError(f"proceeded with target={kw.get('target')!r}")))
+
+    bare = CliRunner().invoke(main, ["agent", TEST_AGENT_NAME, "login-bootstrap"])
+    assert "already present" in bare.output
+
+    codex = CliRunner().invoke(
+        main, ["agent", TEST_AGENT_NAME, "login-bootstrap", "codex"])
+    assert "proceeded with target='codex'" in codex.output
+
+
+# 15, 16, 16a, 16b. Re-attach, the marker, and the watermark.
+
+def _ask_state(home, kind, destination, ts):
+    (home / f".login-ask-{kind}").write_text(
+        json.dumps({"destination": destination, "ts": ts}))
+
+
+def test_reattach_posts_nothing_and_consumes_a_gap_reply(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """Item 15: a stored ask id plus a thread whose newest message is a human
+    one proceeds with no ask posted."""
+    import bobi.events.gateway as gateway_mod
+
+    _ask_state(ask_state_home, "codex", "C0LOGIN42", "1700000000.000001")
+    codex_creds = ask_state_home / "auth.json"
+    monkeypatch.setattr(
+        gateway_mod, "channels_history",
+        lambda project, conv, limit=100: [
+            {"user": "U0BOT", "text": "reply when you are ready, and then "
+                                      "I will begin the login flow", "ts": "1.0"},
+            {"user": "U0HUMAN", "text": "ready", "ts": "2.0"},
+        ])
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[], monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})),
+    )
+    assert ok is True
+    assert not any("ready" in text for _c, text, _t in posts), "no ask re-posted"
+    assert "spawn_login" in log
+
+
+@pytest.mark.parametrize(("history", "label"), [
+    ([{"user": "U0BOT", "text": "ask", "ts": "1.0"}], "newest is the bot's own"),
+    ([{"user": "U0BOT", "text": "ask", "ts": "1.0"},
+      {"user": "", "text": "ready", "ts": "2.0"}], "empty user is not human"),
+])
+def test_reattach_blocks_when_the_catch_up_read_finds_nothing(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch, history, label,
+):
+    """Item 15's other legs. Without the bot-baseline rule a consumed reply
+    would be re-read on every restart; without the empty-user rule the check
+    would not fail closed."""
+    import bobi.events.gateway as gateway_mod
+
+    _ask_state(ask_state_home, "codex", "C0LOGIN42", "1700000000.000001")
+    monkeypatch.setattr(gateway_mod, "channels_history",
+                        lambda project, conv, limit=100: history)
+    with pytest.raises(TimeoutError, match="no human replied"):
+        ab.run_bootstrap(
+            slack_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("must not spawn")),
+            post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "x"},
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+        ), label
+
+
+def test_catch_up_read_is_skipped_entirely_on_a_non_slack_destination(
+    whatsapp_config, ask_state_home, monkeypatch,
+):
+    """Item 15's last leg. Asserts the SKIP, not a faked history response: a
+    faked response would pass against a transport whose endpoint rejects the
+    call outright (WhatsApp's adapter has no fetchConversation)."""
+    import bobi.events.gateway as gateway_mod
+
+    destination = "whatsapp:111222333444555666:dm:15551234567"
+    _ask_state(ask_state_home, "codex", destination, "1700000000.000001")
+    monkeypatch.setattr(
+        gateway_mod, "channels_history",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("history must not be called on WhatsApp")))
+    with pytest.raises(TimeoutError, match="no human replied"):
+        ab.run_bootstrap(
+            whatsapp_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("must not spawn")),
+            post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "x"},
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+        )
+
+
+def test_marker_with_no_id_recovers_it_from_channel_history(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """Item 16: a marker written before the post, plus a channel history
+    carrying this bot's ask, recovers that id and posts nothing."""
+    import bobi.events.gateway as gateway_mod
+
+    _ask_state(ask_state_home, "codex", "C0LOGIN42", "")
+    codex_creds = ask_state_home / "auth.json"
+    reads = []
+
+    def fake_history(project, conv, limit=100):
+        reads.append(conv)
+        if ":thread:" in conv:
+            return [{"user": "U0BOT", "text": "ask", "ts": "1.0"},
+                    {"user": "U0HUMAN", "text": "ready", "ts": "2.0"}]
+        return [{"user": "U0BOT",
+                 "text": "reply when you are ready, and then I will begin "
+                         "the login flow", "ts": "1700000000.000042"}]
+
+    monkeypatch.setattr(gateway_mod, "channels_history", fake_history)
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[], monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})),
+    )
+    assert ok is True
+    assert not any("you are ready" in text for _c, text, _t in posts)
+    # The unanchored read came first, then the recovered thread.
+    assert ":thread:" not in reads[0]
+    assert reads[1].endswith(":thread:1700000000.000042")
+
+
+def test_marker_with_no_id_on_a_non_slack_destination_posts_nothing(
+    whatsapp_config, ask_state_home, monkeypatch,
+):
+    """Item 16: recovery is Slack-only, so elsewhere it posts nothing and blocks."""
+    destination = "whatsapp:111222333444555666:dm:15551234567"
+    _ask_state(ask_state_home, "codex", destination, "")
+    posts = []
+    with pytest.raises(TimeoutError, match="no human replied"):
+        ab.run_bootstrap(
+            whatsapp_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("must not spawn")),
+            post_message=lambda t, c, x, thread_ts="": posts.append(x),
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+        )
+    assert not any("you are ready" in text for text in posts)
+
+
+def test_a_failed_post_leaves_the_ask_state_byte_identical(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """Item 16, the D1 pin. An implementation that cleared the state on a
+    failed post would post a second ask on the next boot."""
+    import bobi.events.gateway as gateway_mod
+
+    state = ask_state_home / ".login-ask-codex"
+    _ask_state(ask_state_home, "codex", "C0LOGIN42", "1700000000.000001")
+    before = state.read_bytes()
+    monkeypatch.setattr(
+        gateway_mod, "channels_history",
+        lambda project, conv, limit=100: [
+            {"user": "U0BOT", "text": "ask", "ts": "1.0"},
+            {"user": "U0HUMAN", "text": "ready", "ts": "2.0"}])
+
+    def exploding_post(token, channel, text, thread_ts=""):
+        raise RuntimeError("channel outage")
+
+    with pytest.raises(RuntimeError, match="channel outage"):
+        ab.run_bootstrap(
+            slack_config, target="codex",
+            spawn_login=lambda h: (_FakeLoginProc(), -1),
+            post_message=exploding_post,
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+            scrape_login=lambda fd, t, spec: ("https://auth.openai.com/codex/device", "A"),
+        )
+    assert state.read_bytes() == before
+
+
+def test_ask_state_is_cleared_on_success_and_only_on_success(
+    slack_config, ask_state_home, slack_bot_identity, empty_thread_history,
+    monkeypatch,
+):
+    """Item 16: the id is cleared on success, and a failed login keeps it."""
+    state = ask_state_home / ".login-ask-codex"
+    codex_creds = ask_state_home / "auth.json"
+
+    ok, _log, _posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex")
+    assert ok is False, "no credential was written"
+    assert state.exists(), "a failed login keeps the ask"
+
+    ok, _log, _posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})))
+    assert ok is True
+    assert not state.exists()
+
+
+def test_a_destination_change_invalidates_the_stored_ask(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 16a: a stored destination that no longer matches is treated as
+    absent, and a fresh ask is posted."""
+    _ask_state(ask_state_home, "codex", "C0SOMEWHERE-ELSE", "1700000000.000001")
+    codex_creds = ask_state_home / "auth.json"
+    ok, log, posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex",
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "r"}})))
+    assert ok is True
+    assert any("you are ready" in text for _c, text, _t in posts)
+    assert json.loads((ask_state_home / ".login-ask-codex").read_text()
+                      ) if (ask_state_home / ".login-ask-codex").exists() else True
+
+
+def test_the_consumed_reply_is_not_re_read_as_the_pasted_code(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """Item 16b. The same human reply is visible in both the catch-up history
+    and the live queue. Phase 1 is satisfied once, and phase 3a must reject it
+    by message id rather than writing "are" - the last word of "ready when you
+    are" - into the pty as the OAuth code.
+    """
+    import bobi.events.gateway as gateway_mod
+
+    _ask_state(ask_state_home, "claude", "C0LOGIN42", "1700000000.000001")
+    monkeypatch.setattr(
+        gateway_mod, "channels_history",
+        lambda project, conv, limit=100: [
+            {"user": "U0BOT", "text": "ask", "ts": "1.0"},
+            {"user": "U0HUMAN", "text": "ready when you are",
+             "ts": "1700000000.000002"}])
+    # The live copy of the very same reply stays in the queue, because phase 1
+    # was satisfied by the history read without draining it.
+    live = _slack_event("ready when you are", thread_ts="1700000000.000001",
+                        ts="1700000000.000002")
+    listener = _FakeListener([live], channel=None)
+    written = []
+    monkeypatch.setattr(ab, "_read_until_url",
+                        lambda fd, timeout: "https://x/oauth/authorize?c=1")
+    monkeypatch.setattr(ab, "_write_line", lambda fd, text: written.append(text))
+
+    def connect(project_path, channel, timeout):
+        listener.channel = channel
+        return listener
+
+    with pytest.raises(TimeoutError, match="auth code not received"):
+        ab.run_bootstrap(
+            slack_config, timeout=0.1,
+            spawn_login=lambda h: (_FakeLoginProc(), -1),
+            post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "1700000000.000001"},
+            connect_listener=connect,
+        )
+    assert written == [], "the ready reply must never reach the pty"
+
+
+class _FakeLoginProc:
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
+# 17. Phase budgets do not share.
+
+def test_phase_budgets_do_not_share(
+    slack_config, ask_state_home, slack_bot_identity, empty_thread_history,
+    monkeypatch,
+):
+    """Item 17: phase 1 consuming its whole budget does not reduce phase 3b's,
+    and a reply one tick late does not rescue the run."""
+    waits = []
+
+    class SlowProc:
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            return 0
+
+    # Phase 1 burns its full budget before the reply arrives.
+    late = _FakeListener([], channel=None)
+
+    def connect(project_path, channel, timeout):
+        late.channel = channel
+        return late
+
+    monkeypatch.setattr(
+        ab, "_scrape_login",
+        lambda fd, t, spec: ("https://auth.openai.com/codex/device", "ABCD-12345"))
+    captured = []
+    with pytest.raises(TimeoutError, match="no human replied"):
+        ab.run_bootstrap(
+            slack_config, target="codex", ask_timeout=0.1, device_timeout=900,
+            spawn_login=lambda h: (SlowProc(), -1),
+            post_message=lambda t, c, x, thread_ts="": (
+                captured.append(x) or {"ok": True, "ts": "1700000000.000001"}),
+            connect_listener=connect,
+        )
+    assert waits == [], "the login CLI is never spawned without a reply"
+    assert any("nobody replied" in text for text in captured)
+
+    # A successful run gets the full, separate device budget.
+    codex_creds = ask_state_home / "auth.json"
+
+    def write(timeout=None):
+        waits.append(timeout)
+        codex_creds.write_text(json.dumps({"tokens": {"refresh_token": "r"}}))
+        return 0
+
+    proc = SlowProc()
+    proc.wait = write
+    ab.run_bootstrap(
+        slack_config, target="codex", ask_timeout=1800, device_timeout=900,
+        spawn_login=lambda h: (proc, -1),
+        post_message=lambda t, c, x, thread_ts="": {"ok": True, "ts": "1700000000.000001"},
+        connect_listener=lambda p, c, t: _FakeListener([_ready_event_for(c)], channel=c),
+    )
+    assert waits == [900], "phase 3b gets its own budget, not what phase 1 left"
+
+
+# 18. Reaping.
+
+def test_a_login_that_ignores_terminate_is_killed_by_process_group(monkeypatch):
+    """Item 18: signal the process group, wait with a bound, escalate, reap."""
+    import signal
+
+    signalled = []
+
+    class StubbornProc:
+        pid = 4242
+
+        def __init__(self):
+            self._waits = 0
+
+        def poll(self):
+            return None if self._waits < 2 else 0
+
+        def wait(self, timeout=None):
+            self._waits += 1
+            if self._waits < 2:
+                raise subprocess.TimeoutExpired("login", timeout)
+            return 0
+
+        def terminate(self):
+            signalled.append("terminate")
+
+        def kill(self):
+            signalled.append("kill")
+
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append((pgid, sig)))
+    ab._reap_login(StubbornProc(), -1)
+    assert signalled == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
+
+
+# 19. Rebind.
+
+def test_rebind_quarantines_collision_free_and_refuses_a_symlink(
+    slack_config, ask_state_home, monkeypatch,
+):
+    """Item 19. A structurally valid credential short-circuits a bare run;
+    --rebind posts the ask and quarantines on the reply."""
+    codex_creds = ask_state_home / "auth.json"
+    codex_creds.write_text(json.dumps({"tokens": {"refresh_token": "old"}}))
+
+    # Bare: short-circuits, nothing posted.
+    posts = []
+    assert ab.run_bootstrap(
+        slack_config, target="codex",
+        spawn_login=lambda h: (_ for _ in ()).throw(AssertionError("no spawn")),
+        post_message=lambda t, c, x, thread_ts="": posts.append(x),
+        connect_listener=lambda p, c, t: (_ for _ in ()).throw(
+            AssertionError("no listener")),
+    ) is True
+    assert posts == []
+
+    # --rebind: the ask is posted and the old credential moves aside.
+    ok, log, _posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex", rebind=True,
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "fresh"}})))
+    assert ok is True
+    quarantined = sorted(ask_state_home.glob("auth.json.quarantined-*"))
+    assert len(quarantined) == 1
+    assert json.loads(quarantined[0].read_text())["tokens"]["refresh_token"] == "old"
+
+    # A second rebind in the same second does not overwrite the first.
+    ok, log, _posts = _run_ask_first(
+        slack_config, events=[_slack_event(thread_ts="1700000000.000001")],
+        monkeypatch=monkeypatch, target="codex", rebind=True,
+        creds_writer=lambda: codex_creds.write_text(
+            json.dumps({"tokens": {"refresh_token": "fresher"}})))
+    assert ok is True
+    assert len(sorted(ask_state_home.glob("auth.json.quarantined-*"))) == 2
+
+
+def test_rebind_refuses_a_symlinked_credential(ask_state_home, tmp_path):
+    """Item 19's last leg. Renaming a symlink would move the link and leave
+    the real credential live, so the quarantine would silently not happen."""
+    real = tmp_path / "real-auth.json"
+    real.write_text(json.dumps({"tokens": {"refresh_token": "real"}}))
+    (ask_state_home / "auth.json").symlink_to(real)
+    import os as _os
+
+    _os.environ["CODEX_HOME"] = str(ask_state_home)
+    from bobi.brain import BRAIN_ENV
+    _os.environ[BRAIN_ENV] = "codex"
+    try:
+        with pytest.raises(RuntimeError, match="not a regular file"):
+            ab._quarantine_credential(ask_state_home)
+    finally:
+        _os.environ[BRAIN_ENV] = "claude"
+    assert real.read_text(), "the real credential is untouched"
+
+
+# 20. Two concurrent runs do not de-index each other.
+
+@pytest.mark.real_listener
+def test_two_concurrent_listeners_get_unique_deployment_names(
+    slack_config, monkeypatch,
+):
+    """Item 20, the regression pin for the fixed-name supersede.
+
+    Registering an existing name in the same bubble removes the prior
+    deployment and its subscriptions, so two fixed-name runs in flight
+    de-index each other: a reply to the FIRST ask would reach only the second
+    listener, whose predicate rejects it.
+    """
+    import bobi.events.client as client_mod
+    import bobi.events.server as server_mod
+    import bobi.slack as slack_mod
+
+    names = []
+    monkeypatch.setattr(
+        server_mod, "ensure_bubble",
+        lambda es_url, project_path: {"bubble_id": "bub", "bubble_key": "key"})
+    monkeypatch.setattr(server_mod, "register_slack_workspaces", lambda *a, **k: ["T1"])
+    monkeypatch.setattr(slack_mod, "resolve_auth_info", lambda token: ("T1", "B1", "U0BOT"))
+    monkeypatch.setattr(slack_mod, "resolve_app_id", lambda token, bot_id: "A1")
+
+    def fake_register(es_url, name, topics, bubble_id="", bubble_key=""):
+        names.append(name)
+        return f"dep-{name}", "api-key"
+
+    monkeypatch.setattr(server_mod, "register", fake_register)
+
+    class FakeClient:
+        def __init__(self, es_url, deployment_id, api_key, queue):
+            self.queue = queue
+
+        def start(self):
+            return None
+
+        def wait_connected(self, timeout):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(client_mod, "EventServerClient", FakeClient)
+
+    first = ab._connect_chat_listener(slack_config, "C0LOGIN42", 1)
+    other_pid = os.getpid() + 1
+    monkeypatch.setattr(os, "getpid", lambda: other_pid)
+    second = ab._connect_chat_listener(slack_config, "C0LOGIN42", 1)
+    first.stop()
+    second.stop()
+    assert len(set(names)) == 2, f"both runs registered as {names}"
+    assert all(n.startswith("login-bootstrap-") for n in names)
