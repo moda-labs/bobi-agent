@@ -63,6 +63,42 @@ def _isolate_environ():
 
 
 @pytest.fixture(autouse=True)
+def _no_outbound_operator_alert(monkeypatch):
+    """No test may post to the operator alert channel (conftest invariant).
+
+    ``brain_availability._emit`` alerts WATCHDOG_ALERT_CHANNEL on every
+    classified brain failure, and it swallows every exception, so on a box
+    where that channel and a bot token are both set the ordinary suite posts
+    real messages to a real operator channel AND still passes green. Six such
+    posts were measured across test_session, test_orchestrator and
+    test_subagent_blocking before this fixture existed.
+
+    Two layers, because either alone is defeatable. Clearing the channel closes
+    the env gate (nothing else in the tree reads that var, so the blast radius
+    is zero), and a transport recorder catches any path that reaches Slack
+    regardless of the gate. The recorder asserts at TEARDOWN, where no
+    ``except Exception`` in the code under test can swallow the failure - a
+    fixture that raises inside the call cannot fail these tests, which is how
+    the first version of this guard read as present while doing nothing.
+
+    A test that patches ``post_slack_message`` itself wins over the recorder
+    and is unaffected.
+    """
+    monkeypatch.delenv("WATCHDOG_ALERT_CHANNEL", raising=False)
+    attempted = []
+
+    def _record(token, channel, text, thread_ts="", **kwargs):
+        attempted.append((channel, text[:120]))
+        return {"ok": True}
+
+    monkeypatch.setattr("bobi.slack.post_slack_message", _record)
+    yield
+    assert not attempted, (
+        f"test reached the Slack transport: {attempted}"
+    )
+
+
+@pytest.fixture(autouse=True)
 def _clear_leaked_event_loop(request):
     """Prevent a leaked running event loop from poisoning async tests.
 

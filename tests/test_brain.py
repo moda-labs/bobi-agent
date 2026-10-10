@@ -1259,3 +1259,28 @@ class TestBrainFactoryContract:
 
         assert "codex" in str(exc.value)
         assert "AttributeError" not in str(exc.value)
+
+
+def test_successful_turn_discussing_an_outage_is_not_reclassified():
+    """A successful turn's own answer is not an error string (#992).
+
+    ``result`` on a successful turn is the agent's final message. The
+    availability markers include sentences this codebase writes constantly
+    ("you've hit your session limit", "not logged in"), so classifying a
+    successful result would flip the turn to is_error, discard the work at
+    ``orchestrator``/``subagent``, and open a false brain incident whose latch
+    then dedups away the next REAL outage on that account.
+    """
+    msg = _result(result=(
+        "Root cause: all 13 dispatches died on \"You've hit your session "
+        "limit\". Fix pushed."
+    ))
+    turn = _result_to_turn(msg)
+    assert turn.is_error is False
+    assert turn.error_kind == ""
+
+    # The same string on a turn the brain actually failed still classifies.
+    failed = _result_to_turn(_result(
+        is_error=True, result="You've hit your session limit · resets 12:40am",
+    ))
+    assert failed.error_kind == ERROR_KIND_CREDITS_EXHAUSTED

@@ -70,7 +70,8 @@ _SECRET_TOKEN = re.compile(
 # like "keep the credential safe" is left alone.
 _SECRET_KV = re.compile(
     r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token"
-    r"|auth[_-]?token|client[_-]?secret|bot[_-]?token)\b(\s*[:=]\s*)(\S+)"
+    r"|auth[_-]?token|refresh[_-]?token|client[_-]?secret|bot[_-]?token)"
+    r"\b(\s*[:=]\s*)(\S+)"
 )
 
 
