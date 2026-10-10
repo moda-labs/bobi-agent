@@ -6,7 +6,9 @@
 > **Size:** ~120 lines across 10 files in `bobi-agent`, plus ~25 lines of prompt and doc text in `moda-agents`.
 > Every design question is decided; no open forks remain.
 >
-> Every `file:line` below was read from a grep run against `origin/main` at `70db2e1059fdf8f35751b17806496cb91f427b09`.
+> Every `file:line` below was read from a grep run against `origin/main` at `70db2e1059fdf8f35751b17806496cb91f427b09`,
+> then re-verified at implementation time against this branch merged with `origin/main` at `8eef3fe4f13d927366b7b094ed3bc7ca15a88fc7`.
+> Only `bobi/slack.py` drifted: #1008 added one import, shifting its cited lines by +1, and the four citations are corrected above.
 > [Appendix A](#appendix-a-verification-record) is the verification record, including what was executed live.
 > Review reports are committed beside this file under [`plans/reviews/`](reviews/).
 
@@ -131,13 +133,13 @@ Five pieces, all in `bobi/auth_bootstrap.py`.
 
 **(a) Return the posted message id.**
 `_post_login_message` (`:382-390`) currently returns `None` and discards both post paths' results.
-Both already carry the id: the legacy Slack path returns `chat.postMessage`'s parsed body (`bobi/slack.py:474-481`), and the gateway path's `channels_send` documents `ts` as "the posted/updated message id" (`bobi/events/gateway.py:69-70`).
+Both already carry the id: the legacy Slack path returns `chat.postMessage`'s parsed body (`bobi/slack.py:475-482`), and the gateway path's `channels_send` documents `ts` as "the posted/updated message id" (`bobi/events/gateway.py:69-70`).
 Return it.
 
 **(b) Post into a thread.**
 Both paths already support it, so this is argument passing, not new transport.
 
-- Legacy: `post_slack_message` already takes `thread_ts` (`bobi/slack.py:478`).
+- Legacy: `post_slack_message` already takes `thread_ts` (`bobi/slack.py:479`).
 - Gateway: posting to a `<destination>:thread:<ts>` ref threads the message.
   The Slack channel adapter maps a parsed `threadId` straight onto `threadTs` (`event-server/core/src/channels.ts:338`), and `slack` declares `threads: true` (`:313`).
   The ref grammar is `<source>:<scope>:<chat_type>:<chat_id>[:thread:<thread_id>]` (`bobi/conversation.py:10`; `build_conversation` at `:32`).
@@ -443,7 +445,7 @@ Replay cannot cover it, because each `register` mints a fresh deployment with an
 So on re-attach, after the listener is live and before blocking, read the ask's thread once through `channels_history` (`bobi/events/gateway.py:96-103`).
 
 `/channels/history` returns `{user, text, ts}` per message, oldest-first, for the thread the ref anchors (`event-server/core/src/core.ts:2417-2419`, `event-server/core/src/channels.ts:379-409`, `ConversationMessage` at `:119-124`).
-A reply is fresh when its `ts` is greater than the newest message in the thread whose `user` **is** the bot's own user id, which `require_app_identity` already returns (`bobi/slack.py:302-303`).
+A reply is fresh when its `ts` is greater than the newest message in the thread whose `user` **is** the bot's own user id, which `require_app_identity` already returns (`bobi/slack.py:303-304`).
 A message with an empty `user` is not treated as human, so the rule fails closed.
 That matters: without it, a boot that already consumed the reply and then timed out mid-login would re-consume it on every restart and re-post a device code each time, which is the Slack noise D1 exists to prevent.
 
@@ -451,7 +453,7 @@ That matters: without it, a boot that already consumed the reply and then timed 
 It is the one piece of this design that is not transport-neutral, so it is scoped explicitly instead of being claimed to work everywhere:
 
 - **WhatsApp has no history at all.** Its channel adapter implements `send` and `uploadFiles` only (`event-server/core/src/channels.ts:471-571`), and `/channels/history` rejects an adapter with no `fetchConversation` outright (`event-server/core/src/core.ts:2437-2439`).
-- **Discord has history but no usable bot identity.** `discordConversationMessage` sets `user` to `author.username` and only falls back to `author.id` (`event-server/core/src/channels.ts:612-618`), while `require_app_identity` resolves Slack identifiers (`bobi/slack.py:302-316`), so the "newest message authored by this bot" baseline cannot be established.
+- **Discord has history but no usable bot identity.** `discordConversationMessage` sets `user` to `author.username` and only falls back to `author.id` (`event-server/core/src/channels.ts:612-618`), while `require_app_identity` resolves Slack identifiers (`bobi/slack.py:303-317`), so the "newest message authored by this bot" baseline cannot be established.
 
 On a non-Slack destination the catch-up read is **skipped**, and the F1 channel-scan recovery with it.
 The degradation is bounded and not a lost credential: the ask message still exists, the next boot still re-attaches and still blocks on the live listener, so a reply that landed in the restart gap simply has to be sent again.
