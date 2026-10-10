@@ -73,9 +73,9 @@ run on this PR.
 | Run | Result |
 |---|---|
 | Baseline, untouched main `8eef3fe4` | **7 failed, 5531 passed**, 11 skipped, 236s |
-| This branch | **7 failed, 5624 passed**, 11 skipped, 292s |
+| This branch | **7 failed, 5638 passed**, 11 skipped, 282s |
 
-Failure sets are byte-identical: **zero new failures, +93 tests**. All 7 are
+Failure sets are byte-identical: **zero new failures, +107 tests**. All 7 are
 pre-existing environmental failures on this box. Two of them
 (`test_homebrew_smoke_script_passes_shellcheck`,
 `test_team_packaging_versioned`) pass once `shellcheck` is on `PATH`; the
@@ -86,7 +86,12 @@ shellcheck 0.11.0 clean.
 
 Every new behaviour is proven by a named mutant: the change is applied, the
 test that must catch it is run and observed to **fail**, and the tree is
-restored and verified byte-identical. **25/25 caught.**
+restored and verified byte-identical. **33/33 caught.**
+
+The harness also gained a SIGTERM handler: a kill mid-run left one mutation on
+disk, and only a post-hoc content check over the fixed lines found it. A
+restore that depends on a `finally` is not enough when the process can be
+signalled.
 
 The harness requires a real `N failed` in the summary, not merely a non-zero
 exit: an empty `-k` selector also exits non-zero (rc 5, "N deselected"), which
@@ -119,3 +124,46 @@ scored one mutant as caught by a test that no longer existed.
 | M23 | Attempt the history read on a non-Slack destination | items 15, 24b |
 | M24 | `tool.yaml` reads the image `~/.codex` | item 25a |
 | M25 | `tool.yaml` clobbers an OAuth credential | item 25a |
+| M26 | The pasted code is accepted uncorrelated | R1 |
+| M27 | A failed initial post re-attaches instead of re-asking | R2 |
+| M28 | Ask-id recovery ignores the login kind | R5 |
+| M29 | `--rebind` re-attaches to stale state | R3 |
+| M30 | No outcome post when the login raises | R4 |
+| M31 | Discord `message_id` ignored | R6 |
+| M32 | A legacy DM destination treated as a channel | R8 |
+| M33 | The CLI pre-check raises outside the handler | R7 |
+
+## Review round
+
+The house review contract plus a codex adversarial pass produced 15 candidates.
+Nine verified; six were refuted as decisions the spec already records. Each fix
+carries a test and a mutant.
+
+| # | Finding | Severity | Test | Mutant |
+|---|---|---|---|---|
+| R1 | `_extract_code` applied no human-authorship and no anchor check, so a bot or an unrelated thread message in a shared login channel could supply the code written into the OAuth pty | BLOCKING | `T:test_the_pasted_code_is_correlated_like_the_ready_reply` (4 legs), `T:test_the_pasted_code_wait_uses_the_asks_anchor` | M26 |
+| R2 | A failed **initial** ask post left a marker with no id; the next boot re-attached with an empty anchor no reply can match, wedging shared-channel login permanently | BLOCKING | `T:test_a_failed_initial_ask_post_does_not_wedge_the_next_boot` | M27 |
+| R8 | A legacy Slack **DM** destination was classified as a channel, so it demanded an anchor a plain DM reply never carries. Ask-first could never start on `BOBI_LOGIN_CHANNEL=D...`, the only path that runs in production | BLOCKING | `T:test_a_legacy_destination_is_classified_by_its_id_shape`, `S:test_ready_predicate_handles_real_adapter_event` | M32 |
+| R9 | Items 26/27 could not pass: they read `CODEX_HOME` in a sibling shell, where the entrypoint's export cannot reach, and masked the boot's exit with `\|\| true` | BLOCKING | rewritten around a `bobi` shim that dumps the manager's own environment | - |
+| R3 | `--rebind` re-attached to stale state, landing in a thread ending in this bot's own success post, so the one recovery path for a revoked credential blocked to timeout | MAJOR | `T:test_rebind_posts_a_fresh_ask_over_stale_state` | M29 |
+| R4 | A scrape or code-wait failure posted no outcome, leaving the thread on "Waiting for you to authorize" | MAJOR | `T:test_a_failure_after_the_ask_still_closes_the_thread` | M30 |
+| R5 | Ask-id recovery matched the wording only, so one channel carrying two kinds' asks could adopt the wrong one | MAJOR | `T:test_ask_id_recovery_does_not_adopt_another_kinds_ask` | M28 |
+| R6 | `_event_message_id` read only `fields.ts`; Discord names it `message_id`, so the watermark recorded nothing there | MAJOR | `T:test_a_discord_message_id_is_recorded_as_consumed` | M31 |
+| R7 | An unknown `TOOL` raised outside the CLI handler and printed a traceback | MINOR | `T:test_cli_reports_an_unknown_tool_cleanly` | M33 |
+
+`S:` = `tests/integration/test_login_bootstrap_smoke.py`, which is restored and
+extended: it now generates the ask-first **ready reply** from the real Slack
+adapter as well as the code event. That is what caught R8, and it closes the
+"no end-to-end ask-first test" gap the review named.
+
+### Refuted: decisions the spec already records
+
+| Candidate | Why it is not a defect |
+|---|---|
+| No lock on the ask protocol; concurrent runs can double-post | D3: "prompt-only dedup. No lock." The residual cost is stated in spec §5 |
+| The catch-up read cannot prove a human wrote the message | D9, Zach 2026-10-10: "this is an acceptable gap" |
+| `CODEX_HOME` redirects codex away from `~/.codex/skills` | Accepted and stated in spec §5; nothing in the repo reads `${CODEX_HOME}/skills` |
+| The api-key write's umask window and non-atomicity | Pre-existing; this change retargets the write without altering it |
+| An event with no channel field fails open | Pre-existing predicate; R1's anchor check closes the practical exposure |
+| `BRAIN_ENV` is not restored after the call | The spec's chosen retarget mechanism; the CLI is one-shot |
+| PID may collide across containers | Deployments are bubble-scoped, so a collision needs one bubble; the spec names the residual |
