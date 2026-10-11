@@ -15,7 +15,7 @@ from typing import Iterable
 
 from bobi import launch_stamp, paths
 from bobi.__version__ import __version__
-from bobi.fsutil import atomic_write_text, file_lock
+from bobi.fsutil import atomic_write_text, file_lock, lock_is_held
 from bobi.sdk import SessionEntry
 
 
@@ -559,7 +559,14 @@ def run_team_foreground(
     pid_path = paths.manager_pid_path(project_path)
     if pid_path.exists():
         pid = _read_pid(pid_path)
-        if pid and pid != os.getpid() and _pid_alive(pid):
+        # A live pid is not enough. manager.pid outlives its machine on a
+        # container volume, and the next boot hands the same number to an
+        # unrelated process, so the supervised child exits here on every
+        # relaunch. The lease dies with its holder, so it cannot go stale.
+        if (
+            pid and pid != os.getpid() and _pid_alive(pid)
+            and lock_is_held(_manager_instance_lock_target(project_path))
+        ):
             raise AlreadyRunning(pid)
     if fresh:
         clear_manager_session(project_path)
@@ -572,10 +579,14 @@ def run_team_foreground(
     )
 
 
+def _manager_instance_lock_target(project_path: Path) -> Path:
+    return paths.state_path(project_path) / "manager-instance"
+
+
 @contextmanager
 def _manager_instance_lock(project_path: Path):
     """Hold the per-runtime manager lease across the full manager lifetime."""
-    lock_target = paths.state_path(project_path) / "manager-instance"
+    lock_target = _manager_instance_lock_target(project_path)
     lock_target.parent.mkdir(parents=True, exist_ok=True)
     with file_lock(lock_target):
         yield
