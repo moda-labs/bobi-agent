@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.60.0 - 2026-10-10
+
+Minor release: a running team can change its own event subscriptions without a
+restart, local deployments can install an OS service, CLI tools such as codex
+get an ask-first subscription login, and a dead brain under a live manager now
+raises an alert. Also a batch of event-delivery fixes: overlapping managers,
+inbox starvation, invisible backlogs, and replayed monitor findings.
+
+### Added
+
+- **Workspace-owned event subscriptions (#1116, #952).**
+  `bobi agent <name> subscriptions list|add|remove` edits
+  `<run>/workspace/subscriptions.yaml` and asks the manager to reload through a
+  token-protected `POST /subscriptions/reload` on its health server. The
+  manager is the only writer to the event server, so the event server's accept
+  or reject comes back in the response. No restart.
+- **Local service supervision on macOS and Linux (#1098, MOD-288).**
+  `bobi agent <name> install-service` / `uninstall-service` generate and start
+  a LaunchAgent or a systemd user unit that runs the shipped supervisor,
+  starts with the user's session, and restarts after a manager or supervisor
+  failure. `stop` and `restart` delegate to the service when one is installed.
+- **Ask-first subscription login for CLI tools (#959, #958).**
+  `login-bootstrap [<tool>] [--rebind]` now covers tools such as codex, not
+  only the brain. It registers its listener, posts one ask, and starts the
+  login only after a human replies, so a one-time device code is never posted
+  unread.
+- **Workflow launch inputs (#1101, MOD-394).** `subagents launch` accepts
+  repeatable `--input KEY=VALUE` and `--input-json OBJECT`. A launch missing an
+  input that a deterministic native action requires is refused before
+  admission instead of completing as a no-op. Explicit inputs are part of the
+  unkeyed launch identity.
+- **`subagents launch --role` is optional (#1105).** Without it, each step runs
+  under its own `agent:` role, so a multi-role workflow can be launched from
+  the CLI. A change of `agent:` between steps now always opens a new session,
+  even at identical model, effort, and max-turns settings.
+- **Event backlog visibility (#1099, MOD-388).** Inbox depth and oldest-event
+  age appear in persisted state, manager health, `status`, and rate-limited
+  warnings. Logs distinguish enqueue from consumption. The local event server
+  records client ACK progress and reports per-deployment lag in `/health`.
+
+### Fixed
+
+- **A dead brain is now reported (#1008, #992).** Session-limit and
+  revoked-auth failures were missing from the brain-unavailability markers, so
+  a brainless manager ran silently for 102 minutes. Both are now classified,
+  only failed turns are classified, and the incident posts to the operator
+  Slack channel as well as the bus.
+- **One manager per runtime (#1102, MOD-389).** The manager holds an exclusive
+  per-runtime lease for its whole lifetime. A replacement waits for the prior
+  manager to exit instead of processing the same events alongside it.
+- **A runtime can no longer stop or restart itself (#1071, MOD-305).** `stop`
+  and `restart` invoked from a descendant of the target manager are refused
+  before any signal is sent, and print the exact command to run externally.
+- **Inbox starvation is bounded (#1110, MOD-387).** Chat stays first until the
+  oldest normal message is 120 seconds old, then that message is taken next.
+  A pinned ACK floor warns at 300 seconds or 64 pending batches and is exposed
+  in manager health.
+- **A terminal inbox reader is no longer fed (#1099, MOD-388).** The drain
+  withholds ACKs so the events replay after restart.
+- **Replayed monitor findings stay out of Director delivery (#1113,
+  MOD-407).** A finding repeated inside its cooldown is dropped as a duplicate
+  rather than delivered to the Director as new, unannotated work.
+- **Contractless workflow steps skip handoff IO (#1111, MOD-385).** A handoff
+  is read only when fields are declared. A required-field repair prompt
+  identifies itself as a continuation of the same step, names the handoff
+  path, and says not to repeat completed work.
+- **Supervisor load grace works on macOS (#1107, MOD-382).** Load and
+  manager-tree CPU evidence come from `os.getloadavg()` and `ps`. Missing or
+  malformed evidence fails closed.
+- **`bobi feedback` redacts secret-shaped text before publishing (#1112,
+  MOD-399).**
+
+### CI and release engineering
+
+- Integration fixtures reap the manager and local event-server process groups
+  on setup failure, with a PID identity check before signalling (#1108,
+  MOD-383).
+- Real-process supervisor load-grace smoke on `macos-latest` (#1107).
+
 ## 0.59.0 - 2026-09-30
 
 Minor release: a crash loop on installed 0.58.0 fixed, a `bobi feedback` CLI,
