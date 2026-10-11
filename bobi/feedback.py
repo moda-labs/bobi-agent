@@ -257,6 +257,27 @@ def _response_message(response: httpx.Response) -> str:
     return str(message).strip()[:300] if message else "GitHub rejected the request."
 
 
+def _redacted(text: str) -> str:
+    """Strip secret-shaped substrings from text Bobi is about to publish.
+
+    Reuses the framework's one redactor (`bobi.setup.actions.redact_secrets`)
+    rather than adding a second pattern set, so a newly recognized credential
+    shape is covered everywhere at once. Imported inside the call, as at the
+    redactor's other call sites.
+
+    That redactor was written for freeform chat input, where a false positive
+    costs nothing, so it is blunter than publication would choose: it also
+    strips any opaque run of 40+ token characters (a full commit SHA, a long
+    test name), a `password:`/`api_key=` style value, and `bearer <word>`.
+    Published reports lose those. Accepted here because a feedback body is the
+    one place Bobi relays text it never inspected, and a leaked credential
+    costs more than a mangled identifier. `test_feedback_publication_*` pins
+    both halves of the trade-off.
+    """
+    from bobi.setup.actions import redact_secrets
+    return redact_secrets(text)[0]
+
+
 def _auth_headers(token: str) -> dict[str, str]:
     if not token:
         raise FeedbackError(
@@ -521,6 +542,12 @@ def submit_feedback(
     explicit report should not be lost to a rate limit.
     """
     repo = validate_repo(repo)
+    # Scrub before anything leaves: the duplicate search carries the title in
+    # its query string, so redacting at the two writers below would still have
+    # shipped a secret-shaped title to GitHub. One call here also keeps the
+    # searched title and the stored title identical, so a recurring report
+    # still matches its own prior filing.
+    title, body = _redacted(title), _redacted(body)
     warning = ""
     # An automated filing always dedupes; the invariant lives here rather than
     # at each call site, so no caller can opt a robot out of it.
