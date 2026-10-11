@@ -77,8 +77,17 @@ Anthropic ids for claude, OpenAI ids for codex). **+ Add custom gateway model**
 takes a typed routing id (`cx/gpt-6.1-sol`, `ds/deepseek-flash`); without a
 gateway the save rejects it. A dashed tag marks a name with no list price. The
 editor saves straight to `run/.env` (**Save and Apply**); there is no clipboard
-export, and the TypeSafe endpoint and experiment id stay as saved (defaults
-`https://api.typesafe.ai/v1/systemone`, `jev-routing-v1`). The control / fallback model is chosen from the candidate list, so it
+export. Every save writes the short form: `mode`, `control_model`,
+`candidate_models`, `prompt_egress` and `instructions`, plus `criteria` and any
+setting that differs from its default. A long-form policy (`variants`/`policy`)
+is rewritten in the short form on its first edit; its experiment id, cohort and
+header labels are dropped, so it takes the default `jev-routing-v1` identity
+and running sessions get a new route on their next start. A long-form policy
+the short form cannot carry (custom variant weights, credential name,
+`max_in_flight` or `store_reason_text`) is edited in place instead. The editor
+does not show scoped roles or the minimum confidence; both keep their saved
+values (defaults `director`/`engineer` and 0.85), and Overview shows the roles
+read-only. Change them in `run/.env` or through the API. The control / fallback model is chosen from the candidate list, so it
 cannot drift off it. Saving rejects two names for one model (`opus` and
 `claude-opus-5-5`), because the policy would split its probability between
 them. Save errors name the field (`invalid JEV configuration: min_confidence
@@ -88,14 +97,32 @@ the policy is called and recorded but turns run the control model.
 
 ### Interactive sandbox
 
-Open Metrics → JEV button → **Test Routing**. Enter a
-test prompt, role, and entry point (default `session_start`). An optional masked API key is used only for
-that request; an empty field uses the agent's configured credential. The
-simulation sends what production would: redacted task text when the policy's
-`prompt_egress` is `redacted`, metadata only when it is `none`. The web UI
-calls the saved endpoint; the API still accepts an `endpoint` override on the
-saved TypeSafe hostname and port. Keys are cleared on close and are never saved
-by the sandbox.
+Open Metrics → JEV button → **Test Routing** and click **Run test**. One
+prompt is followed through four numbered steps, the way production handles it:
+
+1. **Your prompt**, with what JEV receives: redacted task text when the
+   policy's `prompt_egress` is `redacted`, metadata only when it is `none`.
+2. **JEV suggests**: the pick, its confidence, latency and per-model
+   probabilities. A failed call (bad key, timeout) is shown here.
+3. **Bobi chooses**: the model the turn runs on and why (confidence clears the
+   minimum, a fallback reason, shadow mode, or no suggestion → control model).
+4. **Output from <model>**: the chosen model answers the prompt, with latency,
+   tokens and a list-price estimate.
+
+Role and entry point offer only the policy's scope (entry point defaults to
+`session_start`). The test always uses the policy's saved key
+(`TYPESAFE_API_KEY` in `run/.env`); the tab says so, or disables **Run test**
+when the key is not set (`credential_configured` in `GET .../jev-config`).
+
+Step 4 calls `POST /api/agents/{name}/metrics/test-run` with `prompt` and
+`model` (a policy candidate). It runs one turn through the agent's own Claude
+brain and login (`BOBI_AUTH`, `run/.env`) with every tool disabled, a fixed
+sandbox system prompt and an empty temporary working directory, so no project
+files or instructions reach the model. It opens no session and writes no
+metrics. Runs are capped at 180 s, two at a time, and 64 KiB of output.
+Agents on a codex brain or a gateway get `model_run_unsupported`; a model
+error returns 502 `model_run_failed`, a timeout 504 `model_timeout`. On a
+subscription the answer counts against the account's usage limits.
 
 ### Fallback log and failed candidates
 
@@ -204,7 +231,6 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
 - Reported and estimated costs remain separate. When a turn has neither, the
   view shows a `~`-prefixed list-price figure (`list_price_usd`) computed from
   `bobi/costs.py` `PRICE_TABLE`; it is never added to recorded spend.
-  Collector health is global, not limited by view filters.
 - The routing card prices each routed turn's canonical tokens at list price
   three ways: on the model that ran, on the cheapest candidate in that
   decision's `candidate_models` (**always cheapest**), and on the most expensive
@@ -232,15 +258,16 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   `fallback_reasons` (reason to turn count), and the set's own saving; a pick
   outside the candidate list is appended with `off_list: true`. Claude Code aliases (`opus`, `sonnet`, `haiku`) and a
   context suffix (`claude-opus-5-5[1m]`) price as the current model.
-- Telemetry health is one strip under the spend tiles: collector state,
-  invocation coverage, usage granularity, import lag and reconciliation
-  errors. Only a problem (unknown usage, lag over a minute, reconciliation
-  errors) takes colour.
+- The web view shows no telemetry health strip; collector state, coverage,
+  import lag and reconciliation errors stay in the `summary` payload and the
+  CLI.
 - Recent turns default to one card per session (thread). The header holds the
   first user message (or the lifecycle label), a **user prompt** / **system
   lifecycle** tag, agent and role, the Slack origin, and the session ID; turn
   rows repeat none of these and show the step instead (initial request,
-  follow-up, tool call, assistant response). **Flat** lists turns
+  follow-up, assistant response, or the lifecycle step such as **Inbox Event
+  Processing**). Tool use is the step's detail line (`Bash +1 more · 10.8s`,
+  or `2 tool calls` when the tool names were not captured), never its name. **Flat** lists turns
   chronologically and shows `turn #n` only for sessions with more than one
   loaded turn. The turn drawer's earlier/later buttons stay within the session.
 - Run drilldowns match the session **name** across telemetry lifecycles in the

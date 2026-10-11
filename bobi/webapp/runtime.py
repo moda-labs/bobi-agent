@@ -290,6 +290,12 @@ class TeamRuntime(ABC):
 
         raise MetricsQueryError("routing simulation is unavailable for this runtime", "metrics_unsupported")
 
+    async def run_test_prompt(self, name: str, payload: dict) -> dict:
+        """Run one sandbox prompt on a candidate model without sessions or telemetry writes."""
+        from bobi.metrics.query import MetricsQueryError
+
+        raise MetricsQueryError("sandbox runs are unavailable for this runtime", "metrics_unsupported")
+
     @abstractmethod
     def dashboard(self) -> dict:
         """Every team slot this runtime can see."""
@@ -781,6 +787,68 @@ def _agent_brain(root: Path, env: dict) -> tuple[str, bool]:
     return normalize_brain_kind(kind), gateway
 
 
+_SHORT_DEFAULTS = {
+    "roles": {"director", "engineer"},
+    "entry_points": {"session_start", "subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start"},
+    "brain": "auto", "min_confidence": 0.85, "deadline_ms": 3000, "max_prompt_bytes": 8192,
+    "policy_version": "jev-1.13.0",
+}
+_SHORT_LABELS = ("experiment_id", "cohort", "router_name", "router_version", "feature_schema_version")
+
+
+def _short_config(experiment, labels: dict) -> dict | None:
+    """The editor's minimal JEV config: the key fields plus any setting that
+    differs from the short-form defaults. None when the short form cannot carry
+    the policy (custom variants, credential name or concurrency limits)."""
+    import json
+
+    policy = experiment.policy
+    variants = [(v.variant_id, v.weight, v.model, v.policy) for v in experiment.variants]
+    if (variants != [("control", 0.0, experiment.control_model, ""), ("treatment_jev", 1.0, "", "typesafe-jev")]
+            or policy.credential_env != "TYPESAFE_API_KEY" or policy.max_in_flight != 8 or policy.store_reason_text):
+        return None
+    options = json.loads(policy.options_json)
+    candidates = list(policy.candidate_models)
+    config = {"mode": policy.mode, "control_model": experiment.control_model, "candidate_models": candidates,
+              "prompt_egress": policy.prompt_egress, "instructions": options["instructions"]}
+    if options["criteria"] != {model: f"Choose {model} when the routing instructions recommend it." for model in candidates}:
+        config["criteria"] = options["criteria"]
+    if "endpoint" in options:
+        config["endpoint"] = options["endpoint"]
+    settings = {"roles": list(policy.roles), "entry_points": list(policy.entry_points), "brain": policy.brain,
+                "min_confidence": policy.min_confidence, "deadline_ms": policy.deadline_ms,
+                "max_prompt_bytes": policy.max_prompt_bytes, "policy_version": policy.version}
+    for field, value in settings.items():
+        if (set(value) if isinstance(value, list) else value) != _SHORT_DEFAULTS[field]:
+            config[field] = value
+    config.update(labels)
+    return config
+
+
+def _saved_experiment(root, env: dict):
+    """The policy the sandbox tests: the saved line, or the commented line a
+    disabled policy keeps."""
+    import json
+
+    from bobi.metrics.router import ExperimentConfig
+
+    raw = env.get("BOBI_METRICS_EXPERIMENT_JSON", "").strip()
+    if not raw:
+        for line in paths.env_path(root).read_text().splitlines() if paths.env_path(root).exists() else []:
+            if line.startswith("# BOBI_METRICS_EXPERIMENT_JSON="):
+                raw = line.split("=", 1)[1].strip()
+                break
+    if not raw:
+        raise ValueError("configure a JEV policy before simulating routing")
+    return ExperimentConfig.from_mapping(json.loads(raw))
+
+
+_SANDBOX_SYSTEM_PROMPT = ("You are answering a routing test in the Bobi sandbox. Answer the task directly "
+                          "and concisely. You have no tools and no access to files.")
+_SANDBOX_RUN_TIMEOUT_S = 180
+_SANDBOX_MAX_OUTPUT_BYTES = 65536
+
+
 def _routing_problems(policy_brain: str, candidates: list[str], brain: str, gateway: bool) -> list[str]:
     """Why a routing policy cannot run on this agent, in operator words.
 
@@ -816,6 +884,7 @@ class LocalRuntime(TeamRuntime):
     def __init__(self) -> None:
         self._metrics_reads = threading.BoundedSemaphore(4)
         self._routing_tests = threading.BoundedSemaphore(4)
+        self._model_runs = threading.BoundedSemaphore(2)
         # Submit-then-poll job store. Carries only status and errors; the
         # reply itself reaches the transcript via the messages poll. Guarded
         # by a lock: submits and finishing worker threads share it.
@@ -844,7 +913,6 @@ class LocalRuntime(TeamRuntime):
         from bobi.metrics.policies.typesafe import TypeSafePolicy
         from bobi.metrics.policy import PolicyError, PolicyRequest, guard_result
         from bobi.metrics.query import MetricsQueryError
-        from bobi.metrics.router import ExperimentConfig
         from bobi.redact import redact_secrets
 
         root = self._resolve(name)
@@ -868,19 +936,11 @@ class LocalRuntime(TeamRuntime):
             if context.get("brain", "claude") not in ("claude", "codex"):
                 raise ValueError("unsupported sandbox brain")
             env = project_env(root)
-            raw = env.get("BOBI_METRICS_EXPERIMENT_JSON", "").strip()
-            if not raw:
-                for line in paths.env_path(root).read_text().splitlines() if paths.env_path(root).exists() else []:
-                    if line.startswith("# BOBI_METRICS_EXPERIMENT_JSON="):
-                        raw = line.split("=", 1)[1].strip()
-                        break
-            if not raw:
-                raise ValueError("configure a JEV policy before simulating routing")
-            config = ExperimentConfig.from_mapping(json.loads(raw))
+            config = _saved_experiment(root, env)
             policy_config = config.policy
             if policy_config is None or policy_config.name != "typesafe-jev":
                 raise ValueError("simulation requires a TypeSafe JEV policy")
-            if not isinstance(role, str) or role not in {"director", "engineer", "curator", *policy_config.roles}:
+            if not isinstance(role, str) or role not in policy_config.roles:
                 raise ValueError("unsupported sandbox role")
             brain = context.get("brain") or (
                 policy_config.brain if policy_config.brain != "auto" else _agent_brain(root, env)[0])
@@ -959,6 +1019,77 @@ class LocalRuntime(TeamRuntime):
         if len(json.dumps(data, ensure_ascii=True).encode()) > MAX_RESPONSE_BYTES:
             raise MetricsQueryError("JEV simulation returned an oversized response", "policy_invalid_response")
         return data
+
+    async def run_test_prompt(self, name: str, payload: dict) -> dict:
+        """Run one sandbox prompt on a candidate model through the agent's own
+        brain and login: no tools, no session, nothing recorded in metrics."""
+        import asyncio
+        import tempfile
+
+        from bobi.brain import AssistantText, StreamDelta, TurnResult, get_brain
+        from bobi.config import project_env
+        from bobi.costs import estimate_cost, model_provider
+        from bobi.env import child_agent_env
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.redact import redact_secrets
+        from bobi.setup.llm import _NO_TOOLS
+
+        root = self._resolve(name)
+        try:
+            if set(payload) - {"prompt", "model"}:
+                raise ValueError("unsupported run fields")
+            prompt, model = payload.get("prompt"), payload.get("model")
+            if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > 65536:
+                raise ValueError("prompt must contain 1 to 65536 UTF-8 bytes")
+            env = project_env(root)
+            policy_config = _saved_experiment(root, env).policy
+            if policy_config is None or model not in policy_config.candidate_models:
+                raise ValueError("model must be one of the policy's candidates")
+            engine, gateway = _agent_brain(root, env)
+        except (ValueError, TypeError, AttributeError, OSError, RecursionError):
+            raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
+        if engine != "claude" or gateway:
+            raise MetricsQueryError("running the prompt is available for agents on a native Claude brain",
+                                    "model_run_unsupported")
+        if not self._model_runs.acquire(blocking=False):
+            raise MetricsQueryError("a sandbox run is already in progress", "metrics_busy")
+        parts: list[str] = []
+        fallback_text = ""
+        result: TurnResult | None = None
+        started = time.perf_counter()
+        try:
+            # A fresh empty directory: no project instructions leak into the answer.
+            with tempfile.TemporaryDirectory(prefix="bobi-jev-run-") as cwd:
+                async with asyncio.timeout(_SANDBOX_RUN_TIMEOUT_S):
+                    async for message in get_brain(engine).stream_once(
+                            system_prompt=_SANDBOX_SYSTEM_PROMPT, user_prompt=prompt, model=model, cwd=cwd,
+                            options={"max_turns": 1, "disallowed_tools": _NO_TOOLS, "env": child_agent_env(root)}):
+                        if isinstance(message, StreamDelta) and message.text:
+                            parts.append(message.text)
+                        elif isinstance(message, AssistantText) and message.text:
+                            fallback_text = message.text
+                        elif isinstance(message, TurnResult):
+                            result = message
+        except TimeoutError:
+            raise MetricsQueryError("the model did not answer in time", "model_timeout") from None
+        except Exception as error:
+            raise MetricsQueryError(f"the model run failed: {redact_secrets(str(error))[0][:300]}",
+                                    "model_run_failed") from None
+        finally:
+            self._model_runs.release()
+        if result is None or result.is_error:
+            detail = redact_secrets(result.error_text() if result else "no result")[0][:300]
+            raise MetricsQueryError(f"the model run failed: {detail}", "model_run_failed")
+        text = "".join(parts) or fallback_text or result.result_text
+        output = text.encode("utf-8")[:_SANDBOX_MAX_OUTPUT_BYTES].decode("utf-8", "ignore")
+        input_tokens = sum(usage.input_tokens or 0 for usage in result.usage)
+        cached_tokens = sum(usage.cache_read_input_tokens or 0 for usage in result.usage)
+        output_tokens = sum(usage.output_tokens or 0 for usage in result.usage)
+        return {"model": model, "output": output, "truncated": len(output) < len(text),
+                "latency_ms": (time.perf_counter() - started) * 1000,
+                "input_tokens": input_tokens, "output_tokens": output_tokens,
+                "list_price_usd": estimate_cost(model_provider(model) or "anthropic", model,
+                                                input_tokens, output_tokens, cached_tokens)}
 
     def metrics(self, name: str, view: str, args: dict) -> dict:
         import json
@@ -1080,8 +1211,10 @@ class LocalRuntime(TeamRuntime):
 
         agent_brain, gateway = _agent_brain(root, env)
 
-        def model_fields(candidates: list[str], control: str, policy_brain: str) -> dict:
+        def model_fields(candidates: list[str], control: str, policy_brain: str, credential_env: str) -> dict:
             return {
+                # Whether the policy's key is set, never the key itself.
+                "credential_configured": bool(env.get(credential_env)),
                 "agent_brain": agent_brain,
                 "gateway": gateway,
                 "config_warnings": _routing_problems(policy_brain, candidates, agent_brain, gateway),
@@ -1124,7 +1257,8 @@ class LocalRuntime(TeamRuntime):
                 "restart_required": True,
                 "config_path": str(env_file),
                 **model_fields(list(policy.candidate_models) if policy else [v.model for v in config.variants if v.model],
-                               config.control_model or "", policy.brain if policy else "auto"),
+                               config.control_model or "", policy.brain if policy else "auto",
+                               policy.credential_env if policy else "TYPESAFE_API_KEY"),
             }
 
         formatted_json = ""
@@ -1189,7 +1323,8 @@ class LocalRuntime(TeamRuntime):
             "restart_required": True,
             "config_path": str(env_file),
             "config_error": config_error,
-            **model_fields(list(candidates), control, policy_dict.get("brain", "auto")),
+            **model_fields(list(candidates), control, policy_dict.get("brain", "auto"),
+                           policy_dict.get("credential_env", "TYPESAFE_API_KEY")),
         }
 
     def update_routing_config(self, name: str, payload: dict) -> dict:
@@ -1326,6 +1461,15 @@ class LocalRuntime(TeamRuntime):
                         raise ValueError(problems[0] + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""))
                     if set(experiment.policy.roles) - set(current["available_roles"]):
                         raise ValueError("unknown roles: " + ", ".join(sorted(set(experiment.policy.roles) - set(current["available_roles"]))))
+                    if fields:
+                        # Labels written in the short form or sent by the caller are kept;
+                        # the long form's are dropped with it.
+                        labels = {field: config_dict[field] for field in _SHORT_LABELS
+                                  if field in config_dict and ("policy" not in config_dict or field in payload)}
+                        short = _short_config(experiment, labels)
+                        if short is not None:
+                            ExperimentConfig.from_mapping(short)
+                            config_dict = short
                     config_json = json.dumps(config_dict, ensure_ascii=True, allow_nan=False)
                 replacement = [f"{EXPERIMENT_CONFIG_ENV}={config_json}"] if enabled else (
                     [f"# {EXPERIMENT_CONFIG_ENV}={config_json}", f"{EXPERIMENT_CONFIG_ENV}="] if config_json else [f"{EXPERIMENT_CONFIG_ENV}="])

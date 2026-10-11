@@ -1305,8 +1305,9 @@ class TestRoutingConfig:
             return
         assert response.status_code == 200, response.text
         saved = json.loads(parse_env_file(paths.env_path(bobi_install.repo_path))["BOBI_METRICS_EXPERIMENT_JSON"])
-        # The policy follows whichever brain the agent runs and keeps the chosen egress.
-        assert saved["brain"] == "auto" and saved["prompt_egress"] == "redacted"
+        # The policy follows whichever brain the agent runs (the default, so not
+        # written) and keeps the chosen egress.
+        assert "brain" not in saved and saved["prompt_egress"] == "redacted"
         assert response.json()["config_warnings"] == []
 
     def test_jev_pinned_brain_must_match_the_agent(self, bobi_install, monkeypatch):
@@ -1321,6 +1322,76 @@ class TestRoutingConfig:
             {**concise_config(), "brain": "codex"}) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=synthetic\n")
         # A saved policy that can never route this agent is flagged on read.
         assert "does not match" in _client().get(url).json()["config_warnings"][0]
+
+    def test_jev_config_reports_whether_the_policy_key_is_set(self, bobi_install, monkeypatch):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        env_file = paths.env_path(bobi_install.repo_path)
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        assert _client().get(url).json()["credential_configured"] is False
+        env_file.write_text(env_file.read_text() + "TYPESAFE_API_KEY=synthetic-sandbox-key\n")
+        response = _client().get(url)
+        # The flag says the key exists; the response never carries it.
+        assert response.json()["credential_configured"] is True
+        assert "synthetic-sandbox-key" not in response.text
+
+    def _sandbox_run(self, bobi_install, monkeypatch, *, brain="claude", final=None, payload=None):
+        from bobi import paths
+        from bobi.brain import BrainUsage, StreamDelta, TurnResult
+
+        monkeypatch.delenv("BOBI_GATEWAY_BASE_URL")
+        monkeypatch.setenv("BOBI_BRAIN", brain)
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps({
+            "control_model": "haiku", "candidate_models": ["haiku", "sonnet"],
+            "instructions": "Route by difficulty."}) + "\n")
+        calls = []
+
+        class FakeBrain:
+            async def stream_once(self, **kwargs):
+                calls.append(kwargs)
+                yield StreamDelta(text="Use a lock ")
+                yield StreamDelta(text="around resume.")
+                yield final or TurnResult(usage=[BrainUsage(model="sonnet", input_tokens=1200, output_tokens=80)])
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda kind=None: FakeBrain())
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-run",
+                                  json=payload or {"prompt": "Find the deadlock", "model": "sonnet"})
+        return response, calls
+
+    def test_sandbox_runs_the_prompt_on_the_chosen_model_without_tools_or_metrics(self, bobi_install, monkeypatch):
+        from pathlib import Path
+
+        response, calls = self._sandbox_run(bobi_install, monkeypatch)
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["model"] == "sonnet" and data["output"] == "Use a lock around resume."
+        assert (data["input_tokens"], data["output_tokens"]) == (1200, 80) and data["list_price_usd"] > 0
+        [call] = calls
+        assert call["model"] == "sonnet" and call["user_prompt"] == "Find the deadlock"
+        assert call["options"]["max_turns"] == 1 and "Bash" in call["options"]["disallowed_tools"]
+        # The agent's own environment and login, from an empty directory outside the repo.
+        assert call["options"]["env"]["BOBI_ROOT"] == str(bobi_install.repo_path.resolve())
+        assert not Path(call["cwd"]).is_relative_to(bobi_install.repo_path)
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+
+    @pytest.mark.parametrize("case,status,code", [
+        ("not_a_candidate", 400, "invalid_simulation"),
+        ("codex_brain", 400, "model_run_unsupported"),
+        ("model_error", 502, "model_run_failed"),
+    ])
+    def test_sandbox_run_refuses_or_reports_failures(self, bobi_install, monkeypatch, case, status, code):
+        from bobi.brain import TurnResult
+
+        response, calls = self._sandbox_run(
+            bobi_install, monkeypatch, brain="codex" if case == "codex_brain" else "claude",
+            final=TurnResult(is_error=True, error_kind="api_error", error_message="overloaded")
+            if case == "model_error" else None,
+            payload={"prompt": "Find the deadlock", "model": "opus"} if case == "not_a_candidate" else None)
+        assert response.status_code == status and response.json()["code"] == code
+        assert len(calls) == (1 if case == "model_error" else 0)
 
     def test_jev_mode_off_keeps_the_policy_for_re_enabling(self, bobi_install):
         from bobi import paths
@@ -1371,6 +1442,33 @@ class TestRoutingConfig:
         assert set(options["criteria"]) == {"ds/deepseek-flash", "new-model"}
         if legacy:
             assert policy.credential_env == "CUSTOM_JEV_KEY" and policy.max_in_flight == 3
+
+    def test_jev_edit_rewrites_a_long_form_policy_as_the_short_form(self, bobi_install):
+        from bobi import paths
+        from bobi.config import parse_env_file
+        from bobi.metrics.router import ExperimentConfig, public_config
+        from tests.metrics.test_routing import concise_config
+
+        entry_points = ["subagent_persistent", "subagent_phase", "workflow_start", "session_start"]
+        before = ExperimentConfig.from_mapping({**concise_config(), "prompt_egress": "redacted",
+                                                "entry_points": entry_points, "roles": ["engineer", "director"]})
+        raw = public_config(before)
+        raw.update({"cohort": "team-slack", "router_name": "custom-router"})
+        env_file = paths.env_path(bobi_install.repo_path)
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=synthetic\n")
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config",
+                                  json={"instructions": "Edited instructions"})
+        assert response.status_code == 200, response.text
+        saved = json.loads(parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"])
+        # Key fields plus the one non-default setting; labels and defaults are dropped.
+        assert saved == {"mode": "enforce", "control_model": "ds/deepseek-flash",
+                         "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
+                         "prompt_egress": "redacted", "instructions": "Edited instructions",
+                         "entry_points": entry_points}
+        after = ExperimentConfig.from_mapping(saved).policy
+        assert after.entry_points == tuple(entry_points) and set(after.roles) == {"director", "engineer"}
+        assert (after.min_confidence, after.deadline_ms, after.max_in_flight, after.credential_env) == (
+            before.policy.min_confidence, before.policy.deadline_ms, before.policy.max_in_flight, before.policy.credential_env)
 
     def test_jev_config_preserves_file_on_read_and_write_failure(self, bobi_install, monkeypatch):
         from pathlib import Path
@@ -1567,7 +1665,7 @@ class TestRoutingConfig:
             wire_calls.append(request)
             payload = json.loads(request.content)
             assert payload["state"]["task"] == "Write Raft. API_KEY=[redacted] [redacted]"
-            assert payload["state"]["role"] == "curator"
+            assert payload["state"]["role"] == "director"
             assert payload["state"]["entry_point"] == "subagent_phase"
             assert request.headers["authorization"] == "Bearer override-test-key"
             return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
@@ -1579,7 +1677,7 @@ class TestRoutingConfig:
         monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
             lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
         payload = {"prompt": "Write Raft. API_KEY=private configured-test-key", "api_key": "override-test-key",
-                   "features": {"role": "curator", "entry_point": "subagent_phase", "brain": "claude"}}
+                   "features": {"role": "director", "entry_point": "subagent_phase", "brain": "claude"}}
         url = f"/api/agents/{bobi_install.agent_name}/metrics/test-route"
         result = _client().post(url, json=payload)
         assert result.status_code == 200, result.text

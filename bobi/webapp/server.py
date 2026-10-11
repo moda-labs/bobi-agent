@@ -134,7 +134,7 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def _metrics_error(request, exc) -> JSONResponse:
         status = 404 if exc.code in {"unknown_session", "unknown_turn"} else 503 if exc.code in {
             "metrics_busy", "metrics_not_ready", "metrics_unsupported",
-        } else 409 if exc.code == "config_environment_override" else 500 if exc.code == "config_write_failed" else 504 if exc.code == "policy_timeout" else 502 if exc.code.startswith("policy_") else 400
+        } else 409 if exc.code == "config_environment_override" else 500 if exc.code == "config_write_failed" else 504 if exc.code in {"policy_timeout", "model_timeout"} else 502 if exc.code.startswith("policy_") or exc.code == "model_run_failed" else 400
         headers = {"Cache-Control": "no-store"}
         if status == 503:
             headers["Retry-After"] = "1"
@@ -212,6 +212,25 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         except (ValueError, UnicodeError, RecursionError, TimeoutError):
             raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
         return JSONResponse(await rt.test_route(name, payload), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/agents/{name}/metrics/test-run")
+    async def metrics_test_run(name: str, request: Request) -> JSONResponse:
+        import asyncio
+        import json
+
+        try:
+            body = bytearray()
+            async with asyncio.timeout(3):
+                async for chunk in request.stream():
+                    if len(body) + len(chunk) > 131072:
+                        raise ValueError("run body too large")
+                    body.extend(chunk)
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                raise ValueError("run body must be an object")
+        except (ValueError, UnicodeError, RecursionError, TimeoutError):
+            raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
+        return JSONResponse(await rt.run_test_prompt(name, payload), headers={"Cache-Control": "no-store"})
 
     @app.get("/api/agents/{name}/metrics/turns")
     def metrics_turns(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),

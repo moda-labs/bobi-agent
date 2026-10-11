@@ -715,30 +715,6 @@ function jevValueCard(routing) {
   return card;
 }
 
-// Telemetry health folds into one strip; it only draws attention when
-// something needs it (unknown usage, import lag, reconciliation errors).
-function telemetryStrip(data) {
-  const coverage = data.coverage || {};
-  const collector = data.collector || {};
-  const strip = node("div", "", "metrics-health-strip");
-  strip.setAttribute("aria-label", "telemetry health");
-  const live = collector.status === "running";
-  strip.append(node("span", live ? "live" : (collector.status || "idle"), `metrics-health-state${live ? " is-live" : ""}`));
-  const items = [
-    ["coverage", `${number(coverage.exact_invocations)} exact · ${number(coverage.estimated_invocations)} derived · ${number(coverage.unknown_invocations)} unknown`, coverage.unknown_invocations > 0],
-    ["granularity", coverage.usage_granularity || "none", false],
-    ["import lag", collector.import_lag_ms == null ? "not recorded" : `${number(collector.import_lag_ms)} ms`, collector.import_lag_ms > 60000],
-    ["reconciliation", plural(collector.reconciliation_errors || 0, "error") + (collector.uncovered_turns ? ` · ${plural(collector.uncovered_turns, "uncovered turn")}` : ""), collector.reconciliation_errors > 0],
-  ];
-  items.forEach(([label, value, warn]) => {
-    const item = node("span", "", `metrics-health-item${warn ? " is-warn" : ""}`);
-    item.append(node("span", label, "metrics-health-label"), node("span", value, "bobi-tnum"));
-    strip.append(item);
-  });
-  strip.title = "Totals use canonical usage. Unknown counters stay unknown. Call IDs may be reused across turns; routing selects once per fresh session.";
-  return strip;
-}
-
 function groupTurnsIntoThreads(turns) {
   const map = new Map();
   turns.forEach(turn => {
@@ -853,19 +829,20 @@ function getTurnActionSummary(turn, isFirstRequest = true) {
     const line = (text || "").split("\n").find(item => item.trim())?.trim() || "";
     return line ? `"${line.slice(0, 85)}${line.length > 85 ? "…" : ""}"` : "";
   };
-  if (toolCount > 0) {
-    const first = (turn.tool_executions || [])[0]?.tool_name;
-    const title = first ? `tool: ${first}${toolCount > 1 ? ` +${toolCount - 1}` : ""}` : `${toolCount} tool call${toolCount > 1 ? "s" : ""}`;
-    const detail = `${toolCount} tool execution${toolCount > 1 ? "s" : ""}${turn.wall_duration_ms != null ? ` · ${(turn.wall_duration_ms / 1000).toFixed(1)}s` : ""}`;
-    return { title, detail, kind: "tool" };
-  }
+  // The title names the step; tool use is detail, never the step's name.
+  const first = (turn.tool_executions || [])[0]?.tool_name;
+  const tools = toolCount > 0
+    ? (first ? `${first}${toolCount > 1 ? ` +${toolCount - 1} more` : ""}` : `${toolCount} tool call${toolCount > 1 ? "s" : ""}`)
+      + (turn.wall_duration_ms != null ? ` · ${(turn.wall_duration_ms / 1000).toFixed(1)}s` : "")
+    : "";
   if (conversation.user_message) {
-    return { title: isFirstRequest ? "initial request" : "follow-up", detail: snippet(conversation.user_message), kind: "prompt" };
+    return { title: isFirstRequest ? "initial request" : "follow-up",
+      detail: [snippet(conversation.user_message), tools].filter(Boolean).join(" · "), kind: "prompt" };
   }
   if (conversation.response) {
-    return { title: "assistant response", detail: snippet(conversation.response), kind: "response" };
+    return { title: "assistant response", detail: [snippet(conversation.response), tools].filter(Boolean).join(" · "), kind: "response" };
   }
-  return { title: turnTopic(turn).title, detail: "runtime lifecycle step", kind: "system" };
+  return { title: turnTopic(turn).title, detail: tools || "runtime lifecycle step", kind: "system" };
 }
 
 function renderThreadGroups(container, turns, open, agentName = "") {
@@ -2041,7 +2018,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
     });
     summary.append(tiles);
 
-    summary.append(telemetryStrip(data), jevValueCard(data.routing || {}));
+    summary.append(jevValueCard(data.routing || {}));
   }
 
   function drawTurns() {
@@ -2253,8 +2230,6 @@ export function mountMetrics(element, { api, name, session = "" }) {
     configDirty = false;
     routingController?.abort();
     sandboxController?.abort();
-    const keyInput = jevModalBody.querySelector("#jev-test-key");
-    if (keyInput) { keyInput.type = "password"; keyInput.value = ""; }
     closeConfirmPopup();
     jevModalBackdrop.hidden = true;
     jevModalBackdrop.classList.remove("open");
@@ -2281,7 +2256,10 @@ export function mountMetrics(element, { api, name, session = "" }) {
       return;
     }
     const cfg = currentRoutingConfig;
-    const scopedRoles = [...new Set(["director", "engineer", "curator", ...(cfg.available_roles || []), ...(cfg.roles || [])])];
+    // Production routes only the policy's roles, so the sandbox offers only those.
+    const scopedRoles = cfg.roles?.length ? cfg.roles : ["director", "engineer"];
+    const testEntries = (cfg.entry_points?.length ? [...cfg.entry_points] : ["session_start"])
+      .sort((a, b) => (b === "session_start") - (a === "session_start"));
     const EGRESS_TEXT = {
       redacted: "Redacted task text (secrets and paths removed)",
       none: "Metadata only (size, role, entry point)",
@@ -2300,7 +2278,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
               <span class="jev-switch-slider"></span>
               <div>
                 <span class="jev-switch-title">Enable TypeSafe JEV Dynamic Model Routing</span>
-                <p class="jev-switch-subtext">Enable or disable this agent's routing policy. Edit mode, models, roles, and instructions in the config editor.</p>
+                <p class="jev-switch-subtext">Enable or disable this agent's routing policy. Edit mode, models and instructions in the config editor.</p>
               </div>
             </label>
           </div>
@@ -2394,10 +2372,6 @@ export function mountMetrics(element, { api, name, session = "" }) {
             </div>
             <p class="jev-form-hint">Click models this agent's ${escapeHtml(cfg.agent_brain || "claude")} brain can run natively.</p>
           </div>
-          <fieldset class="jev-form-group jev-editor-roles">
-            <legend class="jev-field-label">Scoped roles</legend>
-            <div class="jev-role-options">${scopedRoles.map(role => `<label class="jev-role-option"><input type="checkbox" name="jev-role" value="${escapeHtml(role)}" ${(cfg.roles || []).includes(role) ? "checked" : ""}><span>${escapeHtml(role)}</span></label>`).join("")}</div>
-          </fieldset>
           <div class="jev-form-group">
             <label class="jev-field-label" for="jev-config-instructions">Routing instructions</label>
             <textarea id="jev-config-instructions" rows="5" maxlength="32768" placeholder="Explain when to choose each candidate model">${escapeHtml(cfg.instructions || "")}</textarea>
@@ -2410,48 +2384,34 @@ export function mountMetrics(element, { api, name, session = "" }) {
             </select>
             <p class="jev-form-hint" id="jev-egress-hint"></p>
           </div>
-          <details class="jev-editor-advanced">
-            <summary>Advanced policy fields</summary>
-            <div class="jev-editor-grid">
-              <div class="jev-form-group"><label class="jev-field-label" for="jev-config-confidence">Minimum confidence</label><input id="jev-config-confidence" type="number" min="0" max="1" step="0.01" value="${escapeHtml(String(cfg.min_confidence ?? 0.85))}"></div>
-            </div>
-            <p class="jev-form-hint">Per-model criteria, the experiment id and other existing advanced fields stay as saved.</p>
-          </details>
           <div class="jev-editor-tools">
             <button type="button" id="jev-config-delete" class="btn bobi-btn quiet">Reset / Delete</button>
           </div>
         </div>
         <div class="jev-tab-pane" id="jev-pane-sandbox" hidden>
           <div class="jev-sandbox-intro">
-            <h4>Test a routing decision</h4>
-            <p class="jev-form-hint">Try the saved policy without creating sessions or telemetry. ${cfg.prompt_egress === "redacted"
-              ? "Like production, TypeSafe receives your test prompt with secrets and paths redacted."
-              : "Like production, TypeSafe receives only metadata (prompt size, role, entry point), never the prompt text."} Vendor charges may apply.</p>
+            <h4>Test a prompt end to end</h4>
+            <p class="jev-form-hint">Follow one prompt the way production handles it: JEV suggests a model, Bobi chooses, and the chosen model answers. Nothing is recorded in metrics. The TypeSafe call may be charged, and the answer uses this agent's Claude login.</p>
           </div>
           <div class="jev-sandbox-grid">
-            <div class="jev-form-group">
-              <label class="jev-field-label" for="jev-test-key">TYPESAFE_API_KEY</label>
-              <div class="jev-sandbox-key">
-                <input id="jev-test-key" type="password" autocomplete="off" spellcheck="false" placeholder="Use configured key if blank">
-                <button type="button" class="btn bobi-btn quiet jev-test-show-key" aria-controls="jev-test-key" aria-pressed="false">Show key</button>
-              </div>
-            </div>
             <div class="jev-form-group">
               <label class="jev-field-label" for="jev-test-role">Role</label>
               <select id="jev-test-role">${scopedRoles.map(role => `<option ${role === ((cfg.roles || []).includes("engineer") ? "engineer" : (cfg.roles || [])[0]) ? "selected" : ""}>${escapeHtml(role)}</option>`).join("")}</select>
             </div>
             <div class="jev-form-group">
               <label class="jev-field-label" for="jev-test-entry">Entry Point</label>
-              <select id="jev-test-entry">${[...new Set(["session_start", ...(cfg.entry_points || []), "subagent_phase"])].map(entry => `<option ${entry === "session_start" ? "selected" : ""}>${escapeHtml(entry)}</option>`).join("")}</select>
+              <select id="jev-test-entry">${testEntries.map(entry => `<option ${entry === testEntries[0] ? "selected" : ""}>${escapeHtml(entry)}</option>`).join("")}</select>
             </div>
-            <p class="jev-form-hint jev-sandbox-credentials">The key is used for this request only and cleared on close.</p>
+            <p class="jev-form-hint jev-sandbox-credentials${cfg.credential_configured ? "" : " text-red"}">${cfg.credential_configured
+              ? `Uses ${escapeHtml(cfg.credential_env || "TYPESAFE_API_KEY")} from run/.env.`
+              : `${escapeHtml(cfg.credential_env || "TYPESAFE_API_KEY")} is not set in run/.env. Add it there to simulate routing.`}</p>
           </div>
           <div class="jev-form-group">
             <label class="jev-field-label" for="jev-test-prompt">User Prompt / Task</label>
             <textarea id="jev-test-prompt" rows="5" maxlength="65536" placeholder="Write a distributed Raft consensus algorithm"></textarea>
           </div>
           <div class="jev-test-actions">
-            <button type="button" class="btn bobi-btn primary jev-test-run">Simulate JEV Routing</button>
+            <button type="button" class="btn bobi-btn primary jev-test-run" ${cfg.credential_configured ? "" : "disabled"}>Run test</button>
             <button type="button" class="btn bobi-btn quiet jev-test-abort" hidden>Cancel request</button>
           </div>
           <p class="jev-test-status jev-form-hint" role="status" aria-live="polite"></p>
@@ -2594,21 +2554,48 @@ export function mountMetrics(element, { api, name, session = "" }) {
       pane.setAttribute("role", "tabpanel");
       pane.setAttribute("aria-labelledby", pane.id.replace("pane", "tab"));
     });
-    const keyInput = form.querySelector("#jev-test-key");
-    const showKey = form.querySelector(".jev-test-show-key");
-    showKey.addEventListener("click", () => {
-      const show = keyInput.type === "password";
-      keyInput.type = show ? "text" : "password";
-      showKey.textContent = show ? "Hide key" : "Show key";
-      showKey.setAttribute("aria-pressed", String(show));
-    });
     const simulate = form.querySelector(".jev-test-run");
     const abort = form.querySelector(".jev-test-abort");
     const testStatus = form.querySelector(".jev-test-status");
     const results = form.querySelector(".jev-test-results");
+    function decisionHeadline(model, isControl, why) {
+      const banner = node("div", "", "jev-decision-banner");
+      const headline = node("p", "This turn runs on ", "jev-decision-headline");
+      headline.append(node("strong", model), isControl ? " (control)." : ".");
+      banner.append(headline, node("p", why, "jev-form-hint"));
+      return banner;
+    }
+    function probabilityMeter(label, value, className) {
+      const percent = Math.round(Math.min(1, Math.max(0, Number(value) || 0)) * 100);
+      const row = node("div", "", className);
+      const heading = node("div", "", "jev-meter-heading");
+      heading.append(node("span", label), node("strong", `${percent}%`, "bobi-tnum"));
+      const meter = node("div", "", "jev-meter-track");
+      meter.setAttribute("role", "meter");
+      meter.setAttribute("aria-label", label);
+      meter.setAttribute("aria-valuemin", "0");
+      meter.setAttribute("aria-valuemax", "100");
+      meter.setAttribute("aria-valuenow", String(percent));
+      meter.setAttribute("aria-valuetext", `${percent}% ${label}`);
+      const fill = node("span", "", "jev-meter-fill");
+      fill.style.width = `${percent}%`;
+      meter.append(fill);
+      row.append(heading, meter);
+      return row;
+    }
+    // One numbered step of the flow: prompt -> JEV suggests -> Bobi chooses -> output.
+    function flowStep(list, number, title) {
+      const item = node("li", "", "jev-flow-step");
+      const head = node("div", "", "jev-flow-head");
+      head.append(node("span", String(number), "jev-flow-num"), node("span", title, "jev-flow-title"));
+      const body = node("div", "", "jev-flow-body");
+      item.append(head, body);
+      list.append(item);
+      return body;
+    }
     abort.addEventListener("click", () => {
       sandboxController?.abort();
-      testStatus.textContent = "Request cancelled. You can run another simulation.";
+      testStatus.textContent = "Request cancelled. You can run another test.";
     });
     simulate.addEventListener("click", async () => {
       const prompt = form.querySelector("#jev-test-prompt").value;
@@ -2621,65 +2608,81 @@ export function mountMetrics(element, { api, name, session = "" }) {
       simulate.disabled = true;
       abort.hidden = false;
       results.setAttribute("aria-busy", "true");
-      simulate.textContent = "Simulating…";
-      testStatus.textContent = "Calling TypeSafe JEV…";
+      simulate.textContent = "Running…";
+      testStatus.textContent = "Asking TypeSafe JEV…";
+      const started = performance.now();
+      const flow = node("ol", "", "jev-flow");
+      results.append(flow);
       try {
+        const promptStep = flowStep(flow, 1, "Your prompt");
+        promptStep.append(node("p", prompt.length > 400 ? `${prompt.slice(0, 400)}…` : prompt, "jev-flow-prompt"),
+          node("p", cfg.prompt_egress === "redacted" ? "JEV receives it with secrets and paths removed."
+            : "JEV receives only its size, role and entry point.", "jev-form-hint"));
+        results.hidden = false;
         const response = await api(`/api/agents/${encodeURIComponent(name)}/metrics/test-route`, {
           method: "POST", signal: requestController.signal,
-          body: JSON.stringify({prompt, api_key: keyInput.value,
+          body: JSON.stringify({prompt,
             features: {role: form.querySelector("#jev-test-role").value,
               entry_point: form.querySelector("#jev-test-entry").value}}),
         });
         if (requestController.signal.aborted) return;
+        const suggestStep = flowStep(flow, 2, "JEV suggests");
+        let chosen;
         if (!response.ok) {
-          testStatus.textContent = `${response.data?.error || "Simulation failed"}${response.data?.code ? ` (${response.data.code})` : ""}`;
-          return;
+          const error = response.data?.error || "Simulation failed";
+          if (!String(response.data?.code || "").startsWith("policy_")) {
+            results.hidden = true;
+            testStatus.textContent = `${error}${response.data?.code ? ` (${response.data.code})` : ""}`;
+            return;
+          }
+          // A failed policy call does not fail the turn in production: it runs the control model.
+          suggestStep.append(node("p", `No suggestion: ${error}.`, "jev-flow-error"));
+          chosen = cfg.control_model;
+          flowStep(flow, 3, "Bobi chooses").append(decisionHeadline(chosen, true,
+            "Without a suggestion, the turn runs on the control model."));
+        } else {
+          const data = response.data;
+          const suggestion = node("p", "", "jev-flow-suggestion");
+          suggestion.append(node("strong", data.selected_model),
+            ` at ${Math.round(Number(data.confidence) * 100)}% confidence, in ${Math.round(data.latency_ms)} ms.`);
+          suggestStep.append(suggestion, probabilityMeter("Confidence", data.confidence,
+            `jev-confidence-meter${data.fallback_reason ? " low-confidence" : ""}`));
+          const distribution = node("div", "", "jev-probabilities");
+          for (const [model, probability] of Object.entries(data.probabilities)) {
+            distribution.append(probabilityMeter(model, probability,
+              `jev-probability-row${model === data.selected_model ? " is-selected" : ""}`));
+          }
+          suggestStep.append(distribution);
+          const drift = data.fallback_reason === "policy_version_drift" ? ` (answered ${data.model_version}, pinned ${data.pinned_version})` : "";
+          const why = data.fallback_reason ? `JEV's pick is not used: ${fallbackText(data.fallback_reason)}${drift}.`
+            : data.mode === "shadow" ? "Shadow mode records JEV's pick and runs the control model."
+            : `Confidence clears the ${Math.round(Number(cfg.min_confidence ?? 0.85) * 100)}% minimum, so JEV's pick is used.`;
+          chosen = data.effective_model;
+          flowStep(flow, 3, "Bobi chooses").append(decisionHeadline(chosen, chosen !== data.selected_model, why));
         }
-        const data = response.data;
-        const banner = node("div", "", "jev-decision-banner");
-        banner.append(node("span", "JEV recommendation", "jev-field-label"), node("strong", data.selected_model));
-        results.append(banner);
-        function probabilityMeter(label, value, className) {
-          const percent = Math.round(Math.min(1, Math.max(0, Number(value) || 0)) * 100);
-          const row = node("div", "", className);
-          const heading = node("div", "", "jev-meter-heading");
-          heading.append(node("span", label), node("strong", `${percent}%`, "bobi-tnum"));
-          const meter = node("div", "", "jev-meter-track");
-          meter.setAttribute("role", "meter");
-          meter.setAttribute("aria-label", label);
-          meter.setAttribute("aria-valuemin", "0");
-          meter.setAttribute("aria-valuemax", "100");
-          meter.setAttribute("aria-valuenow", String(percent));
-          meter.setAttribute("aria-valuetext", `${percent}% ${label}`);
-          const fill = node("span", "", "jev-meter-fill");
-          fill.style.width = `${percent}%`;
-          meter.append(fill);
-          row.append(heading, meter);
-          return row;
+        const outputStep = flowStep(flow, 4, `Output from ${chosen}`);
+        const pending = node("p", `Running the prompt on ${chosen}…`, "jev-form-hint");
+        outputStep.append(pending);
+        testStatus.textContent = `Running the prompt on ${chosen}…`;
+        const run = await api(`/api/agents/${encodeURIComponent(name)}/metrics/test-run`, {
+          method: "POST", signal: requestController.signal, body: JSON.stringify({prompt, model: chosen}),
+        });
+        if (requestController.signal.aborted) return;
+        if (!run.ok) {
+          pending.replaceWith(node("p", run.data?.error || "The model run failed.", "jev-flow-error"));
+        } else {
+          const answer = node("div", run.data.output + (run.data.truncated ? "\n…" : ""), "jev-flow-output");
+          const price = Number(run.data.list_price_usd) > 0 ? ` · ~$${Number(run.data.list_price_usd).toFixed(4)} at list price` : "";
+          pending.replaceWith(answer, node("p", `${(run.data.latency_ms / 1000).toFixed(1)} s · `
+            + `${Number(run.data.input_tokens).toLocaleString()} in / ${Number(run.data.output_tokens).toLocaleString()} out tokens${price}`,
+            "jev-form-hint bobi-tnum"));
         }
-        banner.append(probabilityMeter("Confidence", data.confidence,
-          `jev-confidence-meter${data.fallback_reason ? " low-confidence" : ""}`));
-        const distribution = node("div", "", "jev-probabilities");
-        distribution.append(node("h4", "Model probabilities"));
-        for (const [model, probability] of Object.entries(data.probabilities)) {
-          distribution.append(probabilityMeter(model, probability,
-            `jev-probability-row${model === data.selected_model ? " is-selected" : ""}`));
-        }
-        results.append(distribution);
-        const drift = data.fallback_reason === "policy_version_drift" ? ` (answered ${data.model_version}, pinned ${data.pinned_version})` : "";
-        results.append(node("p", `Policy preview (${data.mode}): ${data.effective_model}${data.fallback_reason ? ` · fallback to the control model: ${fallbackText(data.fallback_reason)}${drift}` : ""}`, "jev-form-hint"));
-        const wire = node("details", "", "jev-wire-inspector");
-        wire.append(node("summary", "Context & Wire Inspector"));
-        for (const [title, value] of [["Extracted features", data.features], ["Outgoing Payload", data.outgoing_payload], ["Raw JEV Response", data.raw_response]]) {
-          wire.append(node("h4", title), node("pre", JSON.stringify(value, null, 2), "jev-code-preview"));
-        }
-        results.append(wire); results.hidden = false;
-        testStatus.textContent = `Completed in ${Math.round(data.latency_ms)} ms. No metrics recorded.`;
+        testStatus.textContent = `Done in ${((performance.now() - started) / 1000).toFixed(1)} s. No metrics recorded.`;
       } catch (error) {
-        if (!requestController.signal.aborted) testStatus.textContent = "Network error. Simulation did not complete.";
+        if (!requestController.signal.aborted) testStatus.textContent = "Network error. The test did not complete.";
       } finally {
         simulate.disabled = false;
-        simulate.textContent = "Simulate JEV Routing";
+        simulate.textContent = "Run test";
         if (document.activeElement === abort) simulate.focus();
         abort.hidden = true;
         results.setAttribute("aria-busy", "false");
@@ -2721,15 +2724,11 @@ export function mountMetrics(element, { api, name, session = "" }) {
       addCandidates();
       const controlModel = controlInput.value;
       const candidates = [...candidateModels];
-      const roles = [...form.querySelectorAll('input[name="jev-role"]:checked')].map(input => input.value);
       const instructions = form.querySelector("#jev-config-instructions").value.trim();
-      const confidenceInput = form.querySelector("#jev-config-confidence");
       if (validate && mode !== "off") {
         const invalid = !candidates.length ? ["Add at least one candidate model.", "#jev-model-filter"]
           : !controlModel ? ["Choose a control model.", "#jev-config-control"]
-          : !roles.length ? ["Select at least one scoped role.", 'input[name="jev-role"]']
-          : !instructions ? ["Enter routing instructions.", "#jev-config-instructions"]
-          : !confidenceInput.value || !confidenceInput.checkValidity() ? ["Minimum confidence must be between 0 and 1.", "#jev-config-confidence"] : null;
+          : !instructions ? ["Enter routing instructions.", "#jev-config-instructions"] : null;
         if (invalid) {
           saveMsg.textContent = invalid[0];
           saveMsg.className = "jev-save-msg text-red";
@@ -2740,8 +2739,8 @@ export function mountMetrics(element, { api, name, session = "" }) {
           return null;
         }
       }
-      return {mode, control_model: controlModel, candidate_models: candidates, roles, instructions,
-        min_confidence: Number(confidenceInput.value), prompt_egress: egressInput.value};
+      return {mode, control_model: controlModel, candidate_models: candidates, instructions,
+        prompt_egress: egressInput.value};
     }
 
     deleteBtn.addEventListener("click", openConfirmPopup);

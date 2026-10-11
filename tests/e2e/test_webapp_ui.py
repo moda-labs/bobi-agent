@@ -269,14 +269,14 @@ class TestMetricsView:
         config = concise_config()
         config["endpoint"] = "https://api.typesafe.ai/v1/sandbox-test"
         config["prompt_egress"] = "redacted"
-        env_file.write_text("# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(config) + "\n")
+        env_file.write_text("# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(config) + "\nTYPESAFE_API_KEY=browser-test-key\n")
         env_before = env_file.read_bytes()
         client_class = httpx.AsyncClient
         calls = []
         def handler(request):
             calls.append(json.loads(request.content))
             assert request.headers["authorization"] == "Bearer browser-test-key"
-            assert calls[-1]["state"]["role"] == "curator"
+            assert calls[-1]["state"]["role"] == "director"
             assert calls[-1]["state"]["entry_point"] == "subagent_phase"
             if calls[-1]["state"]["task"] == "Fail deliberately":
                 return httpx.Response(401, text="private vendor error")
@@ -347,30 +347,41 @@ class TestMetricsView:
         expect(dialog.get_by_label("TypeSafe endpoint", exact=True)).to_have_count(0)
         expect(dialog.get_by_label("Entry Point", exact=True)).to_have_value("session_start")
         expect(dialog.get_by_role("button", name="Save Changes")).to_be_hidden()
-        key = dialog.get_by_label("TYPESAFE_API_KEY", exact=True)
-        expect(key).to_have_attribute("type", "password")
-        key.fill("browser-test-key")
-        dialog.get_by_role("button", name="Show key").click()
-        expect(key).to_have_attribute("type", "text")
-        dialog.get_by_role("button", name="Hide key").click()
-        expect(key).to_have_attribute("type", "password")
-        dialog.get_by_label("Role", exact=True).select_option("curator")
+        # The sandbox always uses the saved key; there is no key field to override it.
+        expect(dialog.locator("#jev-test-key")).to_have_count(0)
+        expect(dialog.locator(".jev-sandbox-credentials")).to_have_text("Uses TYPESAFE_API_KEY from run/.env.")
+        role = dialog.get_by_label("Role", exact=True)
+        # Only the policy's roles: production never routes the curator.
+        expect(role.locator("option")).to_have_text(["director", "engineer"])
+        role.select_option("director")
         dialog.get_by_label("Entry Point", exact=True).select_option("subagent_phase")
         prompt = dialog.get_by_label("User Prompt / Task", exact=True)
         prompt.fill("Write a distributed Raft consensus algorithm")
-        dialog.get_by_role("button", name="Simulate JEV Routing").click()
-        expect(dialog.locator(".jev-decision-banner > strong")).to_have_text("ds/deepseek-v4-pro")
+        runs = []
+        def fulfil_run(route):
+            runs.append(json.loads(route.request.post_data))
+            route.fulfill(json={"model": runs[-1]["model"], "output": "<b>Answer</b> from the chosen model",
+                                "truncated": False, "latency_ms": 2100, "input_tokens": 1200,
+                                "output_tokens": 80, "list_price_usd": 0.0048})
+        page.route("**/metrics/test-run", fulfil_run)
+        dialog.get_by_role("button", name="Run test").click()
+        # The flow: prompt -> JEV suggests -> Bobi chooses -> the chosen model's output.
+        steps = dialog.locator(".jev-flow-title")
+        expect(steps).to_have_text(["Your prompt", "JEV suggests", "Bobi chooses", "Output from ds/deepseek-v4-pro"])
+        headline = dialog.locator(".jev-decision-headline")
+        expect(headline).to_have_text("This turn runs on ds/deepseek-v4-pro.")
+        expect(dialog.locator(".jev-flow-suggestion")).to_contain_text("ds/deepseek-v4-pro at 94% confidence")
+        expect(dialog.locator(".jev-flow-output")).to_have_text("<b>Answer</b> from the chosen model")
+        assert runs[-1] == {"prompt": "Write a distributed Raft consensus algorithm", "model": "ds/deepseek-v4-pro"}
+        expect(dialog.locator(".jev-wire-inspector")).to_have_count(0)
         expect(dialog.get_by_role("meter", name="Confidence", exact=True)).to_have_attribute("aria-valuenow", "94")
         expect(dialog.get_by_role("meter", name="ds/deepseek-v4-pro", exact=True)).to_have_attribute("aria-valuenow", "97")
         expect(dialog.locator("progress")).to_have_count(0)
         expect(dialog.locator(".jev-probability-row")).to_have_count(2)
         expect(dialog.locator(".jev-test-status")).to_contain_text("No metrics recorded")
         _metrics_capture(page, f"jev-sandbox-{width}")
-        dialog.locator(".jev-wire-inspector").scroll_into_view_if_needed()
+        dialog.locator(".jev-probabilities").scroll_into_view_if_needed()
         _metrics_capture(page, f"jev-sandbox-results-{width}")
-        dialog.locator(".jev-wire-inspector summary").click()
-        expect(dialog.locator(".jev-wire-inspector")).to_contain_text("Outgoing Payload")
-        expect(dialog.locator(".jev-wire-inspector")).to_contain_text("Raw JEV Response")
         assert dialog.locator("img").count() == 0
         assert page.evaluate("window.sandboxInjected") is None
         assert dialog.evaluate("element => element.scrollWidth <= element.clientWidth")
@@ -387,16 +398,19 @@ class TestMetricsView:
             .filter(button => button.getClientRects().length)
             .every(button => button.scrollWidth <= button.clientWidth)""")
         prompt.fill("Fail deliberately")
-        dialog.get_by_role("button", name="Simulate JEV Routing").click()
-        # A 401 names the credential problem instead of reading like an outage.
-        expect(dialog.locator(".jev-test-status")).to_contain_text("TypeSafe rejected the API key")
-        expect(dialog.locator(".jev-test-results")).to_be_hidden()
-        expect(dialog.get_by_role("button", name="Simulate JEV Routing")).to_be_enabled()
+        dialog.get_by_role("button", name="Run test").click()
+        # Like production, a failed policy call runs the control model; the 401
+        # names the credential problem instead of reading like an outage.
+        expect(headline).to_have_text("This turn runs on ds/deepseek-flash (control).")
+        expect(dialog.locator(".jev-flow-error")).to_contain_text("TypeSafe rejected the API key")
+        expect(dialog.get_by_role("button", name="Run test")).to_be_enabled()
+        assert runs[-1]["model"] == "ds/deepseek-flash"
         prompt.fill("Retry the routing decision")
-        dialog.get_by_label("TYPESAFE_API_KEY", exact=True).press("Enter")
-        expect(dialog.locator(".jev-decision-banner > strong")).to_have_text("ds/deepseek-v4-pro")
-        assert len(calls) == 3 and env_file.read_bytes() == env_before
-        wire = dialog.locator(".jev-wire-inspector summary")
+        dialog.get_by_role("button", name="Run test").click()
+        expect(headline).to_have_text("This turn runs on ds/deepseek-v4-pro.")
+        assert len(calls) == 3 and len(runs) == 3 and env_file.read_bytes() == env_before
+        page.unroute("**/metrics/test-run")
+        wire = dialog.get_by_role("button", name="Run test")
         wire.focus()
         wire.press("Tab")
         expect(dialog.get_by_role("button", name="Close dialog")).to_be_focused()
@@ -409,11 +423,11 @@ class TestMetricsView:
         page.keyboard.press("ArrowRight")
         pending = []
         page.route("**/metrics/test-route", lambda route: pending.append(route))
-        dialog.get_by_role("button", name="Simulate JEV Routing").click()
-        expect(dialog.get_by_role("button", name="Simulating")).to_be_disabled()
+        dialog.get_by_role("button", name="Run test").click()
+        expect(dialog.get_by_role("button", name="Running")).to_be_disabled()
         dialog.get_by_role("button", name="Cancel request").click()
         expect(dialog.locator(".jev-test-status")).to_contain_text("Request cancelled")
-        expect(dialog.get_by_role("button", name="Simulate JEV Routing")).to_be_enabled()
+        expect(dialog.get_by_role("button", name="Run test")).to_be_enabled()
         for route in pending:
             route.abort()
         page.unroute("**/metrics/test-route")
@@ -425,7 +439,6 @@ class TestMetricsView:
         page.once("dialog", lambda confirmation: confirmation.accept())
         dialog.press("Escape")
         expect(dialog).to_be_hidden()
-        expect(page.locator("#jev-test-key")).to_have_value("")
         assert len(calls) == 3 and env_file.read_bytes() == env_before
         connection = connect(database)
         assert "\n".join(connection.iterdump()) == before
@@ -521,7 +534,7 @@ class TestMetricsView:
         expect(page.locator(".metrics-tile")).to_have_count(3)
         expect(page.locator(".tile-input .tile-sub")).to_have_text("100 (13.9% cache read)")
         expect(page.locator(".tile-input .tile-badge, .tile-output .tile-badge")).to_have_count(0)
-        expect(page.locator(".metrics-health-strip .is-warn")).to_have_text("coverage2 exact · 1 derived · 1 unknown")
+        expect(page.locator(".metrics-health-strip")).to_have_count(0)
         rows = page.locator(".metrics-table-panel .runs tbody tr")
         expect(rows).to_have_count(4)
         expect(rows.filter(has_text="Router Decision")).to_have_count(2)
@@ -1035,7 +1048,6 @@ class TestMetricsView:
         mode = editor.locator("#jev-config-mode")
         candidates = editor.locator("#jev-config-candidates")
         instructions = editor.locator("#jev-config-instructions")
-        roles = editor.locator('input[name="jev-role"]')
         mode.select_option("enforce")
         while editor.locator(".jev-candidate-remove").count():
             editor.locator(".jev-candidate-remove").first.click()
@@ -1078,11 +1090,8 @@ class TestMetricsView:
         expect(editor.locator("#jev-config-egress")).to_have_value("none")
         editor.locator("#jev-config-egress").select_option("redacted")
         expect(editor.locator("#jev-egress-hint")).to_contain_text("secrets, credentials and local paths removed")
-        for role in roles.all():
-            role.uncheck()
-        dialog.locator("#jev-config-save").click()
-        expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("role", re.I))
-        editor.locator('input[name="jev-role"][value="engineer"]').check()
+        # Scoped roles are not editable here; saves keep the policy's allowlist.
+        expect(editor.locator('input[name="jev-role"]')).to_have_count(0)
         instructions.fill("")
         dialog.locator("#jev-config-save").click()
         expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("instruction", re.I))
@@ -1097,7 +1106,7 @@ class TestMetricsView:
         payload = saved.value.json()
         assert payload["enabled"] and payload["mode"] == "enforce"
         assert payload["candidate_models"] == ["ds/deepseek-flash", "ds/deepseek-v4-pro"]
-        assert payload["roles"] == ["engineer"] and payload["instructions"] == instructions.input_value()
+        assert payload["roles"] == ["director", "engineer"] and payload["instructions"] == instructions.input_value()
         assert payload["prompt_egress"] == "redacted" and payload["brain"] == "auto"
         assert payload["restart_required"] and payload["applies_on"] == "agent_restart"
         expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("restart", re.I))
@@ -1270,8 +1279,7 @@ class TestMetricsView:
         expect(table.locator("tfoot")).to_contain_text(f"({savings['saved_pct']:.1f}%)")
         expect(card.locator(".jev-footnote")).to_contain_text("Baseline Cost (Flagship) prices every turn on the most expensive model")
         expect(card).not_to_contain_text("not measurable")
-        # Telemetry health is a single strip, not a second card beside the value.
-        expect(page.locator(".metrics-health-strip")).to_contain_text("coverage")
+        # No telemetry health strip or card beside the value.
         expect(page.get_by_text("Telemetry Health & Coverage")).to_have_count(0)
         card.scroll_into_view_if_needed()
         _metrics_capture(page, f"jev-savings-{width}")
