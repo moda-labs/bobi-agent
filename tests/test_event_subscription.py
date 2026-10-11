@@ -1,5 +1,10 @@
 """Tests for _start_event_subscription — registration retry and persistence.
 
+Since #952 the second argument is this session's EXTRA topics, not its full
+key list: the full list is composed inside `_start_event_subscription` by
+`compose_session_subscriptions`, which prepends `inbox/<session>`. These tests
+pass extras and assert on the composed shape.
+
 Regression coverage for the EC2 director crash: a transient TimeoutError
 during event server registration propagated uncaught and killed the
 manager daemon (register() had no retry, and the deployment was never
@@ -107,10 +112,19 @@ def test_fresh_state_registers_even_when_a_bubble_already_exists(
 @patch("bobi.events.drain.drain_loop")
 @patch("bobi.events.client.EventServerClient")
 @patch("bobi.events.server.register")
-def test_deaf_reconnect_uses_filtered_registered_subscriptions(
+def test_deaf_reconnect_reasserts_the_recomposed_desired_set(
         mock_register, mock_client, _drain, project):
-    """If fresh registration drops an unbacked global topic, the deaf reconnect
-    resubscribe must not later PUT the raw unfiltered subscribe list."""
+    """The deaf reconnect re-DERIVES its desired set rather than replaying a cache.
+
+    Before #952 it replayed `active_subscriptions`, the FILTERED list register
+    returned, which is why a PUT whose response was lost reverted a change the
+    server had already accepted. It now recomposes, so an unbacked global topic
+    is re-asserted unfiltered and the server stays authoritative: it rejects the
+    update if the grant is truly absent, which is the accepted D7 consequence.
+
+    Register itself still filters - an unbacked topic must never hard-reject a
+    FRESH registration - so the two lists differ here on purpose.
+    """
     mock_register.return_value = ("dep-1", "key-1")
     captured = []
 
@@ -127,11 +141,13 @@ def test_deaf_reconnect_uses_filtered_registered_subscriptions(
         on_deaf()
 
     mock_register.assert_called_once()
-    assert mock_register.call_args.args[2] == ["inbox/self"]
+    # Register dropped the ungranted github topic.
+    assert mock_register.call_args.args[2] == ["inbox/sess", "inbox/self"]
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
+    # The reconnect asserted the full composed set, not the filtered one.
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["inbox/self"],
+        "replace": ["inbox/sess", "github:o/r", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
 
@@ -225,7 +241,7 @@ def test_saved_state_uses_put_not_register(mock_register,
     assert len(put_reqs) == 1
     assert str(put_reqs[0].url) == f"{REMOTE_URL}/deployments/dep-3/subscriptions"
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r"],
+        "replace": ["inbox/sess", "github:o/r"],
         "protocol": EVENT_PROTOCOL,
     }
     assert mock_client.call_args.kwargs["deployment_id"] == "dep-3"
@@ -359,11 +375,11 @@ def test_saved_state_keeps_unbacked_global_topics_and_resubscribes_same(
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 2
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r", "inbox/self"],
+        "replace": ["inbox/sess", "github:o/r", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
     assert json.loads(put_reqs[1].content) == {
-        "replace": ["github:o/r", "inbox/self"],
+        "replace": ["inbox/sess", "github:o/r", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
 
@@ -463,7 +479,7 @@ def test_configured_local_keeps_unbacked_topics_when_the_grant_is_denied(
     put_reqs = [r for r in captured if r.method == "PUT"]
     assert len(put_reqs) == 1
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r", "inbox/self"],
+        "replace": ["inbox/sess", "github:o/r", "inbox/self"],
         "protocol": EVENT_PROTOCOL,
     }
     # The saved deployment survives — nothing was re-minted.
@@ -508,7 +524,7 @@ def test_authorization_raising_still_puts_the_raw_list(
     assert len(put_reqs) == 1
     assert str(put_reqs[0].url) == f"{LOCAL_URL}/deployments/dep-L/subscriptions"
     assert json.loads(put_reqs[0].content) == {
-        "replace": ["github:o/r"],
+        "replace": ["inbox/sess", "github:o/r"],
         "protocol": EVENT_PROTOCOL,
     }
     assert json.loads(state.read_text()) == {

@@ -39,6 +39,9 @@ plan/spec text or when you must pass the diff explicitly.
 
 - Treat the output as advice, not a verdict — you judge what to act on.
 - Never paste secrets/tokens into the prompt. In API-key mode, Bobi
-  materializes `~/.codex/auth.json` from `OPENAI_API_KEY` before launch.
-- If `codex` is missing or unauthed the `requires:` preflight blocks dispatch —
-  surface that, don't silently skip.
+  materializes `$CODEX_HOME/auth.json` (the durable volume dir, not
+  `~/.codex`) from `OPENAI_API_KEY` before launch - and only when no
+  subscription credential is already there.
+- If `codex` is unauthed, an operator logs it in over chat with
+  `bobi agent <name> login-bootstrap codex`, or heals a revoked credential
+  with `--rebind`. Report the gap and proceed; don't silently skip.

@@ -1,6 +1,6 @@
 [project]
 name = "bobi"
-version = "0.59.0"
+version = "0.60.1"
 description = "Build teams of event-driven AI agents"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -123,6 +123,7 @@ markers = [
     "local_only: test only runs against the local Node.js event server backend",
     "docker: test builds/runs the instance container image (needs a docker daemon; deselected in integration-fast)",
     "live: test hits a live external API (Claude, Slack, ...); gated by credentials/env, not run on PRs",
+    "real_listener: subscription-login test drives the real event-listener registration path, not the ask-first fake",
 ]
 
 [build-system]

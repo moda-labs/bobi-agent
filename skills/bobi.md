@@ -90,6 +90,10 @@ bobi agent <name> start --fresh
 bobi agent <name> status
 bobi agent <name> doctor
 
+# Install or remove the user-level supervisor service (macOS/Linux).
+bobi agent <name> install-service [--replace]
+bobi agent <name> uninstall-service
+
 # Supervise the manager as the terminal process (containers, pod specs).
 # Spawns + probes the manager, publishes heartbeat/lifecycle telemetry, and
 # listens on the admin topic so a wedged manager can still be restarted.
@@ -109,6 +113,16 @@ bobi agent <name> events publish alert/firing --json '{"title":"x"}'
 bobi agent <name> events ingest-token create alert/firing --name oncall
 bobi agent <name> events ingest-token list
 bobi agent <name> events ingest-token revoke <id>
+
+# Event topics this team hears about. `add`/`remove` persist the declared list
+# to <run>/workspace/subscriptions.yaml and apply it to the running manager
+# with NO restart. Topics, not repos. An `inbox/` or `reply/` topic is refused.
+# With the manager down the change is persisted and exits zero; it applies at
+# the next reload or start. An ungranted topic is rejected by the event server,
+# the declared change is KEPT, and the command exits non-zero.
+bobi agent <name> subscriptions list
+bobi agent <name> subscriptions add github:org/repo
+bobi agent <name> subscriptions remove github:org/repo
 
 bobi agent <name> transcript show manager
 bobi agent <name> transcript search "query"

@@ -34,8 +34,18 @@ from .conftest import _free_port
 class _SlackStub:
     """Minimal Slack Web API stub recording every call it receives."""
 
+    #: Default thread contents for `conversations.replies`. A test may replace
+    #: this to drive a specific thread shape (see the catch-up read below).
+    DEFAULT_REPLIES = [
+        {"user": "U_H", "text": "question", "ts": "100.000"},
+        {"user": "U_BOTGW", "text": "answer", "ts": "100.001",
+         "files": [{"id": "F1", "name": "a.png", "mimetype": "image/png",
+                    "url_private": "https://x"}]},
+    ]
+
     def __init__(self):
         self.calls: list[dict] = []
+        self.replies = list(self.DEFAULT_REPLIES)
         self.port = _free_port()
         stub = self
 
@@ -84,13 +94,8 @@ class _SlackStub:
                 if method == "assistant.threads.setStatus":
                     return self._respond({"ok": True})
                 if method == "conversations.replies":
-                    return self._respond({"ok": True, "messages": [
-                        {"user": "U_H", "text": "question", "ts": "100.000"},
-                        {"user": "U_BOTGW", "text": "answer", "ts": "100.001",
-                         "files": [{"id": "F1", "name": "a.png",
-                                    "mimetype": "image/png",
-                                    "url_private": "https://x"}]},
-                    ]})
+                    return self._respond({"ok": True,
+                                          "messages": stub.replies})
                 if method == "files.getUploadURLExternal":
                     return self._respond({
                         "ok": True, "file_id": "F_GW1",
@@ -172,6 +177,7 @@ def gateway(gateway_env, monkeypatch):
     project, stub, es_url, bubble = gateway_env
     monkeypatch.setenv("BOBI_ROOT", str(project))
     stub.calls.clear()
+    stub.replies = list(_SlackStub.DEFAULT_REPLIES)
     return project, stub, es_url, bubble
 
 
@@ -445,3 +451,107 @@ class TestTypingFlowEndToEnd:
 
         from bobi.events.channels import stop_all_refresh_loops
         stop_all_refresh_loops()
+
+
+class TestLoginBootstrapCatchUpRead:
+    """#958 items 24a and 24b: the ask-first catch-up read against the REAL
+    local event server and the REAL channel adapters.
+
+    The unit lane fakes the chat transport wholesale, which is correct for the
+    orchestration but cannot see an adapter that answers 400. These drive
+    `/channels/history` end to end, so a contract change is caught here rather
+    than post-merge.
+
+    Slack *identity* resolution is patched, because `bobi/slack.py` talks to
+    slack.com directly and is not what these items are about. Everything the
+    items are about stays real: the ref assembly, the bubble-signed GET, the
+    Node adapter's `conversations.replies` call, and the `{user, text, ts}`
+    mapping the freshness rule reads.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _bot_identity(self, monkeypatch):
+        from bobi import auth_bootstrap as ab
+
+        monkeypatch.setattr(ab, "_slack_identity", lambda cfg: ("T_GW", "U_BOTGW"))
+
+    def test_catch_up_read_finds_a_gap_reply_through_the_real_adapter(self, gateway):
+        """Item 24a, the positive leg: a human reply after the bot's own last
+        message is adopted, read through the real history endpoint."""
+        from bobi import auth_bootstrap as ab
+        from bobi.config import Config
+
+        project, stub, _es_url, _bubble = gateway
+        stub.replies = [
+            {"user": "U_BOTGW", "text": "reply when you are ready, and then "
+                                        "I will begin the login flow",
+             "ts": "200.000"},
+            {"user": "U_H", "text": "ready", "ts": "200.001"},
+        ]
+        channel = ab.LoginChannel(
+            destination="slack:T_GW:channel:C_GW", source="slack",
+            topic="slack:T_GW:app:A_GW",
+        )
+        got = ab._catch_up_read(project, Config(), channel, "200.000")
+        assert got is not None, "the gap reply must be found"
+        reply_to, message_id = got
+        assert message_id == "200.001"
+        assert reply_to.thread_ts == "200.000"
+        # The real adapter was asked for THIS thread.
+        replies = stub.named("conversations.replies")
+        assert len(replies) == 1
+        assert replies[0]["body"]["channel"] == "C_GW"
+        assert replies[0]["body"]["ts"] == "200.000"
+
+    def test_catch_up_read_treats_the_bots_own_last_message_as_the_baseline(
+        self, gateway,
+    ):
+        """Item 24a, the negative leg. Without the baseline a boot that already
+        consumed the reply and then timed out mid-login would re-consume it on
+        every restart and re-post a device code each time."""
+        from bobi import auth_bootstrap as ab
+        from bobi.config import Config
+
+        project, stub, _es_url, _bubble = gateway
+        stub.replies = [
+            {"user": "U_H", "text": "ready", "ts": "300.000"},
+            {"user": "U_BOTGW", "text": "Open this link...", "ts": "300.001"},
+        ]
+        channel = ab.LoginChannel(
+            destination="slack:T_GW:channel:C_GW", source="slack",
+            topic="slack:T_GW:app:A_GW",
+        )
+        assert ab._catch_up_read(project, Config(), channel, "300.000") is None
+        assert len(stub.named("conversations.replies")) == 1
+
+    def test_whatsapp_history_is_rejected_by_the_real_adapter_set(self, gateway):
+        """Item 24b, the premise. WhatsApp's channel adapter implements send
+        and uploadFiles only, and `/channels/history` rejects an adapter with
+        no `fetchConversation` outright.
+
+        This is the test that fails loudly the day someone adds WhatsApp
+        history, which is the signal to widen the design.
+        """
+        from bobi.events.gateway import GatewayError, channels_history
+
+        project, _stub, _es_url, _bubble = gateway
+        with pytest.raises(GatewayError):
+            channels_history(project, "whatsapp:15550000000:dm:15551111111")
+
+    def test_the_non_slack_skip_is_taken_without_calling_history(self, gateway):
+        """Item 24b. Asserts the SKIP against the real adapter set: the read is
+        never attempted, so the run blocks on the live listener instead."""
+        from bobi import auth_bootstrap as ab
+        from bobi.config import Config
+
+        project, stub, _es_url, _bubble = gateway
+        channel = ab.LoginChannel(
+            destination="whatsapp:15550000000:dm:15551111111",
+            source="whatsapp", topic="whatsapp:15550000000",
+        )
+        assert ab._catch_up_read(project, Config(), channel, "400.000") is None
+        # None, not "": the transport has no usable history, which is a
+        # different answer from "I looked and there is no ask" - the caller
+        # blocks on the former and posts a fresh ask on the latter.
+        assert ab._recover_ask_id(project, Config(), channel, "codex") is None
+        assert stub.named("conversations.replies") == []

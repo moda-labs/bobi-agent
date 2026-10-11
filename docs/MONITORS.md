@@ -253,6 +253,7 @@ reconcile path (`scheduler.py`):
 - `monitor/<type>` auto-dispatch rules match monitor findings. Their
   `finding_key` and `monitor` payload values become workflow inputs and a
   bounded replay identity; completed exact replays require `fresh`.
+  Within the rule's cooldown, repeats of the same monitor finding are dropped before Director delivery so they cannot become manual launch requests.
 - Failed launches publish one recursion-safe `agent/auto_dispatch.failed` event.
 - Out-of-band agent failures publish `system/monitor.error` with the monitor
   name, flavor, reason (`spawn-failed`, `timeout`, or

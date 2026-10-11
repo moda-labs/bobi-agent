@@ -263,7 +263,10 @@ class EventReactor:
             now = time.monotonic()
             if key in self._dispatched and now - self._dispatched[key] < rule.cooldown:
                 log.info("Auto-dispatch skipped (cooldown): %s", key)
-                return "deduped" if rule.dedup_only else None
+                # A handled monitor finding must not reach the Director as an
+                # unannotated request to launch the same scheduled work again.
+                finding_replay = event.get("source") == "monitor" and rule.finding_identity(event)
+                return "deduped" if rule.dedup_only or finding_replay else None
 
             self._dispatched[key] = now
             self._prune_dispatched(now)

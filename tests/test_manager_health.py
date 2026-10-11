@@ -1,7 +1,9 @@
 """Unit tests for bobi.manager_health — the manager health endpoint."""
 
 import json
+import os
 import socket
+import urllib.error
 import urllib.request
 
 import pytest
@@ -17,11 +19,71 @@ def _reset_server():
     manager_health._server = None
     manager_health._thread = None
     manager_health._port_file = None
+    manager_health._token_file = None
     yield
     manager_health.stop()
 
 
 class TestHealthServer:
+    @pytest.mark.parametrize("watermark", ["invalid", {
+        "pending_batches": 1, "oldest_pending_at": "invalid"}])
+    def test_malformed_watermark_does_not_hide_session_health(self,
+                                                           tmp_path,
+                                                           monkeypatch,
+                                                           watermark):
+        from bobi import sdk
+
+        registry = sdk.SessionRegistry(root=tmp_path)
+        registry.register(sdk.SessionEntry(
+            name="director", pid=os.getpid(), status="idle",
+            ack_watermark=watermark))
+        monkeypatch.setattr(sdk, "get_registry", lambda: registry)
+        assert manager_health._session_status_from_registry()[0]["name"] == "director"
+
+    def test_health_reads_watermark_from_persisted_session_state(self,
+                                                               tmp_path,
+                                                               monkeypatch):
+        from bobi import sdk
+
+        registry = sdk.SessionRegistry(root=tmp_path)
+        registry.register(sdk.SessionEntry(
+            name="director", pid=os.getpid(), status="running",
+            last_activity=10.0))
+        state_path = registry._state_path("director")
+        state = json.loads(state_path.read_text())
+        state["ack_watermark"] = {
+            "pinned_seq": 223, "pending_batches": 98,
+            "oldest_pending_at": 100.0,
+            "oldest_event_type": "agent/session.completed"}
+        state_path.write_text(json.dumps(state))
+        monkeypatch.setattr(sdk, "get_registry", lambda: registry)
+        monkeypatch.setattr(manager_health.time, "time", lambda: 450.0)
+        registry.update_inbox_stats("director", depth=3, oldest_age=25.0)
+        port = manager_health.start(tmp_path / "state", "test-project")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health",
+                                    timeout=2) as response:
+            data = json.loads(response.read())
+        assert data["sessions"][0]["ack_watermark"] == {
+            "pinned_seq": 223, "pending_batches": 98,
+            "oldest_event_type": "agent/session.completed",
+            "oldest_age_seconds": 350.0}
+        assert data["sessions"][0]["inbox"] == {
+            "depth": 3, "oldest_age_seconds": 25.0}
+        assert registry.get("director").last_activity == 10.0
+
+    def test_start_does_not_wait_for_reverse_dns(self, tmp_path, monkeypatch):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        def fail_reverse_dns(_host):
+            raise AssertionError("health startup must not resolve its bind host")
+
+        monkeypatch.setattr(socket, "getfqdn", fail_reverse_dns)
+
+        port = manager_health.start(state_dir, "test-project")
+
+        assert port > 0
+        assert manager_health._server.server_name == "127.0.0.1"
 
     def test_start_returns_port_and_writes_port_file(self, tmp_path):
         state_dir = tmp_path / "state"
@@ -358,3 +420,166 @@ class TestManagerBlock:
         assert block["status"] == "error"
         assert block["error"] == "brain authentication failed"
         assert block["terminal_at"] == 120.0
+
+
+class TestSubscriptionRoutes:
+    """`POST /subscriptions/reload` and `GET /subscriptions` (#952).
+
+    Both are token-gated. `BOBI_HEALTH_BIND=0.0.0.0` ships in the reference
+    image, so an unauthenticated mutating route would let anything on the
+    network trigger credential-bearing authorize POSTs and state-changing
+    subscription writes. `/health` and `/ready` stay open so Kubernetes and Fly
+    probes are unaffected.
+    """
+
+    @staticmethod
+    def _start(tmp_path, session="mgr"):
+        state = tmp_path / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        port = manager_health.start(state, "test-project",
+                                    session_status_fn=lambda: [],
+                                    manager_session=session)
+        token = (state / "manager-health.token").read_text().strip()
+        return port, token, state
+
+    @staticmethod
+    def _request(port, path, *, token=None, method="GET"):
+        url = f"http://127.0.0.1:{port}{path}"
+        req = urllib.request.Request(url, method=method)
+        if token is not None:
+            req.add_header(manager_health.RELOAD_TOKEN_HEADER, token)
+        if method == "POST":
+            req.data = b""
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    class _Controller:
+        def __init__(self):
+            self.calls = []
+
+        def reload(self, *, authorize):
+            self.calls.append(authorize)
+            return {"status": "applied", "subscriptions": ["inbox/mgr"],
+                    "added_topics": [], "removed_topics": [],
+                    "at": "2026-10-10T18:22:04+00:00"}
+
+        def accepted_record(self):
+            return {"session": "mgr", "subscriptions": ["inbox/mgr"],
+                    "at": "2026-10-10T18:22:04+00:00"}
+
+    def test_reload_without_the_token_is_401_and_triggers_no_put(self, tmp_path,
+                                                                 monkeypatch):
+        from bobi import subagent
+
+        controller = self._Controller()
+        monkeypatch.setattr(subagent, "get_live_subscription",
+                            lambda s: controller)
+        port, token, _ = self._start(tmp_path)
+
+        assert self._request(port, "/subscriptions/reload",
+                             method="POST")[0] == 401
+        assert self._request(port, "/subscriptions/reload", token="wrong",
+                             method="POST")[0] == 401
+        assert self._request(port, "/subscriptions")[0] == 401
+        # The gate runs BEFORE the lookup, so nothing was applied.
+        assert controller.calls == []
+
+        status, body = self._request(port, "/subscriptions/reload",
+                                     token=token, method="POST")
+        assert status == 200
+        assert body["status"] == "applied"
+        # The operator-triggered path authorizes, so a newly declared global
+        # topic has its grant written before the PUT.
+        assert controller.calls == [True]
+
+        status, body = self._request(port, "/subscriptions", token=token)
+        assert status == 200
+        assert body == controller.accepted_record()
+
+    def test_health_and_ready_stay_unauthenticated(self, tmp_path):
+        port, _token, _ = self._start(tmp_path)
+        assert self._request(port, "/health")[0] == 200
+        assert self._request(port, "/ready")[0] in (200, 503)
+
+    def test_no_live_subscription_is_409_on_both_routes(self, tmp_path,
+                                                        monkeypatch):
+        from bobi import subagent
+
+        monkeypatch.setattr(subagent, "get_live_subscription", lambda s: None)
+        port, token, _ = self._start(tmp_path)
+        status, body = self._request(port, "/subscriptions/reload",
+                                     token=token, method="POST")
+        assert status == 409
+        assert body == {"status": "no_live_subscription", "session": "mgr"}
+        assert self._request(port, "/subscriptions", token=token)[0] == 409
+
+    def test_the_token_file_is_0600_and_unlinked_by_stop(self, tmp_path):
+        import stat
+
+        _port, token, state = self._start(tmp_path)
+        token_file = state / "manager-health.token"
+        assert token
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+        manager_health.stop()
+        assert not token_file.exists()
+        assert not (state / "manager-health.port").exists()
+
+    def test_an_unknown_post_path_is_404(self, tmp_path):
+        port, token, _ = self._start(tmp_path)
+        assert self._request(port, "/nope", token=token, method="POST")[0] == 404
+
+    def test_the_token_is_never_observable_at_a_wider_mode(self, tmp_path):
+        """Codex review F2.
+
+        `write_secret` writes the file and chmods it AFTERWARDS, so on a 022
+        umask the secret is readable at 0644 in between and permanently so if
+        the process dies there. Here the token IS the boundary for a server
+        that may bind 0.0.0.0, so it is created at 0600.
+        """
+        import stat
+
+        state = tmp_path / "state"
+        state.mkdir(parents=True)
+        path = state / "manager-health.token"
+
+        observed = []
+        real_write = os.write
+
+        def _watch(fd, data):
+            # Mode at the instant the bytes land, not after the call returns.
+            try:
+                observed.append(stat.S_IMODE(os.fstat(fd).st_mode))
+            except OSError:
+                pass
+            return real_write(fd, data)
+
+        prior = os.umask(0o022)
+        try:
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(os, "write", _watch)
+                token = manager_health._mint_token(path)
+        finally:
+            os.umask(prior)
+
+        assert token
+        assert observed == [0o600]
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    def test_minting_replaces_a_leftover_world_readable_token(self, tmp_path):
+        """O_CREAT does not apply its mode to an EXISTING inode, so a file left
+        at 0644 by an older version would keep that mode."""
+        import stat
+
+        state = tmp_path / "state"
+        state.mkdir(parents=True)
+        path = state / "manager-health.token"
+        path.write_text("stale")
+        os.chmod(path, 0o644)
+
+        token = manager_health._mint_token(path)
+        assert token != "stale"
+        assert path.read_text() == token
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600

@@ -10,6 +10,7 @@ state machine are all exercised end to end; only the child *program* is the
 stub (a real manager would need a Claude session).
 """
 
+import json
 import os
 import signal
 import subprocess
@@ -18,8 +19,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 from bobi import manager_health, paths
 
 from bobi.supervisor.config import SupervisorConfig
@@ -27,6 +26,7 @@ from bobi.supervisor.supervision import Supervisor
 
 STUB = Path(__file__).parent / "fixtures" / "supervisor_stub_manager.py"
 SIGNAL_HARNESS = Path(__file__).parent / "fixtures" / "supervisor_signal_harness.py"
+LOAD_HARNESS = Path(__file__).parent / "fixtures" / "supervisor_load_harness.py"
 SESSION = "moda-manager-proj"
 
 
@@ -77,6 +77,13 @@ def _wait_until(predicate, timeout: float, interval: float = 0.1) -> bool:
             return True
         time.sleep(interval)
     return False
+
+
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def _run_supervisor_in_thread(sup: Supervisor):
@@ -217,69 +224,79 @@ def test_supervisor_forwards_sigterm_to_child_and_exits_clean(tmp_path):
                 pass
 
 
-def test_load_grace_defers_a_busy_wedge_then_reopens(tmp_path):
-    """Load grace end to end (#903): the supervisor's OWN load evidence - a real CPU-
-    burning descendant walked from the real /proc - defers a confirmed wedge
-    verdict on a pegged host, so the healthy-but-busy manager is NOT restarted
-    and nothing is charged. The moment the load evidence drops, the gate
-    reopens and the SAME wedge restarts exactly as before.
+def test_load_grace_smoke_defers_real_busy_wedge_then_reopens(tmp_path):
+    """Load grace smoke (#903/MOD-382): a real supervisor drives a real manager
+    process and CPU-burning descendant through the platform-native evidence
+    reader. The busy wedge is not restarted; killing the burner drops the
+    evidence and reopens the same restart path.
 
     This is the #903 trap in miniature: full-suite runs on a 2-vCPU instance
     charged the restart budget three ways and killed a productive manager.
     """
-    if not Path("/proc").exists():
-        pytest.skip("/proc required for the real descendant CPU walk")
-
     root = tmp_path / "proj"
     (root / ".bobi" / "state").mkdir(parents=True)
     launch_log = tmp_path / "launches.log"
     busy_pid_file = tmp_path / "busy.pid"
 
-    host = {"load": (99.0, 2)}  # saturated: load1 99 over 2 cpus
-
-    def spawn():
-        return subprocess.Popen([
-            sys.executable, str(STUB),
-            "--project-root", str(root),
-            "--session", SESSION,
-            "--launch-log", str(launch_log),
-            "--busy-pid-file", str(busy_pid_file),
-            "--mode", "busy-wedge-then-recover",
-        ])
-
-    def load_fn(manager_pid, previous):
-        from bobi.supervisor.load import load_evidence
-        # One burner consumes roughly one of the injected two CPUs. The
-        # production default is stricter (0.8) for attribution; this acceptance
-        # leg uses 0.25 so shared/slow CI still proves the real tick-delta path.
-        return load_evidence(manager_pid, previous, host_load=host["load"],
-                             tree_cpu_ratio=0.25)
-
-    sup = Supervisor([], _fast_config(), project_root=root,
-                     spawn_fn=spawn, load_fn=load_fn)
-    t = _run_supervisor_in_thread(sup)
+    state_file = tmp_path / "supervisor-state.json"
+    wedge_trigger = tmp_path / "wedge.trigger"
+    proc = subprocess.Popen([
+        sys.executable, str(LOAD_HARNESS), str(root), str(launch_log),
+        str(busy_pid_file), str(state_file), str(wedge_trigger),
+    ])
     busy_pid = None
     try:
-        # The stub forks its busy descendant and records its pid.
+        # The stub spawns its busy descendant and records its pid.
         assert _wait_until(lambda: busy_pid_file.exists(), timeout=10), \
             "busy descendant never spawned"
         busy_pid = int(busy_pid_file.read_text().strip())
 
-        # Under pegged load the confirmed wedge verdict defers, across several
-        # confirm windows: one launch only, no restart, nothing charged.
-        time.sleep(4.0)
+        # Establish both inputs to the real decision before presenting an
+        # ambiguous verdict: the supervisor has observed the healthy manager
+        # over HTTP, and the native reader has a two-sample CPU delta.
+        def observed():
+            return _read_json(state_file)
+
+        assert _wait_until(
+            lambda: bool(
+                observed().get("load_evidence", {}).get("active")
+                and observed().get("ever_healthy")
+                and observed().get("health", {}).get("manager", {}).get(
+                    "status"
+                ) == "running"
+            ),
+            timeout=20,
+        ), f"real health/load evidence never became ready: {observed()}"
+        assert _launch_count(launch_log) == 1
+
+        # Transition the same live manager to wedged only after the production
+        # reader has established that its real descendant is consuming CPU.
+        wedge_trigger.touch()
+        assert _wait_until(
+            lambda: bool(observed().get("load_grace")), timeout=20
+        ), \
+            f"real load evidence never activated the supervisor gate: {observed()}"
+        grace = observed()["load_grace"]
+        assert grace is not None
+        assert grace["load1"] is not None
+        assert grace["busy_descendants"] >= 1
+        assert grace["tree_cpu_cores"] > 0
         assert _launch_count(launch_log) == 1, \
             "a busy wedge was restarted despite the load grace"
 
-        # The load clears: the evidence goes inactive and the same wedge now
-        # restarts - the gate reopens, the budget charges, the relaunch
-        # recovers to idle.
-        host["load"] = (0.1, 2)
+        # Stop the real CPU work. The tree delta falls to zero and the same
+        # wedge now restarts through the production decision path.
+        os.kill(busy_pid, signal.SIGKILL)
+        busy_pid = None
         assert _wait_until(lambda: _launch_count(launch_log) >= 2, timeout=20), \
             "supervisor never restarted the wedge after the load cleared"
     finally:
-        sup.request_stop()
-        t.join(timeout=10)
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         if busy_pid:
             try:
                 os.kill(busy_pid, signal.SIGKILL)

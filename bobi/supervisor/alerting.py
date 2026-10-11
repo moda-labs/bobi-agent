@@ -61,20 +61,13 @@ _POST_TIMEOUT = 3.0
 def _default_post(message: str) -> bool:
     """Post to the configured alert channel; True when delivered.
 
-    Same env gates as ``Supervisor._announce``: ``WATCHDOG_ALERT_CHANNEL`` plus
-    a Slack token. Unset degrades to log-only (the pre-#4 fleet state), never
-    an error.
+    The shared operator-alert path (``bobi.slack.post_operator_alert``) with
+    this loop's shorter timeout. Env gates and the log-only degrade live there,
+    so the supervisor and the brain-availability alerter cannot drift apart.
     """
-    token = (os.environ.get("BOBI_SLACK_BOT_TOKEN")
-             or os.environ.get("SLACK_BOT_TOKEN"))
-    channel = os.environ.get("WATCHDOG_ALERT_CHANNEL")
-    if not (token and channel):
-        log.warning("supervisor: WATCHDOG_ALERT_CHANNEL / Slack token not set "
-                    "- incident alert is log-only: %s", message)
-        return False
-    from bobi.slack import post_slack_message
-    post_slack_message(token, channel, message, timeout=_POST_TIMEOUT)
-    return True
+    from bobi.slack import post_operator_alert
+    return post_operator_alert(message, what="supervisor incident",
+                               timeout=_POST_TIMEOUT)
 
 
 class SlackAlerter(SupervisorObserver):

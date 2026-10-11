@@ -666,10 +666,21 @@ def _check_ingress_reachability() -> CheckResult:
     if not root:
         return CheckResult("Ingress reachability", ok=True,
                            detail="no runtime selected")
+    from bobi.events.subscriptions import WorkspaceSubscriptionsError
+
     try:
         from bobi.ingress import check_ingress_reachability
 
         warning = check_ingress_reachability(root)
+    except WorkspaceSubscriptionsError as exc:
+        # Ahead of the two arms below on purpose (#952): an invalid workspace
+        # subscription file fails every apply, so the command an operator runs
+        # first must not report it green as "skipped".
+        return CheckResult(
+            "Ingress reachability", ok=False,
+            detail=f"invalid subscription file: {exc}",
+            hint=f"fix or delete {exc.path}, then re-run",
+            required=False)
     except FileNotFoundError:
         return CheckResult("Ingress reachability", ok=True,
                            detail="no agent config")

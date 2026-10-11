@@ -1234,3 +1234,152 @@ def test_codex_api_key_auth_file_is_materialized(image: str):
 # it bypasses the code path that would have stopped it is not coverage of the
 # shipped behaviour. That is the same failure mode as the stale-copy problem
 # these tests came here to escape, one level down.
+
+
+# ---------------------------------------------------------------------------
+# #958 - CODEX_HOME on the durable volume, in the real image
+# ---------------------------------------------------------------------------
+
+# The entrypoint's last act is `exec gosu "${APP_USER}" env "HOME=..." ... bobi
+# agent <name> supervise`. An `export` in that process CANNOT propagate to a
+# sibling shell, so the only honest way to see what the manager receives is to
+# be the manager: this shim stands in for `bobi` and dumps its own environment
+# onto the mounted volume, where the test reads it.
+_BOBI_SHIM = """#!/bin/sh
+# The section-5 guard asks the CLI whether `supervise` is really there.
+if [ "$1" = "agent" ] && [ "$2" = "--help" ]; then
+  echo "  supervise  Run the supervisor sidecar"
+  exit 0
+fi
+case "$*" in
+  *supervise*) env > "/data/${BOOT_ENV_DUMP:-manager.env}" ;;
+esac
+exit 0
+"""
+
+
+def _boot_with_shim(image: str, data: Path, shim: Path, brain: str,
+                    dump: str = "manager.env",
+                    extra_env: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
+    """Run the REAL entrypoint to completion with `bobi` shimmed.
+
+    No `|| true` and no `sh -c` wrapper: the container's exit status IS the
+    entrypoint's, so a non-zero boot fails the test instead of being masked.
+    """
+    shim.mkdir(parents=True, exist_ok=True)
+    script = shim / "bobi"
+    script.write_text(_BOBI_SHIM)
+    script.chmod(0o755)
+    args = [
+        "docker", "run", "--rm",
+        "-v", f"{data}:/data",
+        "-v", f"{shim}:/shim:ro",
+        "-e", "PATH=/shim:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "-e", f"BOOT_ENV_DUMP={dump}",
+        "-e", "BOBI_AUTH=subscription",
+        "-e", f"BOBI_AGENT={brain}-smoke",
+        "-e", f"BOBI_BRAIN={brain}",
+        "-e", "BOBI_EVENT_SERVER=http://127.0.0.1:9",
+        "-e", "BOBI_TEAM=/mnt/team",
+        "-v", f"{REPO_ROOT / 'tests' / 'fixtures' / f'{brain}-smoke'}:/mnt/team:ro",
+        *extra_env,
+        image,
+    ]
+    return _run(*args)
+
+
+def _manager_env(data: Path, dump: str = "manager.env") -> dict[str, str]:
+    """The environment the shimmed manager was handed.
+
+    Read, never removed: the dump is written inside the container as `bobi` and
+    the entrypoint chowns the bind mount, so the host user cannot unlink it.
+    Each boot therefore writes its own file.
+    """
+    dump = data / dump
+    assert dump.is_file(), "the entrypoint never reached the manager handoff"
+    env = {}
+    for line in dump.read_text().splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            env[key] = value
+    return env
+
+
+@requires_docker
+@pytest.mark.timeout(400)
+def test_codex_home_is_on_the_volume_for_a_claude_brain(image: str, tmp_path: Path):
+    """#958 item 26. On a CLAUDE brain the entrypoint still moves codex's config
+    dir onto the volume, so a credential minted by `login-bootstrap codex`
+    survives a roll and the workers share it.
+
+    `CODEX_HOME` must reach the manager as `/data/codex`, the path must be a
+    real bobi-owned directory rather than a symlink, and both must survive a
+    restart on the same volume.
+    """
+    data = tmp_path / "data-claude"
+    data.mkdir()
+
+    for boot in ("first", "restart"):
+        proc = _boot_with_shim(
+            image, data, tmp_path / f"shim-{boot}", "claude",
+            dump=f"manager-{boot}.env",
+        )
+        assert proc.returncode == 0, f"{boot} boot:\n{proc.stdout}\n{proc.stderr}"
+        env = _manager_env(data, f"manager-{boot}.env")
+        assert env.get("CODEX_HOME") == "/data/codex", f"{boot} boot: {env!r}"
+        # `env` without `-i` inherits, so HOME is present too; that is what
+        # proves the export was inherited rather than the variable re-set.
+        assert env.get("HOME"), f"{boot} boot: no HOME in the manager env"
+
+        probe = _run(
+            "docker", "run", "--rm", "-v", f"{data}:/data",
+            "--entrypoint", "sh", image, "-c",
+            "printf 'OWNER=%s\\nISDIR=%s\\nISLINK=%s\\n' "
+            "\"$(stat -c %U /data/codex)\" "
+            "\"$(test -d /data/codex && echo yes || echo no)\" "
+            "\"$(test -L /data/codex && echo yes || echo no)\"",
+        )
+        out = probe.stdout + probe.stderr
+        assert "OWNER=bobi" in out, f"{boot} boot:\n{out}"
+        assert "ISDIR=yes" in out, f"{boot} boot:\n{out}"
+        assert "ISLINK=no" in out, f"{boot} boot:\n{out}"
+
+    # The credential path the tool flow resolves, under the exported dir.
+    creds = _run(
+        "docker", "run", "--rm", "-v", f"{data}:/data",
+        "-e", "CODEX_HOME=/data/codex", "-e", "BOBI_BRAIN=codex",
+        "--entrypoint", "python", image, "-c",
+        "from bobi import auth_bootstrap as a; print(a.credentials_path())",
+    )
+    assert creds.returncode == 0, creds.stderr
+    assert creds.stdout.strip() == "/data/codex/auth.json", creds.stdout
+
+
+@requires_docker
+@pytest.mark.timeout(400)
+def test_codex_brain_still_boots_clean_with_section_3c(image: str, tmp_path: Path):
+    """#958 item 27, the regression pin for the abort an earlier shape of
+    section 3c reproduced.
+
+    That shape needed one persistent path to be a different kind of object per
+    brain - a real directory owned by 3b on a codex brain, a symlink out to the
+    image HOME on any other - and an `ln` over 3b's real directory aborted the
+    boot. The settled shape creates no sub-object, so a codex brain boots clean
+    and its own credential is left intact.
+    """
+    data = tmp_path / "data-codex"
+    (data / "codex").mkdir(parents=True)
+    credential = json.dumps({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {"refresh_token": "refresh-token-value", "account_id": "acct"},
+    })
+    (data / "codex" / "auth.json").write_text(credential)
+
+    proc = _boot_with_shim(image, data, tmp_path / "shim", "codex")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "FATAL" not in out, out
+    assert _manager_env(data).get("CODEX_HOME") == "/data/codex"
+    # 3b still owns ~/.codex on a codex brain, and the credential is untouched.
+    assert (data / "codex" / "auth.json").read_text() == credential

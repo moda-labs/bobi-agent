@@ -724,12 +724,13 @@ def test_result_to_turn_handles_error_and_status():
     assert turn.result_text == "API Error: 529 Overloaded"
 
 
-def test_result_to_turn_classifies_5xx_api_error_without_error_flag():
-    msg = _result(is_error=False, result='API Error: 521 {"title":"Error 521: Web server is down"}')
+def test_result_to_turn_keeps_a_successful_answer_that_mentions_an_api_error():
+    # The agent's own answer can quote an outage; only the provider's error
+    # flag marks a turn failed.
+    msg = _result(is_error=False, result="The deploy failed with API Error: 502 Bad Gateway, so I retried.")
     turn = _result_to_turn(msg)
-    assert turn.is_error is True
-    assert turn.error_kind == "api_error"
-    assert "Error 521" in turn.error_message
+    assert turn.is_error is False
+    assert turn.error_kind == ""
 
 
 
@@ -1532,3 +1533,28 @@ class TestBrainFactoryContract:
 
         assert "codex" in str(exc.value)
         assert "AttributeError" not in str(exc.value)
+
+
+def test_successful_turn_discussing_an_outage_is_not_reclassified():
+    """A successful turn's own answer is not an error string (#992).
+
+    ``result`` on a successful turn is the agent's final message. The
+    availability markers include sentences this codebase writes constantly
+    ("you've hit your session limit", "not logged in"), so classifying a
+    successful result would flip the turn to is_error, discard the work at
+    ``orchestrator``/``subagent``, and open a false brain incident whose latch
+    then dedups away the next REAL outage on that account.
+    """
+    msg = _result(result=(
+        "Root cause: all 13 dispatches died on \"You've hit your session "
+        "limit\". Fix pushed."
+    ))
+    turn = _result_to_turn(msg)
+    assert turn.is_error is False
+    assert turn.error_kind == ""
+
+    # The same string on a turn the brain actually failed still classifies.
+    failed = _result_to_turn(_result(
+        is_error=True, result="You've hit your session limit · resets 12:40am",
+    ))
+    assert failed.error_kind == ERROR_KIND_CREDITS_EXHAUSTED

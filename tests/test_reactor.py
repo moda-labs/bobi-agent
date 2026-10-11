@@ -464,6 +464,31 @@ class TestEventReactor:
         _wait_calls(mock_launch, 2)
         assert mock_launch.call_count == 2
 
+    @pytest.mark.parametrize("source,finding_key,replay_result", [
+        ("monitor", "day-1", "deduped"),
+        ("monitor", None, None),
+        ("github", "day-1", None),
+    ])
+    def test_finding_cooldown_preserves_legacy_delivery_and_expiry(
+        self, source, finding_key, replay_result,
+    ):
+        reactor = EventReactor(
+            rules=[AutoDispatchRule(event="standup.due", workflow="standup")],
+            cwd="/tmp/project",
+        )
+        event = {
+            "type": "standup.due", "source": source, "id": "delivery-1",
+            "payload": {"monitor": "standup-due", "finding_key": finding_key},
+        }
+        with patch.object(reactor, "_dispatch") as dispatch, patch(
+            "bobi.events.reactor.time.monotonic", side_effect=[10, 11, 1810],
+        ):
+            assert reactor.process(event) == "dispatched"
+            assert reactor.process(event) == replay_result
+            assert dispatch.call_count == 1
+            assert reactor.process(event) == "dispatched"
+            assert dispatch.call_count == 2
+
     @patch("bobi.subagent.launch_agent")
     def test_distinct_comments_same_pr_each_dispatch_within_cooldown(self, mock_launch):
         """Two distinct comments on one PR both dispatch despite the cooldown.

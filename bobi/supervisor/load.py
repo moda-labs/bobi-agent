@@ -3,22 +3,25 @@
 Derives "legitimately busy" from the live process table so the
 supervisor can defer ambiguous liveness verdicts under saturation:
 
-- host is pegged: ``load1 >= ratio * ncpu`` (from ``/proc/loadavg``),
+- host is pegged: ``load1 >= ratio * ncpu`` (from procfs or
+  ``os.getloadavg()``),
   where ``ncpu`` respects process affinity and cgroup CPU quota; and
 - the manager's own descendant tree materially consumed that
   capacity: aggregate ``utime + stime`` delta over the poll interval
-  meets a minimum ratio (from ``/proc/<pid>/stat``).
+  meets a minimum ratio (from procfs or the Darwin process table).
 
 Evidence is re-derived every poll; nothing is persisted.
-On hosts without ``/proc`` (macOS, Windows) reads fail closed and the
-gate is inert.  See ``docs/ADMIN_PROTOCOL.md`` § Load grace for the
-full design, bounds, and operator knobs.
+Linux reads ``/proc``; macOS reads ``ps -axo pid=,ppid=,time=``. Unsupported
+platforms and unreadable evidence fail closed. See ``docs/ADMIN_PROTOCOL.md``
+§ Load grace for the full design, bounds, and operator knobs.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,6 +220,25 @@ def _collect_descendants(children: dict[int, list[int]], root: int) -> set[int]:
     return descendants
 
 
+def _descendant_delta(
+    manager_pid: int,
+    entries: dict[int, tuple[int, int]],
+    previous: dict[int, int] | None,
+) -> tuple[int, int, dict[int, int]]:
+    if manager_pid not in entries:
+        return 0, 0, {}
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _ticks) in entries.items():
+        children.setdefault(ppid, []).append(pid)
+    descendants = _collect_descendants(children, manager_pid)
+
+    sample = {pid: entries[pid][1] for pid in descendants}
+    prev = previous or {}
+    deltas = [sample[pid] - prev[pid] for pid in descendants
+              if pid in prev and sample[pid] > prev[pid]]
+    return len(deltas), sum(deltas), sample
+
+
 def _descendant_cpu(
     manager_pid: int,
     proc_root: Path,
@@ -244,18 +266,72 @@ def _descendant_cpu(
             pid, ppid, ticks = parsed
             entries[pid] = (ppid, ticks)
 
-    if manager_pid not in entries:
-        return 0, 0, {}
-    children: dict[int, list[int]] = {}
-    for pid, (ppid, _ticks) in entries.items():
-        children.setdefault(ppid, []).append(pid)
-    descendants = _collect_descendants(children, manager_pid)
+    return _descendant_delta(manager_pid, entries, previous)
 
-    sample = {pid: entries[pid][1] for pid in descendants}
-    prev = previous or {}
-    deltas = [sample[pid] - prev[pid] for pid in descendants
-              if pid in prev and sample[pid] > prev[pid]]
-    return len(deltas), sum(deltas), sample
+
+def _parse_ps_time(raw: str) -> int | None:
+    """Convert Darwin ``ps`` cumulative CPU time to centiseconds."""
+    try:
+        whole, dot, fraction = raw.partition(".")
+        centiseconds = int((fraction + "00")[:2]) if dot else 0
+        days = 0
+        if "-" in whole:
+            day_text, whole = whole.split("-", 1)
+            days = int(day_text)
+        parts = [int(part) for part in whole.split(":")]
+        part_count = len(parts)
+        if part_count == 2:
+            hours = 0
+            minutes, seconds = parts
+        elif part_count == 3:
+            hours, minutes, seconds = parts
+        else:
+            return None
+        if min(days, hours, minutes, seconds, centiseconds) < 0:
+            return None
+        if (seconds >= 60
+                or (part_count == 3 and minutes >= 60)
+                or (days and hours >= 24)):
+            return None
+    except ValueError:
+        return None
+    total_seconds = ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+    return total_seconds * 100 + centiseconds
+
+
+def _run_darwin_ps() -> str:
+    return subprocess.check_output(
+        ["ps", "-axo", "pid=,ppid=,time="], text=True, timeout=5)
+
+
+def _darwin_descendant_cpu(
+    manager_pid: int,
+    previous: dict[int, int] | None,
+    *,
+    ps_run=_run_darwin_ps,
+) -> tuple[int, int, dict[int, int]]:
+    """Busy descendants from one Darwin ``ps`` process-table snapshot."""
+    try:
+        output = ps_run()
+    except (OSError, subprocess.SubprocessError):
+        return 0, 0, {}
+
+    entries: dict[int, tuple[int, int]] = {}
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) != 3:
+            return 0, 0, {}
+        try:
+            pid, ppid = int(fields[0]), int(fields[1])
+        except ValueError:
+            return 0, 0, {}
+        ticks = _parse_ps_time(fields[2])
+        if ticks is None:
+            return 0, 0, {}
+        entries[pid] = (ppid, ticks)
+    return _descendant_delta(manager_pid, entries, previous)
 
 
 def _clock_ticks() -> float | None:
@@ -264,6 +340,44 @@ def _clock_ticks() -> float | None:
     except (AttributeError, OSError, ValueError):
         return None
     return ticks if ticks > 0 else None
+
+
+def _build_evidence(
+    previous: CpuSample | None,
+    *,
+    load1: float | None,
+    ncpu: float | None,
+    busy: int,
+    tick_delta: int,
+    ticks: dict[int, int],
+    now: float,
+    clock_ticks: float | None,
+    pegged_ratio: float,
+    tree_cpu_ratio: float,
+) -> dict:
+    sample = CpuSample(ticks=ticks, sampled_at=now)
+    elapsed = None if previous is None else now - previous.sampled_at
+    tree_cpu_cores: float | None = None
+    measured_tree_ratio: float | None = None
+    if (elapsed is not None and elapsed > 0 and clock_ticks
+            and clock_ticks > 0 and ncpu and ncpu > 0):
+        tree_cpu_cores = tick_delta / clock_ticks / elapsed
+        measured_tree_ratio = tree_cpu_cores / ncpu
+    pegged = bool(load1 is not None and ncpu and load1 >= pegged_ratio * ncpu)
+    tree_busy = bool(
+        measured_tree_ratio is not None
+        and measured_tree_ratio >= tree_cpu_ratio
+    )
+    return {
+        "active": pegged and busy > 0 and tree_busy,
+        "load1": load1,
+        "ncpu": ncpu,
+        "pegged": pegged,
+        "busy_descendants": busy,
+        "tree_cpu_cores": tree_cpu_cores,
+        "tree_cpu_ratio": measured_tree_ratio,
+        "sample": sample,
+    }
 
 
 def load_evidence(manager_pid: int, previous: CpuSample | None, *,
@@ -290,25 +404,63 @@ def load_evidence(manager_pid: int, previous: CpuSample | None, *,
     previous_ticks = previous.ticks if previous is not None else None
     busy, tick_delta, ticks = _descendant_cpu(
         manager_pid, proc_root, previous_ticks)
-    sample = CpuSample(ticks=ticks, sampled_at=now)
-
-    elapsed = None if previous is None else now - previous.sampled_at
     hz = clock_ticks if clock_ticks is not None else _clock_ticks()
-    tree_cpu_cores: float | None = None
-    tree_ratio: float | None = None
-    if (elapsed is not None and elapsed > 0 and hz and hz > 0
-            and ncpu and ncpu > 0):
-        tree_cpu_cores = tick_delta / hz / elapsed
-        tree_ratio = tree_cpu_cores / ncpu
-    pegged = bool(load1 is not None and ncpu and load1 >= pegged_ratio * ncpu)
-    tree_busy = bool(tree_ratio is not None and tree_ratio >= tree_cpu_ratio)
-    return {
-        "active": pegged and busy > 0 and tree_busy,
-        "load1": load1,
-        "ncpu": ncpu,
-        "pegged": pegged,
-        "busy_descendants": busy,
-        "tree_cpu_cores": tree_cpu_cores,
-        "tree_cpu_ratio": tree_ratio,
-        "sample": sample,
-    }
+    return _build_evidence(
+        previous,
+        load1=load1,
+        ncpu=ncpu,
+        busy=busy,
+        tick_delta=tick_delta,
+        ticks=ticks,
+        now=now,
+        clock_ticks=hz,
+        pegged_ratio=pegged_ratio,
+        tree_cpu_ratio=tree_cpu_ratio,
+    )
+
+
+def darwin_load_evidence(
+    manager_pid: int,
+    previous: CpuSample | None,
+    *,
+    host_load: tuple[float, float | None] | None = None,
+    pegged_ratio: float = 1.0,
+    tree_cpu_ratio: float = 0.8,
+    now_fn=time.monotonic,
+    ps_run=_run_darwin_ps,
+) -> dict:
+    """Darwin load evidence using ``getloadavg`` and cumulative ``ps`` time."""
+    if host_load is not None:
+        load1, ncpu = host_load
+        if ncpu is None:
+            ncpu = _cpu_capacity()
+    else:
+        try:
+            load1 = os.getloadavg()[0]
+        except (AttributeError, OSError):
+            load1 = None
+        ncpu = _cpu_capacity()
+    busy, tick_delta, ticks = _darwin_descendant_cpu(
+        manager_pid,
+        previous.ticks if previous is not None else None,
+        ps_run=ps_run,
+    )
+    return _build_evidence(
+        previous,
+        load1=load1,
+        ncpu=ncpu,
+        busy=busy,
+        tick_delta=tick_delta,
+        ticks=ticks,
+        now=now_fn(),
+        clock_ticks=100.0,
+        pegged_ratio=pegged_ratio,
+        tree_cpu_ratio=tree_cpu_ratio,
+    )
+
+
+def default_load_evidence(manager_pid: int, previous: CpuSample | None, **kwargs):
+    """Select the native evidence reader without changing the supervisor seam."""
+    if sys.platform == "darwin":
+        return darwin_load_evidence(manager_pid, previous, **kwargs)
+    return load_evidence(manager_pid, previous, **kwargs)

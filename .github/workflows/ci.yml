@@ -89,6 +89,32 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q
 
+  macos-supervisor-load:
+    name: macOS supervisor load evidence
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Smoke the real Darwin supervisor load-grace path
+        run: >-
+          pytest
+          tests/test_supervisor_load.py::TestParsePsTime::test_parses_real_ps_shapes_and_rejects_malformed_time
+          tests/test_supervisor_load.py::TestDarwinLoadEvidence::test_default_reader_selects_darwin
+          tests/test_supervisor_load.py::TestDarwinLoadEvidence::test_unreadable_ps_fails_closed
+          tests/test_supervision_restart.py::test_load_grace_smoke_defers_real_busy_wedge_then_reopens
+          --timeout=60 -q
+
   # The required check that stands in for the unit-test matrix.
   #
   # WHY THIS EXISTS. `unit-tests` is the only matrixed job here, and a matrix
@@ -550,7 +576,7 @@ jobs:
     # becomes `dev` when the whole CI matrix proved it. `changes` is included
     # so a gate-job error on a push to main blocks promotion too (on push it
     # always reports code=true, so it never suppresses the heavy jobs here).
-    needs: [changes, unit-tests, unit-tests-gate, lint, event-server, wrangler, integration-fast, e2e, diy-install-build, diy-install, diy-install-gate]
+    needs: [changes, unit-tests, unit-tests-gate, macos-supervisor-load, lint, event-server, wrangler, integration-fast, e2e, diy-install-build, diy-install, diy-install-gate]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # Serialize promotions; the ancestor check below handles runs that
     # complete out of order.

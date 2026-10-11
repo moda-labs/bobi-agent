@@ -416,7 +416,9 @@ def test_startup_reauthorizes_resources_after_forced_bubble_remint(tmp_path):
         _start_event_subscription("sess", ["github:o/r"], tmp_path)
 
     assert auth_bubbles == [("bub_old", "bkey_old"), ("bub_new", "bkey_new")]
+    # #952: `_start_event_subscription` composes its own key list, so
+    # `inbox/<session>` is present without the caller passing it.
     assert register_bubbles == [
-        ("bub_old", "bkey_old", ["github:o/r"]),
-        ("bub_new", "bkey_new", ["github:o/r"]),
+        ("bub_old", "bkey_old", ["inbox/sess", "github:o/r"]),
+        ("bub_new", "bkey_new", ["inbox/sess", "github:o/r"]),
     ]

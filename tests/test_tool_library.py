@@ -616,6 +616,7 @@ def test_codex_requires_accepts_subscription_auth_without_api_key(tmp_path, monk
         env={
             **os.environ,
             "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "CODEX_LOG": str(log),
         },
@@ -650,6 +651,7 @@ def test_codex_requires_subscription_does_not_overwrite_oauth_auth(tmp_path, mon
         env={
             **os.environ,
             "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
         },
     )
@@ -685,6 +687,7 @@ def test_codex_requires_subscription_recognizes_real_oauth_auth(tmp_path, monkey
     proc = subprocess.run(
         ["bash", "-c", check], capture_output=True, text=True,
         env={**os.environ, "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
              "PATH": f"{bin_dir}:{os.environ['PATH']}"},
     )
     assert proc.returncode == 0, (
@@ -714,6 +717,7 @@ def test_codex_requires_subscription_rejects_api_key_auth_file(tmp_path, monkeyp
         env={
             **os.environ,
             "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
         },
     )
@@ -741,6 +745,7 @@ def test_codex_requires_subscription_fails_without_oauth_auth(tmp_path, monkeypa
         env={
             **os.environ,
             "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
         },
     )
@@ -772,6 +777,7 @@ def test_codex_requires_api_key_mode_fails_without_api_key_or_auth(
         env={
             **os.environ,
             "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
         },
     )
@@ -803,6 +809,7 @@ def test_codex_requires_allows_binary_probe_during_build_verify(tmp_path, monkey
         env={
             **os.environ,
             "HOME": str(home),
+            "CODEX_HOME": str(home / ".codex"),
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "CODEX_LOG": str(log),
             "BOBI_VERIFY_PHASE": "build",
@@ -811,6 +818,45 @@ def test_codex_requires_allows_binary_probe_during_build_verify(tmp_path, monkey
 
     assert proc.returncode == 0, proc.stderr
     assert log.read_text() == "--version\n"
+
+
+def test_codex_requires_reads_codex_home_not_the_image_home(tmp_path, monkeypatch):
+    """#958: the entrypoint points codex's config dir at the durable volume on
+    every brain, so a recipe that reads a literal ~/.codex checks the wrong
+    directory and fails closed.
+
+    The pin: a valid credential under $CODEX_HOME passes while ~/.codex holds
+    an API-key file that would fail. A recipe reading ~/.codex fails this.
+    """
+    entry = tool_library.load_entry("codex")
+    home = tmp_path / "home"
+    volume = tmp_path / "volume-codex"
+    bin_dir = tmp_path / "bin"
+    (home / ".codex").mkdir(parents=True)
+    volume.mkdir(parents=True)
+    # The image HOME holds a stale API-key file; the volume holds real OAuth.
+    (home / ".codex" / "auth.json").write_text(
+        '{"OPENAI_API_KEY": "sk-stale"}\n')
+    (volume / "auth.json").write_text(
+        '{"OPENAI_API_KEY": null, "tokens": {"refresh_token": "r"}}\n')
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text("#!/usr/bin/env bash\nexit 0\n")
+    codex.chmod(0o755)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("BOBI_AUTH", "subscription")
+    monkeypatch.delenv("BOBI_VERIFY_PHASE", raising=False)
+
+    proc = subprocess.run(
+        ["bash", "-c", entry.success], capture_output=True, text=True,
+        env={**os.environ, "HOME": str(home), "CODEX_HOME": str(volume),
+             "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+    assert proc.returncode == 0, (
+        f"the recipe read ~/.codex instead of $CODEX_HOME: {proc.stderr}")
+    # The stale image-HOME file is untouched: nothing wrote through to it.
+    assert (home / ".codex" / "auth.json").read_text() == (
+        '{"OPENAI_API_KEY": "sk-stale"}\n')
 
 
 def test_codex_requires_fix_preserves_subscription_login_path():
@@ -880,8 +926,8 @@ agent: acme
 requires:
   - name: codex
     why: "Delegate a coding sub-task to the Codex CLI (tools/codex.md)."
-    check: "command -v codex >/dev/null 2>&1 && { if { [ \\"${BOBI_BRAIN:-}\\" = \\"codex\\" ] || [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ]; } && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then python3 -c 'import re, subprocess, sys; out=subprocess.check_output([\\"codex\\", \\"--version\\"], text=True); m=re.search(r\\"(\\\\d+)\\\\.(\\\\d+)\\\\.(\\\\d+)\\", out); sys.exit(0 if m and tuple(map(int, m.groups())) >= (0, 144, 4) else 1)'; elif [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if { [ \\"${BOBI_BRAIN:-}\\" = \\"codex\\" ] || [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ]; } && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then true; elif [ -f ~/.codex/auth.json ]; then if [ \\"${BOBI_AUTH:-api_key}\\" = \\"subscription\\" ] && python3 -c 'import json, pathlib, sys; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and data.get(\\"OPENAI_API_KEY\\") and not data.get(\\"tokens\\") else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${BOBI_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
-    fix: "npm install -g @openai/codex@0.144.4 && { if { [ \\"${BOBI_BRAIN:-}\\" = \\"codex\\" ] || [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ]; } && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then codex --version >/dev/null 2>&1; elif [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p ~/.codex && python3 -c 'import json, os, pathlib; p=pathlib.Path.home()/\\".codex\\"/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; else codex auth login || echo 'Set OPENAI_API_KEY in run/.env or run codex auth login'; fi; }"
+    check: "command -v codex >/dev/null 2>&1 && { CODEX_DIR=\\"${CODEX_HOME:-$HOME/.codex}\\"; if { [ \\"${BOBI_BRAIN:-}\\" = \\"codex\\" ] || [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ]; } && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then python3 -c 'import re, subprocess, sys; out=subprocess.check_output([\\"codex\\", \\"--version\\"], text=True); m=re.search(r\\"(\\\\d+)\\\\.(\\\\d+)\\\\.(\\\\d+)\\", out); sys.exit(0 if m and tuple(map(int, m.groups())) >= (0, 144, 4) else 1)'; elif [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ] && ! python3 -m bobi.auth_bootstrap credential-status codex \\"${CODEX_DIR}/auth.json\\" >/dev/null 2>&1; then mkdir -p \\"${CODEX_DIR}\\" && CODEX_DIR=\\"${CODEX_DIR}\\" python3 -c 'import json, os, pathlib; p=pathlib.Path(os.environ[\\"CODEX_DIR\\"])/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; fi; if { [ \\"${BOBI_BRAIN:-}\\" = \\"codex\\" ] || [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ]; } && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then true; elif [ -f \\"${CODEX_DIR}/auth.json\\" ]; then if [ \\"${BOBI_AUTH:-api_key}\\" = \\"subscription\\" ] && CODEX_DIR=\\"${CODEX_DIR}\\" python3 -c 'import json, os, pathlib, sys; p=pathlib.Path(os.environ[\\"CODEX_DIR\\"])/\\"auth.json\\"; data=json.loads(p.read_text()); sys.exit(0 if isinstance(data, dict) and data.get(\\"OPENAI_API_KEY\\") and not data.get(\\"tokens\\") else 1)'; then false; else python3 -c 'import subprocess, sys; sys.exit(subprocess.run([\\"codex\\", \\"exec\\", \\"-s\\", \\"read-only\\", \\"--skip-git-repo-check\\", \\"reply OK\\"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=8).returncode)'; fi; elif [ \\"${BOBI_VERIFY_PHASE:-}\\" = \\"build\\" ]; then codex --version >/dev/null 2>&1; else false; fi; }"
+    fix: "npm install -g @openai/codex@0.144.4 && { CODEX_DIR=\\"${CODEX_HOME:-$HOME/.codex}\\"; if { [ \\"${BOBI_BRAIN:-}\\" = \\"codex\\" ] || [ \\"${BOBI_BRAIN:-}\\" = \\"gateway-openai\\" ]; } && [ -n \\"${BOBI_GATEWAY_BASE_URL:-}\\" ]; then codex --version >/dev/null 2>&1; elif python3 -m bobi.auth_bootstrap credential-status codex \\"${CODEX_DIR}/auth.json\\" >/dev/null 2>&1; then true; elif [ \\"${BOBI_AUTH:-api_key}\\" != \\"subscription\\" ] && [ -n \\"${OPENAI_API_KEY:-}\\" ]; then mkdir -p \\"${CODEX_DIR}\\" && CODEX_DIR=\\"${CODEX_DIR}\\" python3 -c 'import json, os, pathlib; p=pathlib.Path(os.environ[\\"CODEX_DIR\\"])/\\"auth.json\\"; p.write_text(json.dumps({\\"OPENAI_API_KEY\\": os.environ[\\"OPENAI_API_KEY\\"]})+\\"\\\\n\\"); p.chmod(0o600)'; else codex auth login || echo 'Set OPENAI_API_KEY in run/.env, or log in over chat with `bobi agent <name> login-bootstrap codex`'; fi; }"
   - name: venn
     why: "Reach external services (email, calendar, CRM) via the Venn CLI (tools/venn.md). Auth via VENN_API_KEY."
     check: "command -v venn >/dev/null 2>&1 && venn --help >/dev/null 2>&1"

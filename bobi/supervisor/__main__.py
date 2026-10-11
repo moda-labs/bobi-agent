@@ -72,6 +72,20 @@ def main(argv: list[str] | None = None) -> int:
     return run(_resolve_run_root(), argv)
 
 
+def _sweep_if_os_service(root: Path) -> bool:
+    """Under the OS service only, stop a directly started manager before the
+    child spawns, or the child exits on AlreadyRunning and the service
+    crash-loops. Never in a container, where a manager.pid left on the
+    volume can name an unrelated process in the new pid namespace. The
+    marker is popped so the manager's descendants do not inherit it."""
+    from bobi.service_manager import OS_SERVICE_ENV
+    if os.environ.pop(OS_SERVICE_ENV, None) != "1":
+        return False
+    from bobi import service
+    service.sweep_direct_manager(root)
+    return True
+
+
 def run(root: Path, argv: list[str]) -> int:
     """Supervise the manager under an ALREADY-BOUND run *root*.
 
@@ -93,6 +107,10 @@ def run(root: Path, argv: list[str]) -> int:
     # survives so `... supervise -- --foreground` and `... supervise
     # --foreground` behave identically on both paths.
     start_args = [a for a in argv if a != "--"]
+
+    os.environ["BOBI_SUPERVISED"] = "1"
+
+    _sweep_if_os_service(root)
 
     config = SupervisorConfig.from_env()
 

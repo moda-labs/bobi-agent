@@ -20,18 +20,19 @@ sites don't change.
 
 from __future__ import annotations
 
-import itertools
 import logging
 import queue
 import secrets
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 log = logging.getLogger(__name__)
 
+BULK_MAX_DELAY = 120.0
 _BACKLOG_WARNING_INTERVAL = 60.0
 
 
@@ -97,20 +98,21 @@ class Inbox:
 
     Two delivery classes (#688): priority (chat channel messages, where a
     human is waiting) and normal (everything else - bulk webhooks, agent
-    inbox messages). Priority messages are received first; ordering is FIFO
-    within each class, enforced by a monotonic tie-break counter so equal
-    priorities never compare ``Message`` objects.
+    inbox messages). Chat is received first unless the oldest normal message
+    has waited at least 120 seconds; that message takes the next receive
+    opportunity, then yields back to waiting chat. FIFO holds within each
+    class. This does not interrupt an active turn or bound the time spent
+    processing older normal messages.
     """
 
     def __init__(self, session_name: str,
                  stats_callback: Callable[[int, float], None] | None = None
                  ) -> None:
         self.session_name = session_name
-        self._queue: queue.PriorityQueue[tuple[int, int, Message]] = (
-            queue.PriorityQueue())
-        self._counter = itertools.count()
-        self._queue_lock = threading.Lock()
-        self._queued_at: dict[int, float] = {}
+        self._chat: deque[Message] = deque()
+        self._bulk: deque[tuple[float, Message]] = deque()
+        self._promoted: bool = False
+        self._condition = threading.Condition()
         self._oldest_queued_at: float | None = None
         self._stats_callback = stats_callback
         self.readable = True
@@ -173,43 +175,63 @@ class Inbox:
         """Enqueue a message for the session's run loop to pick up."""
         if not msg.enqueued_at:
             msg.enqueued_at = time.monotonic()
-        with self._queue_lock:
-            ordinal = next(self._counter)
-            self._queue.put((0 if priority else 1, ordinal, msg))
-            self._queued_at[ordinal] = msg.enqueued_at
+        with self._condition:
+            if priority:
+                self._chat.append(msg)
+            else:
+                self._bulk.append((time.monotonic(), msg))
             if (self._oldest_queued_at is None
                     or msg.enqueued_at < self._oldest_queued_at):
                 self._oldest_queued_at = msg.enqueued_at
+            self._condition.notify()
         self._notify_stats()
         self._warn_if_backlogged()
         self._schedule_backlog_check()
 
     def recv(self, timeout: float = 2.0) -> Message | None:
         """Block until a message arrives. Returns None on timeout."""
-        try:
-            _, ordinal, msg = self._queue.get(timeout=timeout)
-            with self._queue_lock:
-                removed_at = self._queued_at.pop(ordinal, None)
-                if removed_at == self._oldest_queued_at:
-                    self._oldest_queued_at = min(
-                        self._queued_at.values(), default=None)
-            self._notify_stats()
-            return msg
-        except queue.Empty:
-            return None
+        if timeout is not None and timeout < 0:
+            raise ValueError("'timeout' must be a non-negative number")
+        with self._condition:
+            if not self._condition.wait_for(
+                    lambda: self._chat or self._bulk, timeout=timeout):
+                return None
+            if self._bulk and (not self._chat or (
+                    not self._promoted
+                    and time.monotonic() - self._bulk[0][0] >= BULK_MAX_DELAY)):
+                msg = self._bulk.popleft()[1]
+                if self._chat:
+                    self._promoted = True
+            else:
+                msg = self._chat.popleft()
+                self._promoted = False
+            if msg.enqueued_at == self._oldest_queued_at:
+                self._oldest_queued_at = min(
+                    (message.enqueued_at for message in self._chat),
+                    default=None)
+                oldest_bulk = min(
+                    (message.enqueued_at for _, message in self._bulk),
+                    default=None)
+                if oldest_bulk is not None and (
+                        self._oldest_queued_at is None
+                        or oldest_bulk < self._oldest_queued_at):
+                    self._oldest_queued_at = oldest_bulk
+        self._notify_stats()
+        return msg
 
     def empty(self) -> bool:
         """Whether nothing is queued right now (racy, best-effort)."""
-        return self._queue.empty()
+        with self._condition:
+            return not (self._chat or self._bulk)
 
     def depth(self) -> int:
         """Return the best-effort number of queued messages."""
-        with self._queue_lock:
-            return len(self._queued_at)
+        with self._condition:
+            return len(self._chat) + len(self._bulk)
 
     def oldest_age(self) -> float:
         """Return seconds since the oldest queued message was pushed."""
-        with self._queue_lock:
+        with self._condition:
             oldest = self._oldest_queued_at
         return max(0.0, time.monotonic() - oldest) if oldest is not None else 0.0
 

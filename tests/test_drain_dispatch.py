@@ -176,6 +176,41 @@ class TestDrainAutoDispatch:
         mock_launch.assert_not_called()
 
     @patch("bobi.subagent.launch_agent")
+    def test_monitor_finding_replay_does_not_reach_director(self, mock_launch):
+        """Cooldown must not turn a handled finding into a manual launch request."""
+        reactor = EventReactor(
+            rules=[AutoDispatchRule(event="monitor/standup.due", workflow="standup")],
+            cwd="/tmp/proj",
+        )
+        first = {
+            "type": "standup.due",
+            "source": "monitor",
+            "id": "delivery-1",
+            "text": "standup due",
+            "delivery": "bulk",
+            "payload": {"monitor": "standup-due", "finding_key": "day-1"},
+        }
+        replay = {**first, "id": "delivery-2", "text": "replayed standup"}
+        next_finding = {
+            **first,
+            "id": "delivery-3",
+            "text": "next standup",
+            "payload": {"monitor": "standup-due", "finding_key": "day-2"},
+        }
+
+        delivered = self._run_drain_one_batch([first], reactor=reactor)
+        assert len(delivered) == 1
+        assert "standup due" in delivered[0]
+        assert "AUTO-DISPATCHED" in delivered[0]
+        assert self._run_drain_one_batch([replay], reactor=reactor) == []
+        delivered = self._run_drain_one_batch([next_finding], reactor=reactor)
+        assert len(delivered) == 1
+        assert "next standup" in delivered[0]
+        assert "AUTO-DISPATCHED" in delivered[0]
+        _wait_calls(mock_launch, 2)
+        assert mock_launch.call_count == 2
+
+    @patch("bobi.subagent.launch_agent")
     def test_suppressed_event_gets_suppressed_annotation(self, mock_launch):
         """Suppressed events get a SUPPRESSED annotation, not AUTO-DISPATCHED."""
         rules = [

@@ -50,6 +50,37 @@ class TestSessionEntry:
 
 
 class TestSessionRegistry:
+    def test_watermark_diagnostics_do_not_create_or_replace_missing_state(self,
+                                                                        tmp_registry):
+        tmp_registry.update_ack_watermark("missing", {"pending_batches": 0})
+        assert not tmp_registry.session_dir("missing").exists()
+        state_path = tmp_registry._state_path("invalid")
+        state_path.parent.mkdir()
+        state_path.write_text("invalid-json")
+        tmp_registry.update_ack_watermark("invalid", {"pending_batches": 0})
+        assert state_path.read_text() == "invalid-json"
+
+    def test_watermark_telemetry_preserves_session_activity(self, tmp_registry):
+        tmp_registry.register(SessionEntry(name="director", last_activity=10.0))
+        snapshot = {"pinned_seq": 12, "pending_batches": 3,
+                    "oldest_pending_at": 100.0,
+                    "oldest_event_type": "agent/session.completed"}
+        tmp_registry.update_ack_watermark("director", snapshot)
+        entry = tmp_registry.get("director")
+        assert entry.ack_watermark == snapshot
+        assert entry.last_activity == 10.0
+        tmp_registry.update("director", status="idle")
+        assert tmp_registry.get("director").ack_watermark == snapshot
+
+    def test_old_state_accepts_new_watermark_telemetry(self, tmp_registry):
+        state_path = tmp_registry._state_path("legacy")
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text('{"name": "legacy", "last_activity": 10.0}')
+        assert tmp_registry.get("legacy").ack_watermark == {}
+        tmp_registry.update_ack_watermark("legacy", {"pending_batches": 0})
+        assert tmp_registry.get("legacy").ack_watermark == {"pending_batches": 0}
+        assert tmp_registry.get("legacy").last_activity == 10.0
+
     def test_register_and_get(self, tmp_registry):
         entry = SessionEntry(name="agent-42", run_key="42", phase="pickup")
         tmp_registry.register(entry)
@@ -441,9 +472,14 @@ raise SystemExit(1)
 
         tmp_registry.update_inbox_stats(
             "agent-42", depth=3, oldest_age=25.0)
+        snapshot = {"pinned_seq": 12, "pending_batches": 3}
+        tmp_registry.update_ack_watermark("agent-42", snapshot)
+        tmp_registry.update_inbox_stats(
+            "agent-42", depth=3, oldest_age=25.0)
 
         entry = tmp_registry.get("agent-42")
         assert entry.last_activity == 123.0
         assert entry.inbox_depth == 3
         assert entry.inbox_oldest_age_seconds == 25.0
         assert entry.inbox_oldest_enqueued_at == 975.0
+        assert entry.ack_watermark == snapshot

@@ -44,7 +44,8 @@ MANAGED_BEGIN = "# >>> bobi-managed mcp_servers (do not edit) >>>"
 MANAGED_END = "# <<< bobi-managed mcp_servers <<<"
 
 # Codex reads its config from $CODEX_HOME (default ~/.codex). The entrypoint
-# symlinks ~/.codex at the durable volume, so writing there persists.
+# exports CODEX_HOME at the durable volume on every brain (#958), and on a
+# codex brain also symlinks ~/.codex there, so writing there persists.
 _CONFIG_FILENAME = "config.toml"
 
 

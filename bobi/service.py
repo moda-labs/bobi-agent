@@ -15,7 +15,7 @@ from typing import Iterable
 
 from bobi import launch_stamp, paths
 from bobi.__version__ import __version__
-from bobi.fsutil import atomic_write_text, file_lock
+from bobi.fsutil import atomic_write_text, file_lock, lock_is_held
 from bobi.sdk import SessionEntry
 
 
@@ -556,6 +556,18 @@ def run_team_foreground(
     set_process_brain_from_config(cfg)
     _validate_or_raise(project_path)
     _check_nested_runtime(project_path)
+    pid_path = paths.manager_pid_path(project_path)
+    if pid_path.exists():
+        pid = _read_pid(pid_path)
+        # A live pid is not enough. manager.pid outlives its machine on a
+        # container volume, and the next boot hands the same number to an
+        # unrelated process, so the supervised child exits here on every
+        # relaunch. The lease dies with its holder, so it cannot go stale.
+        if (
+            pid and pid != os.getpid() and _pid_alive(pid)
+            and lock_is_held(_manager_instance_lock_target(project_path))
+        ):
+            raise AlreadyRunning(pid)
     if fresh:
         clear_manager_session(project_path)
     else:
@@ -567,10 +579,14 @@ def run_team_foreground(
     )
 
 
+def _manager_instance_lock_target(project_path: Path) -> Path:
+    return paths.state_path(project_path) / "manager-instance"
+
+
 @contextmanager
 def _manager_instance_lock(project_path: Path):
     """Hold the per-runtime manager lease across the full manager lifetime."""
-    lock_target = paths.state_path(project_path) / "manager-instance"
+    lock_target = _manager_instance_lock_target(project_path)
     lock_target.parent.mkdir(parents=True, exist_ok=True)
     with file_lock(lock_target):
         yield
@@ -620,27 +636,11 @@ def run_manager_from_config(
     agent_name = cfg.agent
     role = cfg.entry_role
 
-    from bobi.events.subscriptions import discover_subscriptions
-
-    subscribe = discover_subscriptions(project_path)
-    subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
-
-    from bobi.events.subscriptions import monitor_subscription_keys
-    from bobi.monitors.registry import MonitorRegistry
-
-    monitor_events = [
-        m.event for m in MonitorRegistry.load(project_path=project_path).effective_monitors()
-    ]
-    for key in monitor_subscription_keys(monitor_events):
-        if key not in subscribe:
-            subscribe.append(key)
-
-    from bobi.events.subscriptions import lifecycle_subscription_keys
-
-    for key in lifecycle_subscription_keys():
-        if key not in subscribe:
-            subscribe.append(key)
-
+    # The subscription set is composed INSIDE the session, by
+    # `compose_session_subscriptions` (#952). Composing it here snapshotted the
+    # files seconds before the session that applies them existed, so anything
+    # that changed them in that window was silently overwritten - and a running
+    # manager had no way to re-derive its own set without a restart.
     state_dir = paths.state_dir(project_path)
 
     from bobi.state_version import ensure_state_version
@@ -771,7 +771,7 @@ def run_manager_from_config(
             name=session_name,
             role=role,
             mcp_servers=cfg.mcp_servers or None,
-            subscribe=subscribe,
+            subscribe=list(extra_subscribe or []),
         )
     finally:
         _cleanup()
@@ -790,7 +790,7 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     else:
         pid = _read_pid(pid_path)
         result_kwargs["pid"] = pid
-        if not pid:
+        if not pid or pid == os.getpid():
             pid_path.unlink(missing_ok=True)
             result_kwargs["invalid_pid"] = True
         else:
@@ -829,6 +829,26 @@ def stop_team(project_path: Path, *, force: bool = False) -> StopResult:
     result_kwargs["event_server_port"] = es_port
     result_kwargs["event_server_running"] = bool(health(f"http://localhost:{es_port}"))
     return StopResult(**result_kwargs)
+
+
+def sweep_direct_manager(project_path: Path) -> StopResult:
+    """Sweep any directly running manager process before service start.
+
+    Stops a running process with SIGTERM first, escalating to SIGKILL if needed.
+    Guards against signalling os.getpid() or treating current process as a rogue.
+    """
+    project_path = Path(project_path)
+    pid_path = paths.manager_pid_path(project_path)
+    if pid_path.exists():
+        pid = _read_pid(pid_path)
+        if pid == os.getpid():
+            pid_path.unlink(missing_ok=True)
+            return StopResult(pid=0, invalid_pid=True)
+
+    stopped = stop_team(project_path)
+    if stopped.permission_denied or stopped.still_running:
+        stopped = stop_team(project_path, force=True)
+    return stopped
 
 
 def team_status(project_path: Path) -> TeamStatus:

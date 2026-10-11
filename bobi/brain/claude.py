@@ -19,18 +19,9 @@ import json
 import logging
 import os
 import platform
-import re
 import shutil
 import time
 
-_API_ERROR_5XX_RE = re.compile(
-    r"(?:API Error:\s*5\d\d|Error\s*5\d\d:\s*Web server is down|521\s*Web server is down)",
-    re.IGNORECASE,
-)
-
-
-def _is_api_error_text(text: str) -> bool:
-    return bool(_API_ERROR_5XX_RE.search(text)) if text else False
 from collections import deque
 from contextlib import suppress
 from dataclasses import replace
@@ -300,8 +291,6 @@ class _ClaudeSession:
                 ]
                 text = "\n".join(text_parts) if text_parts else ""
                 error_kind = str(getattr(msg, "error", "") or "")
-                if not error_kind and _is_api_error_text(text):
-                    error_kind = "api_error"
                 if error_kind:
                     assistant_error_kind = error_kind
                     assistant_error_message = text
@@ -466,13 +455,15 @@ def _result_to_turn(
         error_message = assistant_error_message
 
     result_text = getattr(msg, "result", "") or ""
-    if not error_kind and _is_api_error_text(result_text):
-        error_kind = "api_error"
-        error_message = result_text
-
+    # Only a FAILED turn's text is an error string. On a successful turn
+    # ``result`` is the agent's own final answer, so classifying it would turn
+    # an agent that merely WRITES about an outage ("the sessions died on:
+    # you've hit your session limit") into a failed turn, discard its work, and
+    # open a false incident that then dedups away the next real one (#992).
+    failed = bool(getattr(msg, "is_error", False) or error_kind)
     unavailable_kind = classify_brain_unavailability(
         error_kind,
-        error_message or result_text,
+        error_message or (result_text if failed else ""),
     )
     if unavailable_kind:
         error_kind = unavailable_kind
@@ -974,8 +965,6 @@ class ClaudeBrain(GatewayAwareEngine):
                             b.text for b in msg.content if isinstance(b, TextBlock)
                         )
                         error_kind = str(getattr(msg, "error", "") or "")
-                        if not error_kind and _is_api_error_text(text):
-                            error_kind = "api_error"
                         if error_kind:
                             assistant_error_kind = error_kind
                             assistant_error_message = text

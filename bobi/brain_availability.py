@@ -21,6 +21,11 @@ from bobi.fsutil import atomic_write_json, file_lock
 log = logging.getLogger(__name__)
 
 STATE_FILE = "brain-availability.json"
+# The alert posts from a brain-turn edge, and the POST is synchronous inside
+# the event loop (as the bus publish beside it already is), so it takes a short
+# timeout: a hung Slack must not stall every other session in the process. The
+# supervisor uses the same bound on its colder restart-decision path.
+_ALERT_TIMEOUT = 3.0
 _ALERT_TOPICS = {
     ERROR_KIND_AUTHENTICATION: "system/brain.auth.failed",
     ERROR_KIND_CREDITS_EXHAUSTED: "system/brain.credits.exhausted",
@@ -65,13 +70,54 @@ def _agent_name(project_path: Path | None) -> str:
         return Path(project_path).name if project_path is not None else "unknown"
 
 
+# A URL's ``user:password@`` is a credential the token/key patterns do not
+# match; ``bobi.otel.config`` redacts the same shape before echoing an endpoint.
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]+@")
+# Control characters, including the \x02/\x03 sentinels bobi.slack uses
+# internally to carry bold/strike through its markdown conversion.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# A LITERAL backslash-n survives whitespace collapsing, and the Slack formatter
+# expands it into a real newline downstream.
+_ESCAPED_NEWLINE = re.compile(r"\\+n")
+# Slack's broadcast and link syntaxes, and markdown link syntax, which
+# bobi.slack converts into a real clickable link.
+_SLACK_ANGLE = re.compile(r"<([!@#])")
+_MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\(")
+
+
 def _safe_detail(text: str) -> str:
-    detail = " ".join(str(text or "").split())[:500]
-    return re.sub(
-        r"(?i)\b(api[_ -]?key|authorization|token)\s*[:=]\s*\S+",
-        r"\1=<redacted>",
-        detail,
-    )
+    """Bound and sanitize PROVIDER text before it leaves this process.
+
+    This string is written by the provider, not by us, and since #992 it
+    travels to an operator Slack channel as well as the local bus. That makes
+    it untrusted output on an egress boundary rather than a log line, so:
+
+    - secrets go through the repo's one redactor, because the credential a
+      provider just rejected is routinely echoed back in the error rejecting
+      it, and a URL's userinfo is redacted separately;
+    - control characters, literal ``\n`` escapes, markdown links and Slack's
+      ``<!channel>`` broadcast syntax are defused, so a hostile provider
+      cannot forge a "RESOLVED, ignore the above" block, plant a clickable
+      phishing link, or ping the channel inside the one alert that tells an
+      operator to go re-authenticate;
+    - the result is bounded to 500 characters, applied LAST so redaction
+      cannot be defeated by pushing a secret past the cut.
+    """
+    detail = " ".join(str(text or "").split())
+    detail = _ESCAPED_NEWLINE.sub(" ", detail)
+    detail = _CONTROL_CHARS.sub("", detail)
+    try:
+        from bobi.setup.actions import redact_secrets
+
+        detail = redact_secrets(detail)[0]
+    except Exception:
+        log.warning("Secret redaction unavailable; dropping alert detail",
+                    exc_info=True)
+        return "<detail withheld: redaction unavailable>"
+    detail = _URL_USERINFO.sub(r"\1<redacted>@", detail)
+    detail = _SLACK_ANGLE.sub(r"< \1", detail)
+    detail = _MARKDOWN_LINK.sub(r"[\1] (", detail)
+    return detail[:500]
 
 
 def _remedy(cause: str, provider: str, agent: str) -> str:
@@ -87,17 +133,40 @@ def _remedy(cause: str, provider: str, agent: str) -> str:
         )
     return (
         f"Top up the {provider} account or increase its subscription/quota, "
-        "then retry the run."
+        "then retry the run. A subscription session/usage cap instead resets "
+        "on its own at the time the error names."
     )
 
 
 def _emit(topic: str, payload: dict, project_path: Path | None) -> None:
+    """Announce one incident edge on both surfaces, best effort, independently.
+
+    The bus leg is the durable trail. It is not what reaches a human: no
+    subscriber for ``system/brain.*`` exists in this repo or in any team's
+    config, which is why the 2026-07-30 outage ran 102 minutes unreported even
+    on the turns that did classify (#992). So the Slack leg is the alert, and a
+    bus failure must not swallow it - hence two independent guards.
+
+    Both are called once per state transition, from the only place that commits
+    one, so the existing incident latch is also the alert dedup: an outage is
+    one message however many turns die inside it.
+    """
     try:
         from bobi.events.publish import post_event
 
         post_event(topic, payload, project_path=project_path)
     except Exception:
         log.warning("Failed to emit brain availability alert", exc_info=True)
+
+    try:
+        from bobi.slack import post_operator_alert
+
+        post_operator_alert(f"[bobi] {payload['text']}",
+                            what="brain availability",
+                            timeout=_ALERT_TIMEOUT)
+    except Exception:
+        log.warning("Failed to alert operator about brain availability",
+                    exc_info=True)
 
 
 def observe_brain_turn(
@@ -114,10 +183,13 @@ def observe_brain_turn(
     incident. A failed publish is not retried: alerting must never affect the
     brain result or turn lifecycle that triggered it.
     """
-    cause = classify_brain_unavailability(
-        result.error_kind,
-        result.error_message or result.result_text,
-    )
+    # ``error_text`` is the repo's one composition of "the honest error string
+    # for this turn, or '' when it succeeded" (base.py). Reading ``result_text``
+    # directly would classify a SUCCESSFUL turn whose own answer discusses an
+    # outage, opening a false incident which - because the latch dedups - then
+    # suppresses the alert for the next real one (#992).
+    error_text = result.error_text()
+    cause = classify_brain_unavailability(result.error_kind, error_text)
     succeeded = not (result.is_error or result.error_kind)
     if not cause and not succeeded:
         return
@@ -137,9 +209,7 @@ def observe_brain_turn(
                 if incident_key in incidents:
                     return
                 agent = _agent_name(project_path)
-                detail = _safe_detail(
-                    result.error_message or result.result_text or cause
-                )
+                detail = _safe_detail(error_text or cause)
                 incidents[incident_key] = {
                     "account_boundary": boundary,
                     "cause": cause,

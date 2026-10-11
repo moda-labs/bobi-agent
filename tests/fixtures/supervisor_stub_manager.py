@@ -17,18 +17,20 @@ Modes:
 - ``dead-then-recover``: first launch registers a *dead* director
   (``status=error``) whose health server keeps answering - the exact #12
   stranding shape. Every relaunch registers a healthy idle director.
-- ``busy-wedge-then-recover`` (#903): first launch registers a wedged
-  director AND forks a CPU-burning descendant, writing the busy child's pid to
-  ``--busy-pid-file`` - the load-grace shape: a sanctioned heavy worker on a
-  saturated host. Every relaunch registers a healthy idle director. The busy
-  child self-exits after 60s (and the test SIGKILLs it in cleanup), so a
-  failed assertion cannot leak a burn loop past the test.
+- ``busy-wedge-then-recover`` (#903): first launch spawns a CPU-burning
+  descendant, then becomes wedged when ``--wedge-trigger-file`` appears. This
+  lets the platform-native reader establish a real two-sample CPU delta before
+  the ambiguous liveness verdict. Every relaunch registers a healthy idle
+  director. The busy child self-exits after 60s (and the test SIGKILLs it in
+  cleanup), so a failed assertion cannot leak a burn loop past the test.
 
 Each launch appends a line to ``--launch-log`` so the test can count restarts.
 """
 
 import argparse
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -39,10 +41,13 @@ def main() -> None:
     p.add_argument("--session", required=True)
     p.add_argument("--launch-log", required=True)
     p.add_argument("--busy-pid-file", default=None)
+    p.add_argument("--wedge-trigger-file", default=None)
     p.add_argument("--mode", required=True,
                    choices=["wedge-then-recover", "always-idle",
                             "dead-then-recover", "busy-wedge-then-recover"])
     a = p.parse_args()
+    if a.mode == "busy-wedge-then-recover" and not a.wedge_trigger_file:
+        p.error("--wedge-trigger-file is required for busy-wedge-then-recover")
 
     root = Path(a.project_root)
     log = Path(a.launch_log)
@@ -51,22 +56,6 @@ def main() -> None:
     launch_index = (len(log.read_text().splitlines()) if log.exists() else 0) + 1
     with open(log, "a") as fh:
         fh.write(f"launch {launch_index} pid={os.getpid()}\n")
-
-    busy_child = None
-    if a.mode == "busy-wedge-then-recover" and launch_index == 1:
-        # A real descendant burning CPU: fork a tight loop that outlives this
-        # manager (reparented to init when the supervisor kills us), so the
-        # supervisor's /proc walk sees a busy process in the manager's tree.
-        busy_child = os.fork()
-        if busy_child == 0:
-            deadline = time.time() + 60
-            while time.time() < deadline:
-                pass
-            os._exit(0)
-        Path(a.busy_pid_file).write_text(str(busy_child))
-
-    from bobi.sdk import set_project_root, get_registry, SessionEntry
-    set_project_root(root)
 
     frozen = time.time() - 100_000  # far past any test threshold
     if a.mode == "always-idle":
@@ -78,15 +67,46 @@ def main() -> None:
     else:  # wedge-then-recover
         status = "running" if launch_index == 1 else "idle"
 
-    get_registry().register(SessionEntry(
-        name=a.session, role="manager", status=status,
-        pid=os.getpid(), last_activity=frozen,
-    ))
-
     from bobi import manager_health
     from bobi import paths
-    manager_health.start(paths.state_dir(root), root.name,
-                         manager_session=a.session)
+    if a.mode == "busy-wedge-then-recover":
+        wedge_trigger = Path(a.wedge_trigger_file)
+
+        def busy_manager_status():
+            wedged = launch_index == 1 and wedge_trigger.exists()
+            last_activity = frozen if wedged else time.time()
+            return {
+                "session": a.session,
+                "status": "running" if launch_index == 1 else "idle",
+                "last_activity": last_activity,
+                "idle_seconds": max(0.0, time.time() - last_activity),
+            }
+
+        manager_health.start(
+            paths.state_dir(root), root.name,
+            session_status_fn=lambda: [],
+            manager_status_fn=busy_manager_status,
+        )
+        if launch_index == 1:
+            # Production starts manager health before sessions can launch
+            # heavy descendants. Preserve that ordering so CPU evidence never
+            # races ahead of the liveness signal the supervisor must judge.
+            busy_child = subprocess.Popen([
+                sys.executable,
+                "-c",
+                "import time; end=time.time()+60\n"
+                "while time.time()<end: pass",
+            ])
+            Path(a.busy_pid_file).write_text(str(busy_child.pid))
+    else:
+        from bobi.sdk import set_project_root, get_registry, SessionEntry
+        set_project_root(root)
+        get_registry().register(SessionEntry(
+            name=a.session, role="manager", status=status,
+            pid=os.getpid(), last_activity=frozen,
+        ))
+        manager_health.start(paths.state_dir(root), root.name,
+                             manager_session=a.session)
 
     # Behave like a live-but-quiet manager: stay up until the supervisor kills us.
     while True:

@@ -375,12 +375,38 @@ resource grants). Everything else is **bubble-scoped**. Monitors and lifecycle
 events are published to both the bare `<type>` and the `<source>/<type>` form, and
 clients subscribe to both, for cross-version compatibility.
 
+The three `system/brain.*` edges are **also** posted straight to Slack, because
+the brain is what died and no deployment has ever subscribed to them (#992: a
+102-minute outage published nothing a human could read). The direct leg goes to
+`WATCHDOG_ALERT_CHANNEL` with a Slack bot token
+(`BOBI_SLACK_BOT_TOKEN` or `SLACK_BOT_TOKEN`), the same gate the supervisor's
+crash-loop and budget-exhaustion alerts use.
+With no channel configured it degrades to one log line.
+Delivery is deduped by the incident latch, so an outage is one message
+however many turns fail inside it, plus one on recovery.
+A team that also subscribes to the topics will see both.
+Error text on these edges is redacted and bounded before it leaves the host
+(`bobi/brain_availability.py::_safe_detail`): a rejected credential is routinely
+echoed back inside the error that rejected it.
+
 ### Declaring subscriptions
 
 Resolved in `bobi/events/subscriptions.py` + `adapters.py`:
 
-1. **Explicit** - `agent.yaml` top-level `subscribe:` after environment interpolation.
-2. **Auto-detected** from `services:` entries with `events: true`:
+1. **Declared** - `<run>/workspace/subscriptions.yaml`, a mapping with one
+   `subscribe:` key. Operator-owned and edited with
+   `bobi agent <name> subscriptions add|remove`, which applies the change to the
+   running manager without a restart. It wins outright when present, including
+   `subscribe: []`, which means "no declared topics" rather than "auto-detect".
+   Nothing creates the file: with no file, resolution falls through to the pack
+   list exactly as before. Its validator is STRICT and fails loud - a missing
+   `subscribe:`, an unknown top-level key, a duplicate topic, or any `inbox/` /
+   `reply/` topic raises `WorkspaceSubscriptionsError` and blocks the apply with
+   the file path, rather than falling through to auto-detection.
+2. **Explicit** - `agent.yaml` top-level `subscribe:` after environment
+   interpolation. This is the SEED, not the live source of truth: once a
+   workspace file exists the pack list is no longer read.
+3. **Auto-detected** from `services:` entries with `events: true`:
    - **github** from the project's `git remote` (`owner/repo`); for a director over
      many repos with no root remote, from each immediate child repo.
    - **slack** from the bot token (`auth.test` -> team + app id), scoped to any
@@ -391,11 +417,52 @@ Resolved in `bobi/events/subscriptions.py` + `adapters.py`:
      Discord has one app-wide `discord:<application_id>` subscription in v1,
      while channel reachability is limited by Discord permissions and the
      Gateway normalizer's DM / @mention / reply filter.
-3. **Fallback** - the project directory name.
+4. **Fallback** - the project directory name.
 
-On top of that, `bobi agent <name> start` adds any `--subscribe` extras, every
-effective monitor's event topic, the sub-agent lifecycle topics, and the session's
-own `inbox/<self>`.
+On top of that, `compose_session_subscriptions` adds any `--subscribe` extras,
+every effective monitor's event topic, the sub-agent lifecycle topics, and the
+session's own `inbox/<self>`. The declared, monitor and lifecycle layers are the
+MANAGER session's alone; every other session composes to
+`["inbox/<self>"] + its own extras`, which is what keeps a recompose from
+leaking the manager's topics onto a worker's deployment.
+
+#### Applying a change to a running team
+
+One writer per deployment: the session that owns a deployment is the only
+process that PUTs it, at boot, on a reload, and on a deaf reconnect. The CLI
+never PUTs - it persists the declared list and then POSTs the manager's own
+health server:
+
+| Route | Auth | Does |
+| --- | --- | --- |
+| `POST /subscriptions/reload` | token | tells the owning session to re-compose from the files, authorize, and PUT; answers with what the EVENT server said |
+| `GET /subscriptions` | token | the last-accepted set and when it was accepted (`subscriptions list` reads this) |
+| `GET /health`, `GET /ready` | none | unchanged, so orchestrator probes are unaffected |
+
+The token is minted into `<run>/state/manager-health.token` at mode 0600 beside
+the port file and unlinked with it on a graceful stop. It is required because
+`BOBI_HEALTH_BIND=0.0.0.0` is a supported configuration, and an unauthenticated
+reload would let anything on the network trigger credential-bearing authorize
+POSTs and state-changing subscription writes.
+
+A 2xx means the manager processed the request; the body says what the event
+server answered (`applied`, `rejected` with `unauthorized_topics` or
+`deployment_auth_failed`, or `skipped` with `degraded_detection`). `401` is a
+bad token, `409` means no live subscription, `503` means the manager is shutting
+down or the apply raised.
+
+Two consequences worth stating:
+
+- An ungranted topic is rejected by the server's grant check, which rejects the
+  WHOLE update before any write. The declared change is KEPT, so every later
+  reload carries it and is rejected too until it is removed; `subscriptions
+  list` points at it by flagging it declared-but-not-live.
+- A persist-only edit (manager down) applies at the next reload or start - but
+  only if the deployment identity still exists on the server. Both server
+  implementations evict a deployment whose WebSocket has been gone longer than
+  60s, and the boot path deliberately keeps the stale credential rather than
+  re-registering. Recovering an evicted deployment is an explicit operator
+  action.
 
 ### Delivery and routing
 
@@ -443,6 +510,20 @@ sessions must not share a cursor):
   delivered inbox message. Queued messages, provider-error turns, and turns
   interrupted before their terminal result remain unacknowledged and replay
   after a process restart.
+- The session inbox normally serves chat before normal/bulk messages, FIFO
+  within each class. Once the oldest normal message has waited 120 seconds,
+  it takes one receive opportunity ahead of chat, then yields back to waiting
+  chat before another promotion. Active turns are not interrupted, and older
+  normal work can extend the wall-clock delivery time.
+- A pinned ACK watermark warns when its oldest batch reaches 300 seconds or
+  64 batches accumulate. Warnings include the session, pinning batch sequence,
+  event types, age and pending count, and repeat after 60, 120, 240, then every
+  300 seconds while activity continues; the backoff resets when the floor moves.
+- Manager `GET /health` exposes persisted per-session `ack_watermark` diagnostics
+  under `sessions`: `pinned_seq`, `pending_batches`, `oldest_event_type`, and
+  server-derived `oldest_age_seconds`. Old state omits the block until a drain
+  reports it; an empty watermark has a null sequence and zero count/age.
+  Diagnostic writes do not refresh session activity or acknowledge events.
 - `last_seen` is only the reconnect replay position. Local delivery health
   advances `last_acked_seq` and reduces `pending_events` only after a WebSocket
   ACK frame confirms processing; reconnecting past an in-memory queue does not
