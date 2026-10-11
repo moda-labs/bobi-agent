@@ -12,7 +12,6 @@ The previous eight rounds all reviewed a design in which the CLI applied changes
 A premise check against main found that every blocker those rounds produced lived in that one choice, and that a single-writer design meets D1 through D9 including live editing with no restart.
 The generation counter, claim-then-confirm, the accepted-record file, the launch-stamp liveness table, the bounded file lock, the five-writer model and the computed key-ownership rule are all deleted, because with one writer there is nothing for them to coordinate.
 One codex review of this rewrite found three blockers, five majors and two minors, all verified against real code and all folded into the text below rather than appended.
-Its verbatim report and every prior round's are committed in `plans/reviews/` as the record of how this design was reached.
 
 ## Problem
 
