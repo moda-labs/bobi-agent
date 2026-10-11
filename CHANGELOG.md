@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.60.1 - 2026-10-10
+
+Patch release: 0.60.0 crash-loops a containerized manager after a machine
+restart. Use 0.60.1 instead of 0.60.0.
+
+### Fixed
+
+- **A stale `manager.pid` no longer crash-loops the supervised manager
+  (#1118).** 0.60.0 added an already-running check to `start --foreground`
+  that trusted a bare pid probe. `manager.pid` survives on a container volume
+  when the machine is stopped, and after the reboot the same pid number names
+  an unrelated process, so the supervisor's manager child exited with
+  `Already running (pid N)` on every relaunch. The check now also requires the
+  per-runtime manager lease to be held. The kernel drops that lease when its
+  holder dies, so it cannot go stale. Found by the fleet release canary;
+  0.60.0 was never rolled to the fleet.
+
 ## 0.60.0 - 2026-10-10
 
 Minor release: a running team can change its own event subscriptions without a
