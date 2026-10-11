@@ -1021,7 +1021,7 @@ class LocalRuntime(TeamRuntime):
 
         from bobi.brain import AssistantText, StreamDelta, TurnResult, get_brain
         from bobi.config import project_env
-        from bobi.costs import estimate_cost, model_provider
+        from bobi.costs import estimate_cost
         from bobi.env import child_agent_env
         from bobi.metrics.query import MetricsQueryError
         from bobi.redact import redact_secrets
@@ -1076,13 +1076,16 @@ class LocalRuntime(TeamRuntime):
         text = "".join(parts) or fallback_text or result.result_text
         output = text.encode("utf-8")[:_SANDBOX_MAX_OUTPUT_BYTES].decode("utf-8", "ignore")
         input_tokens = sum(usage.input_tokens or 0 for usage in result.usage)
-        cached_tokens = sum(usage.cache_read_input_tokens or 0 for usage in result.usage)
         output_tokens = sum(usage.output_tokens or 0 for usage in result.usage)
+        # Each usage row is priced at its own model (a background call can run on another one).
+        list_price = sum(estimate_cost(
+            "gateway", usage.model or model, usage.input_tokens or 0, usage.output_tokens or 0,
+            usage.cache_read_input_tokens or 0, usage.cache_write_input_tokens or 0,
+            usage.cache_write_1h_input_tokens or 0) for usage in result.usage)
         return {"model": model, "output": output, "truncated": len(output) < len(text),
                 "latency_ms": (time.perf_counter() - started) * 1000,
                 "input_tokens": input_tokens, "output_tokens": output_tokens,
-                "list_price_usd": estimate_cost(model_provider(model) or "anthropic", model,
-                                                input_tokens, output_tokens, cached_tokens)}
+                "list_price_usd": list_price}
 
     def metrics(self, name: str, view: str, args: dict) -> dict:
         import json

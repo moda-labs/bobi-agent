@@ -1,6 +1,8 @@
 """Executable SQLite v1 schema for the fine-grained metrics read model."""
 
 SCHEMA_VERSION = 1
+# Bump when the best_usage view changes; migrate() rebuilds the view (it holds no data).
+BEST_USAGE_VERSION = 2
 
 SCHEMA_SQL = r"""
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -307,11 +309,22 @@ WITH candidates AS (
         + (u.cache_write_unknown_ttl_input_tokens IS NOT NULL)
         + (u.output_tokens IS NOT NULL)
         + (u.reasoning_output_tokens IS NOT NULL) AS completeness,
+        -- One model under two spellings is one measurement: Claude Code's
+        -- terminal usage names "claude-opus-5-5[1m]" what its transcript
+        -- names "claude-opus-5-5".
+        CASE WHEN instr(u.model, '[') > 0 THEN substr(u.model, 1, instr(u.model, '[') - 1)
+             ELSE u.model END AS model_key,
         CASE u.measurement_source
             WHEN 'provider_reconciled' THEN 70
+            -- Claude Code's terminal usage is its billed total for the turn,
+            -- including background calls its transcript never logs, so it
+            -- outranks the transcript at turn scope. Per call, the stream's
+            -- output counts are partial and the transcript stays preferred.
+            WHEN 'provider_stream' THEN CASE
+                WHEN u.scope = 'turn' AND (u.provider = 'anthropic' OR u.model LIKE 'claude%') THEN 68
+                ELSE 50 END
             WHEN 'claude_transcript' THEN 65
             WHEN 'codex_rollout' THEN 65
-            WHEN 'provider_stream' THEN 50
             WHEN 'local_tokenizer' THEN 20
             WHEN 'calibrated_estimator' THEN 10
             ELSE 0
@@ -321,6 +334,10 @@ WITH candidates AS (
         SELECT 1
         FROM usage_measurements AS newer
         WHERE newer.supersedes_measurement_id = u.measurement_id
+        -- A transcript does not replace Claude's exact terminal total for a
+        -- turn; both stay candidates and the ranking below decides.
+        AND NOT (u.scope = 'turn' AND u.is_estimated = 0 AND u.measurement_source = 'provider_stream'
+                 AND newer.measurement_source = 'claude_transcript')
     )
 ), ranked AS (
     SELECT
@@ -331,7 +348,7 @@ WITH candidates AS (
                 turn_id,
                 COALESCE(invocation_id, ''),
                 provider,
-                model
+                model_key
             ORDER BY
                 is_estimated ASC,
                 completeness DESC,

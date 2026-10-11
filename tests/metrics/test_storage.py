@@ -687,6 +687,59 @@ def test_schema_has_wal_foreign_keys_and_best_usage(tmp_path):
     conn.close()
 
 
+def _seed_turn_usage(conn, rows):
+    conn.execute("INSERT INTO sessions(session_id,session_name,brain,provider,started_at_us,status) "
+                 "VALUES('s1','agent','claude','anthropic',1,'completed')")
+    conn.execute("INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,started_at_us,status) "
+                 "VALUES('t1','s1',0,'user',1,1,'completed')")
+    for measurement_id, scope, source, model, input_tokens, supersedes in rows:
+        conn.execute(
+            "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,model,"
+            "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
+            "observed_at_us,supersedes_measurement_id) VALUES(?,?,'t1',NULL,'anthropic',?,?,0,1,?,10,1,?)",
+            (measurement_id, scope, model, source, input_tokens, supersedes))
+    conn.commit()
+
+
+def test_best_usage_counts_one_model_under_two_spellings_once(tmp_path):
+    # Claude Code's terminal usage says "claude-opus-5-5[1m]"; its transcript
+    # says "claude-opus-5-5". They are one measurement, not two.
+    conn = connect(tmp_path / "metrics.db")
+    migrate(conn)
+    _seed_turn_usage(conn, [
+        ("stream", "turn", "provider_stream", "claude-opus-5-5[1m]", 1000, None),
+        ("transcript", "turn", "claude_transcript", "claude-opus-5-5", 1000, None),
+    ])
+    assert conn.execute("SELECT SUM(input_tokens) FROM best_usage").fetchone()[0] == 1000
+    conn.close()
+
+
+def test_best_usage_keeps_claudes_turn_total_over_a_superseding_transcript(tmp_path):
+    # The terminal total includes background calls the transcript never logs.
+    conn = connect(tmp_path / "metrics.db")
+    migrate(conn)
+    _seed_turn_usage(conn, [
+        ("stream", "turn", "provider_stream", "claude-haiku-4-5-20251001", 1_108, None),
+        ("transcript", "turn", "claude_transcript", "claude-haiku-4-5-20251001", 1_000, "stream"),
+    ])
+    assert [tuple(row) for row in conn.execute("SELECT measurement_id, input_tokens FROM best_usage")] == [
+        ("stream", 1_108)]
+    conn.close()
+
+
+def test_migrate_rebuilds_a_stale_best_usage_view(tmp_path):
+    conn = connect(tmp_path / "metrics.db")
+    migrate(conn)
+    conn.execute("DROP VIEW best_usage")
+    conn.execute("CREATE VIEW best_usage AS SELECT 'stale' AS measurement_id")
+    conn.execute("UPDATE schema_meta SET value='1' WHERE key='best_usage_version'")
+    conn.commit()
+    migrate(conn)
+    assert "model_key" in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='best_usage'").fetchone()[0]
+    conn.close()
+
+
 def test_collector_projects_more_than_one_batch(tmp_path):
     segment = tmp_path / "many.telemetry"
     db = tmp_path / "metrics.db"

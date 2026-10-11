@@ -353,6 +353,19 @@ def _enforce_row_count(*collections: list[object]) -> None:
         raise MetricsQueryError("response exceeds 200 rows; narrow the query", "query_too_large")
 
 
+def _cost_tokens(row: sqlite3.Row | dict[str, Any]) -> dict[str, int]:
+    """Token counts in :func:`bobi.costs.estimate_cost` form; absent columns count as zero."""
+    keys = row.keys()
+
+    def count(name: str) -> int:
+        return int(row[name] or 0) if name in keys else 0
+
+    return {"input_tokens": count("input_tokens"), "output_tokens": count("output_tokens"),
+            "cached_input_tokens": count("cache_read_input_tokens"),
+            "cache_write_tokens": count("cache_write_input_tokens"),
+            "cache_write_1h_tokens": count("cache_write_1h_input_tokens")}
+
+
 def _list_price(usage: sqlite3.Row | dict[str, Any]) -> float | None:
     """List-price USD for one usage row, or None when model or tokens are unknown.
 
@@ -362,9 +375,7 @@ def _list_price(usage: sqlite3.Row | dict[str, Any]) -> float | None:
         return None
     if model_prices(usage["model"] or "") is None:
         return None
-    return round(estimate_cost(
-        "gateway", usage["model"], int(usage["input_tokens"]), int(usage["output_tokens"]),
-        int(usage["cache_read_input_tokens"] or 0)), 8)
+    return round(estimate_cost("gateway", usage["model"], **_cost_tokens(usage)), 8)
 
 
 def _price_dict(model: str | None) -> dict[str, float] | None:
@@ -392,7 +403,8 @@ def _routing_savings(rows: list[sqlite3.Row]) -> dict[str, object]:
     cheapest one (``floor``). Each side is priced from
     :data:`bobi.costs.PRICE_TABLE` over the identical token volumes the turn
     actually used, which isolates the routing choice from cache behaviour and
-    provider billing drift; cache writes bill as plain input on every side.
+    provider billing drift; cache reads and writes bill at each model's own
+    cache rates on every side.
     Usage on a model other than the selected one (a harness's background haiku
     call) costs the same whatever the router chose, so it counts at its
     executed price on every side. When no usage matches the selected model
@@ -404,12 +416,7 @@ def _routing_savings(rows: list[sqlite3.Row]) -> dict[str, object]:
     for row in rows:
         by_turn.setdefault(row["turn_id"], []).append(row)
 
-    def tokens(row: sqlite3.Row) -> dict[str, int]:
-        return {
-            "input_tokens": int(row["input_tokens"] or 0),
-            "output_tokens": int(row["output_tokens"] or 0),
-            "cached_input_tokens": int(row["cache_read_input_tokens"] or 0),
-        }
+    tokens = _cost_tokens
 
     totals = {"routed": 0.0, "ceiling": 0.0, "floor": 0.0}
     priced_turns = unpriced_turns = escalated_turns = 0
@@ -839,6 +846,8 @@ class MetricsQueries:
                     "SELECT t.turn_id,b.model,d.model_selected,d.candidate_models_json,d.control_model,d.fallback_reason,"
                     "SUM(b.input_tokens) AS input_tokens,"
                     "SUM(b.cache_read_input_tokens) AS cache_read_input_tokens,"
+                    "SUM(b.cache_write_input_tokens) AS cache_write_input_tokens,"
+                    "SUM(b.cache_write_1h_input_tokens) AS cache_write_1h_input_tokens,"
                     "SUM(b.output_tokens) AS output_tokens FROM best_usage b "
                     "JOIN turns t ON t.turn_id=b.turn_id JOIN sessions s ON s.session_id=t.session_id "
                     "JOIN router_decisions d ON d.router_decision_id=(SELECT latest.router_decision_id "
@@ -951,6 +960,8 @@ class MetricsQueries:
                 by_model = conn.execute(
                     "SELECT b.model,SUM(b.input_tokens) AS input_tokens,"
                     "SUM(b.cache_read_input_tokens) AS cache_read_input_tokens,"
+                    "SUM(b.cache_write_input_tokens) AS cache_write_input_tokens,"
+                    "SUM(b.cache_write_1h_input_tokens) AS cache_write_1h_input_tokens,"
                     "SUM(b.output_tokens) AS output_tokens FROM best_usage b "
                     f"WHERE b.turn_id=? AND ({_chosen_usage()}) GROUP BY b.model", (row["turn_id"],),
                 ).fetchall()

@@ -14,81 +14,57 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Fallback price per million tokens (input, cached_input, output) by
-# provider:model. Used only when the provider doesn't report cost directly
-# (e.g. the codex brain reports token counts only - #760); an estimate is
-# never mixed into recorded dollars, it rides the separate estimated_* fields.
-# The cached-input rate is carried per model because the discount is NOT a
-# constant: gpt-5.x cache reads are 10% of input, o-series and codex-mini are
-# 25%, gpt-4o was 50%. Models a fleet may have recorded historically stay in
-# the table - the fold prices the model each session actually recorded, never
-# "the current default". Approximate list prices as of 2026-07
-# (developers.openai.com/api/docs/pricing; cross-checked against LiteLLM's
-# model_prices json and models.dev) and should be updated periodically - the
-# authoritative source of cost is always the provider's own billing.
-PRICE_TABLE: dict[str, tuple[float, float, float]] = {
-    # Anthropic 5.x (platform.claude.com pricing, 2026-09). Opus 5.5 cache
-    # reads are 5% of input, not the usual 10%.
-    "anthropic:claude-fable-5-1": (10.0, 0.25, 50.0),
-    "anthropic:claude-fable-5": (10.0, 1.00, 50.0),
-    "anthropic:claude-opus-5-5": (4.0, 0.20, 20.0),
-    "anthropic:claude-opus-5": (5.0, 0.50, 25.0),
-    "anthropic:claude-sonnet-5-5": (2.0, 0.20, 10.0),
-    "anthropic:claude-sonnet-5": (2.0, 0.20, 10.0),
-    "anthropic:claude-opus-4-8": (5.0, 0.50, 25.0),
-    "anthropic:claude-opus-4-7": (5.0, 0.50, 25.0),
-    "anthropic:claude-opus-4-6": (5.0, 0.50, 25.0),
-    "anthropic:claude-sonnet-4-6": (3.0, 0.30, 15.0),
-    # Anthropic 4.x and older (cache read = 10% of input)
-    "anthropic:claude-haiku-4-5-20251001": (1.0, 0.10, 5.0),
-    "anthropic:claude-haiku-4-5": (1.0, 0.10, 5.0),
-    "anthropic:claude-sonnet-4-5-20250929": (3.0, 0.30, 15.0),
-    "anthropic:claude-sonnet-4-5": (3.0, 0.30, 15.0),
-    "anthropic:claude-opus-4-5-20251101": (5.0, 0.50, 25.0),
-    "anthropic:claude-opus-4-5": (5.0, 0.50, 25.0),
+
+# Official list prices in USD per million tokens, read from
+# bobi/model_prices.json. scripts/update_prices.py regenerates that file from
+# the Anthropic and OpenAI pricing pages; a weekly CI job opens a PR when
+# they change. Each entry carries input, cache_read, cache_write_5m,
+# cache_write_1h and output rates.
+def _official_prices() -> dict[str, dict[str, float]]:
+    try:
+        return json.loads(Path(__file__).with_name("model_prices.json").read_text())["models"]
+    except (OSError, ValueError, KeyError):
+        log.warning("bobi/model_prices.json is missing or unreadable; using fallback prices only")
+        return {}
+
+
+OFFICIAL_PRICES: dict[str, dict[str, float]] = _official_prices()
+
+# Hand-kept prices for models the official pages no longer (or never) list:
+# retired Claude models and codex-specific ids a fleet may have recorded
+# historically, plus Google. The fold prices the model each session actually
+# recorded, never "the current default". The cached-input rate is per model
+# because the discount is not a constant.
+_FALLBACK_PRICES: dict[str, tuple[float, float, float]] = {
     "anthropic:claude-3-7-sonnet-20250219": (3.0, 0.30, 15.0),
     "anthropic:claude-3-7-sonnet": (3.0, 0.30, 15.0),
     "anthropic:claude-3-5-sonnet-20241022": (3.0, 0.30, 15.0),
     "anthropic:claude-3-5-sonnet": (3.0, 0.30, 15.0),
-    "anthropic:claude-sonnet-4-20250514": (3.0, 0.30, 15.0),
-    "anthropic:claude-opus-4-20250514": (15.0, 1.50, 75.0),
-    "anthropic:claude-haiku-3-5-20241022": (0.80, 0.08, 4.0),
     "anthropic:claude-3-5-haiku-20241022": (0.80, 0.08, 4.0),
     "anthropic:claude-3-5-haiku": (0.80, 0.08, 4.0),
-    # OpenAI - current codex lineup (gpt-5.6 family) and still-offered tiers
     "openai:gpt-5.6": (5.00, 0.50, 30.00),
-    "openai:gpt-5.6-sol": (5.00, 0.50, 30.00),
-    "openai:gpt-5.6-terra": (2.50, 0.25, 15.00),
-    "openai:gpt-5.6-luna": (1.00, 0.10, 6.00),
-    "openai:gpt-5.5": (5.00, 0.50, 30.00),
-    "openai:gpt-5.4": (2.50, 0.25, 15.00),
-    "openai:gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai:gpt-5.3-codex": (1.75, 0.175, 14.00),
     "openai:gpt-5.3-codex-spark": (1.75, 0.175, 14.00),
-    # OpenAI - legacy codex-era models a fleet may have recorded
-    "openai:gpt-5.2": (1.75, 0.175, 14.00),
     "openai:gpt-5.2-codex": (1.75, 0.175, 14.00),
-    "openai:gpt-5.1": (1.25, 0.125, 10.00),
     "openai:gpt-5.1-codex": (1.25, 0.125, 10.00),
     "openai:gpt-5.1-codex-max": (1.25, 0.125, 10.00),
     "openai:gpt-5.1-codex-mini": (0.25, 0.025, 2.00),
-    "openai:gpt-5": (1.25, 0.125, 10.00),
     "openai:gpt-5-codex": (1.25, 0.125, 10.00),
     "openai:codex-mini-latest": (1.50, 0.375, 6.00),
-    # OpenAI - older API models
-    "openai:gpt-4o": (2.50, 1.25, 10.0),
-    "openai:gpt-4o-mini": (0.15, 0.075, 0.60),
-    "openai:gpt-4.1": (2.0, 0.50, 8.0),
-    "openai:gpt-4.1-mini": (0.40, 0.10, 1.60),
-    "openai:o1": (15.0, 7.50, 60.0),
-    "openai:o3": (2.0, 0.50, 8.0),
-    "openai:o4-mini": (1.10, 0.275, 4.40),
-    # Google (implicit cache read = 25% of input)
     "google:gemini-2.5-pro": (1.25, 0.3125, 10.0),
     "google:gemini-2.5-flash": (0.15, 0.0375, 0.60),
 }
 
-# Per-image pricing for image generation models.
+# Per million tokens (input, cached_input, output) by provider:model. An
+# estimate is never mixed into recorded dollars; it rides the separate
+# estimated_* fields. The authoritative source of cost is always the
+# provider's own billing.
+PRICE_TABLE: dict[str, tuple[float, float, float]] = {
+    **_FALLBACK_PRICES,
+    **{key: (entry["input"], entry["cache_read"], entry["output"]) for key, entry in OFFICIAL_PRICES.items()},
+}
+
+
 IMAGE_PRICE_TABLE: dict[str, float] = {
     "openai:gpt-image-1": 0.04,  # 1024x1024 standard
     "openai:dall-e-3": 0.04,
@@ -171,24 +147,25 @@ def model_prices(model: str, provider: str = "gateway") -> tuple[float, float, f
     return _lookup_prices(provider, model)
 
 
-def _table_prices(provider: str, model: str) -> tuple[float, float, float] | None:
-    """Exact price-table hit, tolerating a date or ``-latest`` suffix."""
+def _price_key(provider: str, model: str) -> str | None:
+    """The price-table key for a recorded model, tolerating a date or
+    ``-latest`` suffix. A gateway can front Anthropic or OpenAI, so it tries
+    both vendors' exact entries."""
+    provider, model = normalize_model(provider, model)
     stripped = re.sub(r"-latest$", "", re.sub(r"-\d{8}$", "", model))
-    for name in (model, stripped):
-        if f"{provider}:{name}" in PRICE_TABLE:
-            return PRICE_TABLE[f"{provider}:{name}"]
+    for vendor in (("anthropic", "openai") if provider == "gateway" else (provider,)):
+        for name in (model, stripped):
+            if f"{vendor}:{name}" in PRICE_TABLE:
+                return f"{vendor}:{name}"
     return None
 
 
 def _lookup_prices(provider: str, model: str) -> tuple[float, float, float] | None:
-    provider, model = normalize_model(provider, model)
-    # A gateway can front any vendor: try every vendor's exact entry before
-    # the family heuristics below, which would otherwise win on substrings.
-    for vendor in (("anthropic", "openai") if provider == "gateway" else (provider,)):
-        prices = _table_prices(vendor, model)
-        if prices:
-            return prices
-    m = model.lower()
+    key = _price_key(provider, model)
+    if key:
+        return PRICE_TABLE[key]
+    # Family heuristics only when no exact entry exists.
+    m = normalize_model(provider, model)[1].lower()
     if "haiku" in m:
         return (1.0, 0.10, 5.0)
     if "sonnet" in m:
@@ -204,23 +181,47 @@ def _lookup_prices(provider: str, model: str) -> tuple[float, float, float] | No
     return None
 
 
+def cache_write_prices(provider: str, model: str) -> tuple[float, float] | None:
+    """Per-MTok ``(5-minute, 1-hour)`` cache-write rates, or None when unpriced.
+
+    Official entries carry both rates. Otherwise Anthropic models use the
+    published multipliers (1.25x and 2x input) and other vendors bill cache
+    writes as plain input."""
+    key = _price_key(provider, model)
+    if key in OFFICIAL_PRICES:
+        entry = OFFICIAL_PRICES[key]
+        return entry["cache_write_5m"], entry["cache_write_1h"]
+    prices = _lookup_prices(provider, model)
+    if not prices:
+        return None
+    vendor = (key or "").split(":", 1)[0] or model_provider(model)
+    return (prices[0] * 1.25, prices[0] * 2) if vendor == "anthropic" else (prices[0], prices[0])
+
+
 def estimate_cost(provider: str, model: str,
                   input_tokens: int = 0, output_tokens: int = 0,
-                  cached_input_tokens: int = 0) -> float:
+                  cached_input_tokens: int = 0, cache_write_tokens: int = 0,
+                  cache_write_1h_tokens: int = 0) -> float:
     """Estimate cost from the price table. Returns 0.0 if not in the table.
 
-    ``cached_input_tokens`` is the cached SUBSET of ``input_tokens`` (the
-    provider convention), priced at the per-model cached rate; the remainder
-    bills at the full input rate. ``output_tokens`` already includes any
-    reasoning tokens - callers must not add those separately.
+    ``cached_input_tokens`` (cache reads) and ``cache_write_tokens`` are
+    SUBSETS of ``input_tokens`` (the provider convention); reads bill at the
+    cached rate, writes at the cache-write rate (``cache_write_1h_tokens`` of
+    them at the 1-hour rate, the rest at the 5-minute rate), and the remainder
+    at the full input rate. ``output_tokens`` already includes any reasoning
+    tokens - callers must not add those separately.
     """
     prices = _lookup_prices(provider, model)
     if not prices:
         return 0.0
     input_price, cached_price, output_price = prices
-    cached = min(max(cached_input_tokens, 0), max(input_tokens, 0))
-    uncached = max(input_tokens, 0) - cached
-    return (uncached * input_price + cached * cached_price
+    total = max(input_tokens, 0)
+    cached = min(max(cached_input_tokens, 0), total)
+    writes = min(max(cache_write_tokens, 0), total - cached)
+    writes_1h = min(max(cache_write_1h_tokens, 0), writes)
+    write_5m_price, write_1h_price = cache_write_prices(provider, model) or (input_price, input_price)
+    return ((total - cached - writes) * input_price + cached * cached_price
+            + (writes - writes_1h) * write_5m_price + writes_1h * write_1h_price
             + max(output_tokens, 0) * output_price) / 1_000_000
 
 

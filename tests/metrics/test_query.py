@@ -71,7 +71,7 @@ def test_dashboard_canonical_usage_routing_and_privacy(tmp_path):
     assert route_set["candidates"][1]["ceiling_cost_usd"] == route_set["candidates"][1]["routed_cost_usd"]
     assert route_set["candidates"][1]["fallback_turns"] == 0
     assert route_set["candidates"][1]["prices"] == {
-        "input_per_mtok": 2.0, "cached_input_per_mtok": 0.2, "output_per_mtok": 10.0}
+        "input_per_mtok": 2.0, "cached_input_per_mtok": 0.1, "output_per_mtok": 10.0}
 
 
 def test_dashboard_routing_savings_name_unpriced_candidates(tmp_path):
@@ -761,7 +761,7 @@ def test_summary_cost_selects_one_granularity_without_double_counting(metrics_ro
     assert result["totals"]["reported_cost_usd"] == pytest.approx(0.25)
     assert MetricsQueries(metrics_root).turns({"window_seconds": 10, "end_at": 4})["turns"][0]["costs"] == {
         "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": None,
-        "list_price_usd": pytest.approx(0.000464),
+        "list_price_usd": pytest.approx(0.000467),
     }
 
 
@@ -805,7 +805,7 @@ def test_mixed_exact_and_estimated_invocation_costs_keep_one_granularity(metrics
     assert result["totals"]["estimated_cost_usd"] == pytest.approx(0.05)
     assert MetricsQueries(metrics_root).turns({"window_seconds": 10, "end_at": 4})["turns"][0]["costs"] == {
         "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": pytest.approx(0.05),
-        "list_price_usd": pytest.approx(0.000464),
+        "list_price_usd": pytest.approx(0.000467),
     }
 
 

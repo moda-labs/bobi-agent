@@ -191,7 +191,14 @@ not produced.
 ## Exact accounting
 
 - Use `best_usage`, not all `usage_measurements`: the latter retains
-  superseded estimates and duplicate scopes.
+  superseded estimates and duplicate scopes. One model under two spellings
+  (`claude-opus-5-5[1m]` in Claude Code's terminal usage, `claude-opus-5-5`
+  in its transcript) is one measurement. At turn scope, Claude's exact
+  terminal total outranks the transcript even when reconciliation marked it
+  superseded, because it includes background calls the transcript never logs;
+  per call, the transcript stays preferred because streamed output counts are
+  partial. The view is rebuilt on collector start when its definition changes
+  (`best_usage_version` in `schema_meta`).
 - `measurement_source=provider_stream` and `is_estimated=0` identify provider
   facts. Transcript reconciliation can also recover exact facts. Unknown
   dimensions stay `NULL`, never zero.
@@ -228,6 +235,19 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
 - Reported and estimated costs remain separate. When a turn has neither, the
   view shows a `~`-prefixed list-price figure (`list_price_usd`) computed from
   `bobi/costs.py` `PRICE_TABLE`; it is never added to recorded spend.
+- List prices come from `bobi/model_prices.json`, generated from the official
+  pricing pages (platform.claude.com and developers.openai.com, both served as
+  Markdown) by `scripts/update_prices.py`. The **Update model prices** workflow
+  runs it weekly and opens one pull request when a price changes; the script
+  refuses to write when a page stops parsing. Models the pages do not list
+  (some retired or codex-only ids, Google) keep hand-kept fallback prices in
+  `bobi/costs.py`. Estimates bill cache reads at the cached rate and cache
+  writes at their own rate: 5-minute writes at 1.25x input and 1-hour writes at
+  2x on Claude (the official 5m/1h columns), the published cache-write rate or
+  plain input on OpenAI. Checked against 25 Claude turns of a live agent, these
+  estimates equal Claude Code's own reported cost on 24; the remaining turn
+  differs because Claude Code prices Sonnet 5.5 cache reads at $0.20 where the
+  official page lists $0.10.
 - The routing card prices each routed turn's canonical tokens at list price
   three ways: on the model that ran, on the cheapest candidate in that
   decision's `candidate_models` (**always cheapest**), and on the most expensive

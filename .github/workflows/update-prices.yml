@@ -1,0 +1,54 @@
+name: Update model prices
+
+# Weekly refresh of bobi/model_prices.json from the official Anthropic and
+# OpenAI pricing pages (scripts/update_prices.py). When a price changed it
+# opens, or updates, one pull request on the chore/update-model-prices branch;
+# a maintainer reviews and merges it, so no price changes without review.
+# The script refuses to write when a page no longer parses into the expected
+# table, so a page redesign fails this job instead of emptying the prices.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-model-prices
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Refresh prices
+    if: github.repository == 'moda-labs/bobi-agent'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Read the official pricing pages
+        run: python3 scripts/update_prices.py
+      - name: Open a pull request when a price changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- bobi/model_prices.json; then
+            echo "Prices unchanged."
+            exit 0
+          fi
+          branch=chore/update-model-prices
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git add bobi/model_prices.json
+          git commit -m "chore: update model prices from official pricing pages"
+          git push --force origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$branch" \
+              --title "chore: update model prices" \
+              --body "Prices refreshed by scripts/update_prices.py from the official pricing pages (platform.claude.com and developers.openai.com). Review the diff of bobi/model_prices.json before merging."
+          fi

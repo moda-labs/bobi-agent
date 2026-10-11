@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from bobi.metrics.events import MetricsEvent, canonical_json
-from bobi.metrics.schema import SCHEMA_SQL, SCHEMA_VERSION
+from bobi.metrics.schema import BEST_USAGE_VERSION, SCHEMA_SQL, SCHEMA_VERSION
 from bobi.metrics.spool import FrameRecord
 
 def connect(path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
@@ -33,8 +33,24 @@ def connect(path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
     return conn
 
 
+def _best_usage_current(conn: sqlite3.Connection) -> bool:
+    try:
+        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'best_usage_version'").fetchone()
+    except sqlite3.OperationalError:  # a fresh database has no schema_meta yet
+        return False
+    return row is not None and int(row[0]) == BEST_USAGE_VERSION
+
+
 def migrate(conn: sqlite3.Connection) -> None:
+    if not _best_usage_current(conn):
+        # The view holds no data; rebuild it from the current definition.
+        conn.execute("DROP VIEW IF EXISTS best_usage")
     conn.executescript(SCHEMA_SQL)
+    conn.execute(
+        "INSERT INTO schema_meta(key, value) VALUES('best_usage_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(BEST_USAGE_VERSION),),
+    )
     current = conn.execute(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'"
     ).fetchone()

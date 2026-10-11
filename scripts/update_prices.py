@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Refresh bobi/model_prices.json from the official Anthropic and OpenAI pricing pages.
+
+Both vendors publish their pricing page as Markdown; this reads the standard
+(non-batch) per-model table from each and writes USD per million tokens:
+
+    input, cache_read, cache_write_5m, cache_write_1h, output
+
+Usage:
+    python3 scripts/update_prices.py            # fetch and rewrite the file
+    python3 scripts/update_prices.py --check    # exit 1 when the file is stale
+    python3 scripts/update_prices.py --anthropic page.md --openai page.md
+
+The script refuses to write when a page no longer parses into the expected
+table (a layout change), so a broken page never empties the price list.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import re
+import sys
+import urllib.request
+from pathlib import Path
+
+ANTHROPIC_URL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
+OPENAI_URL = "https://developers.openai.com/api/docs/pricing.md"
+OUTPUT = Path(__file__).resolve().parent.parent / "bobi" / "model_prices.json"
+# A parse that misses any of these means the page layout changed.
+REQUIRED = ("anthropic:claude-sonnet-4-5", "anthropic:claude-haiku-4-5", "anthropic:claude-opus-4-5",
+            "openai:gpt-5", "openai:o3")
+
+
+def _fetch(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": "bobi-price-updater"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return response.read().decode("utf-8")
+
+
+def _tables(markdown: str) -> list[list[list[str]]]:
+    """Every Markdown table as rows of stripped cells (separator rows dropped)."""
+    tables, current = [], []
+    for line in markdown.splitlines():
+        if line.lstrip().startswith("|"):
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if not all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+                current.append(cells)
+        elif current:
+            tables.append(current)
+            current = []
+    if current:
+        tables.append(current)
+    return tables
+
+
+def _usd(cell: str) -> float | None:
+    """'$0.20 / MTok<sup>2</sup>' -> 0.2; '-' -> None."""
+    match = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)", re.sub(r"<[^>]+>", "", cell))
+    return float(match.group(1)) if match else None
+
+
+def _column(header: list[str], *words: str) -> int:
+    for index, name in enumerate(header):
+        if all(word in name.lower() for word in words):
+            return index
+    raise ValueError(f"pricing table has no column matching {words}; layout may have changed: {header}")
+
+
+def parse_anthropic(markdown: str) -> dict[str, dict[str, float]]:
+    """The model table: base input, 5m and 1h cache writes, cache hits, output."""
+    table = next((t for t in _tables(markdown) if any("base input" in cell.lower() for cell in t[0])), None)
+    if table is None:
+        raise ValueError("Anthropic page has no model pricing table")
+    header, rows = table[0], table[1:]
+    columns = {"input": _column(header, "base input"), "cache_write_5m": _column(header, "5m"),
+               "cache_write_1h": _column(header, "1h"), "cache_read": _column(header, "hit"),
+               "output": _column(header, "output")}
+    prices = {}
+    for row in rows:
+        # Drop markup and links ("Claude Opus 4 ([retired](https://...))") first.
+        label = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", re.sub(r"<[^>]+>", "", row[0]))
+        # Tiered rows ("for prompts over 100,000 tokens") keep the base tier only.
+        if re.search(r"\bover\b", label, re.I):
+            continue
+        name = re.sub(r"\s*\(.*?\)\s*", " ", label).strip().lower()
+        match = re.fullmatch(r"claude ([a-z]+) (\d+(?:\.\d+)?)", name)
+        if not match:
+            continue
+        model = f"claude-{match.group(1)}-{match.group(2).replace('.', '-')}"
+        values = {key: _usd(row[index]) for key, index in columns.items()}
+        if None in values.values():
+            continue
+        prices[f"anthropic:{model}"] = values
+    return prices
+
+
+def parse_openai(markdown: str) -> dict[str, dict[str, float]]:
+    """The standard (not batch) table; short-context columns."""
+    section = markdown.split("### Standard pricing data", 1)
+    if len(section) < 2:
+        raise ValueError("OpenAI page has no standard pricing table")
+    table = _tables(section[1])[0]
+    header, rows = table[0], table[1:]
+    i_in = _column(header, "short", "input")
+    i_read = _column(header, "short", "cached")
+    i_write = _column(header, "short", "cache writes")
+    i_out = _column(header, "short", "output")
+    prices = {}
+    for row in rows:
+        model = re.sub(r"\s*\(.*?\)\s*", "", row[0]).strip().lower()
+        input_price, output_price = _usd(row[i_in]), _usd(row[i_out])
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]*", model) or input_price is None or output_price is None:
+            continue
+        # A "-" means no discount (cached reads) or no surcharge (cache writes).
+        write = _usd(row[i_write]) or input_price
+        prices[f"openai:{model}"] = {"input": input_price, "cache_read": _usd(row[i_read]) or input_price,
+                                     "cache_write_5m": write, "cache_write_1h": write, "output": output_price}
+    return prices
+
+
+def build(anthropic_md: str, openai_md: str) -> dict:
+    models = {**parse_anthropic(anthropic_md), **parse_openai(openai_md)}
+    missing = [key for key in REQUIRED if key not in models]
+    if missing:
+        raise ValueError(f"pricing pages parsed without {', '.join(missing)}; layout may have changed")
+    order = ("input", "cache_read", "cache_write_5m", "cache_write_1h", "output")
+    return {"sources": {"anthropic": ANTHROPIC_URL, "openai": OPENAI_URL},
+            "unit": "USD per million tokens",
+            "models": {key: {name: models[key][name] for name in order} for key in sorted(models)}}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--check", action="store_true", help="exit 1 if bobi/model_prices.json is stale")
+    parser.add_argument("--anthropic", type=Path, help="read the Anthropic page from a file")
+    parser.add_argument("--openai", type=Path, help="read the OpenAI page from a file")
+    args = parser.parse_args(argv)
+    try:
+        data = build(args.anthropic.read_text() if args.anthropic else _fetch(ANTHROPIC_URL),
+                     args.openai.read_text() if args.openai else _fetch(OPENAI_URL))
+    except (OSError, ValueError) as error:
+        print(f"update_prices: {error}", file=sys.stderr)
+        return 2
+    current = json.loads(OUTPUT.read_text()) if OUTPUT.exists() else {}
+    if current.get("models") == data["models"]:
+        print(f"update_prices: {len(data['models'])} prices unchanged")
+        return 0
+    if args.check:
+        print("update_prices: bobi/model_prices.json is stale; run scripts/update_prices.py", file=sys.stderr)
+        return 1
+    data["updated"] = datetime.date.today().isoformat()
+    OUTPUT.write_text(json.dumps(data, indent=2) + "\n")
+    print(f"update_prices: wrote {len(data['models'])} prices to {OUTPUT.relative_to(OUTPUT.parent.parent)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

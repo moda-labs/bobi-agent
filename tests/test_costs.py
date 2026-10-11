@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from bobi.costs import (
+    OFFICIAL_PRICES,
+    PRICE_TABLE,
     CostSummary,
+    cache_write_prices,
     estimate_cost,
     format_costs,
     model_prices,
@@ -45,19 +48,19 @@ class TestPriceTable:
     @pytest.mark.parametrize("model,prices", [
         ("claude-opus-5-5", (4.0, 0.20, 20.0)),
         ("claude-opus-5.5", (4.0, 0.20, 20.0)),
-        ("claude-sonnet-5.5", (2.0, 0.20, 10.0)),
+        ("claude-sonnet-5.5", (2.0, 0.10, 10.0)),
         ("claude-haiku-4-5", (1.0, 0.10, 5.0)),
         ("claude-opus-5-5[1m]", (4.0, 0.20, 20.0)),
         ("opus", (4.0, 0.20, 20.0)),
-        ("sonnet", (2.0, 0.20, 10.0)),
+        ("sonnet", (2.0, 0.10, 10.0)),
         ("haiku", (1.0, 0.10, 5.0)),
         ("claude-opus-4-5", (5.0, 0.50, 25.0)),
-        ("cx/gpt-5.6-sol", (5.0, 0.50, 30.0)),
-        ("cx/gpt-5.6-terra", (2.5, 0.25, 15.0)),
-        ("cx/gpt-5.6-luna", (1.0, 0.10, 6.0)),
+        ("cx/gpt-5.6-sol", (4.0, 0.40, 20.0)),
+        ("cx/gpt-5.6-terra", (2.0, 0.20, 12.0)),
+        ("cx/gpt-5.6-luna", (0.2, 0.02, 1.2)),
         ("openai:gpt-5.4-mini", (0.75, 0.075, 4.5)),
         ("gpt-5.4", (2.5, 0.25, 15.0)),
-        ("anthropic:claude-sonnet-5-5", (2.0, 0.20, 10.0)),
+        ("anthropic:claude-sonnet-5-5", (2.0, 0.10, 10.0)),
     ])
     def test_routed_model_ids_resolve_to_list_prices(self, model, prices):
         assert model_prices(model) == prices
@@ -73,6 +76,27 @@ class TestPriceTable:
                              input_tokens=100,
                              cached_input_tokens=500)
         assert abs(cost - 100 * 0.50 / 1_000_000) < 1e-9
+
+    def test_cache_writes_bill_at_their_own_rates(self):
+        # Anthropic bills 5-minute writes at 1.25x input and 1-hour writes at 2x;
+        # both are subsets of input_tokens, like cache reads.
+        cost = estimate_cost("anthropic", "claude-opus-5-5", input_tokens=1_000, output_tokens=10,
+                             cached_input_tokens=200, cache_write_tokens=500, cache_write_1h_tokens=300)
+        expected = (300 * 4.0 + 200 * 0.20 + 200 * 5.0 + 300 * 8.0 + 10 * 20.0) / 1_000_000
+        assert cost == pytest.approx(expected)
+        assert cache_write_prices("gateway", "claude-opus-5-5[1m]") == (5.0, 8.0)
+
+    def test_cache_writes_without_an_official_entry_use_the_published_multipliers(self):
+        assert cache_write_prices("anthropic", "claude-3-5-haiku") == pytest.approx((1.0, 1.6))
+        assert cache_write_prices("openai", "gpt-5.1-codex") == (1.25, 1.25)
+        assert cache_write_prices("openai", "gpt-7-nova") is None
+
+    def test_official_prices_come_from_the_generated_file(self):
+        data = json.loads((Path(__file__).parent.parent / "bobi" / "model_prices.json").read_text())
+        assert data["models"] == OFFICIAL_PRICES
+        for key, entry in OFFICIAL_PRICES.items():
+            assert set(entry) == {"input", "cache_read", "cache_write_5m", "cache_write_1h", "output"}
+            assert PRICE_TABLE[key] == (entry["input"], entry["cache_read"], entry["output"])
 
 
 class TestCostRollup:

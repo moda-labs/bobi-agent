@@ -910,6 +910,8 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
                 input_tokens=agg.get("input_tokens") or 0,
                 output_tokens=agg.get("output_tokens") or 0,
                 cached_input_tokens=agg.get("cache_read_input_tokens") or 0,
+                cache_write_tokens=agg.get("cache_write_input_tokens") or 0,
+                cache_write_1h_tokens=agg.get("cache_write_1h_input_tokens") or 0,
             )
         if est_total > 0:
             runtime.emit(
