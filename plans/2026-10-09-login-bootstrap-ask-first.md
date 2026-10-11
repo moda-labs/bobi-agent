@@ -10,7 +10,6 @@
 > then re-verified at implementation time against this branch merged with `origin/main` at `8eef3fe4f13d927366b7b094ed3bc7ca15a88fc7`.
 > Only `bobi/slack.py` drifted: #1008 added one import, shifting its cited lines by +1, and the four citations are corrected above.
 > [Appendix A](#appendix-a-verification-record) is the verification record, including what was executed live.
-> Review reports are committed beside this file under [`plans/reviews/`](reviews/).
 
 ## 1. Problem
 
