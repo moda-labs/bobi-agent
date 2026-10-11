@@ -49,8 +49,11 @@ Bobi is an event-driven AI agent framework.
   operator setup, the resource-attribute table, collector bring-up, and the
   write-only per-instance token requirement.
 - `docs/FINE_GRAINED_METRICS.md`: implementation and operations guide for the
-  planned session/turn/invocation/tool usage pipeline, schema, Admin/MCP
-  queries and transcript recovery.
+  session/turn/invocation/tool usage pipeline, schema, Admin/MCP queries,
+  transcript recovery, list pricing, and JEV routing configuration.
+- `docs/JEV_ROUTER_DATA_FLOW.md`: how a JEV routing decision flows from session
+  start through the policy call, the sticky route, and telemetry into the
+  metrics view.
 - `docs/SECURITY.md`: overall security model (trust, credentials, prompt-injection).
 - `docs/TICKETING_POLICY.md`: Linear/GitHub ticketing conventions.
 - `docs/RELEASE_RUNBOOK.md`: release process and checklist.

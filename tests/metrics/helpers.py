@@ -4,7 +4,9 @@ import json
 
 import pytest
 
-from bobi.metrics.router import ExperimentConfig, RouterDecision, assign_variant
+from bobi.metrics.policies.typesafe import TypeSafePolicy
+from bobi.metrics.policy import PolicyResult
+from bobi.metrics.router import RouterDecision
 from bobi.metrics.routing import RoutingContext
 
 
@@ -89,31 +91,9 @@ JSONL = {
 """,
 }
 
-_ASSIGNMENT_VECTORS = r"""{
-  "algorithm": "hmac-sha256-u64-v1",
-  "assignment_unit": "experiment_subject",
-  "config": {
-    "control_model": "model-control",
-    "experiment_id": "jev-routing-v1",
-    "feature_schema_version": "features-v1",
-    "policy_version": "policy-2026-09-29",
-    "router_name": "jev",
-    "router_version": "1.0.0",
-    "variants": [
-      {"model": "model-control", "variant_id": "control", "weight": 0.5},
-      {"model": "model-treatment", "variant_id": "treatment", "weight": 0.5}
-    ]
-  },
-  "secret": "public-phase4-test-secret",
-  "vectors": [
-    {"assignment_key": "subject-001", "assignment_key_hash": "dd653ee82de87012aa58849d303a3707025bcc568251bed2b50f6c98af3216d0", "bucket": 0.13753355569280226, "variant_id": "control"},
-    {"assignment_key": "subject-002", "assignment_key_hash": "f7c8ec8ad647fe2a9ff741b70e80e893f0e043fc9cf105ce64af752c1db7f4fe", "bucket": 0.6919266302034648, "variant_id": "treatment"},
-    {"assignment_key": "subject-003", "assignment_key_hash": "94b1f770a5540c6d8bc074401352d31336f2b836ab636f94b140820ead86441c", "bucket": 0.7637140759970137, "variant_id": "treatment"},
-    {"assignment_key": "subject-004", "assignment_key_hash": "defb4aa2be13b4437ca22a8ad66b2c91095b3e18bb526927885291c4588a0685", "bucket": 0.19307702998731682, "variant_id": "control"}
-  ]
-}
-"""
-
+# A router decision as an older build recorded it in session metadata, with
+# the assignment columns the current router no longer fills. Projection must
+# still turn it into a router_decisions row.
 _HISTORICAL_ASSIGNMENT = r"""{
   "experiment_id": "jev-routing-v1",
   "variant_id": "control",
@@ -139,10 +119,6 @@ _HISTORICAL_ASSIGNMENT = r"""{
 """
 
 
-def assignment_vectors():
-    return json.loads(_ASSIGNMENT_VECTORS)
-
-
 def historical_assignment():
     return json.loads(_HISTORICAL_ASSIGNMENT)
 
@@ -156,30 +132,36 @@ def metrics_fixtures(tmp_path):
     return directory
 
 
-def configured():
-    return {"experiment_id": "routing-test", "router_name": "bobi-arm", "router_version": "1",
-        "policy_version": "p1", "feature_schema_version": "jev-features-v1", "control_model": "control",
-        "variants": [{"variant_id": "control", "weight": 0.5, "model": "control"},
-                     {"variant_id": "treatment", "weight": 0.5, "policy": "static"}],
-        "policy": {"name": "static", "version": "v1", "brain": "codex", "mode": "shadow",
-            "candidate_models": ["control", "cheap"], "scope": {"roles": ["engineer"],
-            "entry_points": ["session_start"]}, "egress": {"prompt": "none"},
-            "credential_env": "ROUTING_TEST_KEY", "options": {"model": "cheap"}}}
+def configured(**changes):
+    """The short JEV config production writes, routing between control and cheap."""
+    return {"experiment_id": "routing-test", "mode": "shadow", "control_model": "control",
+            "candidate_models": ["control", "cheap"], "roles": ["engineer"],
+            "entry_points": ["session_start"], "brain": "codex",
+            "instructions": "Route simple tasks to cheap.", **changes}
 
 
-def context(raw, arm):
-    config = ExperimentConfig.from_mapping(raw)
-    subject = next(str(index) for index in range(100) if assign_variant(config, b"test-secret",
-        assignment_unit="experiment_subject", assignment_key=str(index))[0].variant_id == arm)
+def fixed_policy(monkeypatch, model="cheap", *, confidence=1.0, version=None):
+    """Answer every TypeSafe policy call with ``model`` instead of calling the vendor."""
+    calls = []
+
+    async def decide(self, request, *, timeout_s):
+        calls.append(request)
+        return PolicyResult(model, confidence, None, version or request.pinned_version, None, None)
+
+    monkeypatch.setattr(TypeSafePolicy, "decide", decide)
+    return calls
+
+
+def context():
     return RoutingContext("agent", "session_start", "codex", "configured", False,
-                          "Do a task", "engineer", True, experiment_subject=subject)
+                          "Do a task", "engineer", True)
 
 
 def decision():
-    fields = historical_assignment()
-    metadata = json.loads(fields.pop("metadata_json"))
-    fields["candidate_models"] = tuple(json.loads(fields.pop("candidate_models_json")))
-    return RouterDecision(**fields, config_fingerprint=metadata["config_fingerprint"],
-        expected_weight=metadata["expected_weight"],
-        expected_weights=tuple(metadata["expected_weights"].items()),
+    return RouterDecision(
+        experiment_id="jev-routing-v1", cohort=None, router_name="jev-router", router_version="v1",
+        policy_version="jev-1.13.0", feature_schema_version="jev-features-v1",
+        candidate_models=("model-control", "model-treatment"), model_selected="model-control",
+        control_model="model-control", router_reason="policy_shadow", router_latency_ms=0.03,
+        fallback_reason=None, decided_at_us=100, config_fingerprint="fingerprint",
         entry_point="session_start", policy_metadata_json='{"status":"not_called"}')

@@ -573,36 +573,12 @@ def build_usage_summary(root: Path, *, window_seconds: float,
     }
 
 
-def _is_manager(row: dict) -> bool:
-    detail = row.get("detail") or {}
-    return bool(detail.get("is_manager")) or detail.get("role") in ("director", "manager") or str(row.get("origin", "")).startswith("manager")
-
-
-def _is_monitor(row: dict) -> bool:
-    detail = row.get("detail") or {}
-    return row.get("kind") == "monitor" or detail.get("role") == "monitor" or str(row.get("origin", "")).startswith("monitor")
-
-
-def _matches_kind(row: dict, kind: str) -> bool:
-    if not kind or kind == "all":
-        return True
-    if kind == "manager":
-        return _is_manager(row)
-    if kind == "monitor":
-        return _is_monitor(row)
-    if kind == "workflow":
-        return row.get("kind") == "workflow"
-    if kind == "session":
-        return row.get("kind") == "session"
-    return row.get("kind") == kind
-
-
 def build_runs(root: Path, *, manager_name: str = "", status: str = "",
-               kind: str = "", query: str = "", offset: int = 0,
+               query: str = "", offset: int = 0,
                limit: int = DEFAULT_LIMIT, now: float | None = None) -> dict:
     """Everything this agent did, newest first, live runs at the top.
 
-    ``status``, ``kind`` and ``query`` filter before ``offset`` / ``limit`` paginate.
+    ``status`` and ``query`` filter before ``offset`` / ``limit`` paginate.
     ``failed`` covers crashed terminal sessions too. ``counts`` always
     describes the whole set; ``total`` describes the filtered set so both tabs
     and the pager stay honest.
@@ -610,12 +586,8 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     now = time.time() if now is None else now
     rows = _all_rows(root, manager_name=manager_name, now=now)
 
-    counts = {
-        "all": len(rows),
-        "running": 0,
-        "awaiting_action": 0,
-        "failed": 0,
-    }
+    counts = {"all": len(rows), "running": 0, "awaiting_action": 0,
+              "failed": 0}
     for row in rows:
         if row["status"] in LIVE_STATUSES:
             counts["running"] += 1
@@ -624,12 +596,6 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
         if row["status"] in FAILED_STATUSES:
             counts["failed"] += 1
 
-    if status in ("manager", "monitor", "workflow", "session") and not kind:
-        kind = status
-        status = ""
-
-    if kind:
-        rows = [r for r in rows if _matches_kind(r, kind)]
     if status:
         rows = [r for r in rows if _matches(r, status)]
     query = query.strip()

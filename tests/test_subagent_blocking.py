@@ -162,17 +162,14 @@ class TestMakeDeferHook:
 
 class TestRunAgentSupervisedNormal:
     @pytest.mark.asyncio
-    async def test_static_policy_model_reaches_supervised_brain(self, tmp_path, monkeypatch):
+    async def test_policy_model_reaches_supervised_brain(self, tmp_path, monkeypatch):
         import json
         from bobi.metrics.runtime import MetricsRuntime
-        from tests.metrics.helpers import configured, context
+        from tests.metrics.helpers import configured, fixed_policy
 
-        raw = configured()
-        raw["policy"]["mode"] = "enforce"
-        raw["policy"]["scope"]["entry_points"] = ["subagent_supervised"]
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
-        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(
+            mode="enforce", entry_points=["subagent_supervised"])))
+        fixed_policy(monkeypatch)
         monkeypatch.setattr("bobi.subagent.session_brain_label", lambda: "codex")
         runtime = MetricsRuntime(tmp_path, mode="enabled")
         monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
@@ -199,14 +196,11 @@ class TestRunAgentSupervisedNormal:
         from bobi.brain import TurnResult
         from bobi.brain.base import BrainToolExecution
         from bobi.metrics.runtime import MetricsRuntime
-        from tests.metrics.helpers import configured, context
+        from tests.metrics.helpers import configured, fixed_policy
 
-        raw = configured()
-        raw["policy"]["mode"] = "enforce"
-        raw["policy"]["scope"]["entry_points"] = ["subagent_supervised"]
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
-        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(
+            mode="enforce", entry_points=["subagent_supervised"])))
+        fixed_policy(monkeypatch)
         monkeypatch.setattr("bobi.subagent.session_brain_label", lambda: "codex")
         runtime = MetricsRuntime(tmp_path, mode="enabled")
         monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
@@ -1753,21 +1747,18 @@ class _CapturingBrainSession:
 class TestLaunchModelResolution:
     @pytest.mark.parametrize("launcher,explicit", [("phase", False), ("persistent", False),
                                                   ("persistent", True)])
-    def test_launcher_static_routing_contract(self, tmp_path, monkeypatch, launcher, explicit):
+    def test_launcher_routing_contract(self, tmp_path, monkeypatch, launcher, explicit):
         from dataclasses import replace
         import json
         from bobi.metrics.collector import MetricsCollectorService
         from bobi.metrics.routing import resolve_route
         from bobi.metrics.runtime import MetricsRuntime
         from bobi.metrics.store import connect
-        from tests.metrics.helpers import configured, context
+        from tests.metrics.helpers import configured, fixed_policy
 
-        raw = configured()
-        raw["policy"]["mode"] = "enforce"
-        raw["policy"]["scope"]["entry_points"] = ["subagent_phase", "subagent_persistent"]
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
-        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(
+            mode="enforce", entry_points=["subagent_phase", "subagent_persistent"])))
+        fixed_policy(monkeypatch)
         monkeypatch.setattr("bobi.subagent.session_brain_label", lambda: "codex")
         runtime = MetricsRuntime(tmp_path, mode="enabled")
         outcomes = []

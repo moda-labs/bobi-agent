@@ -8,10 +8,10 @@ default when unconfigured.
 ## Configuration
 
 - Set `BOBI_METRICS_MODE=enabled` in the deployment environment.
-- Configure `BOBI_METRICS_EXPERIMENT_JSON` and a private
-  `BOBI_METRICS_ASSIGNMENT_SECRET` for JEV. Keep provider and TypeSafe
-  credentials in private environment files, never in profiles or source.
-- The experiment declares control/candidate models, variant weights, policy,
+- Configure `BOBI_METRICS_EXPERIMENT_JSON` and `TYPESAFE_API_KEY` for JEV.
+  Keep provider and TypeSafe credentials in private environment files, never
+  in profiles or source.
+- The config declares control/candidate models, routing instructions,
   eligible entrypoints/roles, privacy scope, and deadlines. See
   [the routing contract](JEV_ROUTER_DATA_FLOW.md).
 - JEV `shadow` records a recommendation but executes the control model;
@@ -25,8 +25,8 @@ default when unconfigured.
 
 ### Concise JEV configuration
 
-`BOBI_METRICS_EXPERIMENT_JSON` accepts this minimal schema as well as the legacy
-variant/policy schema. Only these three JSON fields are required:
+`BOBI_METRICS_EXPERIMENT_JSON` takes this flat schema. Only these three JSON
+fields are required:
 
 ```json
 {
@@ -36,17 +36,16 @@ variant/policy schema. Only these three JSON fields are required:
 }
 ```
 
-Use a single-line JSON value in the three-line environment configuration
-(`BOBI_METRICS_EXPERIMENT_JSON`, `BOBI_METRICS_ASSIGNMENT_SECRET`, and
-`TYPESAFE_API_KEY`), with private values supplied by your deployment.
-The loader compiles a zero-weight `control` variant and a full-weight
-`treatment_jev` variant with a pinned `jev-1.13.0` TypeSafe policy.
-`experiment_id` defaults to the constant `jev-routing-v1`, so repeated loads
-keep the same identity and assignments. Set an explicit ID for separate
-experiments. `mode` defaults to `enforce`, and `roles` to `director`/`engineer`.
-Internal headers default to `jev-router`, `v1`, and `jev-features-v1`.
-Explicit IDs, headers, legacy variants, and policy options remain unchanged;
-mixing flat candidate fields with legacy `variants`/`policy` is rejected.
+Use a single-line JSON value in the two-line environment configuration
+(`BOBI_METRICS_EXPERIMENT_JSON` and `TYPESAFE_API_KEY`), with private values
+supplied by your deployment. Every eligible session calls the pinned
+`jev-1.13.0` TypeSafe policy, and each decision is recorded with variant
+`treatment_jev`. `experiment_id` defaults to the constant `jev-routing-v1`; set
+an explicit ID to label separate rollouts. `mode` defaults to `enforce`, and
+`roles` to `director`/`engineer`. Internal headers default to `jev-router`,
+`v1`, and `jev-features-v1`. The former long form (`variants` and a nested
+`policy` object) is rejected as `long-form experiment config is no longer
+supported; save from the editor to rewrite it`.
 Optional flat fields include `brain` (`auto` by default: route whichever brain
 the agent runs; `claude` or `codex` pins one), `entry_points`,
 `criteria` (a description per candidate), `min_confidence` (0.85),
@@ -59,7 +58,7 @@ and instructions must be non-empty. Explicit null/empty defaults are rejected.
 To classify actual task text in production,
 explicitly set `prompt_egress` to `redacted`; otherwise only structural context
 is sent. The web editor offers this as **Prompt sent to JEV**, defaulting a new
-policy to redacted. Production routing still requires `BOBI_METRICS_ASSIGNMENT_SECRET`.
+policy to redacted.
 
 Saving checks that the policy can run on the agent. A pinned `brain` must match
 the agent's brain (`BOBI_BRAIN`, else `agent.yaml` `brain.kind`). Candidates
@@ -76,12 +75,9 @@ by filtering and clicking a list of the models the agent's own brain runs
 OpenAI ids for codex); there is no free-text model input. The editor saves straight to `run/.env` (**Save and Apply**); there is no clipboard
 export. Every save writes the short form: `mode`, `control_model`,
 `candidate_models`, `prompt_egress` and `instructions`, plus `criteria` and any
-setting that differs from its default. A long-form policy (`variants`/`policy`)
-is rewritten in the short form on its first edit; its experiment id, cohort and
-header labels are dropped, so it takes the default `jev-routing-v1` identity
-and running sessions get a new route on their next start. A long-form policy
-the short form cannot carry (custom variant weights, credential name,
-`max_in_flight` or `store_reason_text`) is edited in place instead. The editor
+setting or label that differs from its default. A rejected long-form line
+shows as the config error; saving from the editor replaces it with the short
+form. The editor
 does not show scoped roles or the minimum confidence; both keep their saved
 values (defaults `director`/`engineer` and 0.85), and Overview shows the roles
 read-only. Change them in `run/.env` or through the API. The control / fallback model is chosen from the candidate list, so it
@@ -151,8 +147,7 @@ line, to `run/state/jev_routing_fallback.log`. Two events appear there:
 and Host guard. Its JSON body accepts `prompt`, optional `features`
 (`role`, `entry_point`, `brain`), `api_key`, and `endpoint`. It calls the
 saved TypeSafe policy directly with bounded, redacted test text, not production
-transcripts. The policy may be disabled/commented out and no assignment secret
-is needed. It never starts a session, opens SQLite, or emits metrics. Requests
+transcripts. The policy may be disabled/commented out. It never starts a session, opens SQLite, or emits metrics. Requests
 are real TypeSafe API calls and may incur vendor charges.
 
 The response includes `selected_model`, `confidence`, `probabilities`,
@@ -189,10 +184,6 @@ export METRICS_DB="$BOBI_HOME/agents/$BOBI_AGENT_NAME/run/state/metrics/metrics.
 sqlite3 -readonly "$METRICS_DB" 'PRAGMA integrity_check; PRAGMA foreign_key_check;'
 ```
 
-Schema and historical event projection are unchanged. No migration or data
-rewrite is required for this cleanup. Historical `experiment_outcomes` remains
-readable, but new runtime outcome events and external evaluator helpers are
-not produced.
 
 ## Exact accounting
 
@@ -234,9 +225,8 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   The summary has **Total Input Tokens**, **Total Output Tokens** and **Total Spend (USD)** tiles; cache-read tokens and their share of input appear in the input tile, for example `8,885,624 (87.3% cache read)`.
   Missing dimensions read **not recorded**; estimate flags remain in telemetry without UI suffixes, and
   invocation coverage separates exact, estimated, and unknown measurements.
-- Routing shows assignment, recommendation, policy confidence, selected and
-  recorded provider models, latency, and fallbacks. Confidence is the policy
-  value, not the assignment bucket. Distinct call IDs count policy calls;
+- Routing shows the recommendation, policy confidence, selected and
+  recorded provider models, latency, and fallbacks. Distinct call IDs count policy calls;
   subsequent turns can reuse a session route without another policy request.
 - Reported and estimated costs remain separate. When a turn has neither, the
   view shows a `~`-prefixed list-price figure (`list_price_usd`) computed from
@@ -245,9 +235,14 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   pricing pages (platform.claude.com and developers.openai.com, both served as
   Markdown) by `scripts/update_prices.py`. The **Update model prices** workflow
   runs it weekly and opens one pull request when a price changes; the script
-  refuses to write when a page stops parsing. Models the pages do not list
-  (some retired or codex-only ids, Google) keep hand-kept fallback prices in
-  `bobi/costs.py`. Estimates bill cache reads at the cached rate and cache
+  refuses to write when a page stops parsing, and a model that drops off a
+  page keeps its last price. The pull request is opened with `GITHUB_TOKEN`,
+  which does not trigger CI, so a maintainer re-runs the checks (or closes and
+  reopens the PR) before merging. Models the pages never listed (some retired
+  or codex-only ids, Google) keep hand-kept fallback prices in
+  `bobi/costs.py`. A model with no exact entry (after alias, date and `[1m]`
+  normalisation) has no list price and renders as token volume; no family
+  name is guessed. Estimates bill cache reads at the cached rate and cache
   writes at their own rate: 5-minute writes at 1.25x input and 1-hour writes at
   2x on Claude (the official 5m/1h columns), the published cache-write rate or
   plain input on OpenAI. Checked against 25 Claude turns of a live agent, these
@@ -356,11 +351,7 @@ step are required.
 ```bash
 bobi agent "$BOBI_AGENT_NAME" metrics status --json
 bobi agent "$BOBI_AGENT_NAME" metrics reconcile --turn-id "<turn-id>" --wait --json
-bobi agent "$BOBI_AGENT_NAME" metrics calibrate --json
 ```
-
-Calibration is optional and only qualifies model-specific estimators against
-exact samples. It does not turn estimates into provider facts.
 
 Admin aliases and corresponding read-only MCP tools:
 
@@ -452,27 +443,25 @@ automatic retention deletion; monitor volume usage.
 
 ## Routing diagnostics and privacy
 
-Invalid experiment JSON/schema, missing assignment secrets, unavailable
-policies, and configured routing with unavailable telemetry emit structured
-`jev_routing_fallback` warnings and explicit failure codes. With telemetry
-available, pre-assignment failures are recorded in
-`sessions.metadata_json.router_fallback`; invalid configurations do not
-fabricate assignments or decisions. Policy failures after assignment are
-recorded on `router_decisions.fallback_reason`.
+Invalid experiment JSON/schema, unavailable policies, and configured routing
+with unavailable telemetry emit structured `jev_routing_fallback` warnings and
+explicit failure codes. With telemetry available, failures before a decision
+are recorded in `sessions.metadata_json.router_fallback`; invalid
+configurations do not fabricate decisions. Policy failures after the decision
+are recorded on `router_decisions.fallback_reason`.
 
 Warnings omit raw configuration, credentials, and exception messages.
 Metrics/Admin/MCP exclude prompt/response bodies, tool payloads, secret values,
-full paths, and private assignment hashes. TypeSafe input follows the configured
+and full paths. TypeSafe input follows the configured
 privacy scope; do not enable task-text sharing without approval.
 
-## Removed production surfaces
+## Out of scope
 
-The approved 2026-10-03 cleanup removes benchmark/live-matrix/soak scripts,
-SRM and causal/intent-to-treat aggregates, hotspot/experiment Admin and MCP
-queries, external outcome helpers, and bespoke rebuild/prune/retention queues.
-Historical plan sections describing those surfaces are superseded. Operational
-summary/session/turn queries, exact accounting, reconciliation, and JEV policy
-evaluation remain supported.
+There are no benchmark, live-matrix or soak scripts, no SRM or
+causal/intent-to-treat aggregates, no hotspot or experiment Admin/MCP queries,
+no external outcome helpers, and no rebuild/prune/retention queues. The
+supported surface is the operational summary/session/turn queries, exact
+accounting, reconciliation, and JEV policy evaluation.
 
 Run offline regression checks:
 

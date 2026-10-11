@@ -161,24 +161,11 @@ def _price_key(provider: str, model: str) -> str | None:
 
 
 def _lookup_prices(provider: str, model: str) -> tuple[float, float, float] | None:
+    """Exact price-table entries only (after alias, suffix and date
+    normalisation). No family guess: an unknown model has no list price and
+    renders as token volume, so a new model is never billed at an old rate."""
     key = _price_key(provider, model)
-    if key:
-        return PRICE_TABLE[key]
-    # Family heuristics only when no exact entry exists.
-    m = normalize_model(provider, model)[1].lower()
-    if "haiku" in m:
-        return (1.0, 0.10, 5.0)
-    if "sonnet" in m:
-        return (3.0, 0.30, 15.0)
-    if "opus" in m:
-        return (15.0, 1.50, 75.0)
-    if "gpt-4o-mini" in m or "codex-mini" in m:
-        return (0.15, 0.075, 0.60)
-    if "gpt-4o" in m or "gpt-4" in m:
-        return (2.50, 1.25, 10.0)
-    if "gpt-5" in m or "codex" in m:
-        return (1.75, 0.175, 14.0)
-    return None
+    return PRICE_TABLE[key] if key else None
 
 
 def cache_write_prices(provider: str, model: str) -> tuple[float, float] | None:

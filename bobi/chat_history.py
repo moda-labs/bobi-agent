@@ -214,7 +214,6 @@ def tool_result_preview(text: str) -> str:
         return preview
     boundary = next((index for index in range(len(preview) - 1, -1, -1)
                      if preview[index].isspace()), None)
-    # ponytail: unbroken tokens stop at 4000 characters; use a bounded source viewer for longer results.
     return preview[:boundary + 1] if boundary is not None else preview
 
 

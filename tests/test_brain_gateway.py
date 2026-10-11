@@ -227,10 +227,7 @@ async def test_sdk_spawn_does_not_restore_routing_credentials(tmp_path, monkeypa
 
     monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
     monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-policy-secret")
-    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "synthetic-assignment-secret")
-    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", "synthetic-subject")
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(experiment_config()) if configured else "invalid-json")
-    monkeypatch.setenv("ROUTING_TEST_KEY", "synthetic-custom-secret")
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "https://gateway.invalid")
     monkeypatch.setenv("BOBI_GATEWAY_API_KEY", "synthetic-gateway-secret")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-gateway-secret")
@@ -252,18 +249,14 @@ async def test_sdk_spawn_does_not_restore_routing_credentials(tmp_path, monkeypa
             pass
 
     environment = spawn.call_args.kwargs["env"]
-    for name in ("TYPESAFE_API_KEY", "BOBI_METRICS_ASSIGNMENT_SECRET",
-                 "BOBI_METRICS_EXPERIMENT_SUBJECT", "BOBI_METRICS_EXPERIMENT_JSON"):
+    for name in ("TYPESAFE_API_KEY", "BOBI_METRICS_EXPERIMENT_JSON"):
         assert not environment.get(name)
-    if configured:
-        assert not environment.get("ROUTING_TEST_KEY")
     assert environment["ANTHROPIC_AUTH_TOKEN"] == "synthetic-gateway-secret"
     assert environment["ANTHROPIC_BASE_URL"] == "https://gateway.invalid"
     (tmp_path / "package").mkdir()
     (tmp_path / ".env").write_text(
         "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(experiment_config()) + "\n"
-        "BOBI_METRICS_ASSIGNMENT_SECRET=synthetic-assignment-secret\n"
-        "ROUTING_TEST_KEY=synthetic-custom-secret\n")
+        "TYPESAFE_API_KEY=synthetic-policy-secret\n")
     restored = subprocess.run([sys.executable, "-c", """
 import os, sys
 from pathlib import Path
@@ -271,10 +264,10 @@ from bobi.config import load_dotenv
 from bobi.metrics.router import load_experiment, provider_subprocess_env
 load_dotenv(Path(sys.argv[1]))
 assert load_experiment() is not None
-assert os.environ['ROUTING_TEST_KEY'] == 'synthetic-custom-secret'
+assert os.environ['TYPESAFE_API_KEY'] == 'synthetic-policy-secret'
 assert 'BOBI_INTERNAL_PROVIDER_CLEARED_ENV' not in os.environ
 isolated = provider_subprocess_env(blank_inherited=True)
-assert not isolated['ROUTING_TEST_KEY']
+assert not isolated['TYPESAFE_API_KEY']
 assert not isolated['BOBI_METRICS_EXPERIMENT_JSON']
 """, str(tmp_path)], env=environment, capture_output=True, text=True)
     assert restored.returncode == 0, restored.stderr

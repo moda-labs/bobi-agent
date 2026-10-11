@@ -103,7 +103,6 @@ export function mountAgent(el, { api, name, session = "" }) {
         <div class="ah-right">
           <button class="btn bobi-btn small" data-el="refreshBtn" type="button">refresh</button>
           <a class="btn bobi-btn quiet small" data-el="metricsLink">metrics & routing</a>
-          <button class="btn bobi-btn quiet small" data-el="logsBtn" type="button">system logs</button>
           <div class="agent-header-state" data-el="band"></div>
           <span class="stat-popover" data-el="savedWrap">
             <span class="chip" data-el="savedChip" tabindex="0"
@@ -172,25 +171,8 @@ export function mountAgent(el, { api, name, session = "" }) {
           <span class="meta" data-el="slabMeta"></span>
           <button class="btn bobi-btn small" data-el="slabClose" type="button">Close</button>
         </div>
-        <div class="metrics-toolbar slab-tabs" data-el="slabTabs" role="group"
-             aria-label="Run detail sections" hidden></div>
         <div class="transcript" data-el="slabBody"></div>
         <div class="composer" data-el="slabComposer" hidden></div>
-      </div>
-    </div>
-
-    <div class="logs-backdrop system-logs-backdrop" data-el="logsBackdrop" hidden>
-      <div class="modal system-logs-modal" role="dialog" aria-modal="true" aria-label="System Logs">
-        <div class="modal-head">
-          <span class="eyebrow">Daemon Logs</span>
-          <span class="path">manager.log</span>
-          <span class="meta" data-el="logsMeta"></span>
-          <div class="logs-head-actions">
-            <button class="btn bobi-btn quiet small" data-el="logsRefresh" type="button">↻ Refresh</button>
-            <button class="btn bobi-btn small" data-el="logsClose" type="button">Close</button>
-          </div>
-        </div>
-        <div class="system-logs-viewer" data-el="logsViewer"></div>
       </div>
     </div>`;
   el.appendChild(page);
@@ -224,52 +206,6 @@ export function mountAgent(el, { api, name, session = "" }) {
   let busyVerb = null;
   let runsError = "";       // why the table is empty, when it is not "no runs"
   let autoOpenedSession = false;
-
-  /* --- system logs modal -------------------------------------------- */
-  async function fetchAndRenderLogs() {
-    els.logsViewer.innerHTML = '<div class="logs-loading">Loading daemon logs…</div>';
-    const { ok, data } = await api(base + "/logs?lines=300");
-    if (!ok || !data) {
-      els.logsViewer.innerHTML = '<div class="log-line log-error">Failed to fetch logs from server.</div>';
-      return;
-    }
-    els.logsMeta.textContent = `${data.logs ? data.logs.length : 0} lines (${data.total_lines || 0} total)`;
-    els.logsViewer.innerHTML = "";
-    if (!data.logs || !data.logs.length) {
-      els.logsViewer.innerHTML = '<div class="log-line">No logs recorded yet.</div>';
-      return;
-    }
-    data.logs.forEach(line => {
-      const div = document.createElement("div");
-      div.className = "log-line";
-      if (line.includes("[ERROR]") || line.includes(" 521") || line.includes("Error 521") || line.includes("terminal model error")) {
-        div.classList.add("log-error");
-      } else if (line.includes("[WARNING]")) {
-        div.classList.add("log-warning");
-      } else if (line.includes("[INFO]")) {
-        div.classList.add("log-info");
-      }
-      div.textContent = line;
-      els.logsViewer.appendChild(div);
-    });
-    els.logsViewer.scrollTop = els.logsViewer.scrollHeight;
-  }
-
-  function openLogsModal() {
-    els.logsBackdrop.hidden = false;
-    fetchAndRenderLogs();
-  }
-
-  function closeLogsModal() {
-    els.logsBackdrop.hidden = true;
-  }
-
-  els.logsBtn.addEventListener("click", openLogsModal);
-  els.logsClose.addEventListener("click", closeLogsModal);
-  els.logsRefresh.addEventListener("click", fetchAndRenderLogs);
-  els.logsBackdrop.addEventListener("click", (e) => {
-    if (e.target === els.logsBackdrop) closeLogsModal();
-  });
 
   /* --- the agent that isn't there ----------------------------------- */
 
@@ -532,48 +468,18 @@ export function mountAgent(el, { api, name, session = "" }) {
 
   const TABS = [
     { key: "all", label: "all" },
-    { key: "manager", label: "manager" },
-    { key: "monitor", label: "monitor" },
     { key: "running", label: "running" },
     { key: "awaiting_action", label: "awaiting action" },
     { key: "failed", label: "failed" },
   ];
 
-  function isManagerRow(r) {
-    return Boolean(r.detail?.is_manager || r.detail?.role === "director" || r.detail?.role === "manager" || (r.origin && r.origin.startsWith("manager")));
-  }
-  function isMonitorRow(r) {
-    return Boolean(r.kind === "monitor" || r.detail?.role === "monitor" || (r.origin && r.origin.startsWith("monitor")));
-  }
-
-  let knownCounts = {};
-
   function renderTabs() {
     const counts = (runs && runs.counts) || {};
-    if (runs && runs.runs) {
-      if (tab === "all") {
-        knownCounts.manager = runs.runs.filter(isManagerRow).length;
-        knownCounts.monitor = runs.runs.filter(isMonitorRow).length;
-      } else if (tab === "manager") {
-        knownCounts.manager = runs.total != null ? runs.total : runs.runs.length;
-      } else if (tab === "monitor") {
-        knownCounts.monitor = runs.total != null ? runs.total : runs.runs.length;
-      }
-    }
     els.tabs.innerHTML = "";
     for (const t of TABS) {
       // ALL stays bare: the panel head's "⌁ N runs" IS the all-count, and
       // printing it again one gap to the right reads as two facts.
-      let n = null;
-      if (t.key === "all") {
-        n = null;
-      } else if (t.key === "manager") {
-        n = knownCounts.manager != null ? knownCounts.manager : null;
-      } else if (t.key === "monitor") {
-        n = knownCounts.monitor != null ? knownCounts.monitor : null;
-      } else {
-        n = counts[t.key];
-      }
+      const n = t.key === "all" ? null : counts[t.key];
       const on = tab === t.key;
       const b = mk("button", "tab" + (on ? " active" : ""),
                    n == null ? t.label : `${t.label} · ${n}`);
@@ -614,10 +520,6 @@ export function mountAgent(el, { api, name, session = "" }) {
         ? (runsError || "Loading…")
         : query
           ? `No runs match “${query}”.`
-        : tab === "manager"
-          ? "No manager runs recorded."
-        : tab === "monitor"
-          ? "No monitor runs recorded."
         : tab === "awaiting_action"
           ? "No workflows are waiting for approval or clarification."
         : tab === "failed"
@@ -833,10 +735,6 @@ export function mountAgent(el, { api, name, session = "" }) {
     els.slabBody.appendChild(mk("div", "tr-empty", "Loading…"));
     els.slabComposer.hidden = true;
     els.slabComposer.innerHTML = "";
-    if (els.slabTabs) {
-      els.slabTabs.replaceChildren();
-      els.slabTabs.hidden = true;
-    }
 
     // Rows with a session get a transcript; rows without get details.
     // That is the rule, and it is decided by data rather than by kind.
@@ -927,37 +825,50 @@ export function mountAgent(el, { api, name, session = "" }) {
     const mode = composerMode(row);
     const box = els.slabComposer;
     box.innerHTML = "";
+    // Reset, never accumulate: one slab element is reused for every row.
     box.className = "composer " + mode;
-
-    if (mode !== "gate") {
-      box.hidden = true;
-      return;
-    }
     box.hidden = false;
 
+    if (mode === "ended") {
+      box.appendChild(mk("p", "composer-note",
+        "This session has ended and it is not waiting on anything, so there "
+        + "is nothing here to reply to."));
+      return;
+    }
+
+    const gate = mode === "gate";
     const awaited = ((row.detail && row.detail.await_event) || "approval")
       .replaceAll("_", " ");
 
-    const label = "Approve";
+    const label = gate ? "Approve" : "Send";
     const input = mk("textarea");
     input.rows = 2;
-    input.placeholder = "Why? (optional, goes to the agent)";
-    input.setAttribute("aria-label", "Reason for this decision");
+    input.placeholder = gate ? "Why? (optional, goes to the agent)"
+                             : "Reply to this session…";
+    input.setAttribute("aria-label",
+      gate ? "Reason for this decision" : "Reply to this session");
 
     const foot = mk("div", "composer-foot");
-    foot.appendChild(mk("span", "composer-note",
-      `This run is awaiting ${awaited}. Approving resumes it into its next `
-        + "step; rejecting sends it back to rework in the same session."));
+    foot.appendChild(mk("span", "composer-note", gate
+      ? `This run is awaiting ${awaited}. Approving resumes it into its next `
+        + "step; rejecting sends it back to rework in the same session."
+      : "Delivered to this session, the same way the CLI delivers a message."));
 
-    const reject = mk("button", "btn bobi-btn small", "Reject");
-    reject.type = "button";
-    foot.appendChild(reject);
-
+    // Reject sits before Approve, and is the quiet one: the advancing action
+    // is the one that should take the deliberate click.
+    let reject = null;
+    if (gate) {
+      reject = mk("button", "btn bobi-btn small", "Reject");
+      reject.type = "button";
+      foot.appendChild(reject);
+    }
     const send = mk("button", "btn bobi-btn small primary", label);
     send.type = "button";
     foot.appendChild(send);
 
     const status = mk("p", "composer-status");
+    // The outcome arrives minutes later with no focus change, so a screen
+    // reader has to be told rather than left to notice.
     status.setAttribute("role", "status");
     status.hidden = true;
 
@@ -965,9 +876,24 @@ export function mountAgent(el, { api, name, session = "" }) {
     box.appendChild(foot);
     box.appendChild(status);
 
-    const ui = { input, send, reject, status, label };
-    send.addEventListener("click", () => resumeGate(row, ui, "approve"));
-    reject.addEventListener("click", () => resumeGate(row, ui, "reject"));
+    const ui = { input, send, reject, status, gate, label };
+    if (gate) {
+      send.addEventListener("click", () => resumeGate(row, ui, "approve"));
+      reject.addEventListener("click", () => resumeGate(row, ui, "reject"));
+      return;
+    }
+    send.addEventListener("click", () => sendComposer(row, ui));
+    input.addEventListener("keydown", (e) => {
+      // Enter sends and Shift+Enter breaks the line: the chat idiom, and the
+      // reason the control is a textarea rather than an input.
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendComposer(row, ui);
+      }
+    });
+    // No Enter-to-send on the gate branch: there are two verdicts, so there
+    // is no default one, and guessing which is meant is how a spec gets
+    // approved by a stray keystroke.
   }
 
   /** Say something under the box. Inline, never a toast: this modal is what
@@ -1155,13 +1081,7 @@ export function mountAgent(el, { api, name, session = "" }) {
       limit: "100",
       offset: String(pageIndex * 100),
     });
-    if (tab !== "all") {
-      if (tab === "manager" || tab === "monitor") {
-        params.set("kind", tab);
-      } else {
-        params.set("status", tab);
-      }
-    }
+    if (tab !== "all") params.set("status", tab);
     if (query) params.set("query", query);
     const { ok, status, data } = await api(base + "/runs?" + params);
     if (request !== runsRequest) return;

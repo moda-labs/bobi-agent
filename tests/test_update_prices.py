@@ -90,3 +90,30 @@ def test_check_mode_reports_a_stale_file_without_writing(tmp_path, monkeypatch):
     written = json.loads(output.read_text())
     assert written["models"]["anthropic:claude-opus-5-5"]["cache_write_1h"] == 8.0
     assert update_prices.main([*argv, "--check"]) == 0
+
+
+def test_a_model_dropped_from_the_page_keeps_its_last_price(tmp_path, monkeypatch):
+    anthropic, openai = tmp_path / "a.md", tmp_path / "o.md"
+    anthropic.write_text(ANTHROPIC)
+    openai.write_text(OPENAI)
+    retired = {"input": 15.0, "cache_read": 1.5, "cache_write_5m": 18.75,
+               "cache_write_1h": 30.0, "output": 75.0}
+    stale_sonnet = {**retired, "input": 99.0}
+    output = tmp_path / "model_prices.json"
+    output.write_text(json.dumps({"models": {
+        "anthropic:claude-3-opus": retired,
+        "anthropic:claude-sonnet-4-5": stale_sonnet,
+        "openai:malformed": {"input": "free"},
+    }}))
+    monkeypatch.setattr(update_prices, "OUTPUT", output)
+
+    assert update_prices.main(["--anthropic", str(anthropic), "--openai", str(openai)]) == 0
+
+    models = json.loads(output.read_text())["models"]
+    # Gone from the page: kept at its last price, not dropped or repriced.
+    assert models["anthropic:claude-3-opus"] == retired
+    # Still on the page: the page wins.
+    assert models["anthropic:claude-sonnet-4-5"]["input"] == 3.0
+    # A malformed entry is not carried over.
+    assert "openai:malformed" not in models
+    assert list(models) == sorted(models)

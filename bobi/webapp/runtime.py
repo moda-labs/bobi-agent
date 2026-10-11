@@ -352,10 +352,6 @@ class TeamRuntime(ABC):
         the slab header.
         """
 
-    def system_logs(self, name: str, lines: int = 200) -> dict:
-        """Recent daemon system log lines (from manager.log) and health error detection."""
-        return {"ok": True, "logs": [], "total_lines": 0}
-
     @abstractmethod
     def run_details(self, name: str, run_id: str) -> dict:
         """What to show for a run that has no transcript to open.
@@ -517,7 +513,7 @@ class TeamRuntime(ABC):
         """
 
     @abstractmethod
-    def runs(self, name: str, *, status: str = "", kind: str = "", query: str = "",
+    def runs(self, name: str, *, status: str = "", query: str = "",
              offset: int = 0, limit: int | None = None) -> dict:
         """One team's runs: sessions, workflow runs, and monitor runs merged
         into one list, newest first with live runs at the top.
@@ -787,44 +783,6 @@ def _agent_brain(root: Path, env: dict) -> tuple[str, bool]:
     return normalize_brain_kind(kind), gateway
 
 
-_SHORT_DEFAULTS = {
-    "roles": {"director", "engineer"},
-    "entry_points": {"session_start", "subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start"},
-    "brain": "auto", "min_confidence": 0.85, "deadline_ms": 3000, "max_prompt_bytes": 8192,
-    "policy_version": "jev-1.13.0",
-}
-_SHORT_LABELS = ("experiment_id", "cohort", "router_name", "router_version", "feature_schema_version")
-
-
-def _short_config(experiment, labels: dict) -> dict | None:
-    """The editor's minimal JEV config: the key fields plus any setting that
-    differs from the short-form defaults. None when the short form cannot carry
-    the policy (custom variants, credential name or concurrency limits)."""
-    import json
-
-    policy = experiment.policy
-    variants = [(v.variant_id, v.weight, v.model, v.policy) for v in experiment.variants]
-    if (variants != [("control", 0.0, experiment.control_model, ""), ("treatment_jev", 1.0, "", "typesafe-jev")]
-            or policy.credential_env != "TYPESAFE_API_KEY" or policy.max_in_flight != 8 or policy.store_reason_text):
-        return None
-    options = json.loads(policy.options_json)
-    candidates = list(policy.candidate_models)
-    config = {"mode": policy.mode, "control_model": experiment.control_model, "candidate_models": candidates,
-              "prompt_egress": policy.prompt_egress, "instructions": options["instructions"]}
-    if options["criteria"] != {model: f"Choose {model} when the routing instructions recommend it." for model in candidates}:
-        config["criteria"] = options["criteria"]
-    if "endpoint" in options:
-        config["endpoint"] = options["endpoint"]
-    settings = {"roles": list(policy.roles), "entry_points": list(policy.entry_points), "brain": policy.brain,
-                "min_confidence": policy.min_confidence, "deadline_ms": policy.deadline_ms,
-                "max_prompt_bytes": policy.max_prompt_bytes, "policy_version": policy.version}
-    for field, value in settings.items():
-        if (set(value) if isinstance(value, list) else value) != _SHORT_DEFAULTS[field]:
-            config[field] = value
-    config.update(labels)
-    return config
-
-
 def _saved_experiment(root, env: dict):
     """The policy the sandbox tests: the saved line, or the commented line a
     disabled policy keeps."""
@@ -935,8 +893,6 @@ class LocalRuntime(TeamRuntime):
             env = project_env(root)
             config = _saved_experiment(root, env)
             policy_config = config.policy
-            if policy_config is None or policy_config.name != "typesafe-jev":
-                raise ValueError("simulation requires a TypeSafe JEV policy")
             if not isinstance(role, str) or role not in policy_config.roles:
                 raise ValueError("unsupported sandbox role")
             brain = context.get("brain") or (
@@ -1039,7 +995,7 @@ class LocalRuntime(TeamRuntime):
                 raise ValueError("prompt must contain 1 to 65536 UTF-8 bytes")
             env = project_env(root)
             policy_config = _saved_experiment(root, env).policy
-            if policy_config is None or model not in policy_config.candidate_models:
+            if model not in policy_config.candidate_models:
                 raise ValueError("model must be one of the policy's candidates")
             engine, gateway = _agent_brain(root, env)
         except (ValueError, TypeError, AttributeError, OSError, RecursionError):
@@ -1162,8 +1118,9 @@ class LocalRuntime(TeamRuntime):
         import json
         from bobi import paths
         from bobi.config import project_env
-        from bobi.metrics.router import load_experiment
-        from bobi.metrics.policies.typesafe import TypeSafePolicy
+        from bobi.metrics.policies.typesafe import DEFAULT_ENDPOINT
+        from bobi.metrics.policy import POLICY_CREDENTIAL_ENV, POLICY_NAME
+        from bobi.metrics.router import EXPERIMENT_CONFIG_ENV, SHORT_DEFAULTS, ExperimentConfig, load_experiment
         from bobi.prompts.resolver import discover_roles
         from bobi.chat_history import safe_name
         from bobi.costs import native_models
@@ -1187,14 +1144,12 @@ class LocalRuntime(TeamRuntime):
         if "engineer" not in available_roles:
             available_roles.append("engineer")
 
-        raw_val = env.get("BOBI_METRICS_EXPERIMENT_JSON", "").strip()
-        is_commented = False
+        raw_val = env.get(EXPERIMENT_CONFIG_ENV, "").strip()
         if not raw_val and env_file.exists():
             try:
                 for line in env_file.read_text().splitlines():
                     if line.startswith("# BOBI_METRICS_EXPERIMENT_JSON="):
                         raw_val = line.split("=", 1)[1].strip()
-                        is_commented = True
                         break
             except OSError:
                 pass
@@ -1202,27 +1157,48 @@ class LocalRuntime(TeamRuntime):
         config_error = ""
         try:
             configured = load_experiment(env)
-            if configured and configured[0].policy:
-                TypeSafePolicy(configured[0].policy)
         except (ValueError, TypeError) as exc:
             configured = None
             config_error = str(exc)
 
         agent_brain, _ = _agent_brain(root, env)
 
-        def model_fields(candidates: list[str], policy_brain: str, credential_env: str) -> dict:
+        def model_fields(candidates: list[str], policy_brain: str) -> dict:
             return {
                 # Whether the policy's key is set, never the key itself.
-                "credential_configured": bool(env.get(credential_env)),
+                "credential_configured": bool(env.get(POLICY_CREDENTIAL_ENV)),
                 "agent_brain": agent_brain,
                 "config_warnings": _routing_problems(policy_brain, candidates, agent_brain),
                 # The picker lists the models the agent's own brain can run.
                 "native_models": native_models(agent_brain),
             }
 
-        if configured is not None:
-            config, _ = configured
+        def policy_fields(config: ExperimentConfig) -> dict:
             policy = config.policy
+            options = json.loads(policy.options_json)
+            return {
+                "experiment_id": config.experiment_id,
+                "control_model": config.control_model,
+                "policy_name": policy.name,
+                "policy_version": policy.version,
+                "candidate_models": list(policy.candidate_models),
+                "roles": list(policy.roles),
+                "available_roles": available_roles,
+                "entry_points": list(policy.entry_points),
+                "min_confidence": policy.min_confidence,
+                "deadline_ms": policy.deadline_ms,
+                "credential_env": POLICY_CREDENTIAL_ENV,
+                "endpoint": options.get("endpoint", DEFAULT_ENDPOINT),
+                "brain": policy.brain,
+                "prompt_egress": policy.prompt_egress,
+                "instructions": options["instructions"],
+                "applies_on": "agent_restart",
+                "restart_required": True,
+                "config_path": str(env_file),
+                **model_fields(list(policy.candidate_models), policy.brain),
+            }
+
+        if configured is not None:
             formatted_json = ""
             try:
                 formatted_json = json.dumps(json.loads(raw_val or "{}"), indent=2)
@@ -1231,107 +1207,73 @@ class LocalRuntime(TeamRuntime):
             return {
                 "enabled": True,
                 "raw_json": formatted_json,
-                "experiment_id": config.experiment_id,
-                "cohort": config.cohort or "",
-                "control_model": config.control_model,
-                "policy_name": policy.name if policy else "",
-                "policy_version": policy.version if policy else "",
-                "mode": policy.mode if policy else "enforce",
-                "candidate_models": list(policy.candidate_models) if policy else [v.model for v in config.variants if v.model],
-                "roles": list(policy.roles) if policy else [],
-                "available_roles": available_roles,
-                "entry_points": list(policy.entry_points) if policy else [],
-                "min_confidence": policy.min_confidence if policy else 0.85,
-                "deadline_ms": policy.deadline_ms if policy else 3000,
-                "credential_env": policy.credential_env if policy else "TYPESAFE_API_KEY",
-                "endpoint": json.loads(policy.options_json).get("endpoint", "https://api.typesafe.ai/v1/systemone") if policy else "https://api.typesafe.ai/v1/systemone",
-                "brain": policy.brain if policy else "auto",
-                "prompt_egress": policy.prompt_egress if policy else "none",
-                "instructions": json.loads(policy.options_json).get("instructions", "") if policy else "",
-                "applies_on": "agent_restart",
-                "restart_required": True,
-                "config_path": str(env_file),
-                **model_fields(list(policy.candidate_models) if policy else [v.model for v in config.variants if v.model],
-                               policy.brain if policy else "auto",
-                               policy.credential_env if policy else "TYPESAFE_API_KEY"),
+                "cohort": configured.cohort or "",
+                "mode": configured.policy.mode,
+                **policy_fields(configured),
             }
 
-        formatted_json = ""
-        parsed_data = {}
+        experiment = None
         if raw_val:
             try:
-                parsed_data = json.loads(raw_val)
-                formatted_json = json.dumps(parsed_data, indent=2)
-            except Exception:
-                config_error = config_error or "BOBI_METRICS_EXPERIMENT_JSON is not valid JSON"
-
-        from bobi.metrics.router import ExperimentConfig
-
-        if not isinstance(parsed_data, dict):
-            parsed_data = {}
-        try:
-            experiment = ExperimentConfig.from_mapping(parsed_data)
-            if experiment.policy:
-                TypeSafePolicy(experiment.policy)
-            policy_dict = experiment.policy.public_config() if experiment.policy else {}
-            if experiment.policy:
-                policy_dict["options"] = json.loads(experiment.policy.options_json)
-        except (ValueError, TypeError) as exc:
-            if parsed_data:
-                config_error = config_error or str(exc)
-            formatted_json = ""
-            parsed_data = {}
-            policy_dict = {}
-        # Nothing saved: no invented models. The editor asks for candidates.
-        control = parsed_data.get("control_model") or ""
-        mode = policy_dict.get("mode") or "shadow"
-        candidates = policy_dict.get("candidate_models") or ([control] if control else [])
-        scope = policy_dict.get("scope") or {}
-        roles = scope.get("roles") or ["engineer", "director"]
-        entry_points = scope.get("entry_points") or ["subagent_persistent", "subagent_phase", "workflow_start"]
-        options = policy_dict.get("options")
-        endpoint = options.get("endpoint") if isinstance(options, dict) else None
-
+                parsed = json.loads(raw_val)
+            except ValueError:
+                config_error = config_error or f"{EXPERIMENT_CONFIG_ENV} is not valid JSON"
+            else:
+                try:
+                    if not isinstance(parsed, dict):
+                        raise ValueError(f"{EXPERIMENT_CONFIG_ENV} must contain an object")
+                    experiment = ExperimentConfig.from_mapping(parsed)
+                except (ValueError, TypeError) as exc:
+                    config_error = config_error or str(exc)
+        if experiment is not None:
+            # A disabled policy kept as a commented line, ready to re-enable.
+            return {
+                "enabled": False,
+                "raw_json": json.dumps(parsed, indent=2),
+                "cohort": experiment.cohort or "production-opt-in",
+                "mode": "off",
+                "configured_mode": experiment.policy.mode,
+                "config_error": config_error,
+                **policy_fields(experiment),
+            }
+        # Nothing usable saved: no invented models. The editor asks for candidates.
         return {
             "enabled": False,
-            "raw_json": formatted_json,
-            "experiment_id": parsed_data.get("experiment_id", ""),
-            "cohort": parsed_data.get("cohort", "production-opt-in"),
-            "control_model": control,
-            "policy_name": policy_dict.get("name", "typesafe-jev"),
-            "policy_version": policy_dict.get("version", "jev-1.13.0"),
+            "raw_json": "",
+            "experiment_id": "",
+            "cohort": "production-opt-in",
+            "control_model": "",
+            "policy_name": POLICY_NAME,
+            "policy_version": SHORT_DEFAULTS["policy_version"],
             "mode": "off",
-            "configured_mode": mode,
-            "candidate_models": list(candidates),
-            "roles": list(roles),
+            "configured_mode": "shadow",
+            "candidate_models": [],
+            "roles": ["engineer", "director"],
             "available_roles": available_roles,
-            "entry_points": list(entry_points),
-            "min_confidence": policy_dict.get("min_confidence", 0.85),
-            "deadline_ms": policy_dict.get("deadline_ms", 3000),
-            "credential_env": policy_dict.get("credential_env", "TYPESAFE_API_KEY"),
-            "endpoint": endpoint if isinstance(endpoint, str) else "https://api.typesafe.ai/v1/systemone",
-            "brain": policy_dict.get("brain", "auto"),
-            # A new policy recommends redacted task text; a saved one keeps its choice.
-            "prompt_egress": (policy_dict.get("egress") or {}).get("prompt", "redacted"),
-            "instructions": options.get("instructions", "") if isinstance(options, dict) else "",
+            "entry_points": ["subagent_persistent", "subagent_phase", "workflow_start"],
+            "min_confidence": SHORT_DEFAULTS["min_confidence"],
+            "deadline_ms": SHORT_DEFAULTS["deadline_ms"],
+            "credential_env": POLICY_CREDENTIAL_ENV,
+            "endpoint": DEFAULT_ENDPOINT,
+            "brain": "auto",
+            # A new policy recommends redacted task text.
+            "prompt_egress": "redacted",
+            "instructions": "",
             "applies_on": "agent_restart",
             "restart_required": True,
             "config_path": str(env_file),
             "config_error": config_error,
-            **model_fields(list(candidates), policy_dict.get("brain", "auto"),
-                           policy_dict.get("credential_env", "TYPESAFE_API_KEY")),
+            **model_fields([], "auto"),
         }
 
     def update_routing_config(self, name: str, payload: dict) -> dict:
         import json
         import os
-        import secrets
 
-        from bobi.config import _DOTENV_LOADED, project_env
+        from bobi.config import _DOTENV_LOADED
         from bobi.fsutil import atomic_write_text, file_lock
         from bobi.metrics.query import MetricsQueryError
-        from bobi.metrics.router import ASSIGNMENT_SECRET_ENV, EXPERIMENT_CONFIG_ENV, ExperimentConfig
-        from bobi.metrics.policies.typesafe import TypeSafePolicy
+        from bobi.metrics.router import EXPERIMENT_CONFIG_ENV, ExperimentConfig, default_criteria
         from bobi.chat_history import safe_name
         from bobi.costs import model_identity
 
@@ -1386,9 +1328,6 @@ class LocalRuntime(TeamRuntime):
             raise MetricsQueryError(f"invalid JEV configuration: {exc}", "invalid_jev_config") from None
         if EXPERIMENT_CONFIG_ENV in os.environ and _DOTENV_LOADED.get(EXPERIMENT_CONFIG_ENV) != os.environ[EXPERIMENT_CONFIG_ENV]:
             raise MetricsQueryError("JEV configuration is controlled by the process environment", "config_environment_override")
-        if (payload.get("enabled") is False or payload.get("mode") == "off") and (
-                ASSIGNMENT_SECRET_ENV in os.environ and _DOTENV_LOADED.get(ASSIGNMENT_SECRET_ENV) != os.environ[ASSIGNMENT_SECRET_ENV]):
-            raise MetricsQueryError("JEV configuration is controlled by the process environment", "config_environment_override")
         try:
             with file_lock(env_file):
                 text = env_file.read_text() if env_file.exists() else ""
@@ -1419,53 +1358,20 @@ class LocalRuntime(TeamRuntime):
                         }
                         if config_dict.get("mode") == "off":
                             config_dict["mode"] = "shadow"
-                        if "policy" in config_dict:
-                            policy = config_dict["policy"]
-                            previous_control = config_dict["control_model"]
-                            for field in ("experiment_id", "control_model"):
-                                if field in payload:
-                                    config_dict[field] = payload[field]
-                            for variant in config_dict["variants"]:
-                                if variant.get("model") == previous_control:
-                                    variant["model"] = config_dict["control_model"]
-                            for field in ("mode", "candidate_models", "min_confidence", "brain"):
-                                if field in payload:
-                                    policy[field] = payload[field]
-                            if "prompt_egress" in payload:
-                                policy["egress"]["prompt"] = payload["prompt_egress"]
-                            if "roles" in payload:
-                                policy["scope"]["roles"] = payload["roles"]
-                            if "instructions" in payload:
-                                policy["options"]["instructions"] = payload["instructions"]
-                            criteria = policy["options"].get("criteria", {})
-                            policy["options"]["criteria"] = {model: criteria.get(model, f"Choose {model} when the routing instructions recommend it.")
-                                                             for model in policy["candidate_models"]}
-                        else:
-                            config_dict.update({field: value for field, value in payload.items() if field != "enabled"})
-                            if "criteria" in config_dict:
-                                criteria = config_dict["criteria"]
-                                config_dict["criteria"] = {model: criteria.get(model, f"Choose {model} when the routing instructions recommend it.")
-                                                          for model in config_dict["candidate_models"]}
+                        config_dict.update({field: value for field, value in payload.items() if field != "enabled"})
+                        if "criteria" in config_dict:
+                            criteria = config_dict["criteria"]
+                            config_dict["criteria"] = {model: criteria.get(model, default_criteria(model))
+                                                      for model in config_dict["candidate_models"]}
                     experiment = ExperimentConfig.from_mapping(config_dict)
-                    TypeSafePolicy(experiment.policy)
-                    if experiment.control_model not in experiment.policy.candidate_models:
-                        raise ValueError("control_model must be one of candidate_models")
                     problems = _routing_problems(experiment.policy.brain, list(experiment.policy.candidate_models),
                                                  current["agent_brain"])
                     if problems:
                         raise ValueError(problems[0] + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""))
                     if set(experiment.policy.roles) - set(current["available_roles"]):
                         raise ValueError("unknown roles: " + ", ".join(sorted(set(experiment.policy.roles) - set(current["available_roles"]))))
-                    if fields:
-                        # Labels written in the short form or sent by the caller are kept;
-                        # the long form's are dropped with it.
-                        labels = {field: config_dict[field] for field in _SHORT_LABELS
-                                  if field in config_dict and ("policy" not in config_dict or field in payload)}
-                        short = _short_config(experiment, labels)
-                        if short is not None:
-                            ExperimentConfig.from_mapping(short)
-                            config_dict = short
-                    config_json = json.dumps(config_dict, ensure_ascii=True, allow_nan=False)
+                    # Saves always write the minimal short form.
+                    config_json = json.dumps(experiment.to_mapping(), ensure_ascii=True, allow_nan=False)
                 replacement = [f"{EXPERIMENT_CONFIG_ENV}={config_json}"] if enabled else (
                     [f"# {EXPERIMENT_CONFIG_ENV}={config_json}", f"{EXPERIMENT_CONFIG_ENV}="] if config_json else [f"{EXPERIMENT_CONFIG_ENV}="])
                 new_lines = []
@@ -1479,18 +1385,10 @@ class LocalRuntime(TeamRuntime):
                         new_lines.append(line)
                 if not replaced:
                     new_lines.extend(replacement)
-                if not enabled:
-                    new_lines = [line for line in new_lines if not re.match(r"^\s*BOBI_METRICS_ASSIGNMENT_SECRET\s*=", line)]
-                    new_lines.append(f"{ASSIGNMENT_SECRET_ENV}=")
-                if enabled and not project_env(root).get(ASSIGNMENT_SECRET_ENV):
-                    new_lines = [line for line in new_lines if not re.match(r"^\s*BOBI_METRICS_ASSIGNMENT_SECRET\s*=", line)]
-                    new_lines.append(f"{ASSIGNMENT_SECRET_ENV}={secrets.token_urlsafe(32)}")
                 atomic_write_text(env_file, "\n".join(new_lines) + "\n", mode=0o600, fsync=True)
                 return self.get_routing_config(name)
         except (ValueError, TypeError, UnicodeError) as exc:
             raise MetricsQueryError(f"invalid JEV configuration: {exc}", "invalid_jev_config") from None
-        except AttributeError:
-            raise MetricsQueryError("invalid JEV configuration: saved policy has an unexpected shape", "invalid_jev_config") from None
         except OSError:
             raise MetricsQueryError("JEV configuration could not be persisted", "config_write_failed") from None
 
@@ -1636,29 +1534,6 @@ class LocalRuntime(TeamRuntime):
             return build_details(root, run_id)
         except DetailsUnknownRun:
             raise UnknownRun(run_id) from None
-
-    def system_logs(self, name: str, lines: int = 200) -> dict:
-        """Recent daemon system log lines (from manager.log) and health error detection."""
-        root = self._resolve(name)
-        log_file = paths.manager_log_path(root)
-        if not log_file.exists():
-            return {"ok": True, "logs": [], "total_lines": 0, "path": str(log_file)}
-        try:
-            content = log_file.read_text(errors="replace").splitlines()
-            tail = content[-lines:] if lines > 0 else content
-            recent_errors = [
-                line for line in tail[-50:]
-                if "[ERROR]" in line or " 521" in line or "Error 521" in line
-            ]
-            return {
-                "ok": True,
-                "logs": tail,
-                "total_lines": len(content),
-                "recent_error": recent_errors[-1] if recent_errors else None,
-                "path": str(log_file),
-            }
-        except Exception as e:
-            return {"ok": False, "error": str(e), "logs": []}
 
     def _prune_jobs(self) -> None:
         # Caller holds _chat_lock.
@@ -1887,7 +1762,7 @@ class LocalRuntime(TeamRuntime):
         except (run_actions.RunNotWaiting, run_actions.ActionFailed) as e:
             raise TeamLifecycleError(str(e)) from None
 
-    def runs(self, name: str, *, status: str = "", kind: str = "", query: str = "",
+    def runs(self, name: str, *, status: str = "", query: str = "",
              offset: int = 0, limit: int | None = None) -> dict:
         """Fold this machine's three run stores for one team. Every read takes
         the resolved root explicitly - this process serves every team and
@@ -1900,7 +1775,6 @@ class LocalRuntime(TeamRuntime):
             root,
             manager_name=service.manager_session_name(root),
             status=status or "",
-            kind=kind or "",
             query=query or "",
             offset=max(0, offset),
             limit=limit if limit and limit > 0 else DEFAULT_LIMIT,

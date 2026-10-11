@@ -322,14 +322,12 @@ class Session:
         subscribe: list[str] | None = None,
         fresh: bool = False,
         run_key: str = "",
-        experiment_subject: str = "",
         routing=None,
     ) -> None:
         self.name = name
         self.cwd = cwd
         self.role = role
         self.run_key = run_key
-        self.experiment_subject = experiment_subject
         self._routing = routing
         # The policy's decision while its chosen model has not yet completed a
         # turn: a failure in that window retries once on the control model.
@@ -938,7 +936,6 @@ class Session:
                 provider=getattr(self._client, "provider", "anthropic"),
                 role=self.role,
                 run_key=self.run_key,
-                experiment_subject=self.experiment_subject,
                 trigger_kind="direct",
                 model_requested=self._session_model(),
             )
@@ -1327,7 +1324,6 @@ class Session:
                 provider=getattr(self._client, "provider", "anthropic"),
                 role=self.role,
                 run_key=self.run_key,
-                experiment_subject=self.experiment_subject,
                 trigger_kind="startup" if msg.sender == "launch" else "inbox",
                 trigger_id=msg.id,
                 is_user_initiated=msg.sender != "launch",

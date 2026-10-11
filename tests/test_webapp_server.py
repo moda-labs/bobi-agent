@@ -1106,33 +1106,9 @@ class TestMultiAgentRealService:
         assert paths.bound_root() is None
 
 
-class TestSystemLogs:
-    def test_logs_empty_when_no_file(self, bobi_install):
-        r = _client().get(f"/api/agents/{bobi_install.agent_name}/logs")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["ok"] is True
-        assert data["logs"] == []
-
-    def test_logs_tail_and_error_detection(self, bobi_install):
-        log_path = bobi_install.state_dir / "manager.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
-            "[INFO] Starting server\n"
-            "[WARNING] High latency\n"
-            "[ERROR] API Error: 521 Web server is down\n"
-        )
-        r = _client().get(f"/api/agents/{bobi_install.agent_name}/logs")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["ok"] is True
-        assert len(data["logs"]) == 3
-        assert "521" in data["recent_error"]
-
-
 class TestRoutingConfig:
-    @pytest.mark.parametrize("route", ["metrics/jev-config", "routing/config"])
-    def test_jev_config_without_experiment_is_disabled_not_missing(self, bobi_install, route):
+    def test_jev_config_without_experiment_is_disabled_not_missing(self, bobi_install):
+        route = "metrics/jev-config"
         response = _client().get(f"/api/agents/{bobi_install.agent_name}/{route}")
         assert response.status_code == 200
         assert response.json()["enabled"] is False and response.json()["mode"] == "off"
@@ -1229,19 +1205,18 @@ class TestRoutingConfig:
         assert env_file.read_text().startswith("# keep this comment\nOTHER_TOKEN=synthetic-private\n")
         assert "synthetic-private" not in saved.text
         assert dict(os.environ) == before
-        config, secret = load_experiment(project_env(bobi_install.repo_path))
-        restarted_config, restarted_secret = load_experiment(child_agent_env(bobi_install.repo_path, base={}))
-        assert restarted_config == config and restarted_secret == secret
-        assert secret and config.policy.mode == "shadow"
+        config = load_experiment(project_env(bobi_install.repo_path))
+        assert load_experiment(child_agent_env(bobi_install.repo_path, base={})) == config
+        assert config.policy.mode == "shadow"
+        # Routing needs no assignment secret; the editor never writes one.
+        assert "BOBI_METRICS_ASSIGNMENT_SECRET" not in env_file.read_text()
         assert json.loads(config.policy.options_json)["instructions"] == payload["instructions"]
         assert client.get(url).json() == saved.json()
-        assert client.get(f"/api/agents/{bobi_install.agent_name}/routing/config").json() == saved.json()
         deleted = client.delete(url)
         assert deleted.status_code == 200, deleted.text
         assert deleted.json()["enabled"] is False and deleted.json()["mode"] == "off"
         assert deleted.json()["raw_json"] == ""
         assert parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"] == ""
-        assert parse_env_file(env_file)["BOBI_METRICS_ASSIGNMENT_SECRET"] == ""
         assert "# BOBI_METRICS_EXPERIMENT_JSON=" not in env_file.read_text()
         assert load_experiment(project_env(bobi_install.repo_path)) is None
         assert dict(os.environ) == before
@@ -1265,7 +1240,7 @@ class TestRoutingConfig:
         from tests.metrics.test_routing import concise_config
 
         env_file = paths.env_path(bobi_install.repo_path)
-        before = "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=synthetic\n"
+        before = "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n"
         env_file.write_text(before)
         response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config", json=invalid)
         assert response.status_code == 400, response.text
@@ -1320,7 +1295,7 @@ class TestRoutingConfig:
                                              "mode": "enforce", "brain": "codex", "prompt_egress": "none"})
         assert rejected.status_code == 400 and "does not match this agent's claude brain" in rejected.json()["error"]
         paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(
-            {**concise_config(), "brain": "codex"}) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=synthetic\n")
+            {**concise_config(), "brain": "codex"}) + "\n")
         # A saved policy that can never route this agent is flagged on read.
         assert "does not match" in _client().get(url).json()["config_warnings"][0]
 
@@ -1403,7 +1378,7 @@ class TestRoutingConfig:
         from tests.metrics.test_routing import concise_config
 
         env_file = paths.env_path(bobi_install.repo_path)
-        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=synthetic\n")
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
         url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
         off = _client().post(url, json={"mode": "off"}).json()
         assert off["enabled"] is False and off["configured_mode"] == "enforce"
@@ -1412,12 +1387,11 @@ class TestRoutingConfig:
         restored = _client().post(url, json={"mode": "enforce"}).json()
         assert restored["enabled"] is True and restored["instructions"] == concise_config()["instructions"]
 
-    @pytest.mark.parametrize("legacy", [False, True])
-    def test_jev_edit_preserves_advanced_policy_and_updates_criteria(self, bobi_install, legacy, monkeypatch):
+    def test_jev_edit_preserves_advanced_policy_and_updates_criteria(self, bobi_install, monkeypatch):
         monkeypatch.setenv("BOBI_BRAIN", "codex")
         from bobi import paths
         from bobi.config import parse_env_file
-        from bobi.metrics.router import ExperimentConfig, public_config
+        from bobi.metrics.router import ExperimentConfig
         from tests.metrics.test_routing import concise_config
 
         raw = {**concise_config(), "brain": "codex", "deadline_ms": 1750,
@@ -1425,13 +1399,8 @@ class TestRoutingConfig:
                "endpoint": "https://example.invalid/systemone", "prompt_egress": "redacted",
                "max_prompt_bytes": 4096, "entry_points": ["session_start"],
                "criteria": {"gpt-5.6-luna": "Retain this criterion", "gpt-5.6-sol": "Removed criterion"}}
-        if legacy:
-            raw = public_config(ExperimentConfig.from_mapping(raw))
-            raw["policy"]["options"]["endpoint"] = "https://example.invalid/systemone"
-            raw["policy"]["credential_env"] = "CUSTOM_JEV_KEY"
-            raw["policy"]["max_in_flight"] = 3
         env_file = paths.env_path(bobi_install.repo_path)
-        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=synthetic\n")
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\n")
         response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config", json={
             "candidate_models": ["gpt-5.6-luna", "gpt-5.4"], "instructions": "Edited instructions"})
         assert response.status_code == 200, response.text
@@ -1445,35 +1414,35 @@ class TestRoutingConfig:
         assert options["instructions"] == "Edited instructions"
         assert options["criteria"]["gpt-5.6-luna"] == "Retain this criterion"
         assert set(options["criteria"]) == {"gpt-5.6-luna", "gpt-5.4"}
-        if legacy:
-            assert policy.credential_env == "CUSTOM_JEV_KEY" and policy.max_in_flight == 3
 
-    def test_jev_edit_rewrites_a_long_form_policy_as_the_short_form(self, bobi_install):
+    def test_long_form_config_is_reported_and_rewritten_by_the_next_save(self, bobi_install):
         from bobi import paths
         from bobi.config import parse_env_file
-        from bobi.metrics.router import ExperimentConfig, public_config
+        from bobi.metrics.router import LONG_FORM_ERROR
         from tests.metrics.test_routing import concise_config
 
-        entry_points = ["subagent_persistent", "subagent_phase", "workflow_start", "session_start"]
-        before = ExperimentConfig.from_mapping({**concise_config(), "prompt_egress": "redacted",
-                                                "entry_points": entry_points, "roles": ["engineer", "director"]})
-        raw = public_config(before)
-        raw.update({"cohort": "team-slack", "router_name": "custom-router"})
+        long_form = {"experiment_id": "old", "control_model": "haiku",
+                     "variants": [{"variant_id": "control", "weight": 0.0, "model": "haiku"},
+                                  {"variant_id": "treatment_jev", "weight": 1.0, "policy": "typesafe-jev"}],
+                     "policy": {"name": "typesafe-jev", "mode": "shadow", "candidate_models": ["haiku", "sonnet"]}}
         env_file = paths.env_path(bobi_install.repo_path)
-        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=synthetic\n")
-        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config",
-                                  json={"instructions": "Edited instructions"})
-        assert response.status_code == 200, response.text
-        saved = json.loads(parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"])
-        # Key fields plus the one non-default setting; labels and defaults are dropped.
-        assert saved == {"mode": "enforce", "control_model": "haiku",
-                         "candidate_models": ["haiku", "sonnet"],
-                         "prompt_egress": "redacted", "instructions": "Edited instructions",
-                         "entry_points": entry_points}
-        after = ExperimentConfig.from_mapping(saved).policy
-        assert after.entry_points == tuple(entry_points) and set(after.roles) == {"director", "engineer"}
-        assert (after.min_confidence, after.deadline_ms, after.max_in_flight, after.credential_env) == (
-            before.policy.min_confidence, before.policy.deadline_ms, before.policy.max_in_flight, before.policy.credential_env)
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        for line in ("BOBI_METRICS_EXPERIMENT_JSON=", "# BOBI_METRICS_EXPERIMENT_JSON="):
+            env_file.write_text(line + json.dumps(long_form) + "\nOTHER_TOKEN=synthetic-private\n")
+            response = _client().get(url)
+            assert response.status_code == 200, response.text
+            config = response.json()
+            assert config["enabled"] is False and config["mode"] == "off" and config["raw_json"] == ""
+            assert config["config_error"] == LONG_FORM_ERROR
+        # The editor sends the full policy; saving replaces the old line with the short form.
+        payload = {key: concise_config()[key] for key in ("mode", "control_model", "candidate_models", "roles", "instructions")}
+        saved = _client().post(url, json=payload)
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["enabled"] is True and "config_error" not in saved.json()
+        written = env_file.read_text()
+        assert "variants" not in written and written.count("BOBI_METRICS_EXPERIMENT_JSON=") == 1
+        assert parse_env_file(env_file)["OTHER_TOKEN"] == "synthetic-private"
+        assert json.loads(parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"])["candidate_models"] == ["haiku", "sonnet"]
 
     def test_jev_config_preserves_file_on_read_and_write_failure(self, bobi_install, monkeypatch):
         from pathlib import Path
@@ -1539,21 +1508,19 @@ class TestRoutingConfig:
         other_root = bobi_install.agents_dir / "second-agent" / "run"
         shutil.copytree(bobi_install.repo_path / "package", other_root / "package")
         raw = json.dumps(concise_config())
-        paths.env_path(other_root).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + raw + "\nBOBI_METRICS_ASSIGNMENT_SECRET=other-agent-synthetic\n")
+        paths.env_path(other_root).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + raw + "\n")
         monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", raw)
-        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "other-agent-synthetic")
         monkeypatch.setitem(_DOTENV_LOADED, "BOBI_METRICS_EXPERIMENT_JSON", raw)
-        monkeypatch.setitem(_DOTENV_LOADED, "BOBI_METRICS_ASSIGNMENT_SECRET", "other-agent-synthetic")
         process_before = dict(os.environ)
         other_before = paths.env_path(other_root).read_text()
         runtime = LocalRuntime()
         runtime.update_routing_config(bobi_install.agent_name, {**concise_config(), "instructions": "Changed for first agent"})
         assert runtime.get_routing_config("second-agent")["instructions"] == concise_config()["instructions"]
         assert paths.env_path(other_root).read_text() == other_before and dict(os.environ) == process_before
-        config, secret = load_experiment(child_agent_env(bobi_install.repo_path))
+        config = load_experiment(child_agent_env(bobi_install.repo_path))
         assert json.loads(config.policy.options_json)["instructions"] == "Changed for first agent"
-        assert secret != b"other-agent-synthetic"
-        assert load_experiment(project_env(other_root))[1] == b"other-agent-synthetic"
+        other = load_experiment(project_env(other_root))
+        assert json.loads(other.policy.options_json)["instructions"] == concise_config()["instructions"]
 
     @pytest.mark.parametrize("trigger,prompt,title", [
         ("startup", "You are a bobi director.\n# Bobi Agent\nHow you receive events", "Agent Startup & Initialization"),
@@ -1707,10 +1674,11 @@ class TestRoutingConfig:
     @pytest.mark.parametrize("body", [b'{"api_key":"private-canary",', b'[]',
         b'{"prompt":"test","api_key":"private-canary","extra":"' + b'x' * 131072 + b'"}',
         b'[' * 2000 + b'0' + b']' * 2000])
-    def test_sandbox_rejects_bad_bodies_without_echoing_secrets(self, bobi_install, monkeypatch, body):
+    @pytest.mark.parametrize("endpoint", ["test-route", "test-run"])
+    def test_sandbox_rejects_bad_bodies_without_echoing_secrets(self, bobi_install, monkeypatch, body, endpoint):
         monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
                             lambda **kwargs: pytest.fail("invalid body reached network"))
-        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-route",
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/{endpoint}",
                                   content=body, headers={"content-type": "application/json"})
         assert response.status_code == 400
         assert response.json()["code"] == "invalid_simulation"
@@ -1860,32 +1828,6 @@ class TestRoutingConfig:
             runtime._routing_tests.release()
         assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
 
-    def test_sandbox_accepts_legacy_policies_and_custom_secret_names(self, bobi_install, monkeypatch):
-        import httpx
-        from bobi import paths
-        from bobi.metrics.router import ExperimentConfig, public_config
-        from tests.metrics.test_routing import concise_config
-
-        config = public_config(ExperimentConfig.from_mapping(concise_config()))
-        config["policy"]["credential_env"] = "CUSTOM_TYPESAFE_KEY"
-        config["policy"]["brain"] = "codex"
-        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(config) +
-                                                       "\nCUSTOM_TYPESAFE_KEY=legacy-test-key\n")
-        client_class = httpx.AsyncClient
-        def handler(request):
-            assert request.headers["authorization"] == "Bearer legacy-test-key"
-            assert json.loads(request.content)["state"]["brain"] == "codex"
-            return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
-                "type": "choice", "choice": "sonnet", "confidence": 0.94,
-                "probabilities": {"haiku": 0.03, "sonnet": 0.97}}},
-                "usage": {"input_tokens": 12, "output_tokens": 4}})
-        monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
-            lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
-        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-route", json={"prompt": "test"})
-        assert response.status_code == 200, response.text
-        assert response.json()["selected_model"] == "sonnet"
-        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
-
     @pytest.mark.parametrize("mode,confidence,status,version", [
         ("shadow", 0.94, 200, "jev-1.13.0"), ("enforce", 0.5, 200, "jev-1.13.0"),
         ("enforce", 0.94, 401, "jev-1.13.0"), ("enforce", 0.94, 200, "jev-other"),
@@ -1946,49 +1888,3 @@ class TestRoutingConfig:
         assert response.json()["prompt_egress"] == egress
         assert ("task" in sent[0]) is (egress == "redacted")
         assert sent[0]["prompt_bytes"] == len("Refactor the billing module")
-
-    def test_routing_config_lifecycle(self, bobi_install):
-        c = _client()
-        name = bobi_install.agent_name
-
-        # Initial state should be disabled
-        r = c.get(f"/api/agents/{name}/routing/config")
-        assert r.status_code == 200
-        data = r.json()
-        assert "enabled" in data
-
-        # Enable JEV in shadow mode
-        r_update = c.post(f"/api/agents/{name}/routing/config", json={
-            "enabled": True,
-            "mode": "shadow",
-            "control_model": "haiku",
-            "candidate_models": ["haiku", "sonnet"],
-            "roles": ["engineer"],
-            "min_confidence": 0.85
-        })
-        assert r_update.status_code == 200
-        updated = r_update.json()
-        assert updated["enabled"] is True
-        assert updated["mode"] == "shadow"
-        assert updated["control_model"] == "haiku"
-        from bobi import paths
-        from bobi.config import parse_env_file
-        saved = json.loads(parse_env_file(paths.env_path(bobi_install.repo_path))["BOBI_METRICS_EXPERIMENT_JSON"])
-        assert saved["candidate_models"] == ["haiku", "sonnet"]
-        assert "variants" not in saved and "policy" not in saved and "router_name" not in saved
-
-        # Update to enforce mode
-        r_enforce = c.post(f"/api/agents/{name}/routing/config", json={
-            "enabled": True,
-            "mode": "enforce",
-            "control_model": "haiku",
-            "candidate_models": ["haiku", "sonnet"],
-            "roles": ["engineer"]
-        })
-        assert r_enforce.status_code == 200
-        assert r_enforce.json()["mode"] == "enforce"
-
-        # Disable JEV
-        r_disable = c.post(f"/api/agents/{name}/routing/config", json={"enabled": False})
-        assert r_disable.status_code == 200
-        assert r_disable.json()["enabled"] is False

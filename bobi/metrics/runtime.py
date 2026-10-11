@@ -71,24 +71,9 @@ class MetricsRuntime:
         self._emitted_sessions: set[str] = set()
         self._provider_sessions: dict[str, str] = {}
         self._session_contexts: dict[str, dict[str, object]] = {}
-        self._fault_injection_enabled = False
         self._producer: MetricsProducer | None = None
         self._init_error = ""
         self.events_emitted = 0
-
-        try:
-            from bobi.metrics.faults import (
-                fault_injection_enabled,
-                validate_fault_injection,
-            )
-
-            validate_fault_injection(self.root)
-            self._fault_injection_enabled = fault_injection_enabled(self.root)
-        except Exception as exc:
-            self.mode = DISABLED
-            self._init_error = type(exc).__name__
-            log.warning("metrics: fault injection refused: %s", exc)
-            return
 
         if self.mode not in ENABLED_MODES:
             self.mode = DISABLED
@@ -296,7 +281,6 @@ class MetricsRuntime:
         is_user_initiated: bool = False,
         model_requested: str = "",
         prompt_bytes: int | None = None,
-        experiment_subject: str = "",
         started_at_us: int | None = None,
     ) -> "TurnObservation":
         started = started_at_us or time.time_ns() // 1000
@@ -352,10 +336,6 @@ class MetricsRuntime:
             is_user_initiated=is_user_initiated,
             model_requested=model_requested,
             prompt_bytes=prompt_bytes,
-            experiment_subject=(
-                experiment_subject
-                or os.environ.get("BOBI_METRICS_EXPERIMENT_SUBJECT", "")
-            ),
             started_at_us=started,
         )
         observation.start()
@@ -430,7 +410,6 @@ class TurnObservation:
     is_user_initiated: bool
     model_requested: str
     prompt_bytes: int | None
-    experiment_subject: str
     started_at_us: int
     first_output_at_us: int | None = None
     results: list["TurnResult"] = field(default_factory=list)
@@ -716,29 +695,18 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
         (result.session_id for result in reversed(observation.results) if result.session_id),
         "",
     )
-    fault_action = None
-    if runtime._fault_injection_enabled and observation.is_user_initiated:
-        try:
-            from bobi.metrics.faults import consume_drop_online_usage
-
-            fault_action = consume_drop_online_usage(
-                runtime.root, observation.turn_id
-            )
-        except Exception:
-            log.debug("metrics: fault injection check failed", exc_info=True)
     if (
         provider_session_id
         and runtime._provider_sessions.get(observation.session_id)
         != provider_session_id
     ):
         _emit_session(observation, provider_session_id)
-    if fault_action is None:
-        _emit_turn_row(
-            observation,
-            status=status,
-            ended_at_us=ended_at_us,
-            error_kind=error_kind,
-        )
+    _emit_turn_row(
+        observation,
+        status=status,
+        ended_at_us=ended_at_us,
+        error_kind=error_kind,
+    )
 
     provider_turn_id = next(
         (
@@ -781,7 +749,7 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             turn_id=observation.turn_id,
             invocation_id=invocation_id,
         )
-        if invocation.usage is not None and fault_action is None:
+        if invocation.usage is not None:
             usage = invocation.usage
             measurement_id = _stable_id(
                 "use", observation.turn_id, invocation_id, usage.provider_event_id
@@ -824,8 +792,6 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
         for usage in result.usage:
             usage_by_model.setdefault(usage.model or "unknown", []).append(usage)
     for model, usage_items in usage_by_model.items():
-        if fault_action is not None:
-            continue
         aggregate = _aggregate_usage(usage_items)
         invocation_items = invocation_usage_by_model.get(model, [])
         if (
@@ -889,7 +855,6 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
                 "amount_usd": total_cost,
                 "measurement_source": "provider_stream",
                 "is_estimated": 0,
-                "price_snapshot_id": None,
                 "provider_event_id": provider_turn_id or None,
                 "observed_at_us": ended_at_us,
                 "raw_cost_json": None,
@@ -927,7 +892,6 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
                     "amount_usd": est_total,
                     "measurement_source": "calibrated_estimator",
                     "is_estimated": 1,
-                    "price_snapshot_id": None,
                     "provider_event_id": provider_turn_id or None,
                     "observed_at_us": ended_at_us,
                     "raw_cost_json": None,
@@ -935,14 +899,6 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
                 session_id=observation.session_id,
                 turn_id=observation.turn_id,
             )
-    if fault_action is not None:
-        time.sleep(fault_action.hold_seconds)
-        _emit_turn_row(
-            observation,
-            status=status,
-            ended_at_us=time.time_ns() // 1000,
-            error_kind=error_kind,
-        )
 
 
 def _emit_tool(

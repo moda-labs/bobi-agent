@@ -36,14 +36,8 @@ TARGETS = {
         "tool_executions", "tool_execution_id", 40
     ),
     "usage.recorded": ProjectionTarget("usage_measurements", "measurement_id", 40),
-    "price_snapshot.recorded": ProjectionTarget(
-        "price_snapshots", "price_snapshot_id", 40
-    ),
     "cost.recorded": ProjectionTarget(
         "cost_measurements", "cost_measurement_id", 40
-    ),
-    "experiment_outcome.recorded": ProjectionTarget(
-        "experiment_outcomes", "outcome_id", 40
     ),
 }
 
@@ -79,10 +73,6 @@ PARENTS = {
         ("sessions", "session_id", "session_id", False),
         ("turns", "turn_id", "turn_id", False),
         ("llm_invocations", "invocation_id", "invocation_id", False),
-        ("price_snapshots", "price_snapshot_id", "price_snapshot_id", False),
-    ),
-    "experiment_outcome.recorded": (
-        ("router_decisions", "router_decision_id", "router_decision_id", True),
     ),
 }
 

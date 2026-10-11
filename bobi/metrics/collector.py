@@ -279,7 +279,6 @@ class MetricsCollectorService:
     def _reconcile_locked(
         self, result: dict[str, int | str]
     ) -> dict[str, int | str]:
-        from bobi.metrics.estimate import estimate_missing
         from bobi.metrics.reconcile import reconcile_missing
 
         errors = int(self.health()["reconciliation_errors"])
@@ -292,12 +291,6 @@ class MetricsCollectorService:
             self._set_health(reconciliation_retry_exhausted_turns=reconciliation.get("retry_exhausted_turns", 0))
         except Exception:
             log.debug("metrics: scheduled reconciliation failed", exc_info=True)
-            errors += 1
-        result = self._collect_once_locked()
-        try:
-            estimate_missing(self.root, collect=False, terminal_only=True)
-        except Exception:
-            log.debug("metrics: scheduled estimation failed", exc_info=True)
             errors += 1
         result = self._collect_once_locked()
         uncovered = 0

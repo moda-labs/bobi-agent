@@ -9,6 +9,9 @@ import httpx
 
 from bobi.metrics.policy import PolicyConfig, PolicyError, PolicyRequest, PolicyResult
 
+DEFAULT_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
+
+
 class TypeSafePolicy:
     name = "typesafe-jev"
 
@@ -16,7 +19,7 @@ class TypeSafePolicy:
         options = json.loads(config.options_json)
         if set(options) - {"endpoint", "instructions", "criteria"}:
             raise ValueError("unsupported TypeSafe policy options")
-        self.endpoint = options.get("endpoint", "https://api.typesafe.ai/v1/systemone")
+        self.endpoint = options.get("endpoint", DEFAULT_ENDPOINT)
         if not isinstance(self.endpoint, str) or any(ord(char) <= 32 or ord(char) == 127 for char in self.endpoint):
             raise ValueError("invalid TypeSafe endpoint")
         endpoint = urlsplit(self.endpoint)
@@ -33,7 +36,6 @@ class TypeSafePolicy:
                 or set(self.criteria) != set(config.candidate_models)
                 or any(not isinstance(value, str) or not value.strip() for value in self.criteria.values())):
             raise ValueError("TypeSafe requires criteria for every candidate")
-        self.secret_env_names = (config.credential_env,)
         self.credential_env = config.credential_env
         self.api_key = api_key
         if config.version in {"jev-latest", "jev-preview"}:

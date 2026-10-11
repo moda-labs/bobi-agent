@@ -65,9 +65,24 @@ class TestPriceTable:
     def test_routed_model_ids_resolve_to_list_prices(self, model, prices):
         assert model_prices(model) == prices
 
-    def test_unlisted_model_stays_unpriced(self):
-        # No published price: never borrow a sibling's rate.
-        assert model_prices("cx/gpt-7-nova") is None
+    @pytest.mark.parametrize("model", [
+        "cx/gpt-7-nova", "claude-opus-9", "claude-sonnet-next", "claude-haiku-9-9",
+        "gpt-4-vision-preview", "gpt-5.9-codex", "codex-ultra",
+    ])
+    def test_unlisted_model_stays_unpriced(self, model):
+        # No published price: never borrow a sibling's rate, even when the
+        # name carries a family word. Unknown models render as token volume.
+        assert model_prices(model) is None
+
+    @pytest.mark.parametrize("model", [
+        # Ids Claude Code and Codex record: dated, context-suffixed or codex-specific.
+        "claude-sonnet-4-5-20250929", "claude-opus-4-1-20250805", "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022", "claude-3-7-sonnet-20250219",
+        "claude-opus-5-5[1m]", "gpt-5-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini",
+        "gpt-5.2-codex", "gpt-5.3-codex", "codex-mini-latest", "gpt-5.5", "o4-mini",
+    ])
+    def test_recorded_model_ids_price_by_exact_key(self, model):
+        assert model_prices(model) is not None
 
     def test_cached_clamped_to_input(self):
         # A malformed entry claiming more cached than input must not go

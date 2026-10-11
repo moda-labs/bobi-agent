@@ -385,483 +385,302 @@ def test_public_query_projections_do_not_expand_with_private_schema_columns(metr
     assert "invocation-secret" not in rendered
 
 
-def test_summary_uses_best_invocation_usage_without_double_counting(metrics_root):
-    result = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
-    assert result["totals"]["input_tokens"] == 100
-    assert result["totals"]["cache_read_input_tokens"] == 20
-    assert result["totals"]["reported_cost_usd"] == 0.25
-    assert result["totals"]["turns"] == 1
-    assert result["totals"]["invocations"] == 1
-    assert result["totals"]["tool_executions"] == 1
+# --- usage and cost precedence ------------------------------------------------
+#
+# One fixture turn `t1` holds invocation `i1` (sonnet) with exact invocation
+# usage u1 (100 in / 30 out, cache 20/10/10) and exact invocation cost c1
+# ($0.25). Each row adds measurements at another granularity, exactness or
+# model alias and states which one the read model must count.
 
-    grouped = MetricsQueries(metrics_root).summary({
-        "from": "1970-01-01T00:00:00Z",
-        "to": "1970-01-01T00:00:04Z",
-        "group_by": ["model", "experiment_id", "variant_id"],
-        "model": "sonnet",
-        "experiment_id": "exp1",
-        "variant_id": "control",
-    })
-    assert grouped["groups"] == [pytest.approx({
-        "model": "sonnet",
-        "experiment_id": "exp1",
-        "variant_id": "control",
-        "input_tokens": 100,
-        "uncached_input_tokens": None,
-        "cache_read_input_tokens": 20,
-        "cache_write_input_tokens": 10,
-        "cache_write_5m_input_tokens": 10,
-        "cache_write_1h_input_tokens": None,
-        "cache_write_unknown_ttl_input_tokens": None,
-        "output_tokens": 30,
-        "reasoning_output_tokens": None,
-        "turns": 1,
-        "invocations": 1,
-    })]
+WINDOW = {"window_seconds": 10, "end_at": 4}
+BY_MODEL = {**WINDOW, "group_by": ["model"]}
+TURN_T1 = {"turn_id": "t1"}
+_TOKEN_FIELDS = (
+    "input_tokens", "uncached_input_tokens", "cache_read_input_tokens",
+    "cache_write_input_tokens", "cache_write_5m_input_tokens",
+    "cache_write_1h_input_tokens", "cache_write_unknown_ttl_input_tokens",
+    "output_tokens", "reasoning_output_tokens",
+)
 
 
-def test_summary_uses_turn_usage_when_invocation_coverage_is_partial(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
+def _group(**values):
+    return pytest.approx({**dict.fromkeys(_TOKEN_FIELDS), **values})
+
+
+def _coverage(**values):
+    base = {
+        "exact_invocations": 0, "estimated_invocations": 0, "unknown_invocations": 0,
+        "events_dropped": None, "collector_lag_ms": None,
+        "retained_from": 2000000, "retained_to": 3000000,
+    }
+    return pytest.approx({**base, **values})
+
+
+def _turn(turn_id, index, start, end):
+    return (
+        "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
+        "started_at_us,ended_at_us,status) VALUES(?,'s1',?,'user',1,?,?,'completed')",
+        (turn_id, index, start, end),
+    )
+
+
+def _inv(invocation_id, model="sonnet", *, turn="t1", index=1, start=2910000):
+    return (
         "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
         "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
-        "VALUES('i2','t1',1,'anthropic','sonnet',2910000,2950000,40,'completed')"
+        "VALUES(?,?,?,'anthropic',?,?,?,40,'completed')",
+        (invocation_id, turn, index, model, start, start + 40000),
     )
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
-        "observed_at_us) VALUES"
-        "('u-turn','turn','t1','anthropic','sonnet','provider_stream',0,1,250,70,3000000)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({
-        "window_seconds": 10,
-        "end_at": 4,
-        "group_by": ["model"],
-    })
-
-    assert result["totals"]["input_tokens"] == 250
-    assert result["totals"]["output_tokens"] == 70
-    assert result["totals"]["invocations"] == 2
-    assert result["groups"] == [pytest.approx({
-        "model": "sonnet",
-        "input_tokens": 250,
-        "uncached_input_tokens": None,
-        "cache_read_input_tokens": None,
-        "cache_write_input_tokens": None,
-        "cache_write_5m_input_tokens": None,
-        "cache_write_1h_input_tokens": None,
-        "cache_write_unknown_ttl_input_tokens": None,
-        "output_tokens": 70,
-        "reasoning_output_tokens": None,
-        "turns": 1,
-        "invocations": 2,
-    })]
 
 
-def test_exact_turn_usage_wins_over_exact_invocation_usage(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute("UPDATE usage_measurements SET output_tokens=0 WHERE measurement_id='u1'")
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,"
-        "cache_read_input_tokens,cache_write_input_tokens,cache_write_5m_input_tokens,"
-        "output_tokens,observed_at_us) VALUES"
-        "('u-turn','turn','t1','anthropic','sonnet','provider_stream',0,1,100,20,10,10,30,3000001)"
-    )
-    conn.commit()
-    conn.close()
-
-    queries = MetricsQueries(metrics_root)
-    summary = queries.summary({"window_seconds": 10, "end_at": 4})
-
-    assert summary["totals"]["input_tokens"] == 100
-    assert summary["totals"]["output_tokens"] == 30
-    assert summary["coverage"]["usage_granularity"] == "turn"
-
-
-def test_exact_turn_usage_remains_canonical_when_invocation_totals_match(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,"
-        "cache_read_input_tokens,cache_write_input_tokens,cache_write_5m_input_tokens,"
-        "output_tokens,observed_at_us) VALUES"
-        "('u-turn','turn','t1','anthropic','sonnet','provider_stream',0,1,100,20,10,10,30,3000001)"
-    )
-    conn.commit()
-    conn.close()
-
-    summary = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
-
-    assert summary["totals"]["output_tokens"] == 30
-    assert summary["coverage"]["usage_granularity"] == "turn"
-
-
-def test_turn_usage_for_one_model_does_not_hide_another_model(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-        "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
-        "VALUES('i2','t1',1,'anthropic','haiku',2910000,2950000,40,'completed')"
-    )
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
-        "model,measurement_source,is_estimated,token_semantics_version,input_tokens,"
-        "output_tokens,observed_at_us) VALUES"
-        "('u2','invocation','t1','i2','anthropic','haiku','provider_stream',0,1,40,5,3000000)"
-    )
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
-        "observed_at_us) VALUES"
-        "('u-turn','turn','t1','anthropic','sonnet','provider_stream',0,1,100,30,3000001)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({
-        "window_seconds": 10,
-        "end_at": 4,
-        "group_by": ["model"],
-    })
-
-    assert result["totals"]["input_tokens"] == 140
-    assert result["totals"]["output_tokens"] == 35
-    assert [(row["model"], row["input_tokens"]) for row in result["groups"]] == [
-        ("haiku", 40),
-        ("sonnet", 100),
-    ]
-
-
-def test_single_invocation_model_alias_does_not_double_count_turn(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute("UPDATE llm_invocations SET model_selected='claude-current'")
-    conn.execute("UPDATE usage_measurements SET model='claude-current' WHERE scope='invocation'")
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
-        "observed_at_us) VALUES"
-        "('u-turn','turn','t1','anthropic','claude-versioned','provider_stream',0,1,100,30,3000001)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({
-        "window_seconds": 10,
-        "end_at": 4,
-        "group_by": ["model"],
-    })
-
-    assert result["totals"]["input_tokens"] == 100
-    assert result["totals"]["output_tokens"] == 30
-    assert [(row["model"], row["input_tokens"]) for row in result["groups"]] == [
-        ("claude-versioned", 100),
-    ]
-
-
-def test_exact_turn_usage_precedes_complete_estimated_invocation_usage(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute("DELETE FROM usage_measurements WHERE measurement_id='u1'")
-    conn.execute(
-        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-        "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
-        "VALUES('i2','t1',1,'anthropic','sonnet',2910000,2950000,40,'completed')"
-    )
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
-        "observed_at_us) VALUES"
-        "('u-turn-exact','turn','t1','anthropic','sonnet','provider_stream',0,1,1000,100,3000000)"
-    )
-    conn.executemany(
+def _usage(measurement_id, scope, model, input_tokens, output_tokens, *, inv=None,
+           turn="t1", estimated=0, at=3000000, cache=(None, None, None)):
+    return (
         "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
         "model,measurement_source,is_estimated,estimator_name,estimator_version,"
-        "token_semantics_version,input_tokens,output_tokens,observed_at_us) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        [
-            ("u-i1-est", "invocation", "t1", "i1", "anthropic", "sonnet",
-             "calibrated_estimator", 1, "fixture", "1", 1, 300, 30, 2800000),
-            ("u-i2-est", "invocation", "t1", "i2", "anthropic", "sonnet",
-             "calibrated_estimator", 1, "fixture", "1", 1, 400, 40, 2900000),
-        ],
+        "token_semantics_version,input_tokens,cache_read_input_tokens,"
+        "cache_write_input_tokens,cache_write_5m_input_tokens,output_tokens,observed_at_us) "
+        "VALUES(?,?,?,?,'anthropic',?,?,?,?,?,1,?,?,?,?,?,?)",
+        (measurement_id, scope, turn, inv, model,
+         "calibrated_estimator" if estimated else "provider_stream", estimated,
+         "fixture" if estimated else None, "1" if estimated else None,
+         input_tokens, *cache, output_tokens, at),
     )
-    conn.commit()
-    conn.close()
-
-    queries = MetricsQueries(metrics_root)
-    summary = queries.summary({"window_seconds": 10, "end_at": 4})
-
-    assert summary["totals"]["input_tokens"] == 1000
-    assert summary["totals"]["output_tokens"] == 100
-    assert summary["totals"]["invocations"] == 2
-    assert summary["coverage"]["usage_granularity"] == "turn"
-    assert summary["coverage"]["invocation_granularity_turns"] == 0
-    assert summary["coverage"]["turn_granularity_turns"] == 1
 
 
-def test_summary_counts_equal_sized_turn_fallbacks_independently(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
-        "started_at_us,ended_at_us,wall_duration_ms,status) "
-        "VALUES('t2','s1',1,'user',1,3100000,3900000,800,'completed')"
-    )
-    for turn_id, base_index in (("t1", 1), ("t2", 0)):
-        if turn_id == "t1":
-            conn.execute(
-                "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-                "model_selected,started_at_us,status) "
-                "VALUES('i2','t1',1,'anthropic','sonnet',2910000,'completed')"
-            )
-        else:
-            conn.executemany(
-                "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-                "model_selected,started_at_us,status) VALUES(?,?,?,?,?,?,?)",
-                [
-                    ("i3", "t2", base_index, "anthropic", "sonnet", 3200000, "completed"),
-                    ("i4", "t2", base_index + 1, "anthropic", "sonnet", 3300000, "completed"),
-                ],
-            )
-    conn.executemany(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
-        "observed_at_us) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        [
-            ("u-turn-1", "turn", "t1", "anthropic", "sonnet", "provider_stream", 0, 1, 250, 70, 3000000),
-            ("u-turn-2", "turn", "t2", "anthropic", "sonnet", "provider_stream", 0, 1, 200, 60, 3900000),
-        ],
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({
-        "window_seconds": 10,
-        "end_at": 4,
-        "group_by": ["model"],
-    })
-
-    assert result["totals"]["turns"] == 2
-    assert result["totals"]["invocations"] == 4
-    assert result["groups"][0]["invocations"] == 4
-
-
-def test_model_filter_does_not_split_turn_fallback_across_child_models(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-        "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
-        "VALUES('i2','t1',1,'anthropic','haiku',2910000,2950000,40,'completed')"
-    )
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
-        "observed_at_us) VALUES"
-        "('u-turn','turn','t1','anthropic','mixed','provider_stream',0,1,250,70,3000000)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({
-        "window_seconds": 10,
-        "end_at": 4,
-        "model": "haiku",
-    })
-
-    assert result["totals"]["input_tokens"] is None
-    assert result["totals"]["turns"] == 0
-    assert result["coverage"] == pytest.approx({
-        "exact_invocations": 0,
-        "estimated_invocations": 0,
-        "unknown_invocations": 1,
-        "events_dropped": None,
-        "collector_lag_ms": None,
-        "retained_from": 2000000,
-        "retained_to": 3000000,
-        "usage_granularity": "none",
-        "invocation_granularity_turns": 0,
-        "turn_granularity_turns": 0,
-    })
-
-
-def test_summary_reports_mixed_usage_granularity_across_turns(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
-        "started_at_us,ended_at_us,status) "
-        "VALUES('t2','s1',1,'user',1,3100000,3900000,'completed')"
-    )
-    conn.execute(
-        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-        "model_selected,started_at_us,status) "
-        "VALUES('i2','t2',0,'anthropic','sonnet',3200000,'completed')"
-    )
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
-        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
-        "observed_at_us) VALUES"
-        "('u-turn-2','turn','t2','anthropic','sonnet','provider_stream',0,1,200,60,3900000)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
-
-    assert result["totals"]["input_tokens"] == 300
-    assert result["coverage"]["usage_granularity"] == "mixed"
-    assert result["coverage"]["invocation_granularity_turns"] == 1
-    assert result["coverage"]["turn_granularity_turns"] == 1
-
-
-def test_model_filter_counts_only_tools_triggered_by_selected_model(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-        "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
-        "VALUES('i2','t1',1,'anthropic','haiku',2910000,2950000,40,'completed')"
-    )
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
-        "model,measurement_source,is_estimated,token_semantics_version,input_tokens,"
-        "output_tokens,observed_at_us) VALUES"
-        "('u2','invocation','t1','i2','anthropic','haiku','provider_stream',0,1,40,10,2950000)"
-    )
-    conn.execute(
-        "INSERT INTO tool_executions(tool_execution_id,turn_id,triggering_invocation_id,tool_name,"
-        "tool_kind,started_at_us,status,attribution_method) "
-        "VALUES('x2','t1','i2','edit_file','file_edit',2920000,'completed','unknown')"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({
-        "window_seconds": 10,
-        "end_at": 4,
-        "model": "haiku",
-    })
-
-    assert result["totals"]["input_tokens"] == 40
-    assert result["totals"]["tool_executions"] == 1
-
-
-def test_summary_cost_selects_one_granularity_without_double_counting(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,"
-        "model,amount_usd,measurement_source,is_estimated,observed_at_us) "
-        "VALUES('c-turn','turn','s1','t1','anthropic','sonnet',0.30,'provider_stream',0,3000000)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
-
-    assert result["totals"]["reported_cost_usd"] == pytest.approx(0.25)
-    assert MetricsQueries(metrics_root).turns({"window_seconds": 10, "end_at": 4})["turns"][0]["costs"] == {
-        "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": None,
-        "list_price_usd": pytest.approx(0.000467),
-    }
-
-
-def test_exact_cost_suppresses_estimate_for_same_invocation(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,invocation_id,"
-        "provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) "
-        "VALUES('c-est','invocation','s1','t1','i1','anthropic','other-model',0.20,"
-        "'price_snapshot',1,2500000)"
-    )
-    conn.commit()
-    conn.close()
-
-    queries = MetricsQueries(metrics_root)
-    result = queries.summary({"window_seconds": 10, "end_at": 4})
-
-    assert result["totals"]["reported_cost_usd"] == pytest.approx(0.25)
-    assert result["totals"]["estimated_cost_usd"] is None
-
-
-def test_mixed_exact_and_estimated_invocation_costs_keep_one_granularity(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-        "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
-        "VALUES('i2','t1',1,'anthropic','haiku',2910000,2950000,40,'completed')"
-    )
-    conn.execute(
-        "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,invocation_id,"
-        "provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) "
-        "VALUES('c-est-2','invocation','s1','t1','i2','anthropic','haiku',0.05,"
-        "'price_snapshot',1,2950000)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
-
-    assert result["totals"]["reported_cost_usd"] == pytest.approx(0.25)
-    assert result["totals"]["estimated_cost_usd"] == pytest.approx(0.05)
-    assert MetricsQueries(metrics_root).turns({"window_seconds": 10, "end_at": 4})["turns"][0]["costs"] == {
-        "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": pytest.approx(0.05),
-        "list_price_usd": pytest.approx(0.000467),
-    }
-
-
-def test_exact_turn_cost_precedes_complete_estimated_invocation_costs(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute("DELETE FROM cost_measurements WHERE cost_measurement_id='c1'")
-    conn.execute(
-        "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
-        "model_selected,started_at_us,ended_at_us,wall_duration_ms,status) "
-        "VALUES('i2','t1',1,'anthropic','sonnet',2910000,2950000,40,'completed')"
-    )
-    conn.execute(
-        "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,"
-        "model,amount_usd,measurement_source,is_estimated,observed_at_us) "
-        "VALUES('c-turn-exact','turn','s1','t1','anthropic','sonnet',1.00,"
-        "'provider_stream',0,3000000)"
-    )
-    conn.executemany(
+def _cost(cost_id, scope, model, amount, *, inv=None, estimated=0, at=3000000):
+    return (
         "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,"
         "invocation_id,provider,model,amount_usd,measurement_source,is_estimated,"
-        "observed_at_us) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        [
-            ("c-i1-est", "invocation", "s1", "t1", "i1", "anthropic", "sonnet",
-             0.30, "price_snapshot", 1, 2800000),
-            ("c-i2-est", "invocation", "s1", "t1", "i2", "anthropic", "sonnet",
-             0.40, "price_snapshot", 1, 2900000),
-        ],
+        "observed_at_us) VALUES(?,?,'s1','t1',?,'anthropic',?,?,?,?,?)",
+        (cost_id, scope, inv, model, amount,
+         "price_snapshot" if estimated else "provider_stream", estimated, at),
     )
+
+
+def _pick(result, path):
+    """Dotted path into a result; `groups:model,input_tokens` projects rows."""
+    if ":" in path:
+        key, fields = path.split(":")
+        return [tuple(row[f] for f in fields.split(",")) for row in result[key]]
+    for part in path.split("."):
+        result = result[int(part)] if part.isdigit() else result[part]
+    return result
+
+
+TURN_COSTS_EXACT_ONLY = {
+    "reported_cost_usd": pytest.approx(0.25), "estimated_cost_usd": None,
+    "list_price_usd": pytest.approx(0.000467),
+}
+
+PRECEDENCE_CASES = [
+    pytest.param(
+        [],
+        [
+            ("summary", WINDOW, "totals.input_tokens", 100),
+            ("summary", WINDOW, "totals.cache_read_input_tokens", 20),
+            ("summary", WINDOW, "totals.reported_cost_usd", 0.25),
+            ("summary", WINDOW, "totals.turns", 1),
+            ("summary", WINDOW, "totals.invocations", 1),
+            ("summary", WINDOW, "totals.tool_executions", 1),
+            ("summary", {
+                "from": "1970-01-01T00:00:00Z", "to": "1970-01-01T00:00:04Z",
+                "group_by": ["model", "experiment_id", "variant_id"],
+                "model": "sonnet", "experiment_id": "exp1", "variant_id": "control",
+            }, "groups", [_group(
+                model="sonnet", experiment_id="exp1", variant_id="control",
+                input_tokens=100, cache_read_input_tokens=20, cache_write_input_tokens=10,
+                cache_write_5m_input_tokens=10, output_tokens=30, turns=1, invocations=1,
+            )]),
+        ],
+        id="exact-invocation-usage-counted-once",
+    ),
+    pytest.param(
+        [_inv("i2"), _usage("u-turn", "turn", "sonnet", 250, 70)],
+        [
+            ("summary", BY_MODEL, "totals.input_tokens", 250),
+            ("summary", BY_MODEL, "totals.output_tokens", 70),
+            ("summary", BY_MODEL, "totals.invocations", 2),
+            ("summary", BY_MODEL, "groups", [_group(
+                model="sonnet", input_tokens=250, output_tokens=70, turns=1, invocations=2,
+            )]),
+        ],
+        id="partial-invocation-coverage-falls-back-to-turn",
+    ),
+    pytest.param(
+        ["UPDATE usage_measurements SET output_tokens=0 WHERE measurement_id='u1'",
+         _usage("u-turn", "turn", "sonnet", 100, 30, at=3000001, cache=(20, 10, 10))],
+        [
+            ("summary", WINDOW, "totals.input_tokens", 100),
+            ("summary", WINDOW, "totals.output_tokens", 30),
+            ("summary", WINDOW, "coverage.usage_granularity", "turn"),
+        ],
+        id="exact-turn-beats-exact-invocation",
+    ),
+    pytest.param(
+        [_usage("u-turn", "turn", "sonnet", 100, 30, at=3000001, cache=(20, 10, 10))],
+        [
+            ("summary", WINDOW, "totals.output_tokens", 30),
+            ("summary", WINDOW, "coverage.usage_granularity", "turn"),
+        ],
+        id="exact-turn-canonical-when-totals-match",
+    ),
+    pytest.param(
+        [_inv("i2", "haiku"),
+         _usage("u2", "invocation", "haiku", 40, 5, inv="i2"),
+         _usage("u-turn", "turn", "sonnet", 100, 30, at=3000001)],
+        [
+            ("summary", BY_MODEL, "totals.input_tokens", 140),
+            ("summary", BY_MODEL, "totals.output_tokens", 35),
+            ("summary", BY_MODEL, "groups:model,input_tokens", [("haiku", 40), ("sonnet", 100)]),
+        ],
+        id="turn-usage-of-one-model-keeps-other-model",
+    ),
+    pytest.param(
+        ["UPDATE llm_invocations SET model_selected='claude-current'",
+         "UPDATE usage_measurements SET model='claude-current' WHERE scope='invocation'",
+         _usage("u-turn", "turn", "claude-versioned", 100, 30, at=3000001)],
+        [
+            ("summary", BY_MODEL, "totals.input_tokens", 100),
+            ("summary", BY_MODEL, "totals.output_tokens", 30),
+            ("summary", BY_MODEL, "groups:model,input_tokens", [("claude-versioned", 100)]),
+        ],
+        id="single-invocation-model-alias-not-double-counted",
+    ),
+    pytest.param(
+        ["DELETE FROM usage_measurements WHERE measurement_id='u1'",
+         _inv("i2"),
+         _usage("u-turn-exact", "turn", "sonnet", 1000, 100),
+         _usage("u-i1-est", "invocation", "sonnet", 300, 30, inv="i1", estimated=1, at=2800000),
+         _usage("u-i2-est", "invocation", "sonnet", 400, 40, inv="i2", estimated=1, at=2900000)],
+        [
+            ("summary", WINDOW, "totals.input_tokens", 1000),
+            ("summary", WINDOW, "totals.output_tokens", 100),
+            ("summary", WINDOW, "totals.invocations", 2),
+            ("summary", WINDOW, "coverage.usage_granularity", "turn"),
+            ("summary", WINDOW, "coverage.invocation_granularity_turns", 0),
+            ("summary", WINDOW, "coverage.turn_granularity_turns", 1),
+        ],
+        id="exact-turn-beats-complete-estimated-invocations",
+    ),
+    pytest.param(
+        [_turn("t2", 1, 3100000, 3900000),
+         _inv("i2"),
+         _inv("i3", turn="t2", index=0, start=3200000),
+         _inv("i4", turn="t2", index=1, start=3300000),
+         _usage("u-turn-1", "turn", "sonnet", 250, 70),
+         _usage("u-turn-2", "turn", "sonnet", 200, 60, turn="t2", at=3900000)],
+        [
+            ("summary", BY_MODEL, "totals.turns", 2),
+            ("summary", BY_MODEL, "totals.invocations", 4),
+            ("summary", BY_MODEL, "groups.0.invocations", 4),
+        ],
+        id="equal-sized-turn-fallbacks-counted-independently",
+    ),
+    pytest.param(
+        [_inv("i2", "haiku"), _usage("u-turn", "turn", "mixed", 250, 70)],
+        [
+            ("summary", {**WINDOW, "model": "haiku"}, "totals.input_tokens", None),
+            ("summary", {**WINDOW, "model": "haiku"}, "totals.turns", 0),
+            ("summary", {**WINDOW, "model": "haiku"}, "coverage", _coverage(
+                unknown_invocations=1, usage_granularity="none",
+                invocation_granularity_turns=0, turn_granularity_turns=0,
+            )),
+        ],
+        id="model-filter-does-not-split-turn-fallback",
+    ),
+    pytest.param(
+        [_turn("t2", 1, 3100000, 3900000),
+         _inv("i2", turn="t2", index=0, start=3200000),
+         _usage("u-turn-2", "turn", "sonnet", 200, 60, turn="t2", at=3900000)],
+        [
+            ("summary", WINDOW, "totals.input_tokens", 300),
+            ("summary", WINDOW, "coverage.usage_granularity", "mixed"),
+            ("summary", WINDOW, "coverage.invocation_granularity_turns", 1),
+            ("summary", WINDOW, "coverage.turn_granularity_turns", 1),
+        ],
+        id="mixed-granularity-across-turns",
+    ),
+    pytest.param(
+        [_inv("i2", "haiku"),
+         _usage("u2", "invocation", "haiku", 40, 10, inv="i2", at=2950000),
+         ("INSERT INTO tool_executions(tool_execution_id,turn_id,triggering_invocation_id,"
+          "tool_name,tool_kind,started_at_us,status,attribution_method) "
+          "VALUES('x2','t1','i2','edit_file','file_edit',2920000,'completed','unknown')", ())],
+        [
+            ("summary", {**WINDOW, "model": "haiku"}, "totals.input_tokens", 40),
+            ("summary", {**WINDOW, "model": "haiku"}, "totals.tool_executions", 1),
+        ],
+        id="model-filter-counts-only-its-tools",
+    ),
+    pytest.param(
+        [_cost("c-turn", "turn", "sonnet", 0.30)],
+        [
+            ("summary", WINDOW, "totals.reported_cost_usd", 0.25),
+            ("turns", WINDOW, "turns.0.costs", TURN_COSTS_EXACT_ONLY),
+        ],
+        id="cost-one-granularity",
+    ),
+    pytest.param(
+        [_cost("c-est", "invocation", "other-model", 0.20, inv="i1", estimated=1, at=2500000)],
+        [
+            ("summary", WINDOW, "totals.reported_cost_usd", 0.25),
+            ("summary", WINDOW, "totals.estimated_cost_usd", None),
+        ],
+        id="exact-cost-suppresses-estimate-same-invocation",
+    ),
+    pytest.param(
+        [_inv("i2", "haiku"),
+         _cost("c-est-2", "invocation", "haiku", 0.05, inv="i2", estimated=1, at=2950000)],
+        [
+            ("summary", WINDOW, "totals.reported_cost_usd", 0.25),
+            ("summary", WINDOW, "totals.estimated_cost_usd", 0.05),
+            ("turns", WINDOW, "turns.0.costs", {
+                **TURN_COSTS_EXACT_ONLY, "estimated_cost_usd": pytest.approx(0.05),
+            }),
+        ],
+        id="mixed-exact-and-estimated-invocation-costs",
+    ),
+    pytest.param(
+        ["DELETE FROM cost_measurements WHERE cost_measurement_id='c1'",
+         _inv("i2"),
+         _cost("c-turn-exact", "turn", "sonnet", 1.00),
+         _cost("c-i1-est", "invocation", "sonnet", 0.30, inv="i1", estimated=1, at=2800000),
+         _cost("c-i2-est", "invocation", "sonnet", 0.40, inv="i2", estimated=1, at=2900000)],
+        [
+            ("summary", WINDOW, "totals.reported_cost_usd", 1.00),
+            ("summary", WINDOW, "totals.estimated_cost_usd", None),
+        ],
+        id="exact-turn-cost-beats-complete-estimated-invocation-costs",
+    ),
+    pytest.param(
+        [_usage("u-est", "invocation", "other-model", 90, 20, inv="i1", estimated=1, at=2500000)],
+        [
+            ("turn", TURN_T1, "coverage.exact_invocations", 1),
+            ("turn", TURN_T1, "coverage.estimated_invocations", 0),
+            ("turn", TURN_T1, "coverage.unknown_invocations", 0),
+            ("summary", WINDOW, "totals.input_tokens", 100),
+        ],
+        id="exact-coverage-supersedes-estimate-same-invocation",
+    ),
+]
+
+
+@pytest.mark.parametrize(("setup", "checks"), PRECEDENCE_CASES)
+def test_usage_and_cost_precedence(metrics_root, setup, checks):
+    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
+    for statement in setup:
+        sql, params = (statement, ()) if isinstance(statement, str) else statement
+        conn.execute(sql, params)
     conn.commit()
     conn.close()
 
     queries = MetricsQueries(metrics_root)
-    summary = queries.summary({"window_seconds": 10, "end_at": 4})
-
-    assert summary["totals"]["reported_cost_usd"] == pytest.approx(1.00)
-    assert summary["totals"]["estimated_cost_usd"] is None
-
-
-def test_exact_coverage_supersedes_estimate_for_same_invocation(metrics_root):
-    conn = connect(metrics_root / "state" / "metrics" / "metrics.db")
-    conn.execute(
-        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
-        "model,measurement_source,is_estimated,token_semantics_version,input_tokens,"
-        "output_tokens,observed_at_us) VALUES"
-        "('u-est','invocation','t1','i1','anthropic','other-model','calibrated_estimator',1,1,90,20,2500000)"
-    )
-    conn.commit()
-    conn.close()
-
-    result = MetricsQueries(metrics_root).turn({"turn_id": "t1"})
-    assert result["coverage"]["exact_invocations"] == 1
-    assert result["coverage"]["estimated_invocations"] == 0
-    assert result["coverage"]["unknown_invocations"] == 0
-
-    summary = MetricsQueries(metrics_root).summary({"window_seconds": 10, "end_at": 4})
-    assert summary["totals"]["input_tokens"] == 100
+    for query, args, path, expected in checks:
+        actual = _pick(getattr(queries, query)(dict(args)), path)
+        if isinstance(expected, float):
+            expected = pytest.approx(expected)
+        assert actual == expected, (query, path)
 
 
 def test_session_cursor_is_filter_bound(metrics_root):
@@ -1076,25 +895,8 @@ def test_metrics_reconcile_invokes_one_turn(monkeypatch, tmp_path):
     assert json.loads(result.output)["turn_id"] == "turn-1"
 
 
-def test_metrics_calibrate_reports_qualified_groups(monkeypatch, tmp_path):
-    monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
-    monkeypatch.setattr(
-        "bobi.metrics.estimate.calibrate_estimators",
-        lambda root: {
-            "status": "done",
-            "model_groups": 2,
-            "qualified_model_groups": 1,
-        },
-    )
-
-    result = CliRunner().invoke(metrics, ["calibrate", "--json"])
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["qualified_model_groups"] == 1
-
-
 def test_metrics_commands_are_operational_only():
-    assert set(metrics.commands) == {"status", "reconcile", "calibrate"}
+    assert set(metrics.commands) == {"status", "reconcile"}
 
 
 class Response:

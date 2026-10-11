@@ -122,7 +122,7 @@ A command is published to the deployment's admin topic:
 
 `command_id` is caller-supplied and opaque to the supervisor; it is echoed on
 the result so a caller can correlate. A command whose `command` is not one of
-the twenty below, or which carries no `command_id`, is **dropped without a
+the eighteen below, or which carries no `command_id`, is **dropped without a
 reply** (the supervisor logs it locally). An unrecognized command has no
 command to acknowledge, so a consumer must not wait on a result for one — it
 never executes and never answers.
@@ -277,8 +277,8 @@ with the same filters and page size, and inserts ahead of its last row do not
 duplicate or skip the next retained row. Turn detail is a bounded atomic view:
 if its combined rows exceed 200, it fails with `query_too_large`.
 
-The approved 2026-10-03 production cleanup removes hotspot and experiment
-analytics commands/tools. Summary, session, and turn inspection remain supported.
+Metrics reads are limited to summary, session, and turn inspection; there are
+no hotspot or experiment analytics commands or tools.
 
 The legacy part of `usage` folds the same de-duplicated rows as `runs`. It includes terminal jobs
 whose completion time falls in `[end_at - window_seconds, end_at]`; running and
@@ -554,7 +554,7 @@ state read from KV. Browser clients are not supported and CORS is off.
 | `bobi_send_message` | `fleet`, `instance`, `message`, `session?` | A `command_id`. **Never the reply** |
 | `bobi_lifecycle` | `fleet`, `instance`, `action`, `reason` | The `restart`/`stop`/`start` command's view |
 
-Eleven tools over twenty admin commands, because the vocabulary is deliberately
+Nine tools over eighteen admin commands, because the vocabulary is deliberately
 **not** one tool per command: `bobi_lifecycle` folds `restart`/`stop`/`start`
 behind an `action` enum, and `status` is already covered by the heartbeat that
 `bobi_instance_detail` returns.

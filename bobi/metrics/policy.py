@@ -1,24 +1,32 @@
-"""Vendor-neutral model policy contract for fresh-session routing."""
+"""TypeSafe JEV policy settings, guards, and circuit breaker for fresh-session routing."""
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
 from dataclasses import dataclass
-from importlib.metadata import entry_points
 import json
 import logging
 import math
 import re
 import threading
 import time
-from typing import Callable, Mapping, Protocol
+from typing import Callable, ClassVar, Mapping, Protocol
 
 log = logging.getLogger(__name__)
 
+POLICY_NAME = "typesafe-jev"
+POLICY_CREDENTIAL_ENV = "TYPESAFE_API_KEY"
+ENTRY_POINTS = ("session_start", "subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start")
+
+
 @dataclass(frozen=True)
 class PolicyConfig:
-    name: str
+    """The TypeSafe JEV policy settings carried by the short routing config."""
+
+    name: ClassVar[str] = POLICY_NAME
+    credential_env: ClassVar[str] = POLICY_CREDENTIAL_ENV
+
     version: str
     brain: str
     mode: str
@@ -26,23 +34,20 @@ class PolicyConfig:
     entry_points: tuple[str, ...]
     roles: tuple[str, ...]
     prompt_egress: str
-    credential_env: str
     options_json: str
     min_confidence: float = 0.85
-    deadline_ms: int = 1000
-    max_in_flight: int = 8
+    deadline_ms: int = 3000
     max_prompt_bytes: int = 8192
-    store_reason_text: bool = False
+    max_in_flight: int = 8
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> "PolicyConfig":
-        allowed = {
-            "name", "version", "brain", "mode", "candidate_models", "scope",
-            "egress", "credential_env", "options", "min_confidence",
-            "deadline_ms", "max_in_flight", "store_reason_text",
-        }
-        if set(raw) - allowed:
-            raise ValueError("unsupported policy fields")
+        """Validate the policy fields of a short routing config.
+
+        ``raw`` holds the short-form keys (mode, brain, candidate_models,
+        roles, entry_points, prompt_egress, max_prompt_bytes, min_confidence,
+        deadline_ms, policy_version, instructions, criteria, endpoint) with
+        their defaults already applied."""
 
         def text(name: str) -> str:
             value = raw.get(name)
@@ -50,7 +55,8 @@ class PolicyConfig:
                 raise ValueError(f"policy requires {name}")
             return value.strip()
 
-        def strings(value: object, name: str) -> tuple[str, ...]:
+        def strings(name: str) -> tuple[str, ...]:
+            value = raw.get(name)
             if not isinstance(value, list) or not value:
                 raise ValueError(f"policy requires non-empty {name}")
             if any(not isinstance(item, str) or not item.strip() for item in value):
@@ -60,23 +66,12 @@ class PolicyConfig:
                 raise ValueError(f"duplicate policy {name}")
             return result
 
-        def integer(value: object, name: str, minimum: int, maximum: int) -> int:
+        def integer(name: str, minimum: int, maximum: int) -> int:
+            value = raw.get(name)
             if type(value) is not int or not minimum <= value <= maximum:
                 raise ValueError(f"invalid policy {name}")
             return value
 
-        scope = raw.get("scope")
-        egress = raw.get("egress")
-        if not isinstance(scope, dict) or set(scope) != {"entry_points", "roles"}:
-            raise ValueError("policy requires scope allowlists")
-        if not isinstance(egress, dict) or set(egress) - {"prompt", "max_prompt_bytes"}:
-            raise ValueError("invalid policy egress")
-        if egress.get("prompt") not in ("none", "redacted"):
-            raise ValueError("policy requires explicit prompt egress")
-        confidence = raw.get("min_confidence", 0.85)
-        if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
-                or not math.isfinite(confidence) or not 0 <= confidence <= 1):
-            raise ValueError("invalid policy min_confidence")
         mode = text("mode")
         if mode not in ("shadow", "enforce"):
             raise ValueError("invalid policy mode")
@@ -84,65 +79,30 @@ class PolicyConfig:
         # "auto" routes for whichever brain the agent runs.
         if brain not in ("auto", "claude", "codex"):
             raise ValueError("invalid policy brain")
-        credential_env = text("credential_env")
-        if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", credential_env):
-            raise ValueError("invalid policy credential_env")
-        store_reason = raw.get("store_reason_text", False)
-        if type(store_reason) is not bool:
-            raise ValueError("invalid policy store_reason_text")
-        options = raw.get("options", {})
-        if not isinstance(options, dict):
-            raise ValueError("policy options must be an object")
-
-        def validate_options(value: object) -> None:
-            if isinstance(value, dict):
-                for key, item in value.items():
-                    if not isinstance(key, str) or re.search(
-                        r"secret|token|password|passwd|credential|api.?key|authorization", key, re.I
-                    ):
-                        raise ValueError("policy options must not contain credentials")
-                    validate_options(item)
-            elif isinstance(value, list):
-                for item in value:
-                    validate_options(item)
-            elif isinstance(value, float) and not math.isfinite(value):
-                raise ValueError("policy options must contain finite numbers")
-            elif value is not None and not isinstance(value, (str, int, float, bool)):
-                raise ValueError("policy options must contain JSON values")
-
-        validate_options(options)
-        entry_points = strings(scope.get("entry_points"), "entry_points")
-        if set(entry_points) - {
-            "session_start", "subagent_phase", "subagent_persistent",
-            "subagent_supervised", "workflow_start",
-        }:
+        if raw.get("prompt_egress") not in ("none", "redacted"):
+            raise ValueError("policy requires explicit prompt egress")
+        confidence = raw.get("min_confidence")
+        if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+                or not math.isfinite(confidence) or not 0 <= confidence <= 1):
+            raise ValueError("invalid policy min_confidence")
+        entry_points = strings("entry_points")
+        if set(entry_points) - set(ENTRY_POINTS):
             raise ValueError("unsupported policy entry_points")
+        options = {"instructions": raw.get("instructions"), "criteria": raw.get("criteria")}
+        if "endpoint" in raw:
+            options["endpoint"] = raw["endpoint"]
+        try:
+            options_json = json.dumps(options, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError):
+            raise ValueError("policy options must contain JSON values") from None
         return cls(
-            name=text("name"), version=text("version"), brain=brain, mode=mode,
-            candidate_models=strings(raw.get("candidate_models"), "candidate_models"),
-            entry_points=entry_points,
-            roles=strings(scope.get("roles"), "roles"),
-            prompt_egress=egress["prompt"], credential_env=credential_env,
-            options_json=json.dumps(options, sort_keys=True, separators=(",", ":"), allow_nan=False),
+            version=text("policy_version"), brain=brain, mode=mode,
+            candidate_models=strings("candidate_models"), entry_points=entry_points,
+            roles=strings("roles"), prompt_egress=raw["prompt_egress"], options_json=options_json,
             min_confidence=float(confidence),
-            deadline_ms=integer(raw.get("deadline_ms", 1000), "deadline_ms", 50, 3000),
-            max_in_flight=integer(raw.get("max_in_flight", 8), "max_in_flight", 1, 1024),
-            max_prompt_bytes=integer(egress.get("max_prompt_bytes", 8192), "max_prompt_bytes", 1, 65536),
-            store_reason_text=store_reason,
+            deadline_ms=integer("deadline_ms", 50, 3000),
+            max_prompt_bytes=integer("max_prompt_bytes", 1, 65536),
         )
-
-    def public_config(self) -> dict[str, object]:
-        options = json.loads(self.options_json)
-        options.pop("endpoint", None)
-        return {
-            "name": self.name, "version": self.version, "brain": self.brain,
-            "mode": self.mode, "candidate_models": list(self.candidate_models),
-            "scope": {"entry_points": list(self.entry_points), "roles": list(self.roles)},
-            "egress": {"prompt": self.prompt_egress, "max_prompt_bytes": self.max_prompt_bytes},
-            "credential_env": self.credential_env, "options": options,
-            "min_confidence": self.min_confidence, "deadline_ms": self.deadline_ms,
-            "max_in_flight": self.max_in_flight, "store_reason_text": self.store_reason_text,
-        }
 
 
 @dataclass(frozen=True)
@@ -168,66 +128,14 @@ class PolicyResult:
 
 
 class ModelPolicy(Protocol):
-    name: str
-    secret_env_names: tuple[str, ...]
-
     async def decide(self, request: PolicyRequest, *, timeout_s: float) -> PolicyResult: ...
 
-
-class StaticPolicy:
-    name = "static"
-    secret_env_names: tuple[str, ...] = ()
-
-    def __init__(self, model: str) -> None:
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError("static policy requires a model")
-        self.model = model.strip()
-
-    async def decide(self, request: PolicyRequest, *, timeout_s: float) -> PolicyResult:
-        if timeout_s <= 0:
-            raise ValueError("policy timeout must be positive")
-        if self.model not in request.candidate_models:
-            raise ValueError("static policy model must be a candidate")
-        return PolicyResult(self.model, 1.0, None, request.pinned_version, None, 0.0)
 
 class PolicyError(Exception):
     def __init__(self, reason: str, *, authentication: bool = False) -> None:
         super().__init__(reason)
         self.reason = reason
         self.authentication = authentication
-
-_secret_names: set[str] = set()
-_registry_lock = threading.Lock()
-
-def policy_secret_names() -> tuple[str, ...]:
-    with _registry_lock:
-        return tuple(_secret_names)
-
-def load_policy(config: PolicyConfig) -> ModelPolicy:
-    with _registry_lock:
-        _secret_names.add(config.credential_env)
-    options = json.loads(config.options_json)
-    if config.name == "static":
-        if set(options) != {"model"}:
-            raise ValueError("static policy requires only options.model")
-        policy = StaticPolicy(options["model"])
-    elif config.name == "typesafe-jev":
-        from bobi.metrics.policies.typesafe import TypeSafePolicy
-
-        policy = TypeSafePolicy(config)
-    else:
-        matches = list(entry_points(group="bobi.model_policies", name=config.name))
-        if len(matches) != 1:
-            raise ValueError("model policy unavailable or ambiguous")
-        policy = matches[0].load()(config)
-    if policy.name != config.name or not callable(getattr(policy, "decide", None)):
-        raise ValueError("invalid model policy")
-    names = policy.secret_env_names
-    if any(not isinstance(name, str) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", name) for name in names):
-        raise ValueError("invalid policy secret environment names")
-    with _registry_lock:
-        _secret_names.update(names)
-    return policy
 
 def guard_result(result: PolicyResult, config: PolicyConfig) -> str | None:
     if (not isinstance(result, PolicyResult) or not isinstance(result.model, str)
@@ -337,9 +245,10 @@ class CircuitBreaker:
                     "opened_at_us": self._opened_at_us, "last_failure_kind": self._last_failure}
 
 _breakers: dict[tuple[str, str], CircuitBreaker] = {}
+_breakers_lock = threading.Lock()
 
 def policy_health() -> dict[str, object]:
-    with _registry_lock:
+    with _breakers_lock:
         breakers = list(_breakers.items())
     health: dict[str, list[dict[str, object]]] = {}
     for (name, _), breaker in breakers:
@@ -350,7 +259,7 @@ def policy_breaker(config: PolicyConfig) -> CircuitBreaker:
     endpoint = json.loads(config.options_json).get("endpoint", "")
     if not isinstance(endpoint, str):
         raise ValueError("policy endpoint must be a string")
-    with _registry_lock:
+    with _breakers_lock:
         return _breakers.setdefault((config.name, endpoint), CircuitBreaker())
 
 async def call_policy(policy: ModelPolicy, request: PolicyRequest, config: PolicyConfig,

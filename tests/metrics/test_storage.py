@@ -9,15 +9,6 @@ import uuid
 from bobi.brain.base import BrainUsage, TurnResult
 from bobi.fsutil import try_file_lock
 from bobi.metrics.collector import MetricsCollector, MetricsCollectorService
-from bobi.metrics.estimate import (
-    CalibrationSample,
-    EstimatorQualification,
-    EstimatorRegistry,
-    calibrate_estimators,
-    estimate_missing,
-    estimate_turn,
-    qualify_byte_estimator,
-)
 from bobi.metrics.events import MetricsEvent
 from bobi.metrics.producer import MetricsProducer
 from bobi.metrics.projection import ORPHAN_TTL_US, project_pending
@@ -433,10 +424,7 @@ def test_collector_reconciles_after_interval(monkeypatch, tmp_path):
     assert service.health()["last_reconciliation_at_us"] == 123
 
 
-def test_scheduled_reconciliation_collects_exact_before_estimation(
-    monkeypatch, tmp_path
-):
-    import bobi.metrics.estimate as estimate_module
+def test_scheduled_reconciliation_collects_exact_usage(monkeypatch, tmp_path):
     import bobi.metrics.reconcile as reconcile_module
 
     service = MetricsCollectorService(tmp_path)
@@ -449,13 +437,6 @@ def test_scheduled_reconciliation_collects_exact_before_estimation(
         ),
     )
     monkeypatch.setattr(
-        estimate_module,
-        "estimate_missing",
-        lambda root, collect, terminal_only: (
-            order.append(("estimate", terminal_only)) or {}
-        ),
-    )
-    monkeypatch.setattr(
         service,
         "_collect_once_locked",
         lambda: order.append("collect") or service._empty_result("active"),
@@ -463,18 +444,12 @@ def test_scheduled_reconciliation_collects_exact_before_estimation(
 
     service._reconcile_locked(service._empty_result("active"))
 
-    assert order == [
-        ("reconcile", True),
-        "collect",
-        ("estimate", True),
-        "collect",
-    ]
+    assert order == [("reconcile", True), "collect"]
     assert service.health()["reconciliation_errors"] == 0
     assert service.health()["last_reconciliation_at_us"] is not None
 
 
 def test_scheduled_reconciliation_failures_are_health_only(monkeypatch, tmp_path):
-    import bobi.metrics.estimate as estimate_module
     import bobi.metrics.reconcile as reconcile_module
 
     service = MetricsCollectorService(tmp_path)
@@ -487,20 +462,13 @@ def test_scheduled_reconciliation_failures_are_health_only(monkeypatch, tmp_path
         ).throw(RuntimeError("reconcile")),
     )
     monkeypatch.setattr(
-        estimate_module,
-        "estimate_missing",
-        lambda root, collect, terminal_only: (
-            _ for _ in ()
-        ).throw(RuntimeError("estimate")),
-    )
-    monkeypatch.setattr(
         service, "_collect_once_locked", lambda: service._empty_result("active")
     )
 
     result = service._reconcile_locked(service._empty_result("active"))
 
     assert result["role"] == "active"
-    assert service.health()["reconciliation_errors"] == 6
+    assert service.health()["reconciliation_errors"] == 5
     assert service.health()["last_reconciliation_at_us"] is not None
 
 
@@ -740,6 +708,27 @@ def test_migrate_rebuilds_a_stale_best_usage_view(tmp_path):
     conn.close()
 
 
+def test_migrate_refuses_a_newer_database_before_touching_it(tmp_path):
+    from bobi.metrics.schema import SCHEMA_VERSION
+
+    conn = connect(tmp_path / "metrics.db")
+    migrate(conn)
+    conn.execute("DROP VIEW best_usage")
+    conn.execute("CREATE VIEW best_usage AS SELECT 'newer' AS measurement_id")
+    conn.execute("UPDATE schema_meta SET value='999' WHERE key='best_usage_version'")
+    conn.execute("UPDATE schema_meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION + 1),))
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="newer than this Bobi"):
+        migrate(conn)
+
+    assert "'newer'" in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='best_usage'").fetchone()[0]
+    assert dict(conn.execute("SELECT key, value FROM schema_meta").fetchall()) == {
+        "best_usage_version": "999", "schema_version": str(SCHEMA_VERSION + 1)}
+    conn.close()
+
+
 def test_collector_projects_more_than_one_batch(tmp_path):
     segment = tmp_path / "many.telemetry"
     db = tmp_path / "metrics.db"
@@ -938,24 +927,6 @@ def test_historical_session_assignment_survives_projection(tmp_path):
         assert decision["assignment_key_hash"] == assignment["assignment_key_hash"]
         assert decision["model_selected"] == assignment["model_selected"]
         assert decision["decided_at_us"] == 2
-    finally:
-        conn.close()
-
-    with SpoolWriter(segment) as writer:
-        writer.append(_projection_event("experiment_outcome.recorded", 3, {
-            "outcome_id": "historical-outcome",
-            "router_decision_id": decision["router_decision_id"],
-            "outcome_name": "completion", "outcome_value": 1,
-            "outcome_definition_version": "bobi-runtime-v1",
-            "outcome_source": "runtime", "evaluator_name": "bobi-runtime",
-            "evaluator_version": "1", "is_estimated": 0, "observed_at_us": 3,
-        }, session_id="historical-session", turn_id="historical-turn"))
-    assert MetricsCollector(database).collect_segment(segment)["projected"] == 1
-    assert MetricsCollector(database).collect_segment(segment)["staged"] == 0
-    conn = connect(database, readonly=True)
-    try:
-        assert conn.execute("SELECT outcome_value FROM experiment_outcomes").fetchone()[0] == 1
-        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()
 
@@ -1463,7 +1434,6 @@ def test_background_reconciliation_retries_are_bounded_and_persisted(monkeypatch
         raise error("transcript not available")
 
     monkeypatch.setattr("bobi.metrics.reconcile.reconcile_turn", unavailable)
-    monkeypatch.setattr("bobi.metrics.estimate.estimate_missing", lambda *args, **kwargs: {})
     for index in range(5):
         service = MetricsCollectorService(tmp_path, reconcile_interval=0)
         service._cycle_locked()
@@ -1485,7 +1455,6 @@ def test_standby_collector_preserves_retry_limit_on_takeover(monkeypatch, tmp_pa
         calls.append(turn_id)
         raise ReconciliationError("transcript not available")
     monkeypatch.setattr("bobi.metrics.reconcile.reconcile_turn", unavailable)
-    monkeypatch.setattr("bobi.metrics.estimate.estimate_missing", lambda *args, **kwargs: {})
     first = MetricsCollectorService(tmp_path, poll_interval=0.01, reconcile_interval=0)
     second = MetricsCollectorService(tmp_path, poll_interval=0.01, reconcile_interval=0)
     try:
@@ -1910,214 +1879,6 @@ def test_reconciliation_reserves_stable_sequences_with_partial_invocations(metri
         assert len({row[0] for row in sequences}) == len(sequences)
     finally:
         conn.close()
-
-
-def _seed_uncovered_turn(root, *, prompt_bytes=400, model="claude-test"):
-    segment = root / "state" / "metrics" / "spool" / "fixture" / "one.telemetry"
-    events = [
-        MetricsEvent(
-            event_type="session.recorded",
-            producer_id="fixture",
-            producer_sequence=0,
-            source="test",
-            session_id="session-1",
-            payload={
-                "session_id": "session-1",
-                "session_name": "agent",
-                "brain": "claude",
-                "provider": "anthropic",
-                "started_at_us": 1,
-                "status": "completed",
-            },
-        ),
-        MetricsEvent(
-            event_type="turn.recorded",
-            producer_id="fixture",
-            producer_sequence=1,
-            source="test",
-            session_id="session-1",
-            turn_id="turn-1",
-            payload={
-                "turn_id": "turn-1",
-                "session_id": "session-1",
-                "turn_index": 1,
-                "trigger_kind": "test",
-                "is_user_initiated": 1,
-                "prompt_bytes": prompt_bytes,
-                "started_at_us": 2,
-                "ended_at_us": 3,
-                "status": "completed",
-            },
-        ),
-        MetricsEvent(
-            event_type="invocation.recorded",
-            producer_id="fixture",
-            producer_sequence=2,
-            source="test",
-            session_id="session-1",
-            turn_id="turn-1",
-            invocation_id="inv-1",
-            payload={
-                "invocation_id": "inv-1",
-                "turn_id": "turn-1",
-                "invocation_index": 1,
-                "provider": "anthropic",
-                "model_selected": model,
-                "started_at_us": 2,
-                "ended_at_us": 3,
-                "status": "completed",
-            },
-        ),
-    ]
-    with SpoolWriter(segment) as writer:
-        for event in events:
-            writer.append(event)
-    MetricsCollector(root / "state" / "metrics" / "metrics.db").collect_segment(
-        segment
-    )
-
-
-def test_byte_estimator_requires_one_hundred_held_out_samples():
-    report = qualify_byte_estimator(
-        provider="anthropic",
-        model_family="claude-",
-        calibration=[CalibrationSample(400, 100)] * 50,
-        held_out=[CalibrationSample(400, 100)] * 99,
-        estimator_version="1",
-    )
-
-    assert report.qualified is False
-    assert report.mape_percent == 0
-
-
-def test_byte_estimator_enforces_accuracy_gates():
-    report = qualify_byte_estimator(
-        provider="anthropic",
-        model_family="claude-",
-        calibration=[CalibrationSample(400, 100)] * 50,
-        held_out=[CalibrationSample(400, 150)] * 100,
-        estimator_version="1",
-    )
-
-    assert report.qualified is False
-    assert report.mape_percent > 10
-    assert report.p95_ape_percent > 20
-
-
-def test_qualified_estimator_emits_nullable_cache_dimensions(tmp_path):
-    _seed_uncovered_turn(tmp_path)
-    qualification = EstimatorQualification(
-        provider="anthropic",
-        model_family="claude-",
-        estimator_name="calibrated_bytes",
-        estimator_version="fixture-1",
-        tokens_per_byte=0.25,
-        calibration_samples=100,
-        held_out_samples=100,
-        mape_percent=0,
-        p95_ape_percent=0,
-        qualified=True,
-    )
-
-    first = estimate_turn(
-        tmp_path,
-        "turn-1",
-        registry=EstimatorRegistry([qualification]),
-    )
-    second = estimate_turn(
-        tmp_path,
-        "turn-1",
-        registry=EstimatorRegistry([qualification]),
-    )
-
-    assert first["status"] == "done"
-    assert second["status"] == "skipped"
-    conn = connect(tmp_path / "state" / "metrics" / "metrics.db", readonly=True)
-    try:
-        row = conn.execute(
-            "SELECT * FROM usage_measurements WHERE turn_id='turn-1'"
-        ).fetchone()
-        assert row["is_estimated"] == 1
-        assert row["input_tokens"] == 100
-        assert row["output_tokens"] is None
-        assert row["cache_read_input_tokens"] is None
-        assert row["cache_write_input_tokens"] is None
-    finally:
-        conn.close()
-
-
-def test_unqualified_registry_produces_no_guess(tmp_path):
-    _seed_uncovered_turn(tmp_path)
-
-    result = estimate_turn(tmp_path, "turn-1", registry=EstimatorRegistry())
-
-    assert result["status"] == "skipped"
-    conn = connect(tmp_path / "state" / "metrics" / "metrics.db", readonly=True)
-    try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM usage_measurements"
-        ).fetchone()[0] == 0
-    finally:
-        conn.close()
-
-
-def test_scheduled_estimation_skips_active_turns(monkeypatch, tmp_path):
-    _seed_uncovered_turn(tmp_path)
-    db = tmp_path / "state" / "metrics" / "metrics.db"
-    conn = connect(db)
-    conn.execute(
-        "UPDATE turns SET ended_at_us=NULL,status='running' WHERE turn_id='turn-1'"
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(
-        "bobi.metrics.estimate.estimate_turn",
-        lambda *args, **kwargs: pytest.fail("active turn was estimated"),
-    )
-
-    result = estimate_missing(
-        tmp_path, registry=EstimatorRegistry(), terminal_only=True
-    )
-
-    assert result["turns_considered"] == 0
-
-
-def test_database_calibration_writes_report_and_qualified_registry(tmp_path):
-    db = tmp_path / "state" / "metrics" / "metrics.db"
-    conn = connect(db)
-    migrate(conn)
-    conn.execute(
-        "INSERT INTO sessions(session_id,session_name,brain,provider,"
-        "started_at_us,status) VALUES(?,?,?,?,?,?)",
-        ("session-1", "agent", "claude", "anthropic", 1, "completed"),
-    )
-    for index in range(200):
-        turn_id = f"turn-{index}"
-        conn.execute(
-            "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,"
-            "is_user_initiated,prompt_bytes,started_at_us,ended_at_us,status) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
-            (turn_id, "session-1", index + 1, "test", 1, 400, index + 2, index + 3, "completed"),
-        )
-        conn.execute(
-            "INSERT INTO usage_measurements(measurement_id,scope,turn_id,"
-            "provider,model,measurement_source,is_estimated,token_semantics_version,"
-            "input_tokens,cache_write_breakdown_complete,observed_at_us) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (f"usage-{index}", "turn", turn_id, "anthropic", "claude-test", "provider_stream", 0, 1, 100, 0, index + 3),
-        )
-    conn.commit()
-    conn.close()
-
-    report = calibrate_estimators(tmp_path)
-
-    assert report["exact_turns_considered"] == 200
-    assert report["qualified_model_groups"] == 1
-    assert report["estimators"][0]["held_out_samples"] == 100
-    registry = json.loads(
-        (tmp_path / "state" / "metrics" / "estimators.json").read_text()
-    )
-    assert len(registry["estimators"]) == 1
 
 
 def test_default_spawn_marks_supervisor_as_metrics_collector_owner(

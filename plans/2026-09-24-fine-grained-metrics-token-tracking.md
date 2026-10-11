@@ -1,6 +1,6 @@
 # Fine-grained metrics and token tracking
 
-> **Status:** Phase 0-3 accepted; Phase 4 implemented locally, acceptance pending commit-bound S1-S4 control/treatment matrix on Claude and Codex
+> **Status:** Shipped with reduced scope. Token tracking (Phases 0-3) and JEV routing (Phase 4) cover the Claude and Codex brains only; JEV takes the short-form configuration in `docs/JEV_ROUTER_DATA_FLOW.md`. There is no A/B or control/treatment experiment framework (HMAC arm assignment, SRM and intent-to-treat analysis were removed), so the S1-S4 control/treatment acceptance matrix no longer applies. A local web view was added later (`plans/2026-10-05-metrics-web-view.md`). Current contract: `docs/FINE_GRAINED_METRICS.md`; sections below are the historical design record.
 > **Created:** 2026-09-24
 > **Phase 0.0 amendment:** 2026-09-25
 > **Phase 0 completed:** 2026-09-28

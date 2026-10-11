@@ -6,6 +6,12 @@ name: Update model prices
 # a maintainer reviews and merges it, so no price changes without review.
 # The script refuses to write when a page no longer parses into the expected
 # table, so a page redesign fails this job instead of emptying the prices.
+# A model that drops off a page keeps its last price in the file.
+#
+# CI note: the pull request is opened with GITHUB_TOKEN, and GitHub does not
+# start `pull_request` workflows for events created by that token. Required
+# checks therefore do not run on their own: a maintainer re-runs them from the
+# PR (or closes and reopens it) before merging.
 
 on:
   schedule:

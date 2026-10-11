@@ -487,8 +487,7 @@ def test_make_session_sets_generous_max_buffer_size(monkeypatch):
 
 def test_make_session_scrubs_metrics_routing_secrets(monkeypatch):
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "private-config")
-    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "private-secret")
-    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", "private-subject")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "private-policy-key")
     captured, _options = _capture_options()
     with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
         ClaudeSDKClient=MagicMock(),
@@ -496,7 +495,7 @@ def test_make_session_scrubs_metrics_routing_secrets(monkeypatch):
     )}):
         ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
 
-    for name in ("BOBI_METRICS_EXPERIMENT_JSON", "BOBI_METRICS_ASSIGNMENT_SECRET", "BOBI_METRICS_EXPERIMENT_SUBJECT"):
+    for name in ("BOBI_METRICS_EXPERIMENT_JSON", "TYPESAFE_API_KEY"):
         assert captured["env"][name] == ""
         assert name in captured["env"]["BOBI_INTERNAL_PROVIDER_CLEARED_ENV"].split(",")
 

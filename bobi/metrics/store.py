@@ -33,33 +33,29 @@ def connect(path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
     return conn
 
 
-def _best_usage_current(conn: sqlite3.Connection) -> bool:
+def _meta(conn: sqlite3.Connection, key: str) -> str | None:
     try:
-        row = conn.execute("SELECT value FROM schema_meta WHERE key = 'best_usage_version'").fetchone()
+        row = conn.execute("SELECT value FROM schema_meta WHERE key = ?", (key,)).fetchone()
     except sqlite3.OperationalError:  # a fresh database has no schema_meta yet
-        return False
-    return row is not None and int(row[0]) == BEST_USAGE_VERSION
+        return None
+    return None if row is None else row[0]
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    if not _best_usage_current(conn):
+    # Refuse a newer database before touching it: an older Bobi must not
+    # rewrite the view or any schema a newer one owns.
+    current = _meta(conn, "schema_version")
+    if current is not None and int(current) > SCHEMA_VERSION:
+        raise RuntimeError(f"metrics schema {current} is newer than this Bobi")
+    best_usage = _meta(conn, "best_usage_version")
+    if best_usage is None or int(best_usage) != BEST_USAGE_VERSION:
         # The view holds no data; rebuild it from the current definition.
         conn.execute("DROP VIEW IF EXISTS best_usage")
     conn.executescript(SCHEMA_SQL)
-    conn.execute(
-        "INSERT INTO schema_meta(key, value) VALUES('best_usage_version', ?) "
+    conn.executemany(
+        "INSERT INTO schema_meta(key, value) VALUES(?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (str(BEST_USAGE_VERSION),),
-    )
-    current = conn.execute(
-        "SELECT value FROM schema_meta WHERE key = 'schema_version'"
-    ).fetchone()
-    if current is not None and int(current[0]) > SCHEMA_VERSION:
-        raise RuntimeError(f"metrics schema {current[0]} is newer than this Bobi")
-    conn.execute(
-        "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (str(SCHEMA_VERSION),),
+        [("best_usage_version", str(BEST_USAGE_VERSION)), ("schema_version", str(SCHEMA_VERSION))],
     )
     conn.commit()
 

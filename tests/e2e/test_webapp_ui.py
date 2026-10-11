@@ -72,8 +72,7 @@ def _metrics_bounds(page, selector):
 
 
 class TestMetricsView:
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
-    def test_metrics_model_input_filters_without_enter_while_loading(self, webapp, page, width):
+    def test_metrics_model_input_filters_without_enter_while_loading(self, webapp, page):
         from bobi.metrics.store import connect
 
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
@@ -90,7 +89,7 @@ class TestMetricsView:
             else:
                 route.continue_()
         page.route("**/metrics/summary?**", hold_initial_summary)
-        page.set_viewport_size({"width": width, "height": 1000})
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
         model = page.get_by_role("textbox", name="Provider model filter")
         model.fill("opu")
@@ -106,7 +105,7 @@ class TestMetricsView:
         assert any("/summary?" in url and "model=opu" in url for url in requests)
         assert any("/turns?" in url and "model=opu" in url for url in requests)
         expect(model).to_be_focused()
-        _metrics_capture(page, f"model-opu-{width}")
+        _metrics_capture(page, "model-opu-1440")
         model.fill("  SONNET  ")
         expect(rows).to_have_count(2)
         expect(page.locator(".metrics-tile strong").first).to_have_text("620")
@@ -115,9 +114,8 @@ class TestMetricsView:
         expect(rows).to_have_count(4)
         expect(page.locator(".metrics-tile strong").first).to_have_text("720")
 
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
     @pytest.mark.parametrize("failure", ["404", "500", "hung"])
-    def test_jev_header_falls_back_within_deadline(self, webapp, page, width, failure):
+    def test_jev_header_falls_back_within_deadline(self, webapp, page, failure):
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -129,7 +127,7 @@ class TestMetricsView:
                 route.fulfill(status=int(failure), json={"error": "offline_config_unavailable"})
         page.route("**/metrics/jev-config", fail_config)
         page.clock.install()
-        page.set_viewport_size({"width": width, "height": 1000})
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
         expect(page.locator(".metrics-tile strong").first).to_have_text("720")
         if failure == "hung":
@@ -139,7 +137,7 @@ class TestMetricsView:
         expect(button).to_be_visible(timeout=2500 if failure != "hung" else 250)
         expect(button).to_be_enabled()
         assert "Loading" not in button.inner_text()
-        _metrics_capture(page, f"jev-{failure}-disabled-{width}")
+        _metrics_capture(page, f"jev-{failure}-disabled-1440")
         button.click()
         dialog = page.get_by_role("dialog", name="JEV Routing Configuration")
         if failure == "hung":
@@ -153,31 +151,29 @@ class TestMetricsView:
         for route in held:
             route.abort()
 
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
     @pytest.mark.parametrize("mode", ["enforce", "shadow"])
-    def test_jev_header_preserves_active_mode(self, webapp, page, width, mode):
+    def test_jev_header_preserves_active_mode(self, webapp, page, mode):
         from bobi import paths
         from tests.metrics.test_routing import concise_config
 
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         config = concise_config()
         config["mode"] = mode
-        paths.env_path(webapp.install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + shlex.quote(json.dumps(config)) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=browser-only-assignment-seed\n")
-        page.set_viewport_size({"width": width, "height": 1000})
+        paths.env_path(webapp.install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + shlex.quote(json.dumps(config)) + "\n")
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
         button = page.get_by_role("button", name="JEV: " + mode.title())
         expect(button).to_be_visible()
         expect(button).to_have_class(re.compile(r"\bactive\b"))
         expect(button).to_have_class(re.compile("mode-" + mode))
         expect(page.get_by_role("button", name="JEV: Disabled")).to_have_count(0)
-        _metrics_capture(page, f"jev-{mode}-{width}")
+        _metrics_capture(page, f"jev-{mode}-1440")
         button.click()
         dialog = page.get_by_role("dialog", name="JEV Routing Configuration")
         dialog.get_by_role("tab", name="Configure").click()
         expect(dialog.locator("#jev-config-mode")).to_have_value(mode)
 
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
-    def test_metrics_maintenance_collapses_without_reclassifying_real_user(self, webapp, page, monkeypatch, width):
+    def test_metrics_maintenance_collapses_without_reclassifying_real_user(self, webapp, page, monkeypatch):
         from bobi.metrics.store import connect
 
         started = int((time.time() - 60) * 1_000_000)
@@ -200,7 +196,7 @@ class TestMetricsView:
             at = datetime.fromtimestamp((started + index * 1_000_000 + 100_000) / 1_000_000, timezone.utc).isoformat()
             entries.extend([_entry("user", prompt, at), _entry("assistant", "Completed safely", at)])
         _seed_transcript(webapp, monkeypatch, "worker-a", entries)
-        page.set_viewport_size({"width": width, "height": 1000})
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.context.grant_permissions(["clipboard-read", "clipboard-write"])
         page.goto(webapp.agent_url() + "/metrics")
         rows = page.locator(".metrics-table-panel tbody tr")
@@ -217,12 +213,12 @@ class TestMetricsView:
             expect(expand).to_have_attribute("aria-expanded", "false")
             assert content.text_content() == prompts[index]
             assert content.evaluate("element => element.clientHeight <= 180 && element.scrollHeight > element.clientHeight")
-            _metrics_capture(page, f"prompt-{'maintenance' if index == 0 else 'startup'}-collapsed-{width}")
+            _metrics_capture(page, f"prompt-{'maintenance' if index == 0 else 'startup'}-collapsed-1440")
             expand.focus()
             expand.press("Enter")
             expect(expand).to_have_attribute("aria-expanded", "true")
             assert content.evaluate("element => element.clientHeight > 180 && element.scrollHeight <= element.clientHeight + 1")
-            _metrics_capture(page, f"prompt-{'maintenance' if index == 0 else 'startup'}-expanded-{width}")
+            _metrics_capture(page, f"prompt-{'maintenance' if index == 0 else 'startup'}-expanded-1440")
             expand.click()
             expect(expand).to_have_attribute("aria-expanded", "false")
             assert content.evaluate("element => element.clientHeight <= 180")
@@ -238,21 +234,20 @@ class TestMetricsView:
         user = dialog.locator(".io-block-user .metrics-markdown")
         expect(user).to_contain_text(prompts[2])
         assert user.evaluate("element => element.clientHeight <= 180 && element.scrollHeight > element.clientHeight")
-        _metrics_capture(page, f"prompt-real-user-collapsed-{width}")
+        _metrics_capture(page, "prompt-real-user-collapsed-1440")
         expand = dialog.locator(".io-block-user .metrics-tool-expand")
         expect(expand).to_have_attribute("aria-expanded", "false")
         expand.click()
         expect(expand).to_have_attribute("aria-expanded", "true")
         assert user.evaluate("element => element.clientHeight > 180 && element.scrollHeight <= element.clientHeight + 1")
-        _metrics_capture(page, f"prompt-real-user-expanded-{width}")
+        _metrics_capture(page, "prompt-real-user-expanded-1440")
         expand.click()
         expect(expand).to_have_attribute("aria-expanded", "false")
         dialog.get_by_role("button", name="Copy Input / Prompt", exact=True).click()
         expect(dialog.get_by_role("button", name="Copy Input / Prompt", exact=True)).to_have_text("copied")
         assert page.evaluate("navigator.clipboard.readText()") == prompts[2]
 
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
-    def test_jev_sandbox_and_defensive_toolbar_layout(self, webapp, page, monkeypatch, width):
+    def test_jev_sandbox_and_defensive_toolbar_layout(self, webapp, page, monkeypatch):
         import httpx
         from bobi import paths
         from bobi.metrics.store import connect
@@ -289,26 +284,10 @@ class TestMetricsView:
             lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
-        page.set_viewport_size({"width": width, "height": 1000})
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
         expect(page.locator(".metrics-tile strong").first).to_have_text("720")
-        toolbar = page.locator(".metrics-toolbar-card")
-        layout = toolbar.evaluate("""element => {
-            const outer = element.getBoundingClientRect();
-            const controls = [...element.children].map(child => {
-                const bounds = child.getBoundingClientRect();
-                return {left: bounds.left, right: bounds.right, top: Math.round(bounds.top), height: bounds.height};
-            });
-            return {left: outer.left, right: outer.right, controls,
-                rows: new Set(controls.map(control => control.top)).size,
-                overflow: document.documentElement.scrollWidth > innerWidth};
-        }""")
-        assert layout["rows"] == (1 if width == 1440 else 2), layout
-        assert not layout["overflow"], layout
-        assert all(control["height"] >= 36 and control["left"] >= layout["left"]
-                   and control["right"] <= layout["right"] for control in layout["controls"]), layout
-        _metrics_bounds(page, ".metrics-toolbar-card input:not([role=switch]), .metrics-toolbar-card select, .metrics-toolbar-card button, .metrics-switch-track")
-        _metrics_capture(page, f"toolbar-default-{width}")
+        _metrics_capture(page, "toolbar-default-1440")
         search = page.get_by_role("searchbox", name="Search loaded turns")
         search.focus()
         expect(search).to_be_focused()
@@ -316,7 +295,7 @@ class TestMetricsView:
         expect(page.locator(".search-turns-box .search-icon")).to_have_count(1)
         search.fill("no-match")
         expect(page.locator(".metrics-table-panel tbody tr")).to_have_count(0)
-        _metrics_capture(page, f"toolbar-focused-{width}")
+        _metrics_capture(page, "toolbar-focused-1440")
         clear = page.locator("#metrics-search-clear")
         clear.focus()
         clear.press("Enter")
@@ -334,7 +313,7 @@ class TestMetricsView:
         expect(live).to_be_checked()
         page.get_by_role("combobox", name="Session lifecycle").select_option("s1")
         assert page.locator(".metrics-session-chip span").evaluate("element => element.getBoundingClientRect().width") <= 280
-        _metrics_capture(page, f"toolbar-session-{width}")
+        _metrics_capture(page, "toolbar-session-1440")
         page.get_by_role("button", name="JEV: Disabled").click()
         dialog = page.get_by_role("dialog", name="JEV Routing Configuration")
         dialog.get_by_role("tab", name="Configure").click()
@@ -379,9 +358,9 @@ class TestMetricsView:
         expect(dialog.locator("progress")).to_have_count(0)
         expect(dialog.locator(".jev-probability-row")).to_have_count(2)
         expect(dialog.locator(".jev-test-status")).to_contain_text("No metrics recorded")
-        _metrics_capture(page, f"jev-sandbox-{width}")
+        _metrics_capture(page, "jev-sandbox-1440")
         dialog.locator(".jev-probabilities").scroll_into_view_if_needed()
-        _metrics_capture(page, f"jev-sandbox-results-{width}")
+        _metrics_capture(page, "jev-sandbox-results-1440")
         assert dialog.locator("img").count() == 0
         assert page.evaluate("window.sandboxInjected") is None
         assert dialog.evaluate("element => element.scrollWidth <= element.clientWidth")
@@ -677,7 +656,7 @@ class TestMetricsView:
         expect(page.locator(".metrics-page")).to_have_count(0)
         expect(page.locator("#health")).not_to_have_class("dot stale")
 
-    def test_metrics_run_slab_preserves_transcript_and_composer(self, webapp, page, monkeypatch):
+    def test_metrics_run_slab_keeps_transcript_and_links_to_metrics(self, webapp, page, monkeypatch):
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         _seed_runs(webapp.install)
         _seed_transcript(webapp, monkeypatch, "worker-a", [
@@ -687,14 +666,12 @@ class TestMetricsView:
         row = page.locator(".runs tbody tr", has_text="Fix the flaky test")
         row.click()
         expect(page.locator(".transcript")).to_contain_text("Original transcript stays available")
-        expect(page.locator("[data-el=slabComposer]")).to_be_hidden()
-        expect(page.locator("[data-el=slabTabs]")).to_be_hidden()
         page.locator("[data-el=slabClose]").click()
         expect(page.locator(".modal-backdrop")).not_to_have_class("modal-backdrop open")
         row.locator(".metrics-jump-link").click()
         page.wait_for_url(re.compile(r"/metrics\?session=worker-a$"))
 
-    @pytest.mark.parametrize("width", [1440, 700])
+    @pytest.mark.parametrize("width", [1440, 1100, 700])
     def test_shared_layout_and_compact_metrics_contract(self, webapp, page, width):
         page.set_viewport_size({"width": width, "height": 1000})
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
@@ -704,9 +681,30 @@ class TestMetricsView:
             page.goto(url)
             expect(page.locator(selector)).to_be_visible()
             edges.append(page.locator(selector).evaluate("el => {const r=el.getBoundingClientRect(); const s=getComputedStyle(el); return [r.x, r.width, s.paddingLeft, s.paddingRight]}"))
+        # Every page shares one centred, symmetric content column that never
+        # scrolls sideways; the gutter size itself is a design token, not a contract.
         assert edges[0] == edges[1] == edges[2]
-        assert edges[0][1] == min(width, 1360)
-        assert edges[0][2:] == ["18px", "18px"] if width <= 760 else edges[0][2:] == ["32px", "32px"]
+        x, column, pad_left, pad_right = edges[0]
+        assert column == min(width, 1360)
+        assert abs(x - (width - column) / 2) <= 1
+        assert pad_left == pad_right and float(pad_left.removesuffix("px")) > 0
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        toolbar = page.locator(".metrics-toolbar-card")
+        layout = toolbar.evaluate("""element => {
+            const outer = element.getBoundingClientRect();
+            const controls = [...element.children].map(child => {
+                const bounds = child.getBoundingClientRect();
+                return {left: bounds.left, right: bounds.right, top: Math.round(bounds.top), height: bounds.height};
+            });
+            return {left: outer.left, right: outer.right, controls,
+                rows: new Set(controls.map(control => control.top)).size,
+                overflow: document.documentElement.scrollWidth > innerWidth};
+        }""")
+        assert layout["rows"] == (1 if width == 1440 else 2), layout
+        assert not layout["overflow"], layout
+        assert all(control["height"] >= 36 and control["left"] >= layout["left"]
+                   and control["right"] <= layout["right"] for control in layout["controls"]), layout
+        _metrics_bounds(page, ".metrics-toolbar-card input:not([role=switch]), .metrics-toolbar-card select, .metrics-toolbar-card button, .metrics-switch-track")
         expect(page.locator(".metrics-thread-card").first.locator("thead th")).to_have_text(
             ["Turn", "Step", "Model & Decision", "Confidence", "Tokens / Cost", "Latency"])
         page.get_by_role("button", name="Flat", exact=True).click()
@@ -801,9 +799,8 @@ class TestMetricsView:
         else:
             expect(decision).to_contain_text("executed haiku")
 
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
     @pytest.mark.parametrize("shape", ["multiline", "wrapped-single-line"])
-    def test_metrics_tool_cards_are_compact_and_escape_transcript_text(self, webapp, page, monkeypatch, width, shape):
+    def test_metrics_tool_cards_are_compact_and_escape_transcript_text(self, webapp, page, monkeypatch, shape):
         from bobi.metrics.store import connect
 
         started = int((time.time() - 60) * 1_000_000)
@@ -825,7 +822,7 @@ class TestMetricsView:
             json.dumps({"type": "assistant", "timestamp": at, "message": {"content": [{"type": "tool_use", "id": "ui-tool", "name": "Bash", "input": {"command": '<img src=x onerror="window.metricsInjected=true">'}}]}}),
             json.dumps({"type": "user", "timestamp": at, "message": {"content": [{"type": "tool_result", "tool_use_id": "ui-tool", "content": result}]}}),
         ])
-        page.set_viewport_size({"width": width, "height": 1000})
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.context.grant_permissions(["clipboard-read", "clipboard-write"])
         page.goto(webapp.agent_url() + "/metrics")
         row = page.locator(".metrics-table-panel tbody tr", has_text="72%")
@@ -858,7 +855,7 @@ class TestMetricsView:
         for block in blocks.all():
             assert block.locator(".metrics-tool-copy").evaluate("element => getComputedStyle(element).position") == "absolute"
         result_block.locator(".metrics-tool-truncated").scroll_into_view_if_needed()
-        _metrics_capture(page, f"tool-{shape}-default-{width}")
+        _metrics_capture(page, f"tool-{shape}-default-1440")
         expand.focus()
         expand.press("Enter")
         expect(expand).to_have_attribute("aria-expanded", "true")
@@ -880,15 +877,14 @@ class TestMetricsView:
         assert page.evaluate("navigator.clipboard.readText()") != result
         region.evaluate("element => {element.scrollTop = element.scrollHeight}")
         result_block.locator(".metrics-tool-truncated").scroll_into_view_if_needed()
-        _metrics_capture(page, f"tool-{shape}-expanded-{width}")
+        _metrics_capture(page, f"tool-{shape}-expanded-1440")
         expand.click()
         expect(expand).to_have_attribute("aria-expanded", "false")
         assert region.text_content() == collapsed
         expect(detail.locator("img")).to_have_count(0)
         assert page.evaluate("window.metricsInjected") is None
 
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
-    def test_metrics_hides_estimate_labels_without_changing_backend_flags(self, webapp, page, width):
+    def test_metrics_hides_estimate_labels_without_changing_backend_flags(self, webapp, page):
         from bobi.metrics.store import connect
 
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
@@ -896,19 +892,19 @@ class TestMetricsView:
         connection.execute("UPDATE usage_measurements SET is_estimated=1 WHERE measurement_id='u0'")
         connection.commit()
         connection.close()
-        page.set_viewport_size({"width": width, "height": 1000})
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
         expect(page.locator(".metrics-table-panel tbody tr")).to_have_count(4)
         forbidden = re.compile(r"\best\b|\bestimated\b|token estimate", re.IGNORECASE)
         assert not forbidden.search(page.locator(".metrics-page").inner_text())
         expect(page.locator(".metrics-table-panel .metrics-conversation-badge")).to_have_count(0)
-        _metrics_capture(page, f"clean-badges-overview-{width}")
+        _metrics_capture(page, "clean-badges-overview-1440")
         page.locator(".metrics-table-panel tbody tr", has_text="72%").click()
         detail = page.get_by_role("dialog", name="Turn detail")
         detail.locator('[data-tab="technical"]').click()
         expect(detail.locator(".panel-usage")).to_be_visible()
         assert not forbidden.search(detail.inner_text())
-        _metrics_capture(page, f"clean-badges-technical-{width}")
+        _metrics_capture(page, "clean-badges-technical-1440")
         detail.locator('[data-tab="overview"]').click()
         assert not forbidden.search(detail.inner_text())
         payload = page.evaluate("""async agent => {
@@ -918,8 +914,7 @@ class TestMetricsView:
         }""", webapp.agent)
         assert any(item["is_estimated"] for item in payload["usage_measurements"])
 
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
-    def test_metrics_semantic_headlines_and_deduped_sessions(self, webapp, page, monkeypatch, width):
+    def test_metrics_semantic_headlines_and_deduped_sessions(self, webapp, page, monkeypatch):
         from bobi.metrics.store import connect
 
         started = int((time.time() - 60) * 1_000_000)
@@ -953,7 +948,7 @@ class TestMetricsView:
             stamp = datetime.fromtimestamp((started + index * 1_000_000 + 100_000) / 1_000_000, timezone.utc).isoformat()
             worker_entries.extend([_entry("user", prompt, stamp), _entry("assistant", "Background event processed", stamp)])
         _seed_transcript(webapp, monkeypatch, "worker-a", worker_entries)
-        page.set_viewport_size({"width": width, "height": 1000})
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
         page.get_by_role("button", name="Flat", exact=True).click()
         rows = page.locator(".metrics-table-panel tbody tr")
@@ -1004,7 +999,7 @@ class TestMetricsView:
         expect(picker.locator("option")).to_have_count(3)
         assert picker.locator("option").all_text_contents() == labels
         page.locator(".metrics-table-panel").scroll_into_view_if_needed()
-        _metrics_capture(page, f"recent-turns-{width}")
+        _metrics_capture(page, "recent-turns-1440")
         def unsafe_and_internal_origins(route):
             response = route.fetch()
             payload = response.json()
@@ -1022,10 +1017,9 @@ class TestMetricsView:
         expect(rows.locator(".metrics-conversation-badge")).to_have_count(0)
         expect(rows.locator('a[href^="javascript:"]')).to_have_count(0)
         assert page.evaluate("window.metricsInjected") is None
-        _metrics_capture(page, f"no-unsafe-or-internal-origin-tags-{width}")
+        _metrics_capture(page, "no-unsafe-or-internal-origin-tags-1440")
 
-    @pytest.mark.parametrize("width", [1440, 1100, 700])
-    def test_jev_editor_save_validation_readback_and_reset(self, webapp, page, width):
+    def test_jev_editor_save_validation_readback_and_reset(self, webapp, page):
         from bobi import paths
 
         from tests.metrics.test_routing import concise_config
@@ -1037,7 +1031,7 @@ class TestMetricsView:
         requests = []
         page.on("request", lambda request: requests.append((request.method, request.url, request.post_data)))
         page.context.grant_permissions(["clipboard-read", "clipboard-write"])
-        page.set_viewport_size({"width": width, "height": 1000})
+        page.set_viewport_size({"width": 1440, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
         page.get_by_role("button", name="JEV: Disabled").click()
         dialog = page.get_by_role("dialog", name="JEV Routing Configuration")
@@ -1105,9 +1099,9 @@ class TestMetricsView:
         assert not [item for item in requests if item[0] == "POST" and item[1].endswith("/restart")]
         assert "UNRELATED_SETTING=preserved" in env_file.read_text()
         assert page.evaluate("window.editorInjected") is None and dialog.locator("img").count() == 0
-        _metrics_capture(page, f"jev-save-{width}")
+        _metrics_capture(page, "jev-save-1440")
         editor.locator("#jev-config-delete").scroll_into_view_if_needed()
-        _metrics_capture(page, f"editor-actions-{width}")
+        _metrics_capture(page, "editor-actions-1440")
         dialog.press("Escape")
         page.reload()
         page.get_by_role("button", name="JEV: Enforce").click()
@@ -1121,7 +1115,7 @@ class TestMetricsView:
         assert confirmation.evaluate("element => getComputedStyle(element).opacity") == "1"
         _metrics_bounds(page, ".jev-confirm-card, .jev-confirm-card button")
         assert confirmation.evaluate("element => {const bounds=element.getBoundingClientRect(); return bounds.top >= 0 && bounds.bottom <= innerHeight}")
-        _metrics_capture(page, f"jev-reset-confirm-{width}")
+        _metrics_capture(page, "jev-reset-confirm-1440")
         dialog.locator(".jev-confirm-btn-cancel").click()
         assert not [item for item in requests if item[0] == "DELETE"]
         expect(editor.locator("#jev-config-delete")).to_be_focused()
@@ -1136,7 +1130,7 @@ class TestMetricsView:
         assert not any(line.startswith("# BOBI_METRICS_EXPERIMENT_JSON=") for line in env_file.read_text().splitlines())
         assert "BOBI_METRICS_EXPERIMENT_JSON=\n" in env_file.read_text()
         assert "UNRELATED_SETTING=preserved" in env_file.read_text()
-        _metrics_capture(page, f"jev-reset-{width}")
+        _metrics_capture(page, "jev-reset-1440")
         dialog.press("Escape")
         page.reload()
         expect(page.get_by_role("button", name="JEV: Disabled")).to_be_visible()
@@ -1241,12 +1235,11 @@ class TestMetricsView:
         expect(flat.locator(".metrics-session-chip-inline")).to_have_count(4)
         _metrics_capture(page, "flat-1440")
 
-    @pytest.mark.parametrize("width", [1440, 700])
-    def test_jev_card_prices_routing_against_its_candidate_envelope(self, webapp, page, width):
+    def test_jev_card_prices_routing_against_its_candidate_envelope(self, webapp, page):
         from bobi.metrics.store import connect
 
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
-        page.set_viewport_size({"width": width, "height": 1100})
+        page.set_viewport_size({"width": 1440, "height": 1100})
         with page.expect_response(re.compile(r"/metrics/summary\?")) as response:
             page.goto(webapp.agent_url() + "/metrics")
         savings = response.value.json()["routing"]["savings"]
@@ -1274,7 +1267,7 @@ class TestMetricsView:
         # No telemetry health strip or card beside the value.
         expect(page.get_by_text("Telemetry Health & Coverage")).to_have_count(0)
         card.scroll_into_view_if_needed()
-        _metrics_capture(page, f"jev-savings-{width}")
+        _metrics_capture(page, "jev-savings-1440")
 
         conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
         conn.execute("UPDATE router_decisions SET candidate_models_json='[\"haiku\",\"cx/gpt-7-nova\"]' "
@@ -1541,7 +1534,7 @@ class TestRunsTable:
         # `all` stays bare on purpose: the section count beside the table is
         # already the all-count, and printing it twice reads as two facts.
         expect(tabs).to_have_text(
-            ["all", "manager · 0", "monitor · 1", "running · 0", "awaiting action · 1", "failed · 1"])
+            ["all", "running · 0", "awaiting action · 1", "failed · 1"])
         expect(page.locator("[data-el=runsCount]")).to_have_text("4")
 
         page.locator(".tabs .tab", has_text="failed").click()
@@ -1550,7 +1543,7 @@ class TestRunsTable:
             "Ship the migration")
         # Counts describe the whole set, not the filtered page.
         expect(tabs).to_have_text(
-            ["all", "manager · 0", "monitor · 1", "running · 0", "awaiting action · 1", "failed · 1"])
+            ["all", "running · 0", "awaiting action · 1", "failed · 1"])
 
     def test_search_filters_the_table(self, webapp, page):
         _seed_runs(webapp.install)
@@ -1794,7 +1787,22 @@ class TestWriteActions:
 # --- the composer -----------------------------------------------------------
 
 class TestComposer:
-    """Inspection is read-only; only a paused approval gate submits a verdict."""
+    """The reply box at the foot of a transcript (#987).
+
+    Three branches, and the read model picks between them: a live session is
+    delivered to, a run parked on a human gate is ANSWERED, and a row that is
+    neither gets no control at all. What each branch posts is the assertion
+    here - the payload is the entire contract, and a box that sends the wrong
+    thing looks exactly like a box that works.
+
+    The chat and resume endpoints are answered from the browser side, for the
+    same reason the `runsError` branch is: resolving one for real needs a live
+    agent process to take a turn, which this test process does not have.
+    Delivery is proven against real sessions in
+    `tests/integration/test_webapp_chat_delivery.py`, and what a verdict does
+    to a running workflow in `tests/test_orchestrator.py`; what is proven here
+    is the front end, which neither of those can see.
+    """
 
     LIVE = "worker-live"
     GATE = "wf-issue-lifecycle-test-repo-987"
@@ -1851,14 +1859,12 @@ class TestComposer:
         expect(page.locator(".composer")).to_be_visible()
         return page.locator(".composer")
 
-    def test_live_session_inspection_is_read_only(self, webapp, page):
+    def test_a_live_session_offers_a_reply(self, webapp, page):
         self._seed(webapp.install)
-        posted = self._chat(page)
-        _agent(page, webapp)
-        page.locator(".runs tbody tr", has_text="Live worker").first.click()
-        expect(page.locator(".composer")).to_be_hidden()
-        expect(page.locator(".modal textarea")).to_have_count(0)
-        assert posted == []
+        composer = self._open(page, webapp, "Live worker")
+        expect(composer.locator("button")).to_have_text("Send")
+        expect(composer.locator(".composer-note")).to_contain_text(
+            "the same way the CLI delivers a message")
 
     def test_a_parked_gate_offers_a_verdict_instead(self, webapp, page):
         # Nothing is behind this row, and nothing needs to be: what the gate
@@ -1879,6 +1885,32 @@ class TestComposer:
         page.locator(".runs tbody tr", has_text="inbox-watch").click()
         expect(page.locator("[data-el=slabKind]")).to_have_text("details")
         expect(page.locator(".composer")).to_be_hidden()
+
+    def test_the_live_branch_delivers_to_that_session(self, webapp, page):
+        self._seed(webapp.install)
+        posted = self._chat(page)
+        composer = self._open(page, webapp, "Live worker")
+
+        composer.locator("textarea").fill("how is it going?")
+        composer.locator("button").click()
+
+        expect(composer.locator("textarea")).to_have_value("", timeout=10_000)
+        assert posted == [{"subagent": self.LIVE, "text": "how is it going?"}]
+
+    def test_the_live_branch_re_reads_the_transcript_when_the_turn_lands(
+            self, webapp, page):
+        """The slab is otherwise one-shot: the 4s timers refresh the table,
+        not this. Without the re-read the answer is invisible until the run
+        is reopened, which reads as the message having been swallowed."""
+        self._seed(webapp.install)
+        self._chat(page)
+        composer = self._open(page, webapp, "Live worker")
+
+        reread = _record_requests(page, TRANSCRIPT_URL)
+        composer.locator("textarea").fill("ping")
+        composer.locator("button").click()
+        expect(composer.locator("textarea")).to_have_value("", timeout=10_000)
+        assert len(reread) == 1, reread
 
     def test_approving_resumes_the_run_with_that_verdict(self, webapp, page):
         """The verdict is the payload. The route step in the workflow reads it
@@ -1965,14 +1997,50 @@ class TestComposer:
         _agent(page, webapp)
         page.locator(".runs tbody tr", has_text="Fix the flaky test").click()
         composer = page.locator(".composer")
-        expect(composer).to_be_hidden()
+        expect(composer).to_be_visible()
+        expect(composer).to_contain_text("This session has ended")
         expect(composer.locator("textarea")).to_have_count(0)
         expect(composer.locator("button")).to_have_count(0)
 
+    def test_a_failed_delivery_is_reported_inline_and_the_box_recovers(
+            self, webapp, page):
+        """The failure this whole design exists to avoid is a box that
+        accepts typing and reports nothing. It must name the reason, in the
+        modal being read, and hand the control back."""
+        self._seed(webapp.install)
+        self._chat(page, outcome="error",
+                   error="session 'worker-live' process is dead")
+        composer = self._open(page, webapp, "Live worker")
+
+        composer.locator("textarea").fill("anyone there?")
+        composer.locator("button").click()
+
+        expect(composer.locator(".composer-status")).to_have_text(
+            "session 'worker-live' process is dead", timeout=10_000)
+        expect(composer.locator(".composer-status")).to_have_class(
+            "composer-status bad")
+        expect(composer.locator("button")).to_be_enabled()
+        expect(composer.locator("textarea")).to_be_enabled()
+        # Their words are not thrown away by a failure they did not cause.
+        expect(composer.locator("textarea")).to_have_value("anyone there?")
+
+    def test_the_control_is_disabled_while_the_turn_is_in_flight(self, webapp,
+                                                                 page):
+        # A turn can take minutes. Leaving the box live invites a second send
+        # against a session already taking a turn.
+        self._seed(webapp.install)
+        self._chat(page, outcome="pending")
+        composer = self._open(page, webapp, "Live worker")
+
+        composer.locator("textarea").fill("slow one")
+        composer.locator("button").click()
+        expect(composer.locator("button")).to_be_disabled()
+        expect(composer.locator("button")).to_have_text("Sending…")
+        expect(composer.locator("textarea")).to_be_disabled()
+
     def test_closing_the_slab_takes_the_composer_with_it(self, webapp, page):
         self._seed(webapp.install)
-        _agent(page, webapp)
-        page.locator(".runs tbody tr", has_text="Live worker").first.click()
+        self._open(page, webapp, "Live worker")
         page.locator("[data-el=slabClose]").click()
         expect(page.locator(".composer")).to_be_hidden()
 

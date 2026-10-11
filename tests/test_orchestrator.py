@@ -920,17 +920,14 @@ class TestRunWorkflow:
         assert [(item["attempted_model"], item["fallback_model"]) for item in incidents] == [("cheap", "control")]
 
     @pytest.mark.parametrize("explicit_model", ["", "operator-model"])
-    def test_static_policy_workflow_reaches_brain_with_routed_model(self, tmp_path, monkeypatch, explicit_model):
+    def test_policy_workflow_reaches_brain_with_routed_model(self, tmp_path, monkeypatch, explicit_model):
         from bobi.metrics.runtime import MetricsRuntime
-        from tests.metrics.helpers import configured, context
+        from tests.metrics.helpers import configured, fixed_policy
 
         _bind_runtime_root(tmp_path, monkeypatch)
-        raw = configured()
-        raw["policy"]["mode"] = "enforce"
-        raw["policy"]["scope"]["entry_points"] = ["workflow_start"]
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        raw = configured(mode="enforce", entry_points=["workflow_start"])
         monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
-        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+        fixed_policy(monkeypatch)
         monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
         runtime = MetricsRuntime(tmp_path, mode="enabled")
         monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
@@ -947,7 +944,6 @@ class TestRunWorkflow:
                 return
             route = runs[0].variable_scopes["_runtime"]["route"]
             assert route["decision"]["model_selected"] == "cheap"
-            assert route["decision"]["variant_id"] == "treatment"
             assert json.loads(route["decision"]["policy_metadata_json"])["status"] == "decided"
             connect_checks.append(True)
             await original_connect(client)
@@ -960,24 +956,21 @@ class TestRunWorkflow:
         if explicit_model:
             def no_policy(*args):
                 raise AssertionError("explicit model must bypass policy loading")
-            monkeypatch.setattr("bobi.metrics.routing.load_policy", no_policy)
+            monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", no_policy)
         assert self._mock_asyncio_run(wf, task="t", repo="r", cwd=str(tmp_path), run_key="run-1", model=explicit_model)
         assert len(calls) == 1 and calls[0]["options"]["model"] == (explicit_model or "cheap")
         assert connect_checks == [True]
         assert runtime.close(timeout=2)
 
     @pytest.mark.parametrize("retry", [False, True])
-    def test_static_routed_workflow_resume_does_not_load_policy(self, tmp_path, monkeypatch, retry):
+    def test_routed_workflow_resume_does_not_load_policy(self, tmp_path, monkeypatch, retry):
         from bobi.metrics.runtime import MetricsRuntime
-        from tests.metrics.helpers import configured, context
+        from tests.metrics.helpers import configured, fixed_policy
 
         _bind_runtime_root(tmp_path, monkeypatch)
-        raw = configured()
-        raw["policy"]["mode"] = "enforce"
-        raw["policy"]["scope"]["entry_points"] = ["workflow_start"]
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_SUBJECT", context(raw, "treatment").experiment_subject)
+        raw = configured(mode="enforce", entry_points=["workflow_start"])
         monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
-        monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+        fixed_policy(monkeypatch)
         monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
         runtime = MetricsRuntime(tmp_path, mode="enabled")
         monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
@@ -994,7 +987,7 @@ class TestRunWorkflow:
         runtime = MetricsRuntime(tmp_path, mode="enabled")
         def no_policy(*args):
             raise AssertionError("workflow resume must reuse checkpoint")
-        monkeypatch.setattr("bobi.metrics.routing.load_policy", no_policy)
+        monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", no_policy)
         if retry:
             wf.steps[1] = StepDef(name="wait", prompt="evaluate")
             assert self._mock_asyncio_run(wf, task="t", repo="r", cwd=str(tmp_path), run_key="run-1")

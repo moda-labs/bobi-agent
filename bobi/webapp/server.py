@@ -96,6 +96,34 @@ class _SetupHost:
         return sorted(self.sessions)
 
 
+# Bound for the JSON bodies the metrics sandbox and JEV config routes accept.
+_JSON_BODY_LIMIT = 131072
+_JSON_BODY_TIMEOUT_S = 3
+
+
+async def _read_json_object(request: Request, message: str, code: str) -> dict:
+    """The request body as a JSON object, read within a size and time bound.
+
+    A body that is too large, slow, not JSON, or not an object raises
+    ``MetricsQueryError(message, code)``; the cause is never echoed back."""
+    import asyncio
+    import json
+
+    try:
+        body = bytearray()
+        async with asyncio.timeout(_JSON_BODY_TIMEOUT_S):
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > _JSON_BODY_LIMIT:
+                    raise ValueError("body too large")
+                body.extend(chunk)
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("body must be an object")
+    except (ValueError, UnicodeError, RecursionError, TimeoutError):
+        raise MetricsQueryError(message, code) from None
+    return payload
+
+
 def _claude_available() -> bool:
     from bobi.brain.claude import get_cli_path
 
@@ -196,40 +224,12 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
 
     @app.post("/api/agents/{name}/metrics/test-route")
     async def metrics_test_route(name: str, request: Request) -> JSONResponse:
-        import asyncio
-        import json
-
-        try:
-            body = bytearray()
-            async with asyncio.timeout(3):
-                async for chunk in request.stream():
-                    if len(body) + len(chunk) > 131072:
-                        raise ValueError("simulation body too large")
-                    body.extend(chunk)
-            payload = json.loads(body)
-            if not isinstance(payload, dict):
-                raise ValueError("simulation body must be an object")
-        except (ValueError, UnicodeError, RecursionError, TimeoutError):
-            raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
+        payload = await _read_json_object(request, "invalid sandbox input or JEV configuration", "invalid_simulation")
         return JSONResponse(await rt.test_route(name, payload), headers={"Cache-Control": "no-store"})
 
     @app.post("/api/agents/{name}/metrics/test-run")
     async def metrics_test_run(name: str, request: Request) -> JSONResponse:
-        import asyncio
-        import json
-
-        try:
-            body = bytearray()
-            async with asyncio.timeout(3):
-                async for chunk in request.stream():
-                    if len(body) + len(chunk) > 131072:
-                        raise ValueError("run body too large")
-                    body.extend(chunk)
-            payload = json.loads(body)
-            if not isinstance(payload, dict):
-                raise ValueError("run body must be an object")
-        except (ValueError, UnicodeError, RecursionError, TimeoutError):
-            raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
+        payload = await _read_json_object(request, "invalid sandbox input or JEV configuration", "invalid_simulation")
         return JSONResponse(await rt.run_test_prompt(name, payload), headers={"Cache-Control": "no-store"})
 
     @app.get("/api/agents/{name}/metrics/turns")
@@ -261,35 +261,18 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
                             headers={"Cache-Control": "no-store"})
 
     @app.get("/api/agents/{name}/metrics/jev-config")
-    @app.get("/api/agents/{name}/routing/config")
     def get_routing_config(name: str) -> JSONResponse:
         return JSONResponse(rt.get_routing_config(name), headers={"Cache-Control": "no-store"})
 
     @app.post("/api/agents/{name}/metrics/jev-config")
-    @app.post("/api/agents/{name}/routing/config")
     async def update_routing_config(name: str, request: Request) -> JSONResponse:
-        import asyncio
-        import json
-
-        try:
-            body = bytearray()
-            async with asyncio.timeout(3):
-                async for chunk in request.stream():
-                    if len(body) + len(chunk) > 131072:
-                        raise ValueError("configuration body too large")
-                    body.extend(chunk)
-            payload = json.loads(body)
-            if not isinstance(payload, dict):
-                raise ValueError("configuration must be an object")
-        except (ValueError, UnicodeError, RecursionError, TimeoutError):
-            raise MetricsQueryError("invalid JEV configuration", "invalid_jev_config") from None
+        payload = await _read_json_object(request, "invalid JEV configuration", "invalid_jev_config")
         from starlette.concurrency import run_in_threadpool
 
         data = await run_in_threadpool(rt.update_routing_config, name, payload)
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
     @app.delete("/api/agents/{name}/metrics/jev-config")
-    @app.delete("/api/agents/{name}/routing/config")
     def delete_routing_config(name: str) -> JSONResponse:
         return JSONResponse(rt.update_routing_config(name, {"enabled": False}), headers={"Cache-Control": "no-store"})
 
@@ -309,18 +292,13 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def agent_sessions(name: str) -> dict:
         return rt.session_log(name)
 
-    # System daemon logs: manager.log tail for debugging network/LLM/event failures
-    @app.get("/api/agents/{name}/logs")
-    def agent_logs(name: str, lines: int = 200) -> dict:
-        return rt.system_logs(name, lines=max(1, min(lines, 1000)))
-
     # The unified runs view: sessions + workflow runs + monitor runs as one
     # list. Filters are applied before the page window is selected.
     @app.get("/api/agents/{name}/runs")
-    def agent_runs(name: str, status: str = "", kind: str = "", query: str = "",
+    def agent_runs(name: str, status: str = "", query: str = "",
                    offset: int = 0, limit: int = 0) -> dict:
         return rt.runs(
-            name, status=status, kind=kind, query=query, offset=max(0, offset),
+            name, status=status, query=query, offset=max(0, offset),
             limit=limit or None)
 
     # The runs table's one write action. Resume ANSWERS a gate: the verdict

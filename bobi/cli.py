@@ -2214,16 +2214,6 @@ def metrics_status(json_output):
             "db_ready": db_path.exists(),
         },
     }
-    try:
-        calibration = json.loads(
-            (metrics_root / "estimator-calibration.json").read_text()
-        )
-    except (OSError, ValueError, TypeError):
-        calibration = None
-    result["estimation"] = {
-        "registry_ready": (metrics_root / "estimators.json").exists(),
-        "last_calibration": calibration,
-    }
     if db_path.exists():
         from bobi.metrics.store import connect, integrity_check
 
@@ -2264,26 +2254,6 @@ def metrics_status(json_output):
             "uncovered:  "
             f"{result['reconciliation']['uncovered_turns']} turn(s)"
         )
-
-
-@metrics.command("calibrate")
-@click.option("--json", "json_output", is_flag=True, help="Print JSON output.")
-def metrics_calibrate(json_output):
-    """Calibrate and gate model-specific byte estimators from exact turns."""
-    from bobi.metrics.estimate import calibrate_estimators
-
-    root = _detect_project_root()
-    try:
-        result = calibrate_estimators(root)
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        raise click.ClickException(str(exc)) from None
-    if json_output:
-        click.echo(json.dumps(result, sort_keys=True))
-        return
-    click.echo(
-        f"done: {result['qualified_model_groups']}/"
-        f"{result['model_groups']} model group(s) qualified"
-    )
 
 
 @metrics.command("reconcile")

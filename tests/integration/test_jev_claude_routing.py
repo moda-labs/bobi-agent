@@ -1,4 +1,4 @@
-"""Opt-in live proof that a static routed model reaches the Claude CLI."""
+"""Opt-in live proof that a policy-routed model reaches the Claude CLI."""
 
 import os
 
@@ -12,12 +12,12 @@ from .conftest import _drain, requires_claude
                     reason="requires explicit live Claude routing opt-in")
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
-async def test_static_routed_model_runs_in_real_claude_cli(tmp_path, monkeypatch):
+async def test_routed_model_runs_in_real_claude_cli(tmp_path, monkeypatch):
     import json
     from bobi.brain import get_brain
     from bobi.metrics.routing import resolve_route
     from bobi.metrics.runtime import MetricsRuntime
-    from tests.metrics.helpers import configured, context
+    from tests.metrics.helpers import configured, context, fixed_policy
     from dataclasses import replace
     from bobi import paths
     from bobi.brain import GATEWAY_BASE_URL_ENV
@@ -28,17 +28,14 @@ async def test_static_routed_model_runs_in_real_claude_cli(tmp_path, monkeypatch
     monkeypatch.setenv("BOBI_BRAIN", "claude")
     monkeypatch.delenv(GATEWAY_BASE_URL_ENV, raising=False)
     monkeypatch.delenv("BOBI_BRAIN_MODEL", raising=False)
-    raw = configured()
-    raw["control_model"] = "sonnet"
-    raw["variants"][0]["model"] = "sonnet"
-    raw["policy"].update(brain="claude", mode="enforce", candidate_models=["sonnet", "haiku"],
-                         options={"model": "haiku"})
+    raw = configured(control_model="sonnet", candidate_models=["sonnet", "haiku"], brain="claude", mode="enforce")
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(raw))
-    monkeypatch.setenv("BOBI_METRICS_ASSIGNMENT_SECRET", "test-secret")
+    # The policy answer is fixed; the real Claude CLI is what this test proves.
+    fixed_policy(monkeypatch, "haiku")
     runtime = MetricsRuntime(tmp_path, mode="enabled")
     client = None
     try:
-        outcome = await resolve_route(replace(context(raw, "treatment"), brain="claude"), runtime=runtime)
+        outcome = await resolve_route(replace(context(), brain="claude"), runtime=runtime)
         assert outcome.model == "haiku" and outcome.decision
         client = get_brain("claude").make_session(cwd=str(tmp_path),
             system_prompt="Reply concisely. Do not use tools.",

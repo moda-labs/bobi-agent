@@ -12,7 +12,9 @@ Usage:
     python3 scripts/update_prices.py --anthropic page.md --openai page.md
 
 The script refuses to write when a page no longer parses into the expected
-table (a layout change), so a broken page never empties the price list.
+table (a layout change), so a broken page never empties the price list. A
+model that drops off a page keeps its last recorded price: historical usage
+of a retired model must not lose its rate or be repriced.
 """
 
 from __future__ import annotations
@@ -120,15 +122,30 @@ def parse_openai(markdown: str) -> dict[str, dict[str, float]]:
     return prices
 
 
-def build(anthropic_md: str, openai_md: str) -> dict:
-    models = {**parse_anthropic(anthropic_md), **parse_openai(openai_md)}
-    missing = [key for key in REQUIRED if key not in models]
+ORDER = ("input", "cache_read", "cache_write_5m", "cache_write_1h", "output")
+
+
+def _retained(previous: object) -> dict[str, dict[str, float]]:
+    """Well-formed entries of the existing file; anything else is not carried over."""
+    if not isinstance(previous, dict):
+        return {}
+    return {key: entry for key, entry in previous.items()
+            if isinstance(key, str) and isinstance(entry, dict)
+            and all(isinstance(entry.get(name), (int, float)) and not isinstance(entry.get(name), bool)
+                    for name in ORDER)}
+
+
+def build(anthropic_md: str, openai_md: str, previous: object = None) -> dict:
+    """Prices from both pages, laid over the ``previous`` models mapping so a
+    model no longer listed keeps its last price instead of disappearing."""
+    parsed = {**parse_anthropic(anthropic_md), **parse_openai(openai_md)}
+    missing = [key for key in REQUIRED if key not in parsed]
     if missing:
         raise ValueError(f"pricing pages parsed without {', '.join(missing)}; layout may have changed")
-    order = ("input", "cache_read", "cache_write_5m", "cache_write_1h", "output")
+    models = {**_retained(previous), **parsed}
     return {"sources": {"anthropic": ANTHROPIC_URL, "openai": OPENAI_URL},
             "unit": "USD per million tokens",
-            "models": {key: {name: models[key][name] for name in order} for key in sorted(models)}}
+            "models": {key: {name: models[key][name] for name in ORDER} for key in sorted(models)}}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -138,12 +155,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--openai", type=Path, help="read the OpenAI page from a file")
     args = parser.parse_args(argv)
     try:
+        current = json.loads(OUTPUT.read_text()) if OUTPUT.exists() else {}
+        if not isinstance(current, dict):
+            raise ValueError(f"{OUTPUT.name} is not a JSON object")
         data = build(args.anthropic.read_text() if args.anthropic else _fetch(ANTHROPIC_URL),
-                     args.openai.read_text() if args.openai else _fetch(OPENAI_URL))
+                     args.openai.read_text() if args.openai else _fetch(OPENAI_URL),
+                     current.get("models"))
     except (OSError, ValueError) as error:
         print(f"update_prices: {error}", file=sys.stderr)
         return 2
-    current = json.loads(OUTPUT.read_text()) if OUTPUT.exists() else {}
     if current.get("models") == data["models"]:
         print(f"update_prices: {len(data['models'])} prices unchanged")
         return 0

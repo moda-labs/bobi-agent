@@ -1,45 +1,57 @@
-"""Privacy-safe HMAC assignment and historical routing telemetry contracts."""
+"""The short JEV routing config and privacy-safe router decision contracts."""
 
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
-import re
 from dataclasses import dataclass
 from typing import Mapping
 
 from bobi.config import _PROVIDER_CLEARED_ENV
-from bobi.metrics.policy import PolicyConfig, policy_secret_names
+from bobi.metrics.policy import POLICY_CREDENTIAL_ENV, PolicyConfig
 
-ASSIGNMENT_ALGORITHM = "hmac-sha256-u64-v1"
 EXPERIMENT_CONFIG_ENV = "BOBI_METRICS_EXPERIMENT_JSON"
-ASSIGNMENT_SECRET_ENV = "BOBI_METRICS_ASSIGNMENT_SECRET"
-EXPERIMENT_SUBJECT_ENV = "BOBI_METRICS_EXPERIMENT_SUBJECT"
-ROUTING_ENV_NAMES = (
-    EXPERIMENT_CONFIG_ENV,
-    ASSIGNMENT_SECRET_ENV,
-    EXPERIMENT_SUBJECT_ENV,
+# Every routed decision records this variant: the config always calls the policy.
+TREATMENT_VARIANT = "treatment_jev"
+LONG_FORM_ERROR = "long-form experiment config is no longer supported; save from the editor to rewrite it"
+
+# Short-form settings and the value each takes when the config omits it.
+SHORT_DEFAULTS: dict[str, object] = {
+    "mode": "enforce",
+    "roles": ["director", "engineer"],
+    "entry_points": ["session_start", "subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start"],
+    "brain": "auto",
+    "prompt_egress": "none",
+    "min_confidence": 0.85,
+    "deadline_ms": 3000,
+    "max_prompt_bytes": 8192,
+    "policy_version": "jev-1.13.0",
+}
+_LABEL_DEFAULTS = {
+    "experiment_id": "jev-routing-v1",
+    "router_name": "jev-router",
+    "router_version": "v1",
+    "feature_schema_version": "jev-features-v1",
+}
+_SHORT_FIELDS = (
+    {"control_model", "candidate_models", "instructions", "criteria", "endpoint", "cohort"}
+    | set(SHORT_DEFAULTS) | set(_LABEL_DEFAULTS)
 )
+
+
+def default_criteria(model: str) -> str:
+    return f"Choose {model} when the routing instructions recommend it."
 
 
 def provider_subprocess_env(
     base: Mapping[str, str] | None = None,
     *, blank_inherited: bool = False,
 ) -> dict[str, str]:
-    """Remove experiment assignment material from provider subprocesses."""
+    """Remove the routing config and the policy credential from provider subprocesses."""
     env = dict(os.environ if base is None else base)
     env.pop(_PROVIDER_CLEARED_ENV, None)
-    removed = set(ROUTING_ENV_NAMES) | {"TYPESAFE_API_KEY"} | set(policy_secret_names())
-    try:
-        configured = json.loads(env.get(EXPERIMENT_CONFIG_ENV, "{}"))
-        policy = configured.get("policy") if isinstance(configured, dict) else None
-        credential = policy.get("credential_env") if isinstance(policy, dict) else None
-        if isinstance(credential, str) and re.fullmatch(r"[A-Z_][A-Z0-9_]*", credential.strip()):
-            removed.add(credential.strip())
-    except (ValueError, TypeError):
-        pass
+    removed = {EXPERIMENT_CONFIG_ENV, POLICY_CREDENTIAL_ENV}
     for name in removed:
         env.pop(name, None)
     if blank_inherited:
@@ -50,273 +62,130 @@ def provider_subprocess_env(
 
 
 @dataclass(frozen=True)
-class ExperimentVariant:
-    variant_id: str
-    weight: float
-    model: str = ""
-    policy: str = ""
-
-
-@dataclass(frozen=True)
 class ExperimentConfig:
+    """A validated short JEV config: one policy routing between candidate models."""
+
     experiment_id: str
-    variants: tuple[ExperimentVariant, ...]
-    router_name: str
-    router_version: str
-    policy_version: str
-    feature_schema_version: str
     control_model: str
+    policy: PolicyConfig
+    router_name: str = "jev-router"
+    router_version: str = "v1"
+    feature_schema_version: str = "jev-features-v1"
     cohort: str | None = None
-    policy: PolicyConfig | None = None
+
+    @property
+    def policy_version(self) -> str:
+        return self.policy.version
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, object]) -> "ExperimentConfig":
-        if "candidate_models" in raw:
-            allowed = {
-                "experiment_id", "mode", "control_model", "candidate_models", "roles",
-                "instructions", "brain", "entry_points", "min_confidence", "deadline_ms",
-                "prompt_egress", "max_prompt_bytes", "criteria", "endpoint", "policy_version",
-                "router_name", "router_version", "feature_schema_version", "cohort",
-            }
-            if set(raw) - allowed:
-                raise ValueError("unsupported experiment config fields")
-            candidates = raw["candidate_models"]
-            if (not isinstance(candidates, list) or not candidates
-                    or any(not isinstance(model, str) or not model.strip() for model in candidates)):
-                raise ValueError("candidate_models must be non-empty model names")
-            candidates = [model.strip() for model in candidates]
-            mode = raw.get("mode", "enforce")
-            control = raw.get("control_model")
-            version = raw.get("policy_version", "jev-1.13.0")
-            options = {
-                "instructions": raw.get("instructions"),
-                "criteria": raw.get("criteria", {model: f"Choose {model} when the routing instructions recommend it."
-                                                   for model in candidates}),
-            }
-            if "endpoint" in raw:
-                options["endpoint"] = raw["endpoint"]
-            raw = {
-                "experiment_id": raw.get("experiment_id", "jev-routing-v1"), "control_model": control,
-                "router_name": raw.get("router_name", "jev-router"),
-                "router_version": raw.get("router_version", "v1"),
-                "feature_schema_version": raw.get("feature_schema_version", "jev-features-v1"),
-                "policy_version": version, "cohort": raw.get("cohort"),
-                "variants": [
-                    {"variant_id": "control", "model": control, "weight": 0.0},
-                    {"variant_id": "treatment_jev", "policy": "typesafe-jev", "weight": 1.0},
-                ],
-                "policy": {
-                    "name": "typesafe-jev", "version": version,
-                    "brain": raw.get("brain", "auto"), "mode": mode,
-                    "candidate_models": candidates,
-                    "scope": {"roles": raw.get("roles", ["director", "engineer"]), "entry_points": raw.get("entry_points", [
-                        "session_start", "subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start",
-                    ])},
-                    "egress": {"prompt": raw.get("prompt_egress", "none"),
-                               "max_prompt_bytes": raw.get("max_prompt_bytes", 8192)},
-                    "credential_env": "TYPESAFE_API_KEY", "options": options,
-                    "min_confidence": raw.get("min_confidence", 0.85),
-                    "deadline_ms": raw.get("deadline_ms", 3000),
-                },
-            }
-            from bobi.metrics.policies.typesafe import TypeSafePolicy
-
-            TypeSafePolicy(PolicyConfig.from_mapping(raw["policy"]))
-        allowed = {
-            "experiment_id", "variants", "router_name", "router_version",
-            "policy_version", "feature_schema_version", "control_model",
-            "cohort", "policy",
-        }
-        unknown = sorted(set(raw) - allowed)
+        if "variants" in raw or "policy" in raw:
+            raise ValueError(LONG_FORM_ERROR)
+        unknown = sorted(set(raw) - _SHORT_FIELDS)
         if unknown:
-            raise ValueError(
-                "unsupported experiment config fields: " + ", ".join(unknown)
-            )
+            raise ValueError("unsupported experiment config fields: " + ", ".join(unknown))
 
-        def required(name: str) -> str:
-            value = raw.get(name)
+        def label(name: str) -> str:
+            value = raw.get(name, _LABEL_DEFAULTS[name])
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"experiment config requires non-empty {name}")
             return value.strip()
 
-        source_variants = raw.get("variants")
-        if not isinstance(source_variants, list) or len(source_variants) < 2:
-            raise ValueError("experiment config requires at least two variants")
-        variants: list[ExperimentVariant] = []
-        seen: set[str] = set()
-        for item in source_variants:
-            if not isinstance(item, dict):
-                raise ValueError("each experiment variant must be an object")
-            unknown_variant = sorted(set(item) - {"variant_id", "weight", "model", "policy"})
-            if unknown_variant:
-                raise ValueError(
-                    "unsupported experiment variant fields: "
-                    + ", ".join(unknown_variant)
-                )
-            variant_id = item.get("variant_id")
-            model = item.get("model")
-            policy_name = item.get("policy")
-            weight = item.get("weight")
-            if not isinstance(variant_id, str) or not variant_id.strip():
-                raise ValueError("variant_id must be a non-empty string")
-            variant_id = variant_id.strip()
-            if variant_id in seen:
-                raise ValueError(f"duplicate variant_id {variant_id}")
-            if ("model" in item) == ("policy" in item):
-                raise ValueError("variant requires exactly one model or policy")
-            selected = model if "model" in item else policy_name
-            if not isinstance(selected, str) or not selected.strip():
-                raise ValueError("variant requires non-empty model or policy")
-            if isinstance(weight, bool) or not isinstance(weight, (int, float)):
-                raise ValueError(f"variant {variant_id} requires numeric weight")
-            if not 0 <= float(weight) <= 1:
-                raise ValueError(f"variant {variant_id} weight must be in [0, 1]")
-            seen.add(variant_id)
-            variants.append(ExperimentVariant(
-                variant_id, float(weight),
-                model.strip() if isinstance(model, str) else "",
-                policy_name.strip() if isinstance(policy_name, str) else "",
-            ))
-        if abs(sum(item.weight for item in variants) - 1.0) > 1e-9:
-            raise ValueError("experiment variant weights must sum to 1")
+        candidates = raw.get("candidate_models")
+        if (not isinstance(candidates, list) or not candidates
+                or any(not isinstance(model, str) or not model.strip() for model in candidates)):
+            raise ValueError("candidate_models must be non-empty model names")
+        candidates = [model.strip() for model in candidates]
+        control = raw.get("control_model")
+        if not isinstance(control, str) or control.strip() not in candidates:
+            raise ValueError("control_model must be one of candidate_models")
         cohort = raw.get("cohort")
-        policy_raw = raw.get("policy")
-        if "policy" in raw and not isinstance(policy_raw, dict):
-            raise ValueError("experiment policy must be an object")
-        policy = PolicyConfig.from_mapping(policy_raw) if isinstance(policy_raw, dict) else None
-        policy_variants = [item for item in variants if item.policy]
-        if bool(policy_variants) != bool(policy):
-            raise ValueError("policy required exactly when a variant names a policy")
-        if policy and any(item.policy != policy.name for item in policy_variants):
-            raise ValueError("variant policy names must match configured policy")
         if cohort is not None and (not isinstance(cohort, str) or not cohort.strip()):
             raise ValueError("cohort must be a non-empty string when supplied")
-        config = cls(
-            experiment_id=required("experiment_id"),
-            variants=tuple(variants),
-            router_name=required("router_name") if "router_name" in raw else "jev-router",
-            router_version=required("router_version") if "router_version" in raw else "v1",
-            policy_version=required("policy_version"),
-            feature_schema_version=required("feature_schema_version") if "feature_schema_version" in raw else "jev-features-v1",
-            control_model=required("control_model"),
-            cohort=cohort.strip() if isinstance(cohort, str) else None,
-            policy=policy,
+        settings = {name: raw.get(name, default) for name, default in SHORT_DEFAULTS.items()}
+        settings.update(
+            candidate_models=candidates, instructions=raw.get("instructions"),
+            criteria=raw.get("criteria", {model: default_criteria(model) for model in candidates}),
         )
-        if config.control_model not in {item.model for item in config.variants}:
-            raise ValueError("control_model must match one configured variant model")
-        if policy:
-            if sum(item.model == config.control_model for item in variants) != 1:
-                raise ValueError("policy experiment requires exactly one control variant")
-            if config.control_model not in policy.candidate_models:
-                raise ValueError("control_model must be a policy candidate")
-        return config
+        if "endpoint" in raw:
+            settings["endpoint"] = raw["endpoint"]
+        policy = PolicyConfig.from_mapping(settings)
+        from bobi.metrics.policies.typesafe import TypeSafePolicy
+
+        TypeSafePolicy(policy)  # instructions, criteria, endpoint and version pin
+        return cls(
+            experiment_id=label("experiment_id"), control_model=control.strip(), policy=policy,
+            router_name=label("router_name"), router_version=label("router_version"),
+            feature_schema_version=label("feature_schema_version"),
+            cohort=cohort.strip() if isinstance(cohort, str) else None,
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        """The minimal short form: key fields plus every setting or label that
+        differs from its default. ``from_mapping`` of the result is ``self``."""
+        policy = self.policy
+        options = json.loads(policy.options_json)
+        candidates = list(policy.candidate_models)
+        result: dict[str, object] = {
+            "mode": policy.mode, "control_model": self.control_model, "candidate_models": candidates,
+            "prompt_egress": policy.prompt_egress, "instructions": options["instructions"],
+        }
+        if options["criteria"] != {model: default_criteria(model) for model in candidates}:
+            result["criteria"] = options["criteria"]
+        if "endpoint" in options:
+            result["endpoint"] = options["endpoint"]
+        settings = {"roles": list(policy.roles), "entry_points": list(policy.entry_points), "brain": policy.brain,
+                    "min_confidence": policy.min_confidence, "deadline_ms": policy.deadline_ms,
+                    "max_prompt_bytes": policy.max_prompt_bytes, "policy_version": policy.version}
+        for name, value in settings.items():
+            default = SHORT_DEFAULTS[name]
+            if (set(value) != set(default)) if isinstance(value, list) else value != default:
+                result[name] = value
+        for name, default in _LABEL_DEFAULTS.items():
+            if getattr(self, name) != default:
+                result[name] = getattr(self, name)
+        if self.cohort is not None:
+            result["cohort"] = self.cohort
+        return result
+
+    def fingerprint(self) -> str:
+        """Hash of everything that shapes a decision; the endpoint is excluded."""
+        public = {name: value for name, value in self.to_mapping().items() if name != "endpoint"}
+        return hashlib.sha256(json.dumps(public, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
 class RouterDecision:
-    experiment_id: str | None
-    variant_id: str | None
-    assignment_unit: str | None
-    assignment_status: str
-    assignment_key_hash: str | None
-    assignment_algorithm: str | None
+    experiment_id: str
     cohort: str | None
     router_name: str
     router_version: str
-    policy_version: str | None
-    feature_schema_version: str | None
+    policy_version: str
+    feature_schema_version: str
     candidate_models: tuple[str, ...]
     model_selected: str
-    control_model: str | None
-    router_score: float | None
+    control_model: str
     router_reason: str
     router_latency_ms: float
     fallback_reason: str | None
     decided_at_us: int
-    expected_weight: float | None
-    expected_weights: tuple[tuple[str, float], ...]
     config_fingerprint: str
     entry_point: str = ""
     policy_metadata_json: str = "{}"
 
 
-def load_experiment(
-    env: Mapping[str, str] | None = None,
-) -> tuple[ExperimentConfig, bytes] | None:
+def load_experiment(env: Mapping[str, str] | None = None) -> ExperimentConfig | None:
     values = os.environ if env is None else env
     encoded = str(values.get(EXPERIMENT_CONFIG_ENV, "")).strip()
     if not encoded:
         return None
-    secret = str(values.get(ASSIGNMENT_SECRET_ENV, ""))
-    if not secret:
-        raise ValueError(f"{ASSIGNMENT_SECRET_ENV} is required when experiment routing is enabled")
     try:
         raw = json.loads(encoded)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{EXPERIMENT_CONFIG_ENV} is not valid JSON") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{EXPERIMENT_CONFIG_ENV} must contain an object")
-    return ExperimentConfig.from_mapping(raw), secret.encode("utf-8")
-
-
-def choose_assignment_key(
-    *,
-    experiment_subject: str = "",
-    run_key: str = "",
-    session_id: str = "",
-) -> tuple[str | None, str | None]:
-    for unit, value in (
-        ("experiment_subject", experiment_subject),
-        ("run_key", run_key),
-        ("session_id", session_id),
-    ):
-        if value:
-            return unit, value
-    return None, None
-
-
-def assign_variant(
-    config: ExperimentConfig,
-    secret: bytes,
-    *,
-    assignment_unit: str,
-    assignment_key: str,
-) -> tuple[ExperimentVariant, float, str]:
-    material = (
-        config.experiment_id + "\0" + assignment_unit + "\0" + assignment_key
-    ).encode("utf-8")
-    digest = hmac.new(secret, material, hashlib.sha256).digest()
-    bucket = int.from_bytes(digest[:8], "big") / 2**64
-    cumulative = 0.0
-    selected = next(variant for variant in reversed(config.variants) if variant.weight > 0)
-    for variant in config.variants:
-        cumulative += variant.weight
-        if bucket < cumulative:
-            selected = variant
-            break
-    key_hash = hmac.new(secret, assignment_key.encode("utf-8"), hashlib.sha256).hexdigest()
-    return selected, bucket, key_hash
-
-
-def public_config(config: ExperimentConfig) -> dict[str, object]:
-    """Return a secret-free representation suitable for test artifacts."""
-    result = {
-        "experiment_id": config.experiment_id,
-        "variants": [
-            {"variant_id": item.variant_id, "weight": item.weight,
-             **({"policy": item.policy} if item.policy else {"model": item.model})}
-            for item in config.variants
-        ],
-        "router_name": config.router_name,
-        "router_version": config.router_version,
-        "policy_version": config.policy_version,
-        "feature_schema_version": config.feature_schema_version,
-        "control_model": config.control_model,
-        "cohort": config.cohort,
-    }
-    if config.policy:
-        result["policy"] = config.policy.public_config()
-    return result
+    return ExperimentConfig.from_mapping(raw)
 
 
 def projection_fields(
@@ -325,11 +194,7 @@ def projection_fields(
     decided_at_us: int | None = None,
 ) -> dict[str, object]:
     """Return the privacy-safe fields used by router decision projections."""
-    metadata: dict[str, object] = {
-        "config_fingerprint": decision.config_fingerprint,
-        "expected_weight": decision.expected_weight,
-        "expected_weights": dict(decision.expected_weights),
-    }
+    metadata: dict[str, object] = {"config_fingerprint": decision.config_fingerprint}
     if decision.entry_point:
         metadata["entry_point"] = decision.entry_point
         policy = json.loads(decision.policy_metadata_json)
@@ -338,11 +203,8 @@ def projection_fields(
         metadata["policy"] = policy
     return {
         "experiment_id": decision.experiment_id,
-        "variant_id": decision.variant_id,
-        "assignment_unit": decision.assignment_unit,
-        "assignment_status": decision.assignment_status,
-        "assignment_key_hash": decision.assignment_key_hash,
-        "assignment_algorithm": decision.assignment_algorithm,
+        "variant_id": TREATMENT_VARIANT,
+        "assignment_status": "assigned",
         "cohort": decision.cohort,
         "router_name": decision.router_name,
         "router_version": decision.router_version,
@@ -356,7 +218,6 @@ def projection_fields(
         ),
         "model_selected": decision.model_selected,
         "control_model": decision.control_model,
-        "router_score": decision.router_score,
         "router_reason": decision.router_reason,
         "router_latency_ms": decision.router_latency_ms,
         "fallback_reason": decision.fallback_reason,

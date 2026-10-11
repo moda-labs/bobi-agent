@@ -222,23 +222,6 @@ CREATE TABLE IF NOT EXISTS usage_measurements (
     )
 );
 
-CREATE TABLE IF NOT EXISTS price_snapshots (
-    price_snapshot_id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,
-    model TEXT NOT NULL,
-    currency TEXT NOT NULL DEFAULT 'USD',
-    effective_at_us INTEGER NOT NULL,
-    input_per_million REAL,
-    cache_read_per_million REAL,
-    cache_write_per_million REAL,
-    cache_write_5m_per_million REAL,
-    cache_write_1h_per_million REAL,
-    output_per_million REAL,
-    source TEXT NOT NULL,
-    source_version TEXT,
-    raw_json TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS cost_measurements (
     cost_measurement_id TEXT PRIMARY KEY,
     scope TEXT NOT NULL CHECK (scope IN ('session', 'turn', 'invocation')),
@@ -250,7 +233,6 @@ CREATE TABLE IF NOT EXISTS cost_measurements (
     amount_usd REAL NOT NULL CHECK (amount_usd >= 0),
     measurement_source TEXT NOT NULL,
     is_estimated INTEGER NOT NULL CHECK (is_estimated IN (0, 1)),
-    price_snapshot_id TEXT REFERENCES price_snapshots(price_snapshot_id) DEFERRABLE INITIALLY DEFERRED,
     provider_event_id TEXT,
     observed_at_us INTEGER NOT NULL,
     raw_cost_json TEXT,
@@ -262,21 +244,6 @@ CREATE TABLE IF NOT EXISTS cost_measurements (
         OR (scope = 'invocation' AND session_id IS NOT NULL
             AND turn_id IS NOT NULL AND invocation_id IS NOT NULL)
     )
-);
-
-CREATE TABLE IF NOT EXISTS experiment_outcomes (
-    outcome_id TEXT PRIMARY KEY,
-    router_decision_id TEXT NOT NULL REFERENCES router_decisions(router_decision_id) DEFERRABLE INITIALLY DEFERRED,
-    outcome_name TEXT NOT NULL,
-    outcome_value REAL,
-    outcome_text TEXT,
-    outcome_definition_version TEXT NOT NULL,
-    outcome_source TEXT NOT NULL CHECK (outcome_source IN ('runtime', 'evaluator', 'human')),
-    evaluator_name TEXT NOT NULL,
-    evaluator_version TEXT NOT NULL,
-    is_estimated INTEGER NOT NULL DEFAULT 0 CHECK (is_estimated IN (0, 1)),
-    observed_at_us INTEGER NOT NULL,
-    metadata_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_provider_session ON sessions(provider, provider_session_id);

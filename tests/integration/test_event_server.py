@@ -2242,15 +2242,6 @@ def test_metrics_summary_default_round_trip_against_real_workerd(
          "sonnet", 0.01, "provider_stream", 0, now_us - 60_000_000,
          '{"private":"not-public"}'),
     )
-    conn.execute(
-        "INSERT INTO experiment_outcomes(outcome_id,router_decision_id,outcome_name,"
-        "outcome_value,outcome_text,outcome_definition_version,outcome_source,"
-        "evaluator_name,evaluator_version,is_estimated,observed_at_us,metadata_json) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        ("o-live", "r-live", "success", 1.0, "not-public-outcome", "v1",
-         "runtime", "runtime", "1", 0, now_us - 59_000_000,
-         '{"private":"not-public"}'),
-    )
     conn.commit()
     conn.close()
 
