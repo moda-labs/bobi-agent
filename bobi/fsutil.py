@@ -191,9 +191,11 @@ def _lock_path(path: Path | str) -> Path:
 def lock_is_held(path: Path | str) -> bool:
     """Whether some process currently holds :func:`file_lock` on *path*.
 
-    A probe, not an acquisition: it never waits and leaves nothing held. The
-    kernel drops a flock when its holder dies, so unlike a pid file the answer
-    cannot go stale across a crash or a machine restart.
+    A probe: it never waits and leaves nothing held. It asks for a shared
+    lock, which only an exclusive holder refuses, so two probes cannot read
+    each other as a holder. The kernel drops a flock when its holder dies, so
+    unlike a pid file the answer cannot go stale across a crash or a machine
+    restart.
     """
     import fcntl
 
@@ -203,7 +205,7 @@ def lock_is_held(path: Path | str) -> bool:
         return False
     with lock_file:
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             return True
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

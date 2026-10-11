@@ -296,6 +296,31 @@ def test_run_team_foreground_refuses_beside_a_manager_holding_the_lease(
     assert ran == []
 
 
+@pytest.mark.parametrize("pid_kind", ["dead", "self"])
+def test_run_team_foreground_held_lease_alone_does_not_refuse(
+    bobi_install, monkeypatch, pid_kind,
+):
+    """The refusal names a live manager; a dead or own pid is not one, and
+    the start goes on to wait for the lease like any replacement."""
+    import subprocess
+    import sys
+
+    from bobi.service import _manager_instance_lock, run_team_foreground
+
+    if pid_kind == "dead":
+        exited = subprocess.Popen([sys.executable, "-c", "pass"])
+        exited.wait()
+        pid = exited.pid
+    else:
+        pid = os.getpid()
+    ran = _foreground_with_pid_file(bobi_install, monkeypatch, pid)
+
+    with _manager_instance_lock(bobi_install.repo_path):
+        run_team_foreground(bobi_install.repo_path, fresh=True)
+
+    assert ran == [bobi_install.repo_path]
+
+
 def test_startup_info_warns_when_inbound_events_use_local_ingress(bobi_install):
     from bobi.service import build_startup_info
 

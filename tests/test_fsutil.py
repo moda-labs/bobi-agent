@@ -280,6 +280,14 @@ class TestFileLock:
         with file_lock(target):
             pass  # the probe left nothing held
 
+    def test_lock_is_held_probes_do_not_read_each_other_as_a_holder(self, tmp_path):
+        import fcntl
+
+        target = tmp_path / "state.json"
+        with open(tmp_path / "state.json.lock", "a+") as other_probe:
+            fcntl.flock(other_probe.fileno(), fcntl.LOCK_SH)
+            assert lock_is_held(target) is False
+
     def test_released_on_exception(self, tmp_path):
         target = tmp_path / "state.json"
         with pytest.raises(RuntimeError):
