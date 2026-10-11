@@ -1302,7 +1302,8 @@ def test_exact_measurement_wins_without_deleting_estimate(tmp_path):
     conn.close()
 
 
-def test_experiment_configuration_is_immutable_per_experiment_id(tmp_path):
+def test_a_config_change_under_one_experiment_id_keeps_every_routed_turn(tmp_path):
+    # Saving the JEV config keeps the experiment id; both decisions must project.
     db = tmp_path / "metrics.db"
     segment = tmp_path / "segment.telemetry"
     session = {
@@ -1340,13 +1341,10 @@ def test_experiment_configuration_is_immutable_per_experiment_id(tmp_path):
     result = MetricsCollector(db).collect_segment(segment)
     conn = connect(db, readonly=True)
     try:
-        assert result["quarantined"] == 1
-        assert conn.execute("SELECT COUNT(*) FROM router_decisions").fetchone()[0] == 1
-        error = conn.execute(
-            "SELECT projection_error FROM raw_events WHERE event_type='router_decision.recorded' "
-            "AND projection_state='quarantined'"
-        ).fetchone()[0]
-        assert "experiment configuration changed" in error
+        assert result["quarantined"] == 0
+        assert [tuple(row) for row in conn.execute(
+            "SELECT router_decision_id, policy_version FROM router_decisions ORDER BY decided_at_us")] == [
+            ("r1", "p1"), ("r2", "p2")]
     finally:
         conn.close()
 

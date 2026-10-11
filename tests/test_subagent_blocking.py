@@ -193,10 +193,11 @@ class TestRunAgentSupervisedNormal:
         assert runtime.close(timeout=2)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("failure", ["connect", "turn"])
+    @pytest.mark.parametrize("failure", ["connect", "turn", "turn_after_tool"])
     async def test_failed_policy_model_reruns_on_control(self, tmp_path, monkeypatch, failure):
         import json
         from bobi.brain import TurnResult
+        from bobi.brain.base import BrainToolExecution
         from bobi.metrics.runtime import MetricsRuntime
         from tests.metrics.helpers import configured, context
 
@@ -221,9 +222,11 @@ class TestRunAgentSupervisedNormal:
                 if failure == "connect" and self.model == "cheap":
                     raise RuntimeError("unknown model cheap")
             async def receive_response(self):
-                broken = failure == "turn" and self.model == "cheap"
+                broken = failure != "connect" and self.model == "cheap"
+                tools = [BrainToolExecution(tool_name="Bash")] if failure == "turn_after_tool" else []
                 yield TurnResult(session_id="sess-1", num_turns=1, is_error=broken,
-                                 error_message="model cheap is not available" if broken else "")
+                                 error_message="model cheap is not available" if broken else "",
+                                 tool_executions=tools)
 
         class FakeBrain:
             def make_session(self, **kwargs):
@@ -235,10 +238,14 @@ class TestRunAgentSupervisedNormal:
              patch(f"{SDK_PATCH}.get_registry", return_value=MagicMock()):
             result = await _run_agent_supervised("initial task", str(tmp_path), "run-1",
                 "check", 60, role="engineer", fresh=True)
-        # The policy chose "cheap"; it failed, so the task completed on the control model.
-        assert result.success and models == ["cheap", "control"]
-        assert [(item["attempted_model"], item["fallback_model"], item["brain"]) for item in incidents] == [
-            ("cheap", "control", "codex")]
+        if failure == "turn_after_tool":
+            # A tool already ran: a rerun would repeat it, so the failure stands.
+            assert not result.success and models == ["cheap"] and incidents == []
+        else:
+            # The policy chose "cheap"; it failed, so the task completed on the control model.
+            assert result.success and models == ["cheap", "control"]
+            assert [(item["attempted_model"], item["fallback_model"], item["brain"]) for item in incidents] == [
+                ("cheap", "control", "codex")]
         assert runtime.close(timeout=2)
 
     @pytest.mark.asyncio

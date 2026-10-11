@@ -113,9 +113,11 @@ when the key is not set (`credential_configured` in `GET .../jev-config`).
 
 Step 4 calls `POST /api/agents/{name}/metrics/test-run` with `prompt` and
 `model` (a policy candidate). It runs one turn through the agent's own Claude
-brain and login (`BOBI_AUTH`, `run/.env`) with every tool disabled, a fixed
-sandbox system prompt and an empty temporary working directory, so no project
-files or instructions reach the model. It opens no session and writes no
+brain and login (`BOBI_AUTH`, `run/.env`) with nothing allowed: no built-in
+tools (`tools=[]`), no MCP server (strict, none passed), no user or project
+settings and no permission bypass, plus a fixed sandbox system prompt and an
+empty temporary working directory, so no project files or instructions reach
+the model. It opens no session and writes no
 metrics. Runs are capped at 180 s, two at a time, and 64 KiB of output.
 Agents on a codex brain or a gateway get `model_run_unsupported`; a model
 error returns 502 `model_run_failed`, a timeout 504 `model_timeout`. On a
@@ -136,8 +138,12 @@ line, to `run/state/jev_routing_fallback.log`. Two events appear there:
   entry point: `Session`-backed sessions (`session_start`, `subagent_phase`,
   `subagent_persistent`), supervised subagents, and workflow runs
   (`workflow_start`), where the first prompt step reruns and later same-agent
-  steps stay on the control model. Turn-cap, authentication and credit failures do not
-  fall back, because the control model would fail the same way. The router
+  steps stay on the control model. A failed turn reruns only when nothing would
+  repeat (`may_rerun_on_control`): no tool ran in it (a rerun would repeat a
+  push or a post), the error is not a turn-cap, authentication or credit
+  failure (the control model would fail the same way), and the decision was
+  made fresh, not reused from a saved session route. Otherwise the failure
+  stands. A failed connect always falls back, since nothing ran. The router
   decision keeps the policy's pick, so the dashboard still attributes the turn
   to that model.
 

@@ -28,7 +28,7 @@ from bobi.sdk import (
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
 from bobi.brain import normalize_brain_kind, session_brain_label
-from bobi.metrics.routing import NO_MODEL_FALLBACK_KINDS, RoutingContext, candidate_failed, resolve_route
+from bobi.metrics.routing import RoutingContext, candidate_failed, may_rerun_on_control, resolve_route
 from bobi.brain.turns import drain_turn, timeout_error, tool_crash_error
 from bobi.transient import is_transient_api_error
 from bobi.env import (
@@ -537,8 +537,9 @@ async def _run_agent_supervised(
                                       error=result.error, phase=phase)
                     return result
 
-                if (result_msg.is_error and route_decision is not None
-                        and result_msg.error_kind not in NO_MODEL_FALLBACK_KINDS):
+                if result_msg.is_error and may_rerun_on_control(
+                        route_decision, error_kind=result_msg.error_kind,
+                        tools_ran=bool(result_msg.tool_executions)):
                     # The policy's model failed its first turn: rerun the task
                     # once on the control model in a fresh session.
                     control = candidate_failed(route_decision, session_name=name, brain=routing_brain,

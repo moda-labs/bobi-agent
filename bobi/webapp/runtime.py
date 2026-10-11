@@ -845,6 +845,10 @@ def _saved_experiment(root, env: dict):
 
 _SANDBOX_SYSTEM_PROMPT = ("You are answering a routing test in the Bobi sandbox. Answer the task directly "
                           "and concisely. You have no tools and no access to files.")
+# An allowlist of nothing: no built-in tools, no MCP server (strict, none
+# passed), no user or project settings, and no permission bypass.
+_SANDBOX_RUN_OPTIONS = {"max_turns": 1, "tools": [], "allowed_tools": [], "mcp_servers": {},
+                        "strict_mcp_config": True, "setting_sources": [], "permission_mode": "default"}
 _SANDBOX_RUN_TIMEOUT_S = 180
 _SANDBOX_MAX_OUTPUT_BYTES = 65536
 
@@ -1025,7 +1029,6 @@ class LocalRuntime(TeamRuntime):
         from bobi.env import child_agent_env
         from bobi.metrics.query import MetricsQueryError
         from bobi.redact import redact_secrets
-        from bobi.setup.llm import _NO_TOOLS
 
         root = self._resolve(name)
         try:
@@ -1056,7 +1059,7 @@ class LocalRuntime(TeamRuntime):
                 async with asyncio.timeout(_SANDBOX_RUN_TIMEOUT_S):
                     async for message in get_brain(engine).stream_once(
                             system_prompt=_SANDBOX_SYSTEM_PROMPT, user_prompt=prompt, model=model, cwd=cwd,
-                            options={"max_turns": 1, "disallowed_tools": _NO_TOOLS, "env": child_agent_env(root)}):
+                            options=_SANDBOX_RUN_OPTIONS | {"env": child_agent_env(root)}):
                         if isinstance(message, StreamDelta) and message.text:
                             parts.append(message.text)
                         elif isinstance(message, AssistantText) and message.text:

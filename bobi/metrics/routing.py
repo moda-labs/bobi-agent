@@ -45,6 +45,23 @@ def log_routing_incident(record: dict[str, object], root=None) -> None:
         log.debug("metrics: routing fallback log unavailable (%s)", type(exc).__name__)
 
 
+def may_rerun_on_control(decision: RouterDecision | None, *, error_kind: str, tools_ran: bool) -> bool:
+    """Whether a failed first turn may run again on the control model.
+
+    Only when nothing happened that a rerun would repeat or could not fix: no
+    tool ran (a rerun would repeat its side effects, a push or a post), the
+    error is not one the control model shares (authentication, credits, turn
+    cap), and the decision was made fresh for this session; a route reused
+    from a saved session belongs to a transcript a fresh session would lose."""
+    if decision is None or tools_ran or error_kind in NO_MODEL_FALLBACK_KINDS:
+        return False
+    try:
+        metadata = json.loads(decision.policy_metadata_json or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    return metadata.get("status") != "reused"
+
+
 def candidate_failed(decision: RouterDecision | None, *, session_name: str, brain: str,
                      model: str, error: str, root=None) -> str | None:
     """The control model to retry on when a policy-chosen model failed, else None.

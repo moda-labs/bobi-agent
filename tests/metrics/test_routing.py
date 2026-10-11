@@ -6,6 +6,8 @@ import httpx
 import json
 import multiprocessing
 import pytest
+
+from bobi.brain.base import ERROR_KIND_AUTHENTICATION, ERROR_KIND_MAX_TURNS
 import threading
 import time
 import yaml
@@ -1881,3 +1883,20 @@ async def test_session_reruns_a_failed_first_turn_on_control(bobi_install, monke
     assert session._route_decision is None
     logged = [item["attempted_model"] for item in _fallback_log(bobi_install.repo_path)]
     assert logged == (["broken-model"] if expected == ["broken-model", "control"] else [])
+
+
+@pytest.mark.parametrize("status,error_kind,tools_ran,allowed", [
+    ("assigned", "", False, True),
+    ("assigned", "", True, False),  # a rerun would repeat the tool's side effects
+    ("assigned", ERROR_KIND_AUTHENTICATION, False, False),  # the control model fails the same way
+    ("assigned", ERROR_KIND_MAX_TURNS, False, False),
+    ("reused", "", False, False),  # a saved route belongs to a transcript
+])
+def test_rerun_on_control_only_when_nothing_would_repeat(status, error_kind, tools_ran, allowed):
+    from types import SimpleNamespace
+
+    from bobi.metrics.routing import may_rerun_on_control
+
+    decision = SimpleNamespace(policy_metadata_json=json.dumps({"status": status}))
+    assert may_rerun_on_control(decision, error_kind=error_kind, tools_ran=tools_ran) is allowed
+    assert may_rerun_on_control(None, error_kind="", tools_ran=False) is False

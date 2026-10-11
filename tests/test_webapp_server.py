@@ -1372,7 +1372,10 @@ class TestRoutingConfig:
         assert (data["input_tokens"], data["output_tokens"]) == (1200, 80) and data["list_price_usd"] > 0
         [call] = calls
         assert call["model"] == "sonnet" and call["user_prompt"] == "Find the deadlock"
-        assert call["options"]["max_turns"] == 1 and "Bash" in call["options"]["disallowed_tools"]
+        # Nothing is allowed: no built-in tools, no MCP servers, no settings, no bypass.
+        assert call["options"]["max_turns"] == 1 and call["options"]["tools"] == []
+        assert call["options"]["mcp_servers"] == {} and call["options"]["strict_mcp_config"] is True
+        assert call["options"]["setting_sources"] == [] and call["options"]["permission_mode"] == "default"
         # The agent's own environment and login, from an empty directory outside the repo.
         assert call["options"]["env"]["BOBI_ROOT"] == str(bobi_install.repo_path.resolve())
         assert not Path(call["cwd"]).is_relative_to(bobi_install.repo_path)

@@ -24,10 +24,10 @@ from bobi.brain import AssistantText, TurnResult, get_brain
 from bobi.brain.base import (
     ERROR_KIND_AUTHENTICATION,
     ERROR_KIND_CREDITS_EXHAUSTED,
-    ERROR_KIND_MAX_TURNS,
 )
 from bobi.brain_availability import observe_brain_turn
 from bobi.inbox import Inbox, Message
+from bobi.metrics.routing import may_rerun_on_control
 from bobi.metrics.runtime import observe_turn
 from bobi.sdk import (
     save_session_id,
@@ -385,6 +385,7 @@ class Session:
         self._state = "stopped"
         self._last_response = ""
         self._last_is_error = False
+        self._last_tools_ran = False
         self._last_api_error_status: int | None = None
         # The brain's own diagnosis of the last failed turn (#845). Without
         # these, consumers built an error out of _last_response, which is EMPTY
@@ -974,6 +975,7 @@ class Session:
                     self._last_is_error = msg.is_error
                     self._last_error_kind = msg.error_kind
                     self._last_error_message = msg.error_message
+                    self._last_tools_ran = bool(msg.tool_executions)
                     cost = msg.total_cost_usd or 0.0
                     self._total_cost_usd += cost
                     self._total_duration_ms += msg.duration_ms
@@ -1365,9 +1367,9 @@ class Session:
                 await self._client.query(msg.text)
                 response = await self._drain_turn()
 
-            if (self._last_is_error and self._route_decision is not None
-                    and self._state == "waiting_input"
-                    and self._last_error_kind != ERROR_KIND_MAX_TURNS
+            if (self._last_is_error and self._state == "waiting_input"
+                    and may_rerun_on_control(self._route_decision, error_kind=self._last_error_kind,
+                                             tools_ran=self._last_tools_ran)
                     and self._route_to_control(self.last_error())):
                 # The policy's model failed its first turn: rerun it once on the
                 # control model in a fresh session instead of failing the event.

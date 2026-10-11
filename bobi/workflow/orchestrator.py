@@ -28,7 +28,7 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, ACTIVE_STATUSES,
 )
 from bobi.brain.turns import drain_turn
-from bobi.metrics.routing import NO_MODEL_FALLBACK_KINDS
+from bobi.metrics.routing import may_rerun_on_control
 from bobi.metrics.runtime import TurnObservation, observe_turn
 from bobi.subagent import _emit_lifecycle_event
 from bobi.timeutil import now_iso
@@ -127,11 +127,13 @@ def remind_workflow(run: WorkflowRun, workflow: Workflow) -> _NotifyOutcome:
 
 
 class DrainResult(NamedTuple):
-    """One drained turn: ``final_text`` (None on failure), error, error kind."""
+    """One drained turn: ``final_text`` (None on failure), error, error kind,
+    and whether any tool ran."""
 
     final_text: str | None
     error: str
     error_kind: str = ""
+    tools_ran: bool = False
 
 
 def _turn_budget_resume_prompt(step: StepDef, final_try: bool) -> str:
@@ -1435,8 +1437,9 @@ async def _run_workflow_async(
                     observation=turn_observation,
                 )
 
-            if (drain.final_text is None and route_decision is not None
-                    and drain.error_kind not in NO_MODEL_FALLBACK_KINDS
+            if (drain.final_text is None
+                    and may_rerun_on_control(route_decision, error_kind=drain.error_kind,
+                                             tools_ran=drain.tools_ran)
                     and _route_to_control(drain.error)):
                 # The policy's model failed the first prompt step: rerun the
                 # step once on the control model in a fresh session.
@@ -1694,12 +1697,14 @@ async def _drain_response(
     )
     msg = outcome.result
     if msg is None:
-        return DrainResult(None, outcome.failure, outcome.failure_kind)
+        return DrainResult(None, outcome.failure, outcome.failure_kind,
+                           tools_ran=outcome.failure_kind == "tool_crash")
     if msg.is_error:
         # Prefer the brain's own diagnosis. result_text is EMPTY on a
         # turn-cap kill, which is how "turn failed" - a literal fallback -
         # reached operators as the whole story (#845).
-        return DrainResult(None, msg.error_text(), msg.error_kind)
+        return DrainResult(None, msg.error_text(), msg.error_kind,
+                           tools_ran=bool(msg.tool_executions))
     return DrainResult(outcome.final_text, "", "")
 
 
