@@ -173,8 +173,7 @@ def file_lock(path: Path | str) -> Iterator[None]:
     """
     import fcntl
 
-    path = Path(path)
-    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path = _lock_path(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -182,3 +181,30 @@ def file_lock(path: Path | str) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _lock_path(path: Path | str) -> Path:
+    path = Path(path)
+    return path.with_name(f"{path.name}.lock")
+
+
+def lock_is_held(path: Path | str) -> bool:
+    """Whether some process currently holds :func:`file_lock` on *path*.
+
+    A probe, not an acquisition: it never waits and leaves nothing held. The
+    kernel drops a flock when its holder dies, so unlike a pid file the answer
+    cannot go stale across a crash or a machine restart.
+    """
+    import fcntl
+
+    try:
+        lock_file = open(_lock_path(path), "a+")
+    except OSError:
+        return False
+    with lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        return False

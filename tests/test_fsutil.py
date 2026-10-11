@@ -15,7 +15,7 @@ import threading
 
 import pytest
 
-from bobi.fsutil import atomic_write_json, atomic_write_text, file_lock
+from bobi.fsutil import atomic_write_json, atomic_write_text, file_lock, lock_is_held
 
 
 def _strays(path):
@@ -270,6 +270,15 @@ class TestFileLock:
             pass
         assert (tmp_path / "state.json.lock").exists()
         assert not target.exists()
+
+    def test_lock_is_held_reports_a_holder_without_taking_the_lock(self, tmp_path):
+        target = tmp_path / "state.json"
+        assert lock_is_held(target) is False
+        with file_lock(target):
+            assert lock_is_held(target) is True
+        assert lock_is_held(target) is False
+        with file_lock(target):
+            pass  # the probe left nothing held
 
     def test_released_on_exception(self, tmp_path):
         target = tmp_path / "state.json"
