@@ -114,6 +114,16 @@ bobi agent <name> events ingest-token create alert/firing --name oncall
 bobi agent <name> events ingest-token list
 bobi agent <name> events ingest-token revoke <id>
 
+# Event topics this team hears about. `add`/`remove` persist the declared list
+# to <run>/workspace/subscriptions.yaml and apply it to the running manager
+# with NO restart. Topics, not repos. An `inbox/` or `reply/` topic is refused.
+# With the manager down the change is persisted and exits zero; it applies at
+# the next reload or start. An ungranted topic is rejected by the event server,
+# the declared change is KEPT, and the command exits non-zero.
+bobi agent <name> subscriptions list
+bobi agent <name> subscriptions add github:org/repo
+bobi agent <name> subscriptions remove github:org/repo
+
 bobi agent <name> transcript show manager
 bobi agent <name> transcript search "query"
 bobi agent <name> costs

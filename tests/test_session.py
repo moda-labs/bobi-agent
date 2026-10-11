@@ -904,7 +904,10 @@ class TestSubscriptionResilience:
         ensure_running.assert_called_once()
         ensure_bubble.assert_not_called()
         register.assert_not_called()
-        assert queued_retries == [["inbox/test-wake", "github:o/r"]]
+        # #952: the retry carries this session's EXTRA topics. `inbox/<self>`
+        # is composed inside `_start_event_subscription` now, not prepended
+        # here, so it is no longer in the argument.
+        assert queued_retries == [["github:o/r"]]
         assert "PackagedEventServerArtifactError" in caplog.text
         assert "Reinstall or upgrade Bobi" in caplog.text
 

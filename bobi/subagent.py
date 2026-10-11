@@ -1658,8 +1658,14 @@ class Subscription:
     client: "Any"
     drain_thread: "threading.Thread"
     queue: "Any"
+    session: str = ""
 
     def stop(self, timeout: float = 5.0) -> None:
+        # Drop the live-subscription controller first (#952): a torn-down
+        # session must not keep answering `POST /subscriptions/reload` and
+        # PUTting a deployment it no longer owns.
+        if self.session:
+            unregister_live_subscription(self.session)
         try:
             self.client.stop()
         except Exception:
@@ -1671,6 +1677,95 @@ class Subscription:
             self.drain_thread.join(timeout=timeout)
         except Exception:
             log.debug("Drain thread stop failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Live subscription registry (#952)
+#
+# A session's event subscription lives in the same process as its Session (one
+# event-server deployment == one session by construction). The manager's health
+# server looks the live controller up by name here so `POST /subscriptions/reload`
+# can tell the OWNING session to re-compose and re-apply, rather than writing
+# that deployment from a second process. Mirrors `bobi/inbox.py`'s local-inbox
+# registry.
+
+# Serializes COMPOSE AND APPLY together across every writer in this process:
+# the boot register, the boot PUT, the reload route and the deaf-reconnect hook.
+# Covering both together is what makes the sequence linearizable - no writer can
+# compose a set, be overtaken by a newer writer, and then land its stale set.
+_subscription_apply_lock = threading.Lock()
+
+_live_subscriptions: dict[str, "LiveSubscription"] = {}
+_live_subscriptions_lock = threading.Lock()
+
+
+def register_live_subscription(session: str, controller: "LiveSubscription") -> None:
+    with _live_subscriptions_lock:
+        _live_subscriptions[session] = controller
+
+
+def unregister_live_subscription(session: str) -> None:
+    with _live_subscriptions_lock:
+        _live_subscriptions.pop(session, None)
+
+
+def get_live_subscription(session: str) -> "LiveSubscription | None":
+    with _live_subscriptions_lock:
+        return _live_subscriptions.get(session)
+
+
+class LiveSubscription:
+    """A session's handle for re-applying its own subscription set.
+
+    Not the :class:`Subscription` dataclass: this must exist BEFORE the
+    deployment identity does, so a reload POST arriving during boot finds a
+    controller and blocks on the apply lock instead of racing the boot's own
+    first apply.
+
+    Holds the last ACCEPTED set and when it was accepted. That record exists for
+    two things and nothing else: `GET /subscriptions` (D4/D11 read-back) and
+    naming which topics a reload changed, because the event server returns only
+    numeric `added`/`removed` counters. It is never replayed as the desired set -
+    the desired set is always re-derived from the files, which is what removes
+    the stale-cache revert class the old `active_subscriptions` carried.
+    """
+
+    def __init__(self, session: str):
+        self.session = session
+        self.deployment_id = ""
+        self.api_key = ""
+        # The last set this session composed from the files. Read by the
+        # auto-dispatch gate; never used as a replay source.
+        self.desired: list[str] = []
+        self.accepted: list[str] | None = None
+        # Aware-UTC ISO-8601, the one house convention (bobi/timeutil.py), so
+        # the value the route returns needs no formatting at the boundary.
+        self.accepted_at: str | None = None
+        # Filled in by `_start_event_subscription` before the controller is
+        # registered; kept as an attribute so the health route calls one thing.
+        self.apply = None
+
+    def record_accepted(self, topics: list[str]) -> None:
+        """Note a set the server accepted. Caller holds the apply lock."""
+        from bobi.timeutil import now_iso
+
+        self.accepted = list(topics)
+        self.accepted_at = now_iso()
+
+    def reload(self, *, authorize: bool) -> dict:
+        """Re-compose from the files and re-apply. Returns the server's answer."""
+        if self.apply is None:
+            raise RuntimeError(
+                f"live subscription for {self.session} has no apply function")
+        with _subscription_apply_lock:
+            return self.apply(authorize=authorize)
+
+    def accepted_record(self) -> dict:
+        """The read-back payload for `GET /subscriptions` (D4/D11)."""
+        with _subscription_apply_lock:
+            accepted = list(self.accepted) if self.accepted is not None else None
+            at = self.accepted_at
+        return {"session": self.session, "subscriptions": accepted, "at": at}
 
 
 _self_github_login: str | None = None
@@ -1712,10 +1807,15 @@ def _auto_dispatch_needs_self_login(rules: list[dict]) -> bool:
     )
 
 
-def _start_event_subscription(session_name: str, subscribe: list[str],
+def _start_event_subscription(session_name: str, extra_subscribe: list[str],
                                project_path: Path,
                                register_attempts: int = 3) -> "Subscription":
     """Start event client + drain loop for a subscribing agent.
+
+    *extra_subscribe* is this session's EXTRA topics, not its full key list
+    (#952): the full list is composed here by
+    ``compose_session_subscriptions``, so a running manager can re-derive it on
+    a reload instead of replaying a snapshot taken before the session existed.
 
     Every session subscribes — at minimum to its own ``inbox/<self>`` topic, so
     it is addressable for inter-agent messages. Sessions that also subscribe to
@@ -1742,7 +1842,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
     from bobi.events.server import (
         ensure_running, ensure_bubble, register, register_slack_workspaces,
         register_whatsapp_numbers, register_discord_apps, authorize_resources,
-        local_port_from_url, BubbleRejected,
+        local_port_from_url, BubbleRejected, UnauthorizedTopics,
     )
     from bobi.events.protocol import (
         EventProtocolError,
@@ -1751,18 +1851,39 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         validate_server_response,
     )
 
+    from bobi.events.subscriptions import compose_session_subscriptions
+
     cfg = Config.load(project_path)
     es_url = cfg.event_server_url
-    # A session that subscribes to anything beyond its own inbox ingests external
-    # resources (the manager). Only such a session registers the Slack bot and
-    # runs the auto-dispatch reactor; an inbox-only worker skips both. Computed
-    # up front because #488 resource authorization (below) runs BEFORE register.
-    has_external = any(not k.startswith("inbox/") for k in subscribe)
     state = load_deployment_state(project_path, session_name)
     es_key = state.get("api_key", "")
     es_deployment = state.get("deployment_id", "")
     cursor_path = session_cursor_path(project_path, session_name)
-    active_subscriptions = list(subscribe)
+    controller = LiveSubscription(session_name)
+
+    def _compose() -> list[str]:
+        """Re-derive this session's full topic list from the files.
+
+        Records the result as the controller's last DESIRED set, which is what
+        the auto-dispatch gate reads: the ACCEPTED set can be narrower (register
+        filters a topic whose grant is missing) and gating on that would stop
+        loading the reactor for a team whose grant has not landed yet.
+        """
+        keys = compose_session_subscriptions(
+            project_path, session_name, extra_subscribe)
+        controller.desired = keys
+        return keys
+
+    def _has_external(keys: list[str]) -> bool:
+        """Whether *keys* reach beyond this session's own inbox.
+
+        A session that subscribes to anything beyond its own inbox ingests
+        external resources (the manager). Only such a session registers the
+        Slack bot and runs the auto-dispatch reactor; an inbox-only worker skips
+        both. Recomputed per apply because #488 resource authorization runs
+        BEFORE register/PUT and the composed set can change across a reload.
+        """
+        return any(not k.startswith("inbox/") for k in keys)
 
     def _register_channel_credentials(url: str, bubble: dict) -> dict[str, list[str]]:
         """Signed chat-channel registrations (#487/#656/#2): write the
@@ -1793,7 +1914,8 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             ),
         }
 
-    def _authorize_subscriptions(url: str, bubble: dict) -> list[str]:
+    def _authorize_subscriptions(url: str, bubble: dict,
+                                 desired: list[str]) -> list[str]:
         """#488: obtain resource grants BEFORE register/PUT so the server's grant
         check passes. The signed Slack/WhatsApp/Discord registrations write
         BOTH the bubble-scoped outbound records (#487/#656/#2) and their
@@ -1801,23 +1923,27 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         Returns ``subscribe`` filtered to drop any global topic we could not
         authorize (so register/PUT is never hard-rejected for a topic we
         already know is unbacked)."""
-        registered = _register_channel_credentials(url, bubble) if has_external else {}
+        registered = (
+            _register_channel_credentials(url, bubble)
+            if _has_external(desired) else {}
+        )
         return authorize_resources(
-            url, cfg, subscribe, bubble["bubble_id"], bubble["bubble_key"],
+            url, cfg, desired, bubble["bubble_id"], bubble["bubble_key"],
             whatsapp_registered=registered.get("whatsapp"),
             discord_registered=registered.get("discord"),
         )
 
     def _register_with_retry(url: str, attempts: int = register_attempts) -> tuple[str, str]:
-        nonlocal active_subscriptions
+        """Compose and register. Caller holds ``_subscription_apply_lock``."""
         last_err: Exception | None = None
         for attempt in range(attempts):
             try:
+                desired = _compose()
                 # Every session JOINs the instance's one bubble (minted once,
                 # lock-protected, by whichever register fires first). If the
                 # server forgot the bubble (restart), re-mint and re-join.
                 bubble = ensure_bubble(url, project_path)
-                authorized = _authorize_subscriptions(url, bubble)
+                authorized = _authorize_subscriptions(url, bubble, desired)
                 try:
                     dep, key = register(
                         url, session_name, authorized,
@@ -1826,13 +1952,13 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 except BubbleRejected:
                     bubble = ensure_bubble(url, project_path,
                                            force_remint_of=bubble["bubble_id"])
-                    authorized = _authorize_subscriptions(url, bubble)
+                    authorized = _authorize_subscriptions(url, bubble, desired)
                     dep, key = register(
                         url, session_name, authorized,
                         bubble_id=bubble["bubble_id"], bubble_key=bubble["bubble_key"],
                     )
                 save_deployment_state(project_path, session_name, dep, key)
-                active_subscriptions = list(authorized)
+                controller.record_accepted(authorized)
                 # A fresh deployment starts a fresh seq space — a leftover
                 # cursor would skip or mis-replay events on first connect.
                 cursor_path.unlink(missing_ok=True)
@@ -1864,7 +1990,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         and rejects the update if the grant is truly absent. Failed updates
         retain replay identity; registration would supersede that deployment.
         """
-        nonlocal active_subscriptions
+        desired = _compose()
         try:
             # Saved deployments keep their original trust identity. Do not
             # mint a replacement bubble while a transient PUT failure is
@@ -1875,10 +2001,10 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
                 raise RuntimeError("saved deployment has no valid bubble state")
             registered = (
                 _register_channel_credentials(es_url, bubble)
-                if has_external else {}
+                if _has_external(desired) else {}
             )
             authorized = authorize_resources(
-                es_url, cfg, subscribe,
+                es_url, cfg, desired,
                 bubble["bubble_id"], bubble["bubble_key"],
                 filter_unauthorized=False,
                 whatsapp_registered=registered.get("whatsapp"),
@@ -1886,17 +2012,26 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             )
         except Exception:
             log.info("Pre-PUT resource authorization unavailable; keeping configured topics")
-            authorized = subscribe
+            authorized = desired
         try:
-            _put_subscriptions(dep, key, authorized)
-            active_subscriptions = list(authorized)
+            accepted = _put_subscriptions(dep, key, authorized)
+            controller.record_accepted(accepted)
             return dep, key
         except EventProtocolError:
             raise
         except Exception as e:
             import httpx
 
-            if isinstance(e, httpx.HTTPStatusError):
+            if isinstance(e, UnauthorizedTopics):
+                # _put_subscriptions now parses the server's 400 body before
+                # raise_for_status, so this arm keeps the HTTP-400 diagnosis the
+                # httpx branch below used to produce instead of letting it fall
+                # through to the catch-all.
+                reason = (
+                    "subscription configuration or resource grants rejected "
+                    f"(HTTP 400); unauthorized topics: {e.topics}"
+                )
+            elif isinstance(e, httpx.HTTPStatusError):
                 status = e.response.status_code
                 if status in (401, 403):
                     reason = (
@@ -1923,7 +2058,16 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
             # exception, whose URL/body can contain credentials or payloads.
             raise RuntimeError(message) from None
 
-    def _put_subscriptions(dep: str, key: str, subscriptions: list[str]) -> None:
+    def _put_subscriptions(dep: str, key: str,
+                           subscriptions: list[str]) -> list[str]:
+        """PUT the full desired set; return what the server accepted.
+
+        Raises :class:`UnauthorizedTopics` (carrying ``.topics``) on the
+        server's ``400 {"error":"unauthorized_topics"}`` BEFORE
+        ``raise_for_status`` discards the body, matching the register path,
+        which has parsed that shape since #488. Without this the topic list the
+        operator needs is thrown away and every caller sees a bare HTTP 400.
+        """
         from bobi import http as pooled
 
         resp = pooled.put(
@@ -1940,10 +2084,108 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         except ValueError:
             data = None
         raise_for_protocol_error(resp.status_code, data)
+        if (resp.status_code == 400 and isinstance(data, dict)
+                and data.get("error") == "unauthorized_topics"):
+            raise UnauthorizedTopics(list(data.get("topics") or []))
         resp.raise_for_status()
         if not isinstance(data, dict) or "error" in data:
             raise ValueError("Unexpected subscription reply")
         validate_server_response(data)
+        # The server echoes the stored set; older replies answer a bare
+        # {"ok": true}, in which case the set we just PUT *is* what it stored.
+        echoed = data.get("subscriptions")
+        if isinstance(echoed, list) and all(isinstance(t, str) for t in echoed):
+            return list(echoed)
+        return list(subscriptions)
+
+    def _apply(*, authorize: bool) -> dict:
+        """Re-compose from the files and PUT. Caller holds the apply lock.
+
+        Returns the wire body the manager health route serializes: a 2xx there
+        means the manager processed the request, and this body says what the
+        EVENT server answered, so the CLI never has to tell "the route refused
+        me" apart from "the topics were refused".
+        """
+        from bobi.events.subscriptions import (
+            WorkspaceSubscriptionsError, workspace_subscriptions,
+        )
+
+        desired = _compose()
+        previous = list(controller.accepted or [])
+
+        # Auto-detection swallows a transient Slack/Linear API failure into []
+        # and discovery then falls through to [project_path.name]. On a team with
+        # NO workspace file that would let a transport-recovery reconnect PUT a
+        # set missing a topic that is already routing, and silently stop
+        # delivering it. The test is "LOSES a previously accepted topic", not
+        # "is a strict subset": the fall-through ADDS the project-directory
+        # topic, so a degraded Slack-only team is not a subset of what it had
+        # and a subset test would wave it through. With a workspace file a
+        # shrink is a legitimate operator removal and is applied.
+        if not authorize and previous:
+            declared = None
+            try:
+                declared = workspace_subscriptions(project_path)
+            except WorkspaceSubscriptionsError:
+                raise
+            except Exception:
+                declared = None
+            lost = [t for t in previous if t not in desired]
+            if declared is None and lost:
+                log.warning(
+                    "Skipping subscription re-assert for %s: source detection "
+                    "dropped %d already-accepted topic(s) %s; leaving routing "
+                    "alone", session_name, len(lost), lost,
+                )
+                return {"status": "skipped", "reason": "degraded_detection",
+                        "subscriptions": desired}
+
+        if authorize:
+            try:
+                from bobi.events.state import load_bubble_state
+                bubble = load_bubble_state(project_path)
+                if not bubble:
+                    raise RuntimeError("no valid bubble state")
+                desired = authorize_resources(
+                    es_url, cfg, desired,
+                    bubble["bubble_id"], bubble["bubble_key"],
+                    filter_unauthorized=False,
+                )
+            except Exception as e:
+                log.info("Pre-PUT resource authorization unavailable (%s); "
+                         "keeping configured topics", e)
+
+        try:
+            accepted = _put_subscriptions(
+                controller.deployment_id, controller.api_key, desired)
+        except UnauthorizedTopics as e:
+            log.warning("Subscription update for %s rejected: unauthorized "
+                        "topics %s", session_name, e.topics)
+            return {"status": "rejected", "error": "unauthorized_topics",
+                    "topics": list(e.topics)}
+        except Exception as e:
+            import httpx
+
+            if isinstance(e, httpx.HTTPStatusError) and \
+                    e.response.status_code in (401, 403):
+                log.warning(
+                    "Subscription update for %s rejected with HTTP %d: the "
+                    "server does not recognise this deployment with this "
+                    "credential", session_name, e.response.status_code)
+                return {"status": "rejected", "error": "deployment_auth_failed",
+                        "http_status": e.response.status_code}
+            raise
+
+        controller.record_accepted(accepted)
+        return {
+            "status": "applied",
+            "subscriptions": list(accepted),
+            "added_topics": [t for t in accepted if t not in previous],
+            "removed_topics": [t for t in previous if t not in accepted],
+            "at": controller.accepted_at,
+        }
+
+    controller.apply = _apply
 
     if not es_url:
         es_url = "http://localhost:8080"
@@ -1954,10 +2196,27 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
 
-    if not (es_deployment and es_key):
-        es_deployment, es_key = _register_with_retry(es_url)
-    else:
-        es_deployment, es_key = _sync_saved_deployment(es_deployment, es_key)
+    # Registration order closes the boot-overwrite window (#952). The lock is
+    # taken BEFORE the controller is published, so a reload POST arriving in
+    # this window finds the controller and BLOCKS until the boot's own
+    # compose-and-apply completes; it then composes again, reads the file the
+    # CLI just wrote, and PUTs the newer set. `409 no_live_subscription` is left
+    # for the honest case only - no controller registered at all, in which case
+    # the boot's own compose reads the file and the change applies at this boot.
+    with _subscription_apply_lock:
+        register_live_subscription(session_name, controller)
+        try:
+            if not (es_deployment and es_key):
+                es_deployment, es_key = _register_with_retry(es_url)
+            else:
+                es_deployment, es_key = _sync_saved_deployment(es_deployment, es_key)
+            controller.deployment_id = es_deployment
+            controller.api_key = es_key
+        except BaseException:
+            # A boot that raises before it has an identity must not leave a
+            # dead controller answering reloads.
+            unregister_live_subscription(session_name)
+            raise
 
     # Note: Slack-bot registration (signed, also writing the #487 outbound record
     # and the #488 slack grant) now happens in `_authorize_subscriptions` BEFORE
@@ -1978,8 +2237,15 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         repairs a stale server-side subscription index (e.g. the deployment was
         dropped from the index during a long redeploy gap) by re-adding every
         key. Idempotent — the server dedups keys already present (#425).
+
+        Re-DERIVES the desired set from the files rather than replaying a cache
+        (#952): the server commits `replace` and then responds, so a lost
+        response used to leave the old list cached and the next reconnect would
+        revert a change the server had already accepted. ``authorize=False``
+        matches the pre-#952 behaviour and keeps a transport-recovery path from
+        firing one signed credential POST per global topic.
         """
-        _put_subscriptions(es_deployment, es_key, active_subscriptions)
+        controller.reload(authorize=False)
 
     client = EventServerClient(
         server_url=es_url,
@@ -1993,7 +2259,7 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
 
     # Build auto-dispatch reactor from config (if rules are defined).
     reactor = None
-    if has_external and cfg.auto_dispatch:
+    if _has_external(controller.desired) and cfg.auto_dispatch:
         from bobi.events.reactor import EventReactor
         # Resolve identity for both self-author hygiene and `$self` match values.
         self_login = None
@@ -2011,9 +2277,11 @@ def _start_event_subscription(session_name: str, subscribe: list[str],
         daemon=True, name="agent-drain",
     )
     drain_thread.start()
-    log.info(f"Event subscription started for {session_name}: {subscribe}")
+    log.info("Event subscription started for %s: %s",
+             session_name, controller.accepted)
 
-    return Subscription(client=client, drain_thread=drain_thread, queue=session_queue)
+    return Subscription(client=client, drain_thread=drain_thread,
+                        queue=session_queue, session=session_name)
 
 
 def _run_agent_entry(args: dict) -> None:

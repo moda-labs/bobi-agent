@@ -625,27 +625,11 @@ def run_manager_from_config(
     agent_name = cfg.agent
     role = cfg.entry_role
 
-    from bobi.events.subscriptions import discover_subscriptions
-
-    subscribe = discover_subscriptions(project_path)
-    subscribe += [s for s in (extra_subscribe or []) if s not in subscribe]
-
-    from bobi.events.subscriptions import monitor_subscription_keys
-    from bobi.monitors.registry import MonitorRegistry
-
-    monitor_events = [
-        m.event for m in MonitorRegistry.load(project_path=project_path).effective_monitors()
-    ]
-    for key in monitor_subscription_keys(monitor_events):
-        if key not in subscribe:
-            subscribe.append(key)
-
-    from bobi.events.subscriptions import lifecycle_subscription_keys
-
-    for key in lifecycle_subscription_keys():
-        if key not in subscribe:
-            subscribe.append(key)
-
+    # The subscription set is composed INSIDE the session, by
+    # `compose_session_subscriptions` (#952). Composing it here snapshotted the
+    # files seconds before the session that applies them existed, so anything
+    # that changed them in that window was silently overwritten - and a running
+    # manager had no way to re-derive its own set without a restart.
     state_dir = paths.state_dir(project_path)
 
     from bobi.state_version import ensure_state_version
@@ -761,7 +745,7 @@ def run_manager_from_config(
         name=session_name,
         role=role,
         mcp_servers=cfg.mcp_servers or None,
-        subscribe=subscribe,
+        subscribe=list(extra_subscribe or []),
     )
 
 

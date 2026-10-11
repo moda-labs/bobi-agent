@@ -3304,6 +3304,385 @@ def monitor_curator(request_path):
 main.add_command(monitors)
 
 
+# --- subscriptions (#952) -------------------------------------------------
+#
+# A running team mutates its OWN event subscriptions: the CLI persists the
+# operator's list into `workspace/subscriptions.yaml` and then asks the running
+# manager to re-apply it. The CLI never writes the event server itself - one
+# writer per deployment, and that writer is the session that owns it.
+
+# The manager's reload is bounded: `authorize_resources` loops serially over
+# global topics at 10s each, then one PUT at 10s. This timeout is derived from
+# that bound and set ABOVE it, so a slow authorize can never make the caller
+# give up on an apply that then lands.
+_RELOAD_PER_TOPIC_S = 10.0
+_RELOAD_TIMEOUT_MARGIN_S = 30.0
+_GLOBAL_TOPIC_PREFIXES = ("github:", "linear:", "slack:", "whatsapp:", "discord:")
+
+
+def _reload_timeout(topics: list[str]) -> float:
+    """Above the route's own worst case, with room for one queued apply.
+
+    Every reload serializes on the manager's apply lock, so a caller can wait
+    out ANOTHER reload's full bound before its own starts. The budget therefore
+    doubles the per-apply bound rather than paying it once. It is not a
+    guarantee for arbitrarily many concurrent callers - nothing short of an
+    asynchronous reload with a polled result id would be, which is the request-
+    tracking protocol D13 says not to build. When the budget does expire, the
+    CLI says the apply may still be landing (R4) rather than guessing.
+    """
+    globals_ = [t for t in topics if t.startswith(_GLOBAL_TOPIC_PREFIXES)]
+    one_apply = (len(globals_) + 1) * _RELOAD_PER_TOPIC_S
+    return 2 * one_apply + _RELOAD_TIMEOUT_MARGIN_S
+
+
+def _manager_reload_endpoint(project_path: Path) -> tuple[str, str] | None:
+    """The manager health server's base URL and token, or None when it is down.
+
+    An absent port or token file IS the liveness test, and it is
+    self-evidencing: both are written by `manager_health.start()` and unlinked
+    by its `stop()`. No pid probe, no launch stamp, no state-file table.
+    """
+    from bobi import paths
+
+    state = paths.state_path(project_path)
+    try:
+        port = (state / "manager-health.port").read_text().strip()
+        token = (state / "manager-health.token").read_text().strip()
+    except OSError:
+        return None
+    if not port or not token:
+        return None
+    return f"http://127.0.0.1:{port}", token
+
+
+class _ReloadUnreachable(Exception):
+    """The reload never reached a live manager. Carries why, for the operator.
+
+    `indeterminate` separates "nothing is listening", where the change is simply
+    not live yet, from "the connection died while the manager may have been
+    mid-apply", which is accepted risk R4: nothing is corrupted (the apply is a
+    full idempotent replace) but the caller cannot know whether it landed.
+    Collapsing the two into "the manager is not running" would report an
+    apply-in-flight as a clean persist-only edit and exit zero.
+    """
+
+    def __init__(self, reason: str, *, indeterminate: bool):
+        self.reason = reason
+        self.indeterminate = indeterminate
+        super().__init__(reason)
+
+
+def _post_manager_reload(project_path: Path, topics: list[str]):
+    """POST /subscriptions/reload. Raises :class:`_ReloadUnreachable` if it could
+    not get an answer."""
+    import httpx
+
+    from bobi.manager_health import RELOAD_TOKEN_HEADER
+
+    endpoint = _manager_reload_endpoint(project_path)
+    if endpoint is None:
+        raise _ReloadUnreachable("The manager is not running.",
+                                 indeterminate=False)
+    base, token = endpoint
+    try:
+        return httpx.post(
+            f"{base}/subscriptions/reload",
+            headers={RELOAD_TOKEN_HEADER: token},
+            timeout=_reload_timeout(topics),
+        )
+    except httpx.ConnectError as e:
+        # Nothing listening on the published port. The port and token files
+        # outlive a SIGKILLed manager, so this is the common stale-file case.
+        raise _ReloadUnreachable(
+            f"Nothing is listening on the manager's health port ({e}).",
+            indeterminate=False) from e
+    except httpx.HTTPError as e:
+        raise _ReloadUnreachable(
+            f"Lost the connection to the manager ({type(e).__name__}).",
+            indeterminate=True) from e
+
+
+_NOT_YET_LIVE = ("Nothing was applied live - the change takes effect at the "
+                 "next reload or `bobi agent <name> start`.")
+
+
+def _echo_persist_only(reason: str) -> None:
+    click.echo(f"Saved. {reason} {_NOT_YET_LIVE}")
+
+
+def _report_reload(resp) -> int:
+    """Print the reload outcome. Returns the process exit code."""
+    if resp.status_code == 401:
+        click.echo("The manager rejected the reload token. Check "
+                   "state/manager-health.token.", err=True)
+        return 1
+    if resp.status_code == 409:
+        _echo_persist_only(
+            "The manager is running but has no live subscription yet.")
+        return 0
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    if resp.status_code >= 400:
+        click.echo(f"The manager could not apply the change (HTTP "
+                   f"{resp.status_code}): {body.get('error') or resp.text}",
+                   err=True)
+        return 1
+
+    status = body.get("status")
+    if status == "applied":
+        added = body.get("added_topics") or []
+        removed = body.get("removed_topics") or []
+        click.echo(f"Applied live at {body.get('at') or 'now'}.")
+        # Printed in FULL rather than just the topic typed: a reload also
+        # converges monitor drift, so one command can change more than it named.
+        click.echo(f"  added:   {', '.join(added) if added else '(none)'}")
+        click.echo(f"  removed: {', '.join(removed) if removed else '(none)'}")
+        return 0
+    if status == "rejected" and body.get("error") == "unauthorized_topics":
+        topics = body.get("topics") or []
+        click.echo("The event server rejected these topics as unauthorized:",
+                   err=True)
+        for topic in topics:
+            click.echo(f"  {topic}", err=True)
+        click.echo("The workspace change was KEPT. For a github: or linear: "
+                   "topic, grant the resource (install the GitHub App / add the "
+                   "credential) and re-run. A whatsapp:, discord: or "
+                   "new-workspace slack: grant is written by the channel "
+                   "registration the manager runs at SESSION START, which a "
+                   "reload does not re-run, so that topic applies at the next "
+                   "`bobi agent <name> restart`. Otherwise "
+                   "`subscriptions remove` the topic.", err=True)
+        return 1
+    if status == "rejected" and body.get("error") == "deployment_auth_failed":
+        click.echo(
+            f"The event server answered HTTP {body.get('http_status')}: it does "
+            "not recognise this deployment with this credential. A deployment "
+            "evicted after a long stop looks like this, as does a wrong "
+            "deployment id or api key - the server returns the same 403 for "
+            "all three, so this cannot say which. The change is persisted; "
+            "recovering the deployment is an explicit operator action.",
+            err=True)
+        return 1
+    if status == "skipped" and body.get("reason") == "degraded_detection":
+        click.echo("Nothing was applied: source detection returned a narrower "
+                   "set than the live one, so the manager left routing alone. "
+                   "The change is persisted. Re-run once detection recovers.",
+                   err=True)
+        return 1
+    click.echo(f"Unexpected reload response: {body}", err=True)
+    return 1
+
+
+def _edit_subscriptions(topics: tuple[str, ...], *, add: bool) -> None:
+    """Shared body of `subscriptions add` and `subscriptions remove`."""
+    from bobi.events.subscriptions import (
+        WorkspaceSubscriptionsError, discover_subscriptions,
+        render_workspace_subscriptions, sanitize_seed_topics, validate_topic,
+        workspace_subscriptions, workspace_subscriptions_path,
+    )
+    from bobi.fsutil import atomic_write_text, file_lock
+
+    project_path = _detect_project_root()
+
+    def _read_declared():
+        """The declared list, or None when absent, with a readable failure."""
+        try:
+            return workspace_subscriptions(project_path)
+        except WorkspaceSubscriptionsError as e:
+            raise click.ClickException(
+                f"{e.path} is not a valid subscription file: {e.reason}. "
+                "Fix or delete it by hand; this command will not overwrite a "
+                "file it cannot read.") from e
+
+    def _seed() -> list[str]:
+        """The effective set to seed a first edit from, made file-legal.
+
+        Seeded from `discover_subscriptions` so a team that was auto-detecting
+        keeps its effective set, then sanitized: the pack parser tolerates a
+        duplicate and an `inbox/`/`reply/` topic that this file's reader
+        rejects, and writing one would fail every later apply with no way for
+        `remove` to repair it.
+        """
+        kept, dropped = sanitize_seed_topics(discover_subscriptions(project_path))
+        if dropped:
+            click.echo(
+                "Dropped from the seed (not declarable in this file): "
+                + ", ".join(dropped), err=True)
+        return kept
+
+    # Validate EVERY argument before any write, using the workspace reader's
+    # own rule - so the CLI can never write a file its own reader rejects and
+    # thereby fail every later apply, and the namespace ban has one definition.
+    wanted: list[str] = []
+    for raw in topics:
+        try:
+            topic = validate_topic(raw, where="topic")
+        except ValueError as e:
+            raise click.ClickException(str(e)) from e
+        if topic in wanted:
+            raise click.ClickException(f"topic {topic!r} given twice")
+        wanted.append(topic)
+
+    path = workspace_subscriptions_path(project_path)
+    seeded_from_detection = False
+    if _read_declared() is None:
+        # First edit on a team with no file: seed from the EFFECTIVE set, so a
+        # team that was auto-detecting keeps its topics instead of collapsing
+        # to the one named on the command line. On an auto-detecting team this
+        # makes live Slack and Linear API calls.
+        seeded_from_detection = True
+
+    with file_lock(path):
+        # Re-read INSIDE the lock: that is what makes two concurrent commands
+        # compose instead of overwriting each other. No network call happens in
+        # here, so the lock needs no timeout.
+        current = _read_declared()
+        if current is None:
+            current = _seed()
+        if add:
+            final = list(current)
+            for topic in wanted:
+                if topic not in final:
+                    final.append(topic)
+        else:
+            missing = [t for t in wanted if t not in current]
+            if missing:
+                raise click.ClickException(
+                    "not subscribed to " + ", ".join(repr(t) for t in missing)
+                    + " - nothing written")
+            final = [t for t in current if t not in wanted]
+        atomic_write_text(path, render_workspace_subscriptions(final))
+
+    if seeded_from_detection:
+        click.echo(f"Created {path}, seeded from the pack list or source "
+                   "auto-detection (which may have called Slack and Linear).")
+    click.echo(f"{len(final)} topic(s) declared in {path}")
+
+    try:
+        resp = _post_manager_reload(project_path, final)
+    except _ReloadUnreachable as e:
+        if not e.indeterminate:
+            _echo_persist_only(e.reason)
+            return
+        # R4: the manager may have finished the apply and we never read the
+        # answer. Saying "not running" here would be a false clean exit.
+        click.echo(
+            f"Saved. {e.reason} The apply may still have landed - re-running "
+            "this command is safe, and `subscriptions list` reads the set the "
+            "manager actually accepted.", err=True)
+        raise SystemExit(1) from e
+    code = _report_reload(resp)
+    if code:
+        raise SystemExit(code)
+
+
+@main.group()
+def subscriptions():
+    """Event topics this team hears about - edit them on a running team."""
+    pass
+
+
+@subscriptions.command("add")
+@click.argument("topics", nargs=-1, required=True)
+def subscriptions_add(topics):
+    """Declare TOPICS and apply them to the running manager.
+
+    Idempotent. Usage:
+        bobi agent <name> subscriptions add github:org/repo
+    """
+    _edit_subscriptions(topics, add=True)
+
+
+@subscriptions.command("remove")
+@click.argument("topics", nargs=-1, required=True)
+def subscriptions_remove(topics):
+    """Undeclare TOPICS and apply the removal to the running manager.
+
+    Fails without writing if a topic is not declared. Usage:
+        bobi agent <name> subscriptions remove github:org/repo
+    """
+    _edit_subscriptions(topics, add=False)
+
+
+@subscriptions.command("list")
+def subscriptions_list():
+    """Show the declared topics, the last-accepted live set, and any gap.
+
+    Usage:
+        bobi agent <name> subscriptions list
+    """
+    import httpx
+
+    from bobi.events.subscriptions import (
+        WorkspaceSubscriptionsError, discover_subscriptions,
+        workspace_subscriptions, workspace_subscriptions_path,
+    )
+    from bobi.manager_health import RELOAD_TOKEN_HEADER
+
+    project_path = _detect_project_root()
+    path = workspace_subscriptions_path(project_path)
+    try:
+        declared = workspace_subscriptions(project_path)
+    except WorkspaceSubscriptionsError as e:
+        raise click.ClickException(
+            f"{e.path} is not a valid subscription file: {e.reason}. Every "
+            "apply fails until it is fixed or deleted.") from e
+    if declared is None:
+        declared = discover_subscriptions(project_path)
+        click.echo(f"Declared ({len(declared)}) - no {path.name} yet, so this "
+                   "is the pack list or source auto-detection (which may have "
+                   "called Slack and Linear):")
+    else:
+        click.echo(f"Declared ({len(declared)}) - persisted in {path}:")
+    for topic in declared:
+        click.echo(f"  {topic}")
+
+    endpoint = _manager_reload_endpoint(project_path)
+    live: list[str] | None = None
+    if endpoint is None:
+        click.echo("\nLive set unavailable: the manager is not running.")
+    else:
+        base, token = endpoint
+        try:
+            resp = httpx.get(f"{base}/subscriptions",
+                             headers={RELOAD_TOKEN_HEADER: token}, timeout=10.0)
+        except httpx.HTTPError as e:
+            click.echo(f"\nLive set unavailable: {e}")
+            resp = None
+        if resp is not None and resp.status_code == 401:
+            click.echo("\nLive set unavailable: the manager rejected the "
+                       "reload token. Check state/manager-health.token.")
+        elif resp is not None and resp.status_code == 409:
+            click.echo("\nLive set unavailable: the manager is running but has "
+                       "no live subscription yet.")
+        elif resp is not None and resp.status_code == 200:
+            body = resp.json()
+            live = body.get("subscriptions")
+            if live is None:
+                click.echo("\nLive set: the manager has not applied a set yet.")
+            else:
+                click.echo(f"\nLast accepted at {body.get('at')} "
+                           f"({len(live)}):")
+                for topic in live:
+                    click.echo(f"  {topic}")
+        elif resp is not None:
+            click.echo(f"\nLive set unavailable: HTTP {resp.status_code}")
+
+    if live is not None:
+        # One direction only: derived keys and --subscribe extras are in the
+        # live set by design and never in the file, so flagging every difference
+        # would fire on every run of a healthy team.
+        gap = [t for t in declared if t not in live]
+        if gap:
+            click.echo("\nDeclared but NOT live (rejected, or not yet "
+                       "applied):")
+            for topic in gap:
+                click.echo(f"  {topic}")
+
+
 # ---------------------------------------------------------------------------
 # event-server group
 # ---------------------------------------------------------------------------
@@ -4314,7 +4693,8 @@ for _cmd_name in [
     if _cmd_name in main.commands:
         agent.add_command(main.commands[_cmd_name])
 
-for _group_name in ["transcript", "workflows", "roles", "monitors", "kb", "event-server"]:
+for _group_name in ["transcript", "workflows", "roles", "monitors", "kb",
+                    "event-server", "subscriptions"]:
     if _group_name in main.commands:
         agent.add_command(main.commands[_group_name])
 
@@ -4325,8 +4705,8 @@ for _cmd_name in ["install"]:
 for _old_top_level in [
     "start", "stop", "restart", "status", "ui", "message", "ask", "compact",
     "events", "costs", "doctor", "transcript", "workflows", "roles", "monitors", "kb",
-    "event-server", "login-bootstrap", "recall-memory", "install", "supervise",
-    "install-service", "uninstall-service",
+    "event-server", "subscriptions", "login-bootstrap", "recall-memory",
+    "install", "supervise", "install-service", "uninstall-service",
 ]:
     main.commands.pop(_old_top_level, None)
 
