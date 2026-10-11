@@ -652,11 +652,11 @@ def test_claude_usage_keeps_normalized_model_over_raw_cli_alias():
             "outputTokens": 3,
             "canonicalModel": "claude-opus-5",
         },
-        model="deepseek-flash",
+        model="claude-haiku-4-5",
         provider_event_id="req-1",
     )
 
-    assert usage.model == "deepseek-flash"
+    assert usage.model == "claude-haiku-4-5"
 
 
 def test_codex_stdout_uses_terminal_total_not_progress_counters():

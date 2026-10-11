@@ -53,11 +53,11 @@ from pathlib import Path
 from tests.metrics.helpers import assignment_vectors, configured, context, decision
 
 def concise_config():
-    return {"experiment_id": "exp_deepseek_v1", "mode": "enforce",
-            "control_model": "ds/deepseek-flash",
-            "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
+    return {"experiment_id": "exp_claude_v1", "mode": "enforce",
+            "control_model": "haiku",
+            "candidate_models": ["haiku", "sonnet"],
             "roles": ["director", "engineer"],
-            "instructions": "Route coding & complex logic to Pro; trivial queries to Flash."}
+            "instructions": "Route coding & complex logic to Sonnet; trivial queries to Haiku."}
 
 def test_minimal_jev_config_has_stable_defaults_and_legacy_fingerprint():
     raw = {key: concise_config()[key] for key in ("control_model", "candidate_models", "instructions")}
@@ -93,10 +93,10 @@ def test_concise_jev_config_compiles_to_the_legacy_contract(mode):
     assert loaded == config and secret == b"private-assignment"
 
 @pytest.mark.parametrize("field,value", [
-    ("mode", "typo"), ("candidate_models", []), ("candidate_models", "flash"),
-    ("candidate_models", [False]), ("candidate_models", ["ds/deepseek-flash", "ds/deepseek-flash"]),
+    ("mode", "typo"), ("candidate_models", []), ("candidate_models", "haiku"),
+    ("candidate_models", [False]), ("candidate_models", ["haiku", "haiku"]),
     ("control_model", "unknown"), ("roles", []), ("instructions", ""),
-    ("criteria", {"ds/deepseek-flash": "only one"}), ("endpoint", "http://localhost"),
+    ("criteria", {"haiku": "only one"}), ("endpoint", "http://localhost"),
     ("policy_version", "jev-latest"), ("prompt_egress", "raw"),
     ("variants", []), ("policy", {}), ("options_json", "{}"),
     ("experiment_id", None), ("experiment_id", ""), ("roles", None),

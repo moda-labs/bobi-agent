@@ -17,9 +17,9 @@ default when unconfigured.
 - JEV `shadow` records a recommendation but executes the control model;
   `enforce` executes an eligible policy recommendation. Explicit overrides,
   sticky session/workflow decisions, and safe fallbacks still apply.
-- Candidate models and gateway URLs are deployment inputs, not framework
-  defaults. For the Claude brain, the Anthropic-compatible base URL must match
-  the provider's Messages endpoint contract.
+- Candidate models are deployment inputs, not framework defaults. They must be
+  models the agent's own brain runs: Claude models for a claude brain, OpenAI
+  models for a codex brain.
 - Environment changes require container recreation. Preserve the existing
   named volume; never use `docker compose down -v`.
 
@@ -30,9 +30,9 @@ variant/policy schema. Only these three JSON fields are required:
 
 ```json
 {
-  "control_model": "ds/deepseek-flash",
-  "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
-  "instructions": "Route coding & complex logic to Pro; trivial queries to Flash."
+  "control_model": "haiku",
+  "candidate_models": ["haiku", "sonnet"],
+  "instructions": "Route coding & complex logic to sonnet; trivial queries to haiku."
 }
 ```
 
@@ -62,21 +62,18 @@ is sent. The web editor offers this as **Prompt sent to JEV**, defaulting a new
 policy to redacted. Production routing still requires `BOBI_METRICS_ASSIGNMENT_SECRET`.
 
 Saving checks that the policy can run on the agent. A pinned `brain` must match
-the agent's brain (`BOBI_BRAIN`, else `agent.yaml` `brain.kind`). When the agent
-dials a gateway (`BOBI_GATEWAY_BASE_URL`, `brain.base_url`, or a gateway brain
-kind), any provider's model may be a candidate. A native brain calls one vendor,
-so the save rejects a routing-prefixed id (`cx/`, `ds/`) or another provider's
-model (`opus` on codex, `gpt-5.4` on claude) with the fix in the message.
-`GET .../jev-config` returns `agent_brain`, `gateway`, `prompt_egress` and
+the agent's brain (`BOBI_BRAIN`, else `agent.yaml` `brain.kind`). Candidates
+must be models that brain runs (`bobi.costs.native_models`), with or without a
+gateway; the save rejects another vendor's model (`opus` on codex, `gpt-5.4` on
+claude) with the fix in the message, for example `gpt-5.4 is not an Anthropic
+model this agent's claude brain can run; pick one from the model list`.
+`GET .../jev-config` returns `agent_brain`, `prompt_egress` and
 `config_warnings` for a saved policy that cannot route the agent.
 
 In the web editor (Metrics → JEV button → **Configure**), candidates are picked
 by filtering and clicking a list of the models the agent's own brain runs
-natively, unprefixed (`bobi.costs.native_models`: Claude Code aliases and
-Anthropic ids for claude, OpenAI ids for codex). **+ Add custom gateway model**
-takes a typed routing id (`cx/gpt-6.1-sol`, `ds/deepseek-flash`); without a
-gateway the save rejects it. A dashed tag marks a name with no list price. The
-editor saves straight to `run/.env` (**Save and Apply**); there is no clipboard
+(`bobi.costs.native_models`: Claude Code aliases and Anthropic ids for claude,
+OpenAI ids for codex); there is no free-text model input. The editor saves straight to `run/.env` (**Save and Apply**); there is no clipboard
 export. Every save writes the short form: `mode`, `control_model`,
 `candidate_models`, `prompt_egress` and `instructions`, plus `criteria` and any
 setting that differs from its default. A long-form policy (`variants`/`policy`)
@@ -296,24 +293,24 @@ Authenticated, read-only endpoints under `/api/agents/{name}/metrics`:
 | `sessions` | Required `from`, `to`; optional `limit`, `cursor` | Distinct recent lifecycles (`session_id`, name, start/end timestamps, status), `next_cursor` |
 | `sessions/{id}` | Optional `limit`, `cursor` | Existing session detail and bounded turn page |
 | `turns/{id}` | None | Turn detail, session identity, canonical `best_usage`/`invocation_usage` (each row with `list_price_usd`)/`usage_totals`, allowlisted policy fields, local-only `conversation` (`input`, `response`, scoped `entries`, `origin`, `status`, `truncated`) |
-| `jev-config` | None | Current routing configuration; an installed agent without an active experiment returns HTTP 200 with `enabled: false`, `mode: off` and no invented models. Also `native_models` (the picker list for `agent_brain`), `priced_models` (every priced id, gateway forms included), `unpriced_models` among the saved candidates, and `config_error` naming why a saved policy is not active |
+| `jev-config` | None | Current routing configuration; an installed agent without an active experiment returns HTTP 200 with `enabled: false`, `mode: off` and no invented models. Also `native_models` (the picker list for `agent_brain`), `config_warnings`, `credential_configured`, and `config_error` naming why a saved policy is not active |
 
 `routing.savings` shape (USD, list prices; totals are null when nothing could
 be priced; `route_sets` has one entry per candidate set, candidates shortened
 here):
 
 ```json
-{"routed_cost_usd": 0.000213, "ceiling_cost_usd": 0.00023, "floor_cost_usd": 5.9e-05,
- "saved_usd": 1.7e-05, "saved_pct": 7.4, "premium_pct": 259.6, "captured_pct": 10.0,
- "ceiling_model": "ds/deepseek-v4-pro", "floor_model": "ds/deepseek-flash",
+{"routed_cost_usd": 0.0075, "ceiling_cost_usd": 0.009, "floor_cost_usd": 0.0045,
+ "saved_usd": 0.0015, "saved_pct": 16.7, "premium_pct": 66.7, "captured_pct": 33.3,
+ "ceiling_model": "sonnet", "floor_model": "haiku",
  "priced_turns": 3, "unpriced_turns": 0, "escalated_turns": 2, "unpriced_models": [],
- "route_sets": [{"candidates": [{"model": "ds/deepseek-flash", 
-   "prices": {"input_per_mtok": 0.05, "cached_input_per_mtok": 0.001, "output_per_mtok": 0.2},
-   "turns": 1, "off_list": false, "routed_cost_usd": 5e-06, "ceiling_cost_usd": 2.2e-05,
+ "route_sets": [{"candidates": [{"model": "haiku",
+   "prices": {"input_per_mtok": 1.0, "cached_input_per_mtok": 0.1, "output_per_mtok": 5.0},
+   "turns": 1, "off_list": false, "routed_cost_usd": 0.0015, "ceiling_cost_usd": 0.003,
    "fallback_turns": 0, "fallback_reasons": {}}],
-  "control_model": null, "floor_model": "ds/deepseek-flash", "ceiling_model": "ds/deepseek-v4-pro",
-  "turns": 3, "routed_cost_usd": 0.000213, "ceiling_cost_usd": 0.00023,
-  "floor_cost_usd": 5.9e-05, "saved_pct": 7.4}]}
+  "control_model": "haiku", "floor_model": "haiku", "ceiling_model": "sonnet",
+  "turns": 3, "routed_cost_usd": 0.0075, "ceiling_cost_usd": 0.009,
+  "floor_cost_usd": 0.0045, "saved_pct": 16.7}]}
 ```
 
 These use the app's existing token and loopback Host guard, `Cache-Control:

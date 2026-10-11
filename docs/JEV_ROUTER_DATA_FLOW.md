@@ -700,30 +700,6 @@ Do not reset registration state or remove the durable volume without approval.
    `BOBI_JEV_LIVE_CLAUDE=1 .venv/bin/pytest tests/integration/test_jev_claude_routing.py -q`.
    It makes a real provider request and requires authorized Claude authentication.
    A skipped test is not acceptance evidence.
-   For an authorized gateway, provide `BOBI_GATEWAY_BASE_URL`,
-   `BOBI_GATEWAY_API_KEY` and `BOBI_BRAIN_MODEL` privately, then run
-   `BOBI_JEV_LIVE_GATEWAY=1 .venv/bin/pytest tests/integration/test_jev_gateway_routing.py -q -s`.
-   This runs the real Codex and Claude CLI paths using a static routing policy,
-   isolated provider homes, and the gateway's Responses and Messages APIs.
-   It checks persisted token totals and sticky reuse without TypeSafe egress.
-   The first turn of a newly constructed resumed adapter may have no usage:
-   without a trusted cumulative baseline it stays unknown, never zero. The
-   test uses reported invocation usage when the turn aggregate is absent and
-   reports measured and missing turn counts; passing it does not prove
-   complete resumed-token coverage or authenticated TypeSafe routing.
-   For approved TypeSafe plus Codex gateway acceptance, additionally supply
-   `TYPESAFE_API_KEY` and a supported alternative in `BOBI_JEV_CANDIDATE_MODEL`,
-   then run:
-
-   ```bash
-   BOBI_JEV_LIVE_TYPESAFE=1 .venv/bin/pytest \
-     tests/integration/test_jev_gateway_routing.py::test_typesafe_shadow_gateway_tokens_and_runtime_handoff -q -s
-   ```
-
-   This uses a separate synthetic cohort, verifies root-bound CLI credential
-   handoff, makes one authenticated policy call, executes the control model in
-   shadow mode, and checks token persistence and sticky reuse. It is not a
-   production treatment sample or evidence for SRM, quality, or elapsed observation.
 8. Do not enable enforcement before the shadow observation and quality/SRM gates
    below pass. Changing endpoint, model version, mode or policy criteria requires
    a new experiment ID; do not blend those cohorts as one causal comparison.

@@ -767,7 +767,7 @@ def ordered_session_log(entries) -> list:
 
 
 _BRAIN_PROVIDER = {"claude": "anthropic", "codex": "openai"}
-_PROVIDER_TITLE = {"anthropic": "Anthropic", "openai": "OpenAI", "deepseek": "DeepSeek", "google": "Google"}
+_PROVIDER_TITLE = {"anthropic": "Anthropic", "openai": "OpenAI"}
 
 
 def _agent_brain(root: Path, env: dict) -> tuple[str, bool]:
@@ -849,31 +849,24 @@ _SANDBOX_RUN_TIMEOUT_S = 180
 _SANDBOX_MAX_OUTPUT_BYTES = 65536
 
 
-def _routing_problems(policy_brain: str, candidates: list[str], brain: str, gateway: bool) -> list[str]:
+def _routing_problems(policy_brain: str, candidates: list[str], brain: str) -> list[str]:
     """Why a routing policy cannot run on this agent, in operator words.
 
-    Behind a gateway any provider's model can run. A native brain calls one
-    vendor, so a routing-prefixed id or another provider's model would fail
-    when the session connects."""
+    JEV routes between the models the agent's own brain runs: Claude models
+    for a claude brain, OpenAI models for a codex brain."""
+    from bobi.costs import model_identity, native_models
+
     problems = []
     if policy_brain not in ("auto", brain):
         problems.append(f"policy brain {policy_brain} does not match this agent's {brain} brain; use auto")
-    native = _BRAIN_PROVIDER.get(brain)
-    if gateway or native is None:
+    vendor = _PROVIDER_TITLE.get(_BRAIN_PROVIDER.get(brain, ""))
+    if vendor is None:
         return problems
-    from bobi.costs import model_provider
-
-    def an(title: str) -> str:
-        return f"{'an' if title[0] in 'AEIOU' else 'a'} {title}"
-
-    vendor = _PROVIDER_TITLE[native]
+    runnable = {model_identity(model) for model in native_models(brain)}
     for model in candidates:
-        if re.match(r"^[a-z]+[/:]", model, re.IGNORECASE):
-            problems.append(f"{model} is a gateway routing id, but this agent's {brain} brain calls {vendor} "
-                            f"directly; set BOBI_GATEWAY_BASE_URL or use a native {vendor} model id")
-        elif (provider := model_provider(model)) and provider != native:
-            problems.append(f"{model} is {an(_PROVIDER_TITLE[provider])} model, but this agent's {brain} brain calls "
-                            f"{vendor} directly; set BOBI_GATEWAY_BASE_URL to route across providers or pick {an(vendor)} model")
+        if model_identity(model) not in runnable:
+            problems.append(f"{model} is not {'an' if vendor[0] in 'AEIOU' else 'a'} {vendor} model this agent's "
+                            f"{brain} brain can run; pick one from the model list")
     return problems
 
 
@@ -1167,7 +1160,7 @@ class LocalRuntime(TeamRuntime):
         from bobi.metrics.policies.typesafe import TypeSafePolicy
         from bobi.prompts.resolver import discover_roles
         from bobi.chat_history import safe_name
-        from bobi.costs import model_prices, native_models, routable_models
+        from bobi.costs import native_models
 
         if not safe_name(name):
             raise UnknownTeam(name)
@@ -1209,20 +1202,16 @@ class LocalRuntime(TeamRuntime):
             configured = None
             config_error = str(exc)
 
-        agent_brain, gateway = _agent_brain(root, env)
+        agent_brain, _ = _agent_brain(root, env)
 
-        def model_fields(candidates: list[str], control: str, policy_brain: str, credential_env: str) -> dict:
+        def model_fields(candidates: list[str], policy_brain: str, credential_env: str) -> dict:
             return {
                 # Whether the policy's key is set, never the key itself.
                 "credential_configured": bool(env.get(credential_env)),
                 "agent_brain": agent_brain,
-                "gateway": gateway,
-                "config_warnings": _routing_problems(policy_brain, candidates, agent_brain, gateway),
-                # The picker lists what the agent's own brain can run; priced_models
-                # (gateway forms included) tells the editor which typed ids have a list price.
+                "config_warnings": _routing_problems(policy_brain, candidates, agent_brain),
+                # The picker lists the models the agent's own brain can run.
                 "native_models": native_models(agent_brain),
-                "priced_models": routable_models() + native_models("codex"),
-                "unpriced_models": sorted({m for m in (*candidates, control) if m and model_prices(m) is None}),
             }
 
         if configured is not None:
@@ -1257,7 +1246,7 @@ class LocalRuntime(TeamRuntime):
                 "restart_required": True,
                 "config_path": str(env_file),
                 **model_fields(list(policy.candidate_models) if policy else [v.model for v in config.variants if v.model],
-                               config.control_model or "", policy.brain if policy else "auto",
+                               policy.brain if policy else "auto",
                                policy.credential_env if policy else "TYPESAFE_API_KEY"),
             }
 
@@ -1323,7 +1312,7 @@ class LocalRuntime(TeamRuntime):
             "restart_required": True,
             "config_path": str(env_file),
             "config_error": config_error,
-            **model_fields(list(candidates), control, policy_dict.get("brain", "auto"),
+            **model_fields(list(candidates), policy_dict.get("brain", "auto"),
                            policy_dict.get("credential_env", "TYPESAFE_API_KEY")),
         }
 
@@ -1456,7 +1445,7 @@ class LocalRuntime(TeamRuntime):
                     if experiment.control_model not in experiment.policy.candidate_models:
                         raise ValueError("control_model must be one of candidate_models")
                     problems = _routing_problems(experiment.policy.brain, list(experiment.policy.candidate_models),
-                                                 current["agent_brain"], current["gateway"])
+                                                 current["agent_brain"])
                     if problems:
                         raise ValueError(problems[0] + (f" (and {len(problems) - 1} more)" if len(problems) > 1 else ""))
                     if set(experiment.policy.roles) - set(current["available_roles"]):

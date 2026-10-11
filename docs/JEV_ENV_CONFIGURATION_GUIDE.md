@@ -1,6 +1,6 @@
 # Guide: Configuring TypeSafe JEV Dynamic Routing via `.env`
 
-TypeSafe JEV Dynamic Model Routing in Bobi allows your agent fleet to dynamically assess task complexity and route execution to the most capable, cost-effective model (e.g., routing lightweight edits to `ds/deepseek-flash` and complex multi-file architectural reasoning to `ds/deepseek-v4-pro` or `claude-3-5-sonnet`).
+TypeSafe JEV Dynamic Model Routing in Bobi allows your agent fleet to dynamically assess task complexity and route execution to the most capable, cost-effective model (e.g., routing lightweight edits to `haiku` and complex multi-file architectural reasoning to `sonnet`). Candidates must be models the agent's own brain runs: Claude models for a claude brain, OpenAI models such as `gpt-5.6-luna` and `gpt-5.6-sol` for a codex brain.
 
 Because real-world routing relies on **model-specific trust instructions**, **domain-specific complexity criteria**, and **custom task allowlists**, JEV is designed to be configured manually and precisely via the agent's environment file (`run/.env`).
 
@@ -44,13 +44,13 @@ The JSON structure contains top-level experiment metadata and an inner `policy` 
   "router_version": "1",
   "policy_version": "eng-team-policy-v1",
   "feature_schema_version": "jev-features-v1",
-  "control_model": "ds/deepseek-flash",
+  "control_model": "haiku",
   "cohort": "eng-team-production",
   "variants": [
     {
       "variant_id": "control",
       "weight": 0.0,
-      "model": "ds/deepseek-flash"
+      "model": "haiku"
     },
     {
       "variant_id": "treatment_jev",
@@ -64,8 +64,8 @@ The JSON structure contains top-level experiment metadata and an inner `policy` 
     "brain": "claude",
     "mode": "enforce",
     "candidate_models": [
-      "ds/deepseek-flash",
-      "ds/deepseek-v4-pro"
+      "haiku",
+      "sonnet"
     ],
     "scope": {
       "roles": [
@@ -86,8 +86,8 @@ The JSON structure contains top-level experiment metadata and an inner `policy` 
     "options": {
       "instructions": "Route according to task reasoning demands and complexity. Always select the least costly model capable of solving the task accurately.",
       "criteria": {
-        "ds/deepseek-flash": "Use for routine file lookup, single-file edits, linting, simple function refactors, unit tests, and mechanical boilerplate tasks.",
-        "ds/deepseek-v4-pro": "Use for complex architectural refactors, subtle bug hunts, multi-step planning, concurrency issues, and mission-critical code changes."
+        "haiku": "Use for routine file lookup, single-file edits, linting, simple function refactors, unit tests, and mechanical boilerplate tasks.",
+        "sonnet": "Use for complex architectural refactors, subtle bug hunts, multi-step planning, concurrency issues, and mission-critical code changes."
       }
     },
     "min_confidence": 0.85,
@@ -122,13 +122,13 @@ The JSON structure contains top-level experiment metadata and an inner `policy` 
 * Example:
   ```json
   "criteria": {
-    "ds/deepseek-flash": "Use for standard code edits, unit test fixes, mechanical refactoring, and single-file modifications.",
-    "ds/deepseek-v4-pro": "Use for high-complexity tasks: complex debugging, multi-module architectural changes, and security-critical code."
+    "haiku": "Use for standard code edits, unit test fixes, mechanical refactoring, and single-file modifications.",
+    "sonnet": "Use for high-complexity tasks: complex debugging, multi-module architectural changes, and security-critical code."
   }
   ```
 
 ### D. Safety & Fallback Controls
-* **`control_model`**: The fallback model (e.g., `ds/deepseek-flash`). If the TypeSafe API times out, returns an error (such as HTTP 401 or 500), or confidence is lower than `min_confidence`, Bobi instantly falls back to `control_model` with zero downtime.
+* **`control_model`**: The fallback model (e.g., `haiku`). If the TypeSafe API times out, returns an error (such as HTTP 401 or 500), or confidence is lower than `min_confidence`, Bobi instantly falls back to `control_model` with zero downtime.
 * **`min_confidence`**: Minimum threshold (e.g. `0.85`). If JEV's confidence is below this value, the fallback model executes.
 * **`deadline_ms`**: Monotonic timeout (e.g. `3000` ms). If routing takes longer, the session launches immediately with the control model.
 

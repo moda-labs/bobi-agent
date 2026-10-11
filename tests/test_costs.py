@@ -56,11 +56,8 @@ class TestPriceTable:
         ("cx/gpt-5.6-terra", (2.5, 0.25, 15.0)),
         ("cx/gpt-5.6-luna", (1.0, 0.10, 6.0)),
         ("openai:gpt-5.4-mini", (0.75, 0.075, 4.5)),
-        ("cx/gpt-6.1-sol", (2.0, 0.10, 10.0)),
-        ("ds/deepseek-flash", (0.05, 0.001, 0.20)),
-        ("deepseek-flash", (0.05, 0.001, 0.20)),
-        ("ds/deepseek-v4-pro", (0.22, 0.0073, 0.66)),
-        ("deepseek-v4.1-flash", (0.03, 0.003, 0.12)),
+        ("gpt-5.4", (2.5, 0.25, 15.0)),
+        ("anthropic:claude-sonnet-5-5", (2.0, 0.20, 10.0)),
     ])
     def test_routed_model_ids_resolve_to_list_prices(self, model, prices):
         assert model_prices(model) == prices
@@ -462,8 +459,8 @@ class TestToDict:
 @pytest.mark.parametrize("brain,present,absent", [
     ("claude", ["opus", "sonnet", "haiku", "claude-haiku-4-5", "claude-opus-5-5", "claude-3-7-sonnet", "claude-3-5-sonnet"],
      ["gpt-5.4", "cx/gpt-5.6-luna", "claude-haiku-4-5-20251001"]),
-    ("codex", ["gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-4o", "gpt-4o-mini", "o1", "o3"],
-     ["opus", "cx/gpt-6.1-sol", "deepseek-flash"]),
+    ("codex", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4", "gpt-4o", "gpt-4o-mini", "o1", "o3"],
+     ["opus", "cx/gpt-5.6-luna", "claude-haiku-4-5"]),
 ])
 def test_native_models_list_what_each_brain_runs_directly(brain, present, absent):
     from bobi.costs import native_models

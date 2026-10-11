@@ -1131,11 +1131,6 @@ class TestSystemLogs:
 
 
 class TestRoutingConfig:
-    @pytest.fixture(autouse=True)
-    def _gateway_agent(self, monkeypatch):
-        # The roster uses gateway routing ids (ds/, cx/); a native brain rejects them.
-        monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "https://gateway.invalid/v1")
-
     @pytest.mark.parametrize("route", ["metrics/jev-config", "routing/config"])
     def test_jev_config_without_experiment_is_disabled_not_missing(self, bobi_install, route):
         response = _client().get(f"/api/agents/{bobi_install.agent_name}/{route}")
@@ -1144,7 +1139,7 @@ class TestRoutingConfig:
         assert response.headers["cache-control"] == "no-store"
         assert _client().get(f"/api/agents/missing-agent/{route}").status_code == 404
 
-    def test_jev_config_offers_priced_models_and_names_unusable_policy(self, bobi_install):
+    def test_jev_config_offers_native_models_and_names_unusable_policy(self, bobi_install):
         from bobi import paths
         from bobi.costs import model_prices
         from tests.metrics.test_routing import concise_config
@@ -1154,9 +1149,9 @@ class TestRoutingConfig:
         assert config["agent_brain"] == "claude"
         assert {"opus", "claude-haiku-4-5", "claude-3-7-sonnet"} <= set(config["native_models"])
         assert not any("/" in model or model.startswith("gpt-") for model in config["native_models"])
-        assert {"cx/gpt-5.6-luna", "ds/deepseek-flash"} <= set(config["priced_models"])
-        assert all(model_prices(model) for model in config["native_models"] + config["priced_models"])
-        assert config["unpriced_models"] == [] and config["config_error"] == ""
+        assert all(model_prices(model) for model in config["native_models"])
+        assert not {"gateway", "priced_models", "unpriced_models"} & set(config)
+        assert config["config_error"] == ""
         broken = {**concise_config(), "min_confidence": 7}
         paths.env_path(bobi_install.repo_path).write_text("# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(broken) + "\n")
         config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
@@ -1221,8 +1216,8 @@ class TestRoutingConfig:
         env_file.write_text("# keep this comment\nOTHER_TOKEN=synthetic-private\n")
         before = dict(os.environ)
         url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
-        payload = {"mode": "shadow", "control_model": "model-a", "candidate_models": ["model-a", "model-b"],
-                   "roles": ["engineer"], "instructions": "Choose B for complex work.\nOtherwise choose A."}
+        payload = {"mode": "shadow", "control_model": "haiku", "candidate_models": ["haiku", "sonnet"],
+                   "roles": ["engineer"], "instructions": "Choose sonnet for complex work.\nOtherwise choose haiku."}
         client = _client()
         saved = client.post(url, json=payload)
         assert saved.status_code == 200, saved.text
@@ -1263,7 +1258,7 @@ class TestRoutingConfig:
         ({"roles": []}, "roles"), ({"roles": ["unknown-role"]}, "roles"), ({"roles": ["engineer", "engineer"]}, "roles"),
         ({"roles": "engineer"}, "roles"), ({"min_confidence": True}, "min_confidence"),
         ({"min_confidence": 1.5}, "min_confidence"), ({"api_key": "never-echo-this"}, "api_key"),
-        ({"candidate_models": ["ds/deepseek-flash", "opus", "claude-opus-5-5"]}, "candidate_models"),
+        ({"candidate_models": ["haiku", "opus", "claude-opus-5-5"]}, "candidate_models"),
     ])
     def test_jev_config_rejects_invalid_input_without_mutation(self, bobi_install, invalid, field):
         from bobi import paths
@@ -1280,28 +1275,34 @@ class TestRoutingConfig:
         # The message names the offending field so the editor can say what to fix.
         assert field in response.json()["error"]
 
+    @pytest.mark.parametrize("gateway", [False, True])
     @pytest.mark.parametrize("brain,candidates,problem", [
         ("claude", ["haiku", "claude-opus-5-5"], None),
-        ("claude", ["haiku", "ds/deepseek-v4-pro"], "ds/deepseek-v4-pro is a gateway routing id"),
-        ("claude", ["haiku", "gpt-5.4"], "gpt-5.4 is an OpenAI model"),
+        ("claude", ["haiku", "gpt-5.4"], "gpt-5.4 is not an Anthropic model this agent's claude brain can run"),
+        ("claude", ["haiku", "cx/gpt-5"], "cx/gpt-5 is not an Anthropic model this agent's claude brain can run"),
         ("codex", ["gpt-5.6-luna", "gpt-5.6-sol"], None),
-        ("codex", ["gpt-5.6-luna", "opus"], "opus is an Anthropic model"),
+        ("codex", ["gpt-5.6-luna", "opus"], "opus is not an OpenAI model this agent's codex brain can run"),
     ])
-    def test_jev_candidates_must_run_on_a_native_brain(self, bobi_install, monkeypatch, brain, candidates, problem):
+    def test_jev_candidates_must_run_on_the_agent_brain(self, bobi_install, monkeypatch, brain, candidates, problem,
+                                                         gateway):
         from bobi import paths
         from bobi.config import parse_env_file
 
-        monkeypatch.delenv("BOBI_GATEWAY_BASE_URL")
+        # A gateway does not widen the roster: JEV routes only between the brain's own models.
+        if gateway:
+            monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "https://gateway.invalid/v1")
+        else:
+            monkeypatch.delenv("BOBI_GATEWAY_BASE_URL", raising=False)
         monkeypatch.setenv("BOBI_BRAIN", brain)
         url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
         config = _client().get(url).json()
-        assert config["agent_brain"] == brain and config["gateway"] is False
+        assert config["agent_brain"] == brain and "gateway" not in config
         assert config["brain"] == "auto" and config["prompt_egress"] == "redacted"
         response = _client().post(url, json={"mode": "shadow", "control_model": candidates[0],
             "candidate_models": candidates, "roles": ["engineer"], "instructions": "Route by difficulty."})
         if problem:
             assert response.status_code == 400 and problem in response.json()["error"]
-            assert "BOBI_GATEWAY_BASE_URL" in response.json()["error"]
+            assert "pick one from the model list" in response.json()["error"]
             return
         assert response.status_code == 200, response.text
         saved = json.loads(parse_env_file(paths.env_path(bobi_install.repo_path))["BOBI_METRICS_EXPERIMENT_JSON"])
@@ -1342,7 +1343,7 @@ class TestRoutingConfig:
         from bobi import paths
         from bobi.brain import BrainUsage, StreamDelta, TurnResult
 
-        monkeypatch.delenv("BOBI_GATEWAY_BASE_URL")
+        monkeypatch.delenv("BOBI_GATEWAY_BASE_URL", raising=False)
         monkeypatch.setenv("BOBI_BRAIN", brain)
         paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps({
             "control_model": "haiku", "candidate_models": ["haiku", "sonnet"],
@@ -1417,9 +1418,10 @@ class TestRoutingConfig:
         from tests.metrics.test_routing import concise_config
 
         raw = {**concise_config(), "brain": "codex", "deadline_ms": 1750,
+               "control_model": "gpt-5.6-luna", "candidate_models": ["gpt-5.6-luna", "gpt-5.6-sol"],
                "endpoint": "https://example.invalid/systemone", "prompt_egress": "redacted",
                "max_prompt_bytes": 4096, "entry_points": ["session_start"],
-               "criteria": {"ds/deepseek-flash": "Retain this criterion", "ds/deepseek-v4-pro": "Removed criterion"}}
+               "criteria": {"gpt-5.6-luna": "Retain this criterion", "gpt-5.6-sol": "Removed criterion"}}
         if legacy:
             raw = public_config(ExperimentConfig.from_mapping(raw))
             raw["policy"]["options"]["endpoint"] = "https://example.invalid/systemone"
@@ -1428,7 +1430,7 @@ class TestRoutingConfig:
         env_file = paths.env_path(bobi_install.repo_path)
         env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\nBOBI_METRICS_ASSIGNMENT_SECRET=synthetic\n")
         response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config", json={
-            "candidate_models": ["ds/deepseek-flash", "new-model"], "instructions": "Edited instructions"})
+            "candidate_models": ["gpt-5.6-luna", "gpt-5.4"], "instructions": "Edited instructions"})
         assert response.status_code == 200, response.text
         saved = json.loads(parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"])
         policy = ExperimentConfig.from_mapping(saved).policy
@@ -1438,8 +1440,8 @@ class TestRoutingConfig:
         options = json.loads(policy.options_json)
         assert options["endpoint"] == "https://example.invalid/systemone"
         assert options["instructions"] == "Edited instructions"
-        assert options["criteria"]["ds/deepseek-flash"] == "Retain this criterion"
-        assert set(options["criteria"]) == {"ds/deepseek-flash", "new-model"}
+        assert options["criteria"]["gpt-5.6-luna"] == "Retain this criterion"
+        assert set(options["criteria"]) == {"gpt-5.6-luna", "gpt-5.4"}
         if legacy:
             assert policy.credential_env == "CUSTOM_JEV_KEY" and policy.max_in_flight == 3
 
@@ -1461,8 +1463,8 @@ class TestRoutingConfig:
         assert response.status_code == 200, response.text
         saved = json.loads(parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"])
         # Key fields plus the one non-default setting; labels and defaults are dropped.
-        assert saved == {"mode": "enforce", "control_model": "ds/deepseek-flash",
-                         "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
+        assert saved == {"mode": "enforce", "control_model": "haiku",
+                         "candidate_models": ["haiku", "sonnet"],
                          "prompt_egress": "redacted", "instructions": "Edited instructions",
                          "entry_points": entry_points}
         after = ExperimentConfig.from_mapping(saved).policy
@@ -1669,8 +1671,8 @@ class TestRoutingConfig:
             assert payload["state"]["entry_point"] == "subagent_phase"
             assert request.headers["authorization"] == "Bearer override-test-key"
             return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
-                "type": "choice", "choice": "ds/deepseek-v4-pro", "confidence": 0.94,
-                "probabilities": {"ds/deepseek-flash": 0.03, "ds/deepseek-v4-pro": 0.97}}},
+                "type": "choice", "choice": "sonnet", "confidence": 0.94,
+                "probabilities": {"haiku": 0.03, "sonnet": 0.97}}},
                 "usage": {"input_tokens": 12, "output_tokens": 4}, "debug": "override-test-key",
                 "saved": "configured-test-key", "access_token": "opaque-vendor-token"})
 
@@ -1682,8 +1684,8 @@ class TestRoutingConfig:
         result = _client().post(url, json=payload)
         assert result.status_code == 200, result.text
         data = result.json()
-        assert data["selected_model"] == "ds/deepseek-v4-pro" and data["confidence"] == 0.94
-        assert data["probabilities"]["ds/deepseek-v4-pro"] == 0.97 and data["latency_ms"] >= 0
+        assert data["selected_model"] == "sonnet" and data["confidence"] == 0.94
+        assert data["probabilities"]["sonnet"] == 0.97 and data["latency_ms"] >= 0
         assert data["outgoing_payload"]["state"] == data["features"]
         assert data["raw_response"]["debug"] == "[redacted]"
         assert data["raw_response"]["saved"] == "[redacted]"
@@ -1731,8 +1733,8 @@ class TestRoutingConfig:
             calls.append(key)
             await asyncio.sleep(0.01)
             assert policy.api_key == key
-            return PolicyResult("ds/deepseek-flash", 0.94, None, "jev-1.13.0", None, None,
-                {"ds/deepseek-flash": 0.97, "ds/deepseek-v4-pro": 0.03}, {"debug": key}, {})
+            return PolicyResult("haiku", 0.94, None, "jev-1.13.0", None, None,
+                {"haiku": 0.97, "sonnet": 0.03}, {"debug": key}, {})
         monkeypatch.setattr("bobi.metrics.policies.typesafe.TypeSafePolicy.decide", decide)
         runtime = LocalRuntime()
         async def exercise():
@@ -1805,8 +1807,8 @@ class TestRoutingConfig:
             if fault == "unexpected":
                 raise OSError("private-canary sensitive-vendor-error")
             raw = {"model": "jev-1.13.0", "answers": {"route": {
-                "type": "choice", "choice": "ds/deepseek-flash", "confidence": 0.94,
-                "probabilities": {"ds/deepseek-flash": 0.97, "ds/deepseek-v4-pro": 0.03}}},
+                "type": "choice", "choice": "haiku", "confidence": 0.94,
+                "probabilities": {"haiku": 0.97, "sonnet": 0.03}}},
                 "usage": {"input_tokens": 12, "output_tokens": 4}}
             if fault == "nested":
                 nested = {}
@@ -1871,14 +1873,14 @@ class TestRoutingConfig:
             assert request.headers["authorization"] == "Bearer legacy-test-key"
             assert json.loads(request.content)["state"]["brain"] == "codex"
             return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
-                "type": "choice", "choice": "ds/deepseek-v4-pro", "confidence": 0.94,
-                "probabilities": {"ds/deepseek-flash": 0.03, "ds/deepseek-v4-pro": 0.97}}},
+                "type": "choice", "choice": "sonnet", "confidence": 0.94,
+                "probabilities": {"haiku": 0.03, "sonnet": 0.97}}},
                 "usage": {"input_tokens": 12, "output_tokens": 4}})
         monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
             lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
         response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-route", json={"prompt": "test"})
         assert response.status_code == 200, response.text
-        assert response.json()["selected_model"] == "ds/deepseek-v4-pro"
+        assert response.json()["selected_model"] == "sonnet"
         assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
 
     @pytest.mark.parametrize("mode,confidence,status,version", [
@@ -1898,8 +1900,8 @@ class TestRoutingConfig:
         def handler(request):
             assert request.headers["authorization"] == "Bearer saved-test-key"
             return httpx.Response(status, json={"model": version, "answers": {"route": {
-                "type": "choice", "choice": "ds/deepseek-v4-pro", "confidence": confidence,
-                "probabilities": {"ds/deepseek-flash": 0.03, "ds/deepseek-v4-pro": 0.97}}},
+                "type": "choice", "choice": "sonnet", "confidence": confidence,
+                "probabilities": {"haiku": 0.03, "sonnet": 0.97}}},
                 "usage": {"input_tokens": 12, "output_tokens": 4}})
         monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
             lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
@@ -1915,7 +1917,7 @@ class TestRoutingConfig:
         drift = version in {"jev-other", "jev-1.14.0"}
         assert data["model_version"] == version and data["pinned_version"] == "jev-1.13.0"
         assert data["fallback_reason"] == ("policy_version_drift" if drift else "policy_low_confidence" if confidence < 0.85 else None)
-        assert data["effective_model"] == ("ds/deepseek-flash" if drift or confidence < 0.85 or mode == "shadow" else "ds/deepseek-v4-pro")
+        assert data["effective_model"] == ("haiku" if drift or confidence < 0.85 or mode == "shadow" else "sonnet")
 
     @pytest.mark.parametrize("egress", ["none", "redacted"])
     def test_sandbox_sends_task_text_only_when_production_would(self, bobi_install, monkeypatch, egress):
@@ -1930,8 +1932,8 @@ class TestRoutingConfig:
         def handler(request):
             sent.append(json.loads(request.content)["state"])
             return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
-                "type": "choice", "choice": "ds/deepseek-flash", "confidence": 0.9,
-                "probabilities": {"ds/deepseek-flash": 0.9, "ds/deepseek-v4-pro": 0.1}}},
+                "type": "choice", "choice": "haiku", "confidence": 0.9,
+                "probabilities": {"haiku": 0.9, "sonnet": 0.1}}},
                 "usage": {"input_tokens": 1, "output_tokens": 1}})
         monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
             lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
@@ -1956,8 +1958,8 @@ class TestRoutingConfig:
         r_update = c.post(f"/api/agents/{name}/routing/config", json={
             "enabled": True,
             "mode": "shadow",
-            "control_model": "ds/deepseek-flash",
-            "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
+            "control_model": "haiku",
+            "candidate_models": ["haiku", "sonnet"],
             "roles": ["engineer"],
             "min_confidence": 0.85
         })
@@ -1965,19 +1967,19 @@ class TestRoutingConfig:
         updated = r_update.json()
         assert updated["enabled"] is True
         assert updated["mode"] == "shadow"
-        assert updated["control_model"] == "ds/deepseek-flash"
+        assert updated["control_model"] == "haiku"
         from bobi import paths
         from bobi.config import parse_env_file
         saved = json.loads(parse_env_file(paths.env_path(bobi_install.repo_path))["BOBI_METRICS_EXPERIMENT_JSON"])
-        assert saved["candidate_models"] == ["ds/deepseek-flash", "ds/deepseek-v4-pro"]
+        assert saved["candidate_models"] == ["haiku", "sonnet"]
         assert "variants" not in saved and "policy" not in saved and "router_name" not in saved
 
         # Update to enforce mode
         r_enforce = c.post(f"/api/agents/{name}/routing/config", json={
             "enabled": True,
             "mode": "enforce",
-            "control_model": "ds/deepseek-flash",
-            "candidate_models": ["ds/deepseek-flash", "ds/deepseek-v4-pro"],
+            "control_model": "haiku",
+            "candidate_models": ["haiku", "sonnet"],
             "roles": ["engineer"]
         })
         assert r_enforce.status_code == 200

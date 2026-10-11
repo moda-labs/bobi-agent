@@ -78,8 +78,8 @@ class TestMetricsView:
 
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         connection = connect(webapp.install.state_dir / "metrics/metrics.db")
-        connection.execute("UPDATE llm_invocations SET model_requested='claude-haiku-4-5', model_selected='claude-haiku-4-5' WHERE invocation_id='i0'")
-        connection.execute("UPDATE usage_measurements SET model='claude-haiku-4-5' WHERE measurement_id='u0'")
+        connection.execute("UPDATE llm_invocations SET model_requested='claude-opus-5-5', model_selected='claude-opus-5-5' WHERE invocation_id='i0'")
+        connection.execute("UPDATE usage_measurements SET model='claude-opus-5-5' WHERE measurement_id='u0'")
         connection.commit()
         connection.close()
         held = []
@@ -93,7 +93,7 @@ class TestMetricsView:
         page.set_viewport_size({"width": width, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
         model = page.get_by_role("textbox", name="Provider model filter")
-        model.fill("haik")
+        model.fill("opu")
         expect(model).to_be_focused()
         expect(page.locator("#metrics-refresh")).to_have_attribute("aria-busy", "true")
         page.wait_for_timeout(400)
@@ -101,13 +101,13 @@ class TestMetricsView:
         held.pop().continue_()
         rows = page.locator(".metrics-table-panel tbody tr")
         expect(rows).to_have_count(1)
-        expect(rows).to_contain_text("claude-haiku-4-5")
+        expect(rows).to_contain_text("claude-opus-5-5")
         expect(page.locator(".metrics-tile strong").first).to_have_text("100")
-        assert any("/summary?" in url and "model=haik" in url for url in requests)
-        assert any("/turns?" in url and "model=haik" in url for url in requests)
+        assert any("/summary?" in url and "model=opu" in url for url in requests)
+        assert any("/turns?" in url and "model=opu" in url for url in requests)
         expect(model).to_be_focused()
-        _metrics_capture(page, f"model-haik-{width}")
-        model.fill("  V4-PRO  ")
+        _metrics_capture(page, f"model-opu-{width}")
+        model.fill("  SONNET  ")
         expect(rows).to_have_count(2)
         expect(page.locator(".metrics-tile strong").first).to_have_text("620")
         page.unroute("**/metrics/summary?**", hold_initial_summary)
@@ -281,8 +281,8 @@ class TestMetricsView:
             if calls[-1]["state"]["task"] == "Fail deliberately":
                 return httpx.Response(401, text="private vendor error")
             return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
-                "type": "choice", "choice": "ds/deepseek-v4-pro", "confidence": 0.94,
-                "probabilities": {"ds/deepseek-flash": 0.03, "ds/deepseek-v4-pro": 0.97}}},
+                "type": "choice", "choice": "sonnet", "confidence": 0.94,
+                "probabilities": {"haiku": 0.03, "sonnet": 0.97}}},
                 "usage": {"input_tokens": 12, "output_tokens": 4},
                 "debug": '<img src=x onerror="window.sandboxInjected=true">'})
         monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
@@ -367,15 +367,15 @@ class TestMetricsView:
         dialog.get_by_role("button", name="Run test").click()
         # The flow: prompt -> JEV suggests -> Bobi chooses -> the chosen model's output.
         steps = dialog.locator(".jev-flow-title")
-        expect(steps).to_have_text(["Your prompt", "JEV suggests", "Bobi chooses", "Output from ds/deepseek-v4-pro"])
+        expect(steps).to_have_text(["Your prompt", "JEV suggests", "Bobi chooses", "Output from sonnet"])
         headline = dialog.locator(".jev-decision-headline")
-        expect(headline).to_have_text("This turn runs on ds/deepseek-v4-pro.")
-        expect(dialog.locator(".jev-flow-suggestion")).to_contain_text("ds/deepseek-v4-pro at 94% confidence")
+        expect(headline).to_have_text("This turn runs on sonnet.")
+        expect(dialog.locator(".jev-flow-suggestion")).to_contain_text("sonnet at 94% confidence")
         expect(dialog.locator(".jev-flow-output")).to_have_text("<b>Answer</b> from the chosen model")
-        assert runs[-1] == {"prompt": "Write a distributed Raft consensus algorithm", "model": "ds/deepseek-v4-pro"}
+        assert runs[-1] == {"prompt": "Write a distributed Raft consensus algorithm", "model": "sonnet"}
         expect(dialog.locator(".jev-wire-inspector")).to_have_count(0)
         expect(dialog.get_by_role("meter", name="Confidence", exact=True)).to_have_attribute("aria-valuenow", "94")
-        expect(dialog.get_by_role("meter", name="ds/deepseek-v4-pro", exact=True)).to_have_attribute("aria-valuenow", "97")
+        expect(dialog.get_by_role("meter", name="sonnet", exact=True)).to_have_attribute("aria-valuenow", "97")
         expect(dialog.locator("progress")).to_have_count(0)
         expect(dialog.locator(".jev-probability-row")).to_have_count(2)
         expect(dialog.locator(".jev-test-status")).to_contain_text("No metrics recorded")
@@ -401,13 +401,13 @@ class TestMetricsView:
         dialog.get_by_role("button", name="Run test").click()
         # Like production, a failed policy call runs the control model; the 401
         # names the credential problem instead of reading like an outage.
-        expect(headline).to_have_text("This turn runs on ds/deepseek-flash (control).")
+        expect(headline).to_have_text("This turn runs on haiku (control).")
         expect(dialog.locator(".jev-flow-error")).to_contain_text("TypeSafe rejected the API key")
         expect(dialog.get_by_role("button", name="Run test")).to_be_enabled()
-        assert runs[-1]["model"] == "ds/deepseek-flash"
+        assert runs[-1]["model"] == "haiku"
         prompt.fill("Retry the routing decision")
         dialog.get_by_role("button", name="Run test").click()
-        expect(headline).to_have_text("This turn runs on ds/deepseek-v4-pro.")
+        expect(headline).to_have_text("This turn runs on sonnet.")
         assert len(calls) == 3 and len(runs) == 3 and env_file.read_bytes() == env_before
         page.unroute("**/metrics/test-run")
         wire = dialog.get_by_role("button", name="Run test")
@@ -547,8 +547,8 @@ class TestMetricsView:
         routine.click()
         detail = page.get_by_role("dialog", name="Turn detail")
         detail.locator('[data-tab="technical"]').click()
-        expect(detail).to_contain_text("ds/deepseek-flash")
-        expect(detail).to_contain_text("deepseek-flash")
+        expect(detail).to_contain_text("suggest: haiku")
+        expect(detail).to_contain_text("claude-haiku-4-5")
         detail.screenshot(path=str(METRICS_CAPTURES / "turn-detail-tables.png"))
         page.locator(".detail-nav-tabs [data-tab=technical]").click()
         expect(page.locator(".panel-routing")).to_be_hidden()
@@ -566,7 +566,7 @@ class TestMetricsView:
             page.wait_for_timeout(10500)
         expect(detail).to_be_visible()
         detail.get_by_role("button", name="Close").click()
-        page.get_by_role("textbox", name="Provider model filter").fill("deepseek-v4-pro")
+        page.get_by_role("textbox", name="Provider model filter").fill("claude-sonnet-5-5")
         page.get_by_role("textbox", name="Provider model filter").press("Tab")
         expect(page.locator(".metrics-tile strong").first).to_have_text("620")
         expect(rows.filter(has_text="72%")).to_have_count(0)
@@ -664,7 +664,7 @@ class TestMetricsView:
         page.route(re.compile(r"/metrics/summary\?"), hold_first)
         page.goto(webapp.agent_url() + "/metrics")
         expect(page.get_by_role("textbox", name="Provider model filter")).to_be_visible()
-        page.get_by_role("textbox", name="Provider model filter").fill("deepseek-v4-pro")
+        page.get_by_role("textbox", name="Provider model filter").fill("claude-sonnet-5-5")
         page.get_by_role("textbox", name="Provider model filter").press("Tab")
         assert held
         held[0].continue_()
@@ -779,17 +779,17 @@ class TestMetricsView:
 
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
-        conn.execute("UPDATE router_decisions SET fallback_reason=?,metadata_json=json_set(metadata_json,'$.policy.mode',?,'$.policy.confidence',0.34,'$.policy.recommended_model','ds/deepseek-v4-pro') WHERE turn_id='t-routine'", (fallback, mode))
+        conn.execute("UPDATE router_decisions SET fallback_reason=?,metadata_json=json_set(metadata_json,'$.policy.mode',?,'$.policy.confidence',0.34,'$.policy.recommended_model','sonnet') WHERE turn_id='t-routine'", (fallback, mode))
         conn.commit()
         conn.close()
         page.goto(webapp.agent_url() + "/metrics")
         row = page.locator(".metrics-table-panel tbody tr", has_text="34%")
-        expect(row).to_contain_text("deepseek-flash")
+        expect(row).to_contain_text("claude-haiku-4-5")
         expect(row).to_contain_text(expected)
         row.click()
         detail = page.get_by_role("dialog", name="Turn detail")
         decision = detail.locator(".panel-routing tbody tr")
-        expect(decision.locator("td").nth(0)).to_contain_text("deepseek-flash")
+        expect(decision.locator("td").nth(0)).to_contain_text("haiku")
         expect(decision.locator("td").nth(1)).to_contain_text(expected)
         expect(decision.locator("td").nth(2)).to_have_text("34%")
         expect(decision.locator("td").nth(2).locator("span")).to_have_attribute("title", "Raw score: 0.340")
@@ -797,9 +797,9 @@ class TestMetricsView:
         expect(decision).not_to_contain_text("rate limit")
         expect(decision).not_to_contain_text("anthropic")
         if mode == "shadow":
-            expect(decision).to_contain_text("Recommended ds/deepseek-v4-pro; kept the configured model ds/deepseek-flash")
+            expect(decision).to_contain_text("Recommended sonnet; kept the configured model haiku")
         else:
-            expect(decision).to_contain_text("executed ds/deepseek-flash")
+            expect(decision).to_contain_text("executed haiku")
 
     @pytest.mark.parametrize("width", [1440, 1100, 700])
     @pytest.mark.parametrize("shape", ["multiline", "wrapped-single-line"])
@@ -1025,11 +1025,9 @@ class TestMetricsView:
         _metrics_capture(page, f"no-unsafe-or-internal-origin-tags-{width}")
 
     @pytest.mark.parametrize("width", [1440, 1100, 700])
-    def test_jev_editor_save_validation_readback_and_reset(self, webapp, page, width, monkeypatch):
+    def test_jev_editor_save_validation_readback_and_reset(self, webapp, page, width):
         from bobi import paths
 
-        # The roster below uses gateway routing ids; without a gateway the save names the fix.
-        monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "https://gateway.invalid/v1")
         from tests.metrics.test_routing import concise_config
 
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
@@ -1046,46 +1044,40 @@ class TestMetricsView:
         dialog.get_by_role("tab", name="Configure").click()
         editor = dialog.locator("#jev-pane-guide")
         mode = editor.locator("#jev-config-mode")
-        candidates = editor.locator("#jev-config-candidates")
         instructions = editor.locator("#jev-config-instructions")
         mode.select_option("enforce")
         while editor.locator(".jev-candidate-remove").count():
             editor.locator(".jev-candidate-remove").first.click()
         dialog.locator("#jev-config-save").click()
         expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("candidate", re.I))
-        candidates.fill("ds/deepseek-flash")
-        candidates.press("Enter")
-        candidates.fill("ds/deepseek-v4-pro")
-        editor.locator("#jev-config-candidate-add").click()
-        candidates.fill("ds/deepseek-flash")
-        candidates.press("Enter")
-        expect(editor.locator(".jev-candidate-tag code")).to_have_text(["ds/deepseek-flash", "ds/deepseek-v4-pro"])
-        # The control model is picked from the candidates, so it cannot drift off the list.
-        control = editor.locator("#jev-config-control")
-        expect(control.locator("option")).to_have_text(["ds/deepseek-flash", "ds/deepseek-v4-pro"])
-        control.select_option("ds/deepseek-v4-pro")
-        expect(editor.locator(".jev-candidate-tag").nth(1)).to_contain_text("control")
-        editor.get_by_role("button", name="Remove ds/deepseek-v4-pro").click()
-        expect(control).to_have_value("ds/deepseek-flash")
-        candidates.fill("ds/deepseek-v4-pro")
-        candidates.press("Enter")
+        # Candidates come only from the agent's own models; there is no free-text entry.
+        expect(editor.locator("#jev-config-candidates, #jev-config-candidate-add, .jev-custom-model")).to_have_count(0)
         # Native models are picked from a filtered list; nothing to type, nothing to misspell.
         picker = editor.locator("#jev-model-options")
         expect(picker.locator(".jev-model-option").first).to_have_text("opus")
+        picker.get_by_role("option", name="haiku", exact=True).click()
+        editor.locator("#jev-model-filter").fill("sonnet")
+        picker.get_by_role("option", name="sonnet", exact=True).click()
+        expect(editor.locator(".jev-candidate-tag code")).to_have_text(["haiku", "sonnet"])
+        # The control model is picked from the candidates, so it cannot drift off the list.
+        control = editor.locator("#jev-config-control")
+        expect(control.locator("option")).to_have_text(["haiku", "sonnet"])
+        control.select_option("sonnet")
+        expect(editor.locator(".jev-candidate-tag").nth(1)).to_contain_text("control")
+        editor.get_by_role("button", name="Remove sonnet").click()
+        expect(control).to_have_value("haiku")
+        expect(picker.get_by_role("option", name="sonnet", exact=True)).to_have_attribute("aria-selected", "false")
+        picker.get_by_role("option", name="sonnet", exact=True).click()
         editor.locator("#jev-model-filter").fill("haiku-4")
         expect(picker.locator(".jev-model-option")).to_have_text(["claude-haiku-4-5"])
         picker.get_by_role("option", name="claude-haiku-4-5").click()
         expect(picker.get_by_role("option", name="claude-haiku-4-5")).to_have_attribute("aria-selected", "true")
         expect(editor.locator(".jev-candidate-tag code").last).to_have_text("claude-haiku-4-5")
         picker.get_by_role("option", name="claude-haiku-4-5").click()
-        expect(editor.locator(".jev-candidate-tag code")).to_have_text(["ds/deepseek-flash", "ds/deepseek-v4-pro"])
+        expect(editor.locator(".jev-candidate-tag code")).to_have_text(["haiku", "sonnet"])
         editor.locator("#jev-model-filter").fill("haikuuu")
         expect(editor.locator(".jev-model-empty")).to_be_visible()
         editor.locator("#jev-model-filter").fill("")
-        candidates.fill("cx/gpt-5.6-lunna")
-        candidates.press("Enter")
-        expect(editor.locator(".jev-candidate-tag.is-unlisted")).to_have_text(re.compile("cx/gpt-5.6-lunna"))
-        editor.get_by_role("button", name="Remove cx/gpt-5.6-lunna").click()
         expect(editor.locator("#jev-mode-hint")).to_contain_text("fall back to the control model")
         expect(editor.locator("#jev-config-egress")).to_have_value("none")
         editor.locator("#jev-config-egress").select_option("redacted")
@@ -1097,15 +1089,15 @@ class TestMetricsView:
         expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("instruction", re.I))
         assert not [item for item in requests if item[0] == "POST" and item[1].endswith("/metrics/jev-config")]
         assert env_file.read_bytes() == before
-        instructions.fill("Use Flash for simple changes; Pro for the agent's complex coding. <img src=x onerror=window.editorInjected=true>")
-        _metrics_bounds(page, ".jev-config-modal, #jev-pane-guide select, #jev-pane-guide textarea, #jev-pane-guide button, #jev-config-candidates, #jev-config-control")
+        instructions.fill("Use Haiku for simple changes; Sonnet for the agent's complex coding. <img src=x onerror=window.editorInjected=true>")
+        _metrics_bounds(page, ".jev-config-modal, #jev-pane-guide select, #jev-pane-guide textarea, #jev-pane-guide button, #jev-model-filter, #jev-config-control")
         assert editor.locator("textarea").evaluate_all("elements => elements.every(element => element.getBoundingClientRect().width >= 180)")
         with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/metrics/jev-config")) as saved:
             dialog.locator("#jev-config-save").click()
         assert saved.value.status == 200
         payload = saved.value.json()
         assert payload["enabled"] and payload["mode"] == "enforce"
-        assert payload["candidate_models"] == ["ds/deepseek-flash", "ds/deepseek-v4-pro"]
+        assert payload["candidate_models"] == ["haiku", "sonnet"]
         assert payload["roles"] == ["director", "engineer"] and payload["instructions"] == instructions.input_value()
         assert payload["prompt_egress"] == "redacted" and payload["brain"] == "auto"
         assert payload["restart_required"] and payload["applies_on"] == "agent_restart"
@@ -1260,18 +1252,18 @@ class TestMetricsView:
         savings = response.value.json()["routing"]["savings"]
         card = page.locator(".jev-summary-card")
         net = card.locator(".jev-kpi.is-saved")
-        expect(net.locator(".jev-kpi-value")).to_have_text(re.compile(r"^\$0\.0000\d+$"))
-        expect(net).to_contain_text(f"{savings['saved_pct']:.1f}% cheaper than always ds/deepseek-v4-pro")
+        expect(net.locator(".jev-kpi-value")).to_have_text(re.compile(r"^\$0\.000\d+$"))
+        expect(net).to_contain_text(f"{savings['saved_pct']:.1f}% cheaper than always sonnet")
         expect(card.locator(".jev-kpi")).to_have_count(4)
         expect(card.locator(".jev-kpi").nth(1)).to_contain_text("3 of 4 turns routed")
         expect(card.locator(".jev-dist-seg")).to_have_count(2)
         # Real model names and shares, busiest first; no invented tier labels.
-        expect(card.locator(".jev-dist-item")).to_have_text(["ds/deepseek-v4-pro2 turns (67%)", "ds/deepseek-flash1 turn (33%)"])
+        expect(card.locator(".jev-dist-item")).to_have_text(["sonnet2 turns (67%)", "haiku1 turn (33%)"])
         table = card.locator(".jev-table")
         expect(table.locator("thead th")).to_have_text(["Model", "Share / Turns", "Actual Spend", "Baseline Cost (Flagship)", "Net Savings"])
         # One flat table: a row per picked model, no per-router divider rows.
         expect(table.locator("tbody tr")).to_have_count(2)
-        expect(table.locator("tbody .jev-cell-model code")).to_have_text(["ds/deepseek-v4-pro", "ds/deepseek-flash"])
+        expect(table.locator("tbody .jev-cell-model code")).to_have_text(["sonnet", "haiku"])
         expect(table.locator("tbody td:nth-child(2)")).to_have_text(["67% / 2", "33% / 1"])
         expect(card).not_to_contain_text(re.compile("Economy|Balanced|Tier"))
         expect(table.locator("tbody tr").nth(0).locator(".jev-cell-saved")).to_have_text("—(Baseline)")
@@ -1285,7 +1277,7 @@ class TestMetricsView:
         _metrics_capture(page, f"jev-savings-{width}")
 
         conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
-        conn.execute("UPDATE router_decisions SET candidate_models_json='[\"ds/deepseek-flash\",\"cx/gpt-7-nova\"]' "
+        conn.execute("UPDATE router_decisions SET candidate_models_json='[\"haiku\",\"cx/gpt-7-nova\"]' "
                      "WHERE turn_id='t-routine'")
         conn.commit()
         conn.close()

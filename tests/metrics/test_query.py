@@ -36,28 +36,28 @@ def test_dashboard_canonical_usage_routing_and_privacy(tmp_path):
     assert turns[-1]["tool_count"] == 0
     # No recorded dollars; the list-price fallback rides separately.
     assert turns[-1]["costs"] == {"reported_cost_usd": None, "estimated_cost_usd": None,
-                                  "list_price_usd": pytest.approx(100 * 0.05 / 1_000_000)}
+                                  "list_price_usd": pytest.approx(100 * 1.0 / 1_000_000)}
     assert turns[0]["costs"]["list_price_usd"] is None
     detail = queries.turn({"turn_id": "t-pro", "include_policy": True})
     assert detail["router_decisions"][0]["confidence"] == 0.96
     assert "private-task" not in json.dumps([summary, turns, detail])
-    filtered = queries.summary({**args, "include_dashboard": True, "model": "deepseek-v4-pro"})
+    filtered = queries.summary({**args, "include_dashboard": True, "model": "claude-sonnet-5-5"})
     assert filtered["totals"]["input_tokens"] == 620
     assert filtered["routing"]["turns"] == 2
     from bobi.costs import estimate_cost
 
     # Chosen usage per routed turn: invocation rows for t-routine and t-pro,
     # the exact terminal row for t-reused.
-    executed = [("deepseek-flash", 100, 0, 0), ("deepseek-v4-pro", 300, 60, 50),
-                ("ds/deepseek-v4-pro", 320, 80, 50)]
+    executed = [("claude-haiku-4-5", 100, 0, 0), ("claude-sonnet-5-5", 300, 60, 50),
+                ("sonnet", 320, 80, 50)]
     routed = sum(estimate_cost("gateway", m, i, o, c) for m, i, o, c in executed)
-    ceiling = sum(estimate_cost("gateway", "ds/deepseek-v4-pro", i, o, c) for _m, i, o, c in executed)
-    floor = sum(estimate_cost("gateway", "ds/deepseek-flash", i, o, c) for _m, i, o, c in executed)
+    ceiling = sum(estimate_cost("gateway", "sonnet", i, o, c) for _m, i, o, c in executed)
+    floor = sum(estimate_cost("gateway", "haiku", i, o, c) for _m, i, o, c in executed)
     savings = summary["routing"]["savings"]
     assert savings["priced_turns"] == 3 and savings["unpriced_turns"] == 0
     assert savings["escalated_turns"] == 2
-    assert savings["ceiling_model"] == "ds/deepseek-v4-pro"
-    assert savings["floor_model"] == "ds/deepseek-flash"
+    assert savings["ceiling_model"] == "sonnet"
+    assert savings["floor_model"] == "haiku"
     assert savings["routed_cost_usd"] == pytest.approx(routed, abs=1e-6)
     assert savings["ceiling_cost_usd"] == pytest.approx(ceiling, abs=1e-6)
     assert savings["floor_cost_usd"] == pytest.approx(floor, abs=1e-6)
@@ -65,19 +65,19 @@ def test_dashboard_canonical_usage_routing_and_privacy(tmp_path):
     assert savings["captured_pct"] == round(100 * (ceiling - routed) / (ceiling - floor), 1)
     [route_set] = savings["route_sets"]
     assert [(c["model"], c["turns"]) for c in route_set["candidates"]] == [
-        ("ds/deepseek-flash", 1), ("ds/deepseek-v4-pro", 2)]
+        ("haiku", 1), ("sonnet", 2)]
     assert route_set["candidates"][0]["routed_cost_usd"] == pytest.approx(
-        estimate_cost("gateway", "deepseek-flash", 100, 0, 0), abs=1e-6)
+        estimate_cost("gateway", "claude-haiku-4-5", 100, 0, 0), abs=1e-6)
     assert route_set["candidates"][1]["ceiling_cost_usd"] == route_set["candidates"][1]["routed_cost_usd"]
     assert route_set["candidates"][1]["fallback_turns"] == 0
     assert route_set["candidates"][1]["prices"] == {
-        "input_per_mtok": 0.22, "cached_input_per_mtok": 0.0073, "output_per_mtok": 0.66}
+        "input_per_mtok": 2.0, "cached_input_per_mtok": 0.2, "output_per_mtok": 10.0}
 
 
 def test_dashboard_routing_savings_name_unpriced_candidates(tmp_path):
     seed_dashboard(tmp_path, 1_000_000)
     conn = connect(tmp_path / "state/metrics/metrics.db")
-    conn.execute("UPDATE router_decisions SET candidate_models_json='[\"ds/deepseek-flash\",\"cx/gpt-7-nova\"]' "
+    conn.execute("UPDATE router_decisions SET candidate_models_json='[\"haiku\",\"cx/gpt-7-nova\"]' "
                  "WHERE turn_id='t-routine'")
     conn.commit()
     conn.close()
@@ -87,7 +87,7 @@ def test_dashboard_routing_savings_name_unpriced_candidates(tmp_path):
     # An unlisted candidate leaves the turn out instead of guessing a ceiling.
     assert savings["priced_turns"] == 2 and savings["unpriced_turns"] == 1
     assert savings["unpriced_models"] == ["cx/gpt-7-nova"]
-    assert savings["floor_model"] == "ds/deepseek-flash"
+    assert savings["floor_model"] == "haiku"
 
 
 def test_dashboard_routing_savings_hold_helper_calls_constant(tmp_path):
@@ -109,8 +109,8 @@ def test_dashboard_routing_savings_hold_helper_calls_constant(tmp_path):
     })["routing"]["savings"]
     helper = estimate_cost("gateway", "claude-haiku-4-5", 1000, 100, 0)
     executed = [(100, 0, 0), (300, 60, 50), (320, 80, 50)]
-    ceiling = sum(estimate_cost("gateway", "ds/deepseek-v4-pro", i, o, c) for i, o, c in executed)
-    floor = sum(estimate_cost("gateway", "ds/deepseek-flash", i, o, c) for i, o, c in executed)
+    ceiling = sum(estimate_cost("gateway", "sonnet", i, o, c) for i, o, c in executed)
+    floor = sum(estimate_cost("gateway", "haiku", i, o, c) for i, o, c in executed)
     # The haiku helper call is real spend on every side, never re-priced as a candidate.
     assert savings["priced_turns"] == 3 and savings["unpriced_turns"] == 0
     assert savings["ceiling_cost_usd"] == pytest.approx(ceiling + helper, abs=1e-6)
@@ -118,7 +118,7 @@ def test_dashboard_routing_savings_hold_helper_calls_constant(tmp_path):
     assert savings["route_sets"][0]["turns"] == 3
 
 
-@pytest.mark.parametrize("model", ["PRO", "pRo", "  pro  ", "DS/DEEPSEEK-V4"])
+@pytest.mark.parametrize("model", ["SONNET", "sOnNeT", "  sonnet  ", "CLAUDE-SONNET-5"])
 def test_dashboard_model_substring_matches_selected_requested_and_totals(tmp_path, model):
     seed_dashboard(tmp_path, 1_000_000)
     queries = MetricsQueries(tmp_path)
@@ -1384,10 +1384,10 @@ def test_routing_savings_count_each_turn_once_across_model_rows():
 def test_routing_savings_drop_helper_cost_of_unpriced_turns():
     from bobi.metrics.query import _routing_savings
 
-    candidates = ["ds/deepseek-flash", "ds/deepseek-v4-pro"]
-    priced = _routing_savings([_routed_row("t1", "deepseek-flash", "ds/deepseek-flash", candidates)])
+    candidates = ["haiku", "sonnet"]
+    priced = _routing_savings([_routed_row("t1", "claude-haiku-4-5", "haiku", candidates)])
     savings = _routing_savings([
-        _routed_row("t1", "deepseek-flash", "ds/deepseek-flash", candidates),
+        _routed_row("t1", "claude-haiku-4-5", "haiku", candidates),
         # Same candidate set, but the routed model has no list price: its helper must not leak.
         _routed_row("t2", "cx/gpt-7-nova", "cx/gpt-7-nova", candidates),
         _routed_row("t2", "claude-haiku-4-5", "cx/gpt-7-nova", candidates),
@@ -1400,12 +1400,12 @@ def test_routing_savings_drop_helper_cost_of_unpriced_turns():
 def test_routing_savings_count_fallback_reasons_per_pick():
     from bobi.metrics.query import _routing_savings
 
-    candidates = ["ds/deepseek-flash", "ds/deepseek-v4-pro"]
-    rows = [_routed_row(f"t{index}", "deepseek-flash", "ds/deepseek-flash", candidates) for index in range(3)]
+    candidates = ["haiku", "sonnet"]
+    rows = [_routed_row(f"t{index}", "claude-haiku-4-5", "haiku", candidates) for index in range(3)]
     rows[0]["fallback_reason"] = rows[1]["fallback_reason"] = "policy_low_confidence"
     rows[2]["fallback_reason"] = "policy_timeout"
     [route_set] = _routing_savings(rows)["route_sets"]
-    flash, pro = route_set["candidates"]
-    assert flash["fallback_turns"] == 3
-    assert flash["fallback_reasons"] == {"policy_low_confidence": 2, "policy_timeout": 1}
-    assert pro["fallback_reasons"] == {}
+    haiku, sonnet = route_set["candidates"]
+    assert haiku["fallback_turns"] == 3
+    assert haiku["fallback_reasons"] == {"policy_low_confidence": 2, "policy_timeout": 1}
+    assert sonnet["fallback_reasons"] == {}

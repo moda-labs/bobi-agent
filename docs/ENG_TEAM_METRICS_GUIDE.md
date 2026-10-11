@@ -24,7 +24,7 @@ Every command, tool execution, LLM call, token count, and USD cost is automatica
 
 In your workspace root, create a `.env` file.
 
-#### Option A: Minimal Setup (Direct Anthropic)
+#### Minimal Setup (Direct Anthropic)
 If you are using Anthropic API directly:
 
 ```bash
@@ -34,19 +34,6 @@ BOBI_METRICS_MODE=enabled
 # 2. LLM Provider settings
 ANTHROPIC_API_KEY=sk-ant-api03-xxxx...
 LLM_MODEL=claude-3-5-sonnet-20241022
-```
-
-#### Option B: AI Gateway / Proxy Setup (Cloudflare, OpenRouter, DeepSeek)
-If your team routes requests through a unified gateway:
-
-```bash
-# 1. Enable metrics collection (Required)
-BOBI_METRICS_MODE=enabled
-
-# 2. Gateway provider settings
-ANTHROPIC_API_KEY=your_gateway_token_here
-ANTHROPIC_BASE_URL=https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/anthropic
-LLM_MODEL=deepseek-flash
 ```
 
 ---
@@ -140,22 +127,17 @@ SLACK_CHANNELS=C0123456789
 ### JEV Smart Model Routing (A/B Testing & Dynamic Model Switching)
 ```bash
 BOBI_METRICS_ASSIGNMENT_SECRET=your_32_character_secret_key
+TYPESAFE_API_KEY=your_typesafe_key
 BOBI_METRICS_EXPERIMENT_JSON='{
-  "experiment_id": "eng-team-routing-v1",
-  "policy": {
-    "mode": "enforce",
-    "endpoint": "https://policy.internal.example.com/v1/decision"
-  },
-  "variants": [
-    { "variant_id": "control", "model": "claude-3-5-sonnet-20241022", "weight": 0.5 },
-    { "variant_id": "treatment_flash", "model": "deepseek-flash", "weight": 0.5 }
-  ],
-  "scope": {
-    "entry_points": ["subagent_persistent", "subagent_phase", "workflow_start"],
-    "roles": ["engineer"]
-  }
+  "mode": "enforce",
+  "brain": "claude",
+  "control_model": "haiku",
+  "candidate_models": ["haiku", "sonnet"],
+  "prompt_egress": "redacted",
+  "instructions": "Route multi-file changes and debugging to sonnet; routine edits to haiku."
 }'
 ```
+*Candidates must be models the agent's own brain runs: Claude models for a claude brain, OpenAI models (for example `gpt-5.6-luna`, `gpt-5.6-sol`) for a codex brain. See [Fine-Grained Metrics Operations](FINE_GRAINED_METRICS.md#concise-jev-configuration).*
 
 ---
 

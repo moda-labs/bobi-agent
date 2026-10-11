@@ -967,13 +967,13 @@ async def test_receive_response_captures_invocation_and_tool_metadata():
 async def test_receive_response_deduplicates_repeated_provider_message_chunks():
     first = AssistantMessage(
         content=[ToolUseBlock(id="tool-1", name="view_file", input={"path": "x"})],
-        model="deepseek-flash",
+        model="claude-haiku-4-5",
         usage={"input_tokens": 5, "output_tokens": 0},
         message_id="message-1",
     )
     repeated = AssistantMessage(
         content=[TextBlock(text="working")],
-        model="deepseek-flash",
+        model="claude-haiku-4-5",
         usage={"input_tokens": 5, "output_tokens": 0},
         message_id="message-1",
     )
@@ -999,7 +999,7 @@ async def test_receive_response_deduplicates_repeated_provider_message_chunks():
 async def test_receive_response_uses_gateway_invocation_model_for_turn_usage():
     assistant = AssistantMessage(
         content=[TextBlock(text="done")],
-        model="deepseek-flash",
+        model="claude-haiku-4-5",
         usage={"input_tokens": 5, "output_tokens": 2},
         message_id="message-1",
     )
@@ -1020,8 +1020,8 @@ async def test_receive_response_uses_gateway_invocation_model_for_turn_usage():
         ).receive_response()
     ][-1]
 
-    assert [item.model for item in turn.usage] == ["deepseek-flash"]
-    assert [item.model for item in turn.costs] == ["deepseek-flash"]
+    assert [item.model for item in turn.usage] == ["claude-haiku-4-5"]
+    assert [item.model for item in turn.costs] == ["claude-haiku-4-5"]
     assert turn.usage[0].raw_usage["canonicalModel"] == "claude-opus-5"
 
 

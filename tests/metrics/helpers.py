@@ -22,7 +22,7 @@ def seed_dashboard(root, started_at_us):
     )
     for index, turn_id in enumerate(("t-routine", "t-pro", "t-reused", "t-unknown")):
         started = started_at_us + index * 1_000_000
-        model = "deepseek-flash" if index in (0, 3) else "deepseek-v4-pro"
+        alias, model = ("haiku", "claude-haiku-4-5") if index in (0, 3) else ("sonnet", "claude-sonnet-5-5")
         conn.execute(
             "INSERT INTO turns(turn_id,session_id,turn_index,started_at_us,status,trigger_kind,is_user_initiated) VALUES(?,?,?,?,?,'user',1)",
             (turn_id, "s2" if index == 3 else "s1", index, started, "completed"),
@@ -30,18 +30,18 @@ def seed_dashboard(root, started_at_us):
         conn.execute(
             "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,"
             "model_requested,model_selected,started_at_us,status) VALUES(?,?,0,'gateway',?,?,?,'completed')",
-            (f"i{index}", turn_id, f"ds/{model}", model, started),
+            (f"i{index}", turn_id, alias, model, started),
         )
         if index < 3:
-            policy = {"mode": "enforce", "status": "ok", "recommended_model": f"ds/{model}",
+            policy = {"mode": "enforce", "status": "ok", "recommended_model": alias,
                       "confidence": 0.72 if index == 0 else 0.96, "latency_ms": 12,
-                      "call_id": "call-flash" if index == 0 else "call-pro", "explanation": "private-task"}
+                      "call_id": "call-haiku" if index == 0 else "call-sonnet", "explanation": "private-task"}
             conn.execute(
                 "INSERT INTO router_decisions(router_decision_id,turn_id,variant_id,model_selected,"
                 "router_score,router_latency_ms,decided_at_us,router_reason,metadata_json,"
                 "router_name,router_version,candidate_models_json) "
-                "VALUES(?,?,'treatment_jev',?,0.12,15,?,'private-task',?,'jev','1','[\"ds/deepseek-flash\",\"ds/deepseek-v4-pro\"]')",
-                (f"r{index}", turn_id, f"ds/{model}", started, json.dumps({"policy": policy})),
+                "VALUES(?,?,'treatment_jev',?,0.12,15,?,'private-task',?,'jev','1','[\"haiku\",\"sonnet\"]')",
+                (f"r{index}", turn_id, alias, started, json.dumps({"policy": policy})),
             )
             conn.execute(
                 "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
@@ -54,7 +54,7 @@ def seed_dashboard(root, started_at_us):
     conn.execute(
         "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,measurement_source,"
         "is_estimated,input_tokens,output_tokens,cache_read_input_tokens,observed_at_us,token_semantics_version) "
-        "VALUES('terminal','turn','t-reused','gateway','ds/deepseek-v4-pro','provider_stream',0,320,80,50,?,1)",
+        "VALUES('terminal','turn','t-reused','gateway','sonnet','provider_stream',0,320,80,50,?,1)",
         (started_at_us + 2_000_000,),
     )
     conn.commit()

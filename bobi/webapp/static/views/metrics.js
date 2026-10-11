@@ -2264,7 +2264,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
       redacted: "Redacted task text (secrets and paths removed)",
       none: "Metadata only (size, role, entry point)",
     };
-    const brainText = `${cfg.brain && cfg.brain !== "auto" ? cfg.brain : "auto"}; this agent runs ${cfg.agent_brain || "claude"}${cfg.gateway ? " through a gateway" : " natively"}`;
+    const brainText = `${cfg.brain && cfg.brain !== "auto" ? cfg.brain : "auto"}; this agent runs ${cfg.agent_brain || "claude"}`;
 
     jevModalBody.innerHTML = `
       <form class="jev-config-form">
@@ -2362,15 +2362,8 @@ export function mountMetrics(element, { api, name, session = "" }) {
                 placeholder="Filter ${escapeHtml(cfg.agent_brain || "claude")} models" aria-label="Filter ${escapeHtml(cfg.agent_brain || "claude")} models">
               <div id="jev-model-options" class="jev-model-options" role="listbox" aria-multiselectable="true" aria-label="${escapeHtml(cfg.agent_brain || "claude")} models"></div>
               <p class="jev-model-empty jev-form-hint" hidden>No ${escapeHtml(cfg.agent_brain || "claude")} model matches.</p>
-              <details class="jev-custom-model" ${(cfg.candidate_models || []).some(model => !(cfg.native_models || []).includes(model)) ? "open" : ""}>
-                <summary>+ Add custom gateway model</summary>
-                <div class="jev-candidate-entry"><input id="jev-config-candidates" maxlength="8192" aria-describedby="jev-candidate-hint" placeholder="e.g. cx/gpt-6.1-sol, ds/deepseek-flash" autocomplete="off"><button type="button" id="jev-config-candidate-add" class="btn bobi-btn quiet">Add</button></div>
-                <p class="jev-form-hint" id="jev-candidate-hint">${cfg.gateway
-                  ? "This agent dials a gateway, so any routing id it serves can run. A dashed tag has no list price; the dashboard cannot measure its savings."
-                  : `This agent calls ${cfg.agent_brain === "codex" ? "OpenAI" : "Anthropic"} directly. Custom ids need <code>BOBI_GATEWAY_BASE_URL</code> in run/.env; without it, saving rejects them.`}</p>
-              </details>
             </div>
-            <p class="jev-form-hint">Click models this agent's ${escapeHtml(cfg.agent_brain || "claude")} brain can run natively.</p>
+            <p class="jev-form-hint">Click the models this agent's ${escapeHtml(cfg.agent_brain || "claude")} brain can run.</p>
           </div>
           <div class="jev-form-group">
             <label class="jev-field-label" for="jev-config-instructions">Routing instructions</label>
@@ -2461,12 +2454,8 @@ export function mountMetrics(element, { api, name, session = "" }) {
     });
     let candidateModels = [...new Set([...(cfg.candidate_models || []), ...(cfg.control_model ? [cfg.control_model] : [])])];
     let controlModel = cfg.control_model || candidateModels[0] || "";
-    const candidateInput = form.querySelector("#jev-config-candidates");
     const candidateTags = form.querySelector(".jev-candidate-tags");
-    const candidateAdd = form.querySelector("#jev-config-candidate-add");
     const controlInput = form.querySelector("#jev-config-control");
-    const unpriced = new Set(cfg.unpriced_models || []);
-    const known = new Set([...(cfg.priced_models || []), ...(cfg.native_models || [])]);
     const modelFilter = form.querySelector("#jev-model-filter");
     const modelOptions = form.querySelector("#jev-model-options");
     const modelEmpty = form.querySelector(".jev-model-empty");
@@ -2511,9 +2500,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
       drawOptions();
       candidateTags.replaceChildren();
       candidateModels.forEach(model => {
-        const unlisted = unpriced.has(model) || (!known.has(model) && !(cfg.candidate_models || []).includes(model) && model !== cfg.control_model);
-        const tag = node("span", "", `jev-candidate-tag${unlisted ? " is-unlisted" : ""}`);
-        if (unlisted) tag.title = `${model} has no list price; check the spelling. The dashboard cannot price its turns.`;
+        const tag = node("span", "", "jev-candidate-tag");
         if (model === controlModel) tag.append(node("span", "control", "jev-candidate-role"));
         tag.setAttribute("role", "listitem");
         const remove = node("button", "", "jev-candidate-remove");
@@ -2532,19 +2519,6 @@ export function mountMetrics(element, { api, name, session = "" }) {
         candidateTags.append(tag);
       });
     }
-    function addCandidates() {
-      const values = candidateInput.value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean);
-      if (!values.length) return;
-      candidateModels = [...new Set([...candidateModels, ...values])];
-      candidateInput.value = "";
-      configDirty = true;
-      drawCandidates();
-      candidateInput.focus();
-    }
-    candidateAdd.addEventListener("click", addCandidates);
-    candidateInput.addEventListener("keydown", event => {
-      if (event.key === "Enter" || event.key === ",") { event.preventDefault(); addCandidates(); }
-    });
     drawCandidates();
     form.addEventListener("input", event => {
       if (event.target.closest("#jev-pane-sandbox")) return;
@@ -2721,7 +2695,6 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
     function draftConfig(validate = true) {
       const mode = modeInput.value;
-      addCandidates();
       const controlModel = controlInput.value;
       const candidates = [...candidateModels];
       const instructions = form.querySelector("#jev-config-instructions").value.trim();
