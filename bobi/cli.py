@@ -805,16 +805,23 @@ def _materialize_local_deps(pack_dir: Path, project_path: Path, *,
 
 
 @main.command("login-bootstrap")
+@click.argument("tool", required=False)
 @click.option("--timeout", default=600, type=int,
               help="Seconds to wait for the pasted auth code (default: 600).")
-def login_bootstrap(timeout):
+@click.option("--rebind", is_flag=True,
+              help="Re-run the login even though a credential is present, and "
+                   "quarantine the old one once a human replies. For a revoked "
+                   "or wrong-account credential.")
+def login_bootstrap(tool, timeout, rebind):
     """Bootstrap subscription auth over a chat channel + the event bus.
 
-    For BOBI_AUTH=subscription first boot with no credentials on the
-    volume: drive `claude auth login --claudeai` under a pty, post the OAuth
-    URL to $BOBI_LOGIN_CHANNEL, and wait for the pasted code to arrive as
-    a chat event over the event bus. Idempotent — a no-op if credentials
-    already exist. Fallback: `fly ssh console` then `claude auth login`.
+    Posts one ask to $BOBI_LOGIN_CHANNEL - "reply when you are ready" - and
+    starts the login only once a human replies, so a one-time device code
+    cannot expire unread. With no TOOL this logs in the team's brain; TOOL
+    (`claude` or `codex`) logs in that CLI tool instead, which is how a codex
+    401 is healed in-flight. Idempotent: a no-op if the credential already
+    exists, unless --rebind is given. Fallback: `fly ssh console` then the
+    tool's own login command.
 
     The destination is $BOBI_LOGIN_CHANNEL only. This command is on the
     `agent` group any worker can reach and the URL it posts grants
@@ -824,11 +831,16 @@ def login_bootstrap(timeout):
     from bobi import auth_bootstrap
     project_path = _detect_project_root()
 
-    if auth_bootstrap.credentials_exist():
-        click.echo("Subscription credentials already present — nothing to do.")
-        return
     try:
-        ok = auth_bootstrap.run_bootstrap(project_path, timeout=timeout)
+        # Target-aware: on a Claude brain with a `codex` target, checking the
+        # brain's credential would report "already present" for the wrong file.
+        # Inside the handler because resolving the target validates it, so an
+        # unknown TOOL is a clean error rather than a traceback.
+        if not rebind and auth_bootstrap.credentials_exist(target=tool):
+            click.echo("Subscription credentials already present — nothing to do.")
+            return
+        ok = auth_bootstrap.run_bootstrap(
+            project_path, target=tool, rebind=rebind, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI error
         click.echo(f"Login bootstrap failed: {exc}", err=True)
         raise SystemExit(1)

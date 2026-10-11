@@ -123,6 +123,7 @@ markers = [
     "local_only: test only runs against the local Node.js event server backend",
     "docker: test builds/runs the instance container image (needs a docker daemon; deselected in integration-fast)",
     "live: test hits a live external API (Claude, Slack, ...); gated by credentials/env, not run on PRs",
+    "real_listener: subscription-login test drives the real event-listener registration path, not the ask-first fake",
 ]
 
 [build-system]

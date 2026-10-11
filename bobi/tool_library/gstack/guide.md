@@ -5,7 +5,9 @@ Playwright to load pages, interact, screenshot, and verify state — for testing
 deployed site, reproducing a bug with evidence, or attaching UI proof to a PR.
 
 Installed at `~/dev/gstack`, with its skills linked under `~/.claude/skills/`
-(and `~/.codex/skills/`) under a `gstack-` namespace: `gstack-browse` and
+(and `~/.codex/skills/`, which is the image `$HOME` and so is *not* where
+codex reads skills once `$CODEX_HOME` points at the volume) under a
+`gstack-` namespace: `gstack-browse` and
 `gstack-qa` are the core pair, alongside the `gstack-plan-*-review` and
 `gstack-office-hours` planning helpers. The compiled browse daemon is
 `~/.claude/skills/gstack/browse/dist/browse`.
