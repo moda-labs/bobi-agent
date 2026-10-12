@@ -1692,6 +1692,58 @@ async def test_session_reruns_a_failed_first_turn_on_control(bobi_install, monke
     assert logged == (["broken-model"] if expected == ["broken-model", "control"] else [])
 
 
+@pytest.mark.asyncio
+async def test_session_rerun_on_control_is_its_own_turn(bobi_install, monkeypatch):
+    from bobi.inbox import Message
+
+    observed = []
+
+    class Observation:
+        results = []
+
+        def __init__(self, model):
+            self.model, self.status = model, None
+            observed.append(self)
+
+        def finish(self, *, status, error_kind=""):
+            self.status = status
+
+    monkeypatch.setattr("bobi.session.observe_turn",
+                        lambda _name, **kwargs: Observation(kwargs["model_requested"]))
+    session = Session("agent", str(bobi_install.repo_path), fresh=True,
+                      routing=RoutingContext("agent", "subagent_phase", "claude", "configured", False, "", "engineer", True))
+    session._extra_options["model"] = "broken-model"
+    session._route_decision = replace(decision(), model_selected="broken-model", control_model="control")
+    session._set_state("waiting_input")
+
+    class Client:
+        def __init__(self, model):
+            self.model = model
+        async def connect(self):
+            pass
+        async def query(self, text):
+            pass
+
+    async def drain():
+        session._last_is_error = session._client.model == "broken-model"
+        session._last_error_kind = ""
+        session._last_error_message = "model not available" if session._last_is_error else ""
+        return "done"
+
+    async def disconnect(client):
+        pass
+
+    session._client = Client("broken-model")
+    monkeypatch.setattr(session, "_make_brain_session", lambda resume=None: Client(session._extra_options["model"]))
+    monkeypatch.setattr(session, "_drain_turn", drain)
+    monkeypatch.setattr(session, "_safe_disconnect", disconnect)
+    monkeypatch.setattr(session, "_is_transient_turn_error", lambda: False)
+    await session._process_message(Message(id="m1", sender="launch", text="do the task"))
+    # The failed pick and the control rerun are two turns, so the rerun records the fallback.
+    assert [(item.model, item.status) for item in observed] == [
+        ("broken-model", "failed"), ("control", "failed")]
+
+
 @pytest.mark.parametrize("status,error_kind,tools_ran,allowed", [
     ("assigned", "", False, True),
     ("assigned", "", True, False),  # a rerun would repeat the tool's side effects

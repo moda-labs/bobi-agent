@@ -1321,18 +1321,7 @@ class Session:
             return
 
         try:
-            observation = observe_turn(
-                self.name,
-                provider=getattr(self._client, "provider", "anthropic"),
-                role=self.role,
-                run_key=self.run_key,
-                trigger_kind="startup" if msg.sender == "launch" else "inbox",
-                trigger_id=msg.id,
-                is_user_initiated=msg.sender != "launch",
-                model_requested=self._session_model(),
-                prompt_bytes=prompt_bytes(msg.text),
-            )
-            self._metrics_observation = observation
+            self._metrics_observation = self._observe_message(msg)
             log_activity(
                 "inbox",
                 {"sender": msg.sender, "text": msg.text[:200]},
@@ -1372,6 +1361,9 @@ class Session:
                     and self._route_to_control(self.last_error())):
                 # The policy's model failed its first turn: rerun it once on the
                 # control model in a fresh session instead of failing the event.
+                # The rerun is its own turn, so it records the fallback.
+                self._finish_observation()
+                self._metrics_observation = self._observe_message(msg)
                 await self._safe_disconnect(self._client)
                 self._client = self._make_brain_session(resume=None)
                 await self._client.connect()
@@ -1429,22 +1421,30 @@ class Session:
                 self.inbox.respond(msg, f"error: {e}")
             self._set_state("error")
         finally:
-            observation = self._metrics_observation
-            self._metrics_observation = None
-            if observation is not None:
-                latest = observation.results[-1] if observation.results else None
-                observation.finish(
-                    status=(
-                        "completed"
-                        if latest is not None and not latest.is_error
-                        else "failed"
-                    ),
-                    error_kind=(
-                        latest.error_kind
-                        if latest is not None
-                        else "drain_error"
-                    ),
-                )
+            self._finish_observation()
+
+    def _observe_message(self, msg):
+        return observe_turn(
+            self.name,
+            provider=getattr(self._client, "provider", "anthropic"),
+            role=self.role,
+            run_key=self.run_key,
+            trigger_kind="startup" if msg.sender == "launch" else "inbox",
+            trigger_id=msg.id,
+            is_user_initiated=msg.sender != "launch",
+            model_requested=self._session_model(),
+            prompt_bytes=prompt_bytes(msg.text),
+        )
+
+    def _finish_observation(self) -> None:
+        observation, self._metrics_observation = self._metrics_observation, None
+        if observation is None:
+            return
+        latest = observation.results[-1] if observation.results else None
+        observation.finish(
+            status="completed" if latest is not None and not latest.is_error else "failed",
+            error_kind=latest.error_kind if latest is not None else "drain_error",
+        )
 
     def _start_pending_rotation(self) -> None:
         """Start one coalesced background candidate preparation."""

@@ -338,7 +338,12 @@ function finiteNumber(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
-function usageFromView(view: Record<string, unknown>): (UsageTotals & { fine_grained?: FineGrainedUsage }) | null {
+type InstanceUsage = UsageTotals & {
+	fine_grained?: FineGrainedUsage;
+	fine_grained_unavailable?: { code: string };
+};
+
+function usageFromView(view: Record<string, unknown>): InstanceUsage | null {
 	if (view.status !== "done") return null;
 	const result = view.result;
 	if (!result || typeof result !== "object" || Array.isArray(result)) return null;
@@ -361,6 +366,11 @@ function usageFromView(view: Record<string, unknown>): (UsageTotals & { fine_gra
 				coverage: record.coverage as Record<string, unknown>,
 			}
 			: undefined;
+	const refusal = record.fine_grained_unavailable as Record<string, unknown> | undefined;
+	const unavailable =
+		refusal && typeof refusal === "object" && typeof refusal.code === "string"
+			? { code: refusal.code }
+			: undefined;
 	return {
 		jobs: {
 			total: finiteNumber(jobs.total),
@@ -377,6 +387,7 @@ function usageFromView(view: Record<string, unknown>): (UsageTotals & { fine_gra
 		cost_usd: finiteNumber(record.cost_usd),
 		estimated_cost_usd: finiteNumber(record.estimated_cost_usd),
 		...(fine ? { fine_grained: fine } : {}),
+		...(unavailable ? { fine_grained_unavailable: unavailable } : {}),
 	};
 }
 
@@ -464,7 +475,11 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 				"cost. Returns totals per fleet plus per-instance detail. One unavailable " +
 				"instance does not fail the whole result; `complete` is false and `unavailable` " +
 				"names the missing legs. This observational read issues an audited admin read " +
-				"command to each matching instance.",
+				"command to each matching instance. The job, token and cost totals are never " +
+				"filtered: session_id, run_key, model, experiment_id, variant_id and group_by " +
+				"apply only to each instance's `fine_grained` block. When an instance cannot " +
+				"serve that block (metrics off or busy, or a range over 31 days), it is absent " +
+				"and `fine_grained_unavailable.code` says why.",
 			inputSchema: z.object({
 				days: usageDaysArg,
 				fleet: usageFleetArg,
@@ -557,6 +572,7 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 						instance,
 						usage: roundedUsage(usage),
 						fine_grained: usage.fine_grained,
+						fine_grained_unavailable: usage.fine_grained_unavailable,
 					};
 				}),
 			);
@@ -584,6 +600,9 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 					instance: leg.instance,
 					...leg.usage,
 					...(leg.fine_grained ? { fine_grained: leg.fine_grained } : {}),
+					...(leg.fine_grained_unavailable
+						? { fine_grained_unavailable: leg.fine_grained_unavailable }
+						: {}),
 				});
 			}
 

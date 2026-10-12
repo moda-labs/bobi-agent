@@ -164,13 +164,13 @@ def test_usage_command_returns_the_rolling_summary(monkeypatch):
         "cost_usd": 1.25,
         "estimated_cost_usd": 0.0,
     }
-    monkeypatch.setattr(listener, "_read_usage", lambda args: usage)
+    monkeypatch.setattr(listener, "_read_usage", lambda args, metrics=True: dict(usage))
     listener._dispatch(_event("usage", command_id="u1",
                               args={"window_seconds": 259200}))
     assert _wait(lambda: listener._published)
     _topic, _source, data = listener._published[0]
     assert data["status"] == "done"
-    assert data["result"] == {"usage": usage}
+    assert data["result"] == {"usage": {**usage, "fine_grained_unavailable": {"code": "metrics_not_ready"}}}
 
 
 def test_usage_command_defaults_to_a_24_hour_window(monkeypatch):
@@ -198,9 +198,14 @@ def _usage_listener(tmp_path, monkeypatch, published=None):
     listener.project_root = tmp_path
     monkeypatch.setattr(
         listener, "_read_usage",
-        lambda args: {"window": {"seconds": args.get("window_seconds")}},
+        lambda args, metrics=True: {"window": {"seconds": args.get("window_seconds")}},
     )
     return listener
+
+
+def _legacy_only(seconds, code):
+    """A `usage` reply without the fine-grained block, naming why."""
+    return {"usage": {"window": {"seconds": seconds}, "fine_grained_unavailable": {"code": code}}}
 
 
 @pytest.mark.parametrize("days", [3, 31, 32, 90, 365])
@@ -216,7 +221,7 @@ def test_usage_command_serves_the_legacy_summary_for_any_window_without_metrics(
     assert _wait(lambda: listener._published)
     data = listener._published[0][2]
     assert data["status"] == "done"
-    assert data["result"] == {"usage": {"window": {"seconds": window}}}
+    assert data["result"] == _legacy_only(window, "invalid_range" if days > 31 else "metrics_not_ready")
 
 
 def test_usage_command_serves_the_legacy_summary_for_a_long_from_to_range(
@@ -251,7 +256,7 @@ def test_usage_command_omits_the_fine_grained_block_when_metrics_are_busy(
     assert _wait(lambda: listener._published)
     data = listener._published[0][2]
     assert data["status"] == "done"
-    assert data["result"] == {"usage": {"window": {"seconds": 3600}}}
+    assert data["result"] == _legacy_only(3600, code)
     expected = 1 if "deadline" in message else 0
     assert listener.metrics_query_health()["deadline_cancellations"] == expected
 
@@ -265,7 +270,26 @@ def test_usage_command_serves_the_legacy_summary_when_admission_is_refused(
                               args={"window_seconds": 3600}))
     data = listener._published[0][2]
     assert data["status"] == "done"
-    assert data["result"] == {"usage": {"window": {"seconds": 3600}}}
+    assert data["result"] == _legacy_only(3600, "metrics_busy")
+
+
+def test_refused_usage_never_reads_metrics_on_the_dispatch_thread(tmp_path, monkeypatch):
+    # The fallback runs on the thread that also serves stop and restart, so it
+    # folds the registry only and never waits on SQLite.
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("metrics read on the admin dispatch thread")
+
+    monkeypatch.setattr("bobi.webapp.runs.metrics_session_usage", forbidden)
+    listener = _listener()
+    listener.project_root = tmp_path
+    (tmp_path / "state" / "metrics").mkdir(parents=True)
+    (tmp_path / "state" / "metrics" / "metrics.db").touch()
+    monkeypatch.setattr(listener._metrics_slots, "acquire", lambda blocking=False: False)
+    listener._dispatch(_event("usage", command_id="u1", args={"window_seconds": 3600}))
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"]["usage"]["jobs"]["total"] == 0
+    assert data["result"]["usage"]["fine_grained_unavailable"] == {"code": "metrics_busy"}
 
 
 def test_usage_command_serves_the_legacy_summary_after_shutdown_begins(
@@ -278,7 +302,7 @@ def test_usage_command_serves_the_legacy_summary_after_shutdown_begins(
                               args={"window_seconds": 3600}))
     data = listener._published[-1][2]
     assert data["status"] == "done"
-    assert data["result"] == {"usage": {"window": {"seconds": 3600}}}
+    assert data["result"] == _legacy_only(3600, "metrics_busy")
 
 
 @pytest.mark.parametrize(("args", "code"), [

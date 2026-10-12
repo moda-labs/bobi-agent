@@ -262,8 +262,11 @@ The legacy fold has no range cap. When the
 fine-grained layer cannot serve the request (`metrics_not_ready`,
 `metrics_busy` from the query or from a full or stopping executor,
 `query_too_slow`, or a range over 31 days), `usage` still answers `done` with
-the legacy fold alone and
-omits the fine-grained keys. Malformed arguments still fail with
+the legacy fold alone, omits the fine-grained keys, and adds
+`fine_grained_unavailable: {"code": ...}` naming the refusal. The legacy totals
+are never filtered, so a caller that passed filters must read this field. When
+the executor is full or stopping, the legacy fold uses the session registry
+only (no metrics read) and the code is `metrics_busy`. Malformed arguments still fail with
 `bad_request` or `invalid_range`.
 
 Fine-grained token totals use exact terminal turn aggregates per model when

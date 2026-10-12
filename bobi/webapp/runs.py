@@ -408,8 +408,11 @@ def metrics_session_usage(
     return usage
 
 
-def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
-    """Build the de-duplicated rows once for list and usage views."""
+def _all_rows(root: Path, *, manager_name: str, now: float,
+              metrics: bool = True) -> list[dict]:
+    """Build the de-duplicated rows once for list and usage views.
+
+    ``metrics=False`` uses the registry alone, without the bounded metrics read."""
     from bobi.costs import session_usage
     from bobi.sdk import ACTIVE_STATUSES, SessionRegistry
 
@@ -419,11 +422,12 @@ def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
     usage_by_session = {
         e.name: session_usage(e.model_usage, e.total_cost_usd) for e in entries
     }
-    usage_by_session.update(metrics_session_usage(root, {
-        e.name: (e.started_at, e.terminal_at or now) for e in entries
-        if not usage_by_session[e.name]["total_tokens"]
-        and not usage_by_session[e.name]["cost_usd"]
-    }))
+    if metrics:
+        usage_by_session.update(metrics_session_usage(root, {
+            e.name: (e.started_at, e.terminal_at or now) for e in entries
+            if not usage_by_session[e.name]["total_tokens"]
+            and not usage_by_session[e.name]["cost_usd"]
+        }))
     # Who can be spoken to right now. The same predicate `list_active` uses,
     # off the same read - and the read reaps, so an active status with a dead
     # pid is already `crashed` here rather than a chat target that is gone.
@@ -453,7 +457,8 @@ def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
 
 def build_usage_summary(root: Path, *, window_seconds: float,
                         manager_name: str = "",
-                        now: float | None = None) -> dict:
+                        now: float | None = None,
+                        metrics: bool = True) -> dict:
     """Usage for terminal jobs completed inside a rolling window.
 
     Usage is stored per session rather than per token timestamp. A terminal
@@ -466,7 +471,7 @@ def build_usage_summary(root: Path, *, window_seconds: float,
     start = now - window_seconds
     terminal = (DONE, FAILED, CRASHED, CLOSED)
     rows = [
-        row for row in _all_rows(root, manager_name=manager_name, now=now)
+        row for row in _all_rows(root, manager_name=manager_name, now=now, metrics=metrics)
         if row["status"] in terminal and start <= row["_ended"] <= now
     ]
 

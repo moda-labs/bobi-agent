@@ -401,7 +401,9 @@ class AdminListener:
         from bobi.metrics.query import MetricsQueryError
 
         try:
-            result = {"usage": self._legacy_usage(args)}
+            # This runs on the dispatch thread: fold the registry only, never SQLite.
+            result = {"usage": {**self._legacy_usage(args, metrics=False),
+                                "fine_grained_unavailable": {"code": "metrics_busy"}}}
         except (MetricsQueryError, AdminCommandError) as exc:
             self._publish_result(
                 command_id, "error", {"code": exc.code, **exc.detail}, str(exc),
@@ -436,8 +438,11 @@ class AdminListener:
             with self._metrics_state:
                 self._metrics_deadline_cancellations += 1
 
-    def _legacy_usage(self, args: dict) -> dict:
-        """The pre-fine-grained `usage` fold, for a legacy or `from`/`to` range."""
+    def _legacy_usage(self, args: dict, *, metrics: bool = True) -> dict:
+        """The pre-fine-grained `usage` fold, for a legacy or `from`/`to` range.
+
+        ``metrics=False`` skips the metrics fallback for sessions the registry
+        recorded no usage for."""
         legacy_args = dict(args)
         if args.get("from") is not None or args.get("to") is not None:
             from bobi.metrics.query import _time_range
@@ -449,7 +454,7 @@ class AdminListener:
             legacy_args.pop("to", None)
             legacy_args["window_seconds"] = (end_us - start_us) / 1_000_000
             legacy_args["end_at"] = end_us / 1_000_000
-        return self._read_usage(legacy_args)
+        return self._read_usage(legacy_args, metrics=metrics)
 
     def _execute_metrics_query(self, command: str, args: dict) -> dict:
         from bobi.metrics.query import MetricsQueries, MetricsQueryError
@@ -457,7 +462,7 @@ class AdminListener:
         if command == "usage":
             legacy = self._legacy_usage(args)
             if self.project_root is None:
-                return {"usage": legacy}
+                return {"usage": {**legacy, "fine_grained_unavailable": {"code": "metrics_not_ready"}}}
             queries = MetricsQueries(self.project_root)
             try:
                 legacy.update(queries.summary(args))
@@ -469,6 +474,8 @@ class AdminListener:
                 if exc.code not in _USAGE_FALLBACK_CODES:
                     raise
                 self._count_deadline_miss(exc)
+                # Filters apply only to the fine-grained block; say why it is missing.
+                legacy["fine_grained_unavailable"] = {"code": exc.code}
             return {"usage": legacy}
         queries = MetricsQueries(self.project_root)
         method = {
@@ -619,7 +626,7 @@ class AdminListener:
         payload["script_cache"] = script_cache_savings(self.project_root)
         return payload
 
-    def _read_usage(self, args: dict) -> dict:
+    def _read_usage(self, args: dict, *, metrics: bool = True) -> dict:
         """Rolling usage over terminal jobs in the unified runs ledger."""
         from bobi import service
         from bobi.webapp.runs import build_usage_summary
@@ -643,6 +650,7 @@ class AdminListener:
             manager_name=service.manager_session_name(self.project_root),
             window_seconds=window,
             now=end,
+            metrics=metrics,
         )
 
     def _read_session_log(self) -> dict:

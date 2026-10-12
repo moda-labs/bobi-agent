@@ -691,6 +691,35 @@ describe("/mcp write tools", () => {
 		expect(body.unavailable).toEqual([]);
 	});
 
+	it("bobi_usage_summary says why an instance answered without its filtered block", async () => {
+		const fleetName = `filtered-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+		const { bubble, fleet, instance } = await liveInstance("filtered", fleetName);
+
+		const inFlight = callTool("bobi_usage_summary", { days: 90, fleet, model: "haiku" });
+		const recorded = await awaitRecordedCommand(fleet, instance);
+		expect(recorded).toMatchObject({ command: "usage", args: { model: "haiku" } });
+		await publishSigned("fleet/command_result", bubble, {
+			deployment: { fleet, instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: {
+				usage: {
+					jobs: { total: 2, completed: 2, failed: 0, closed: 0 },
+					tokens: { input: 10, cached_input: 0, output: 5, total: 15 },
+					cost_usd: 0.1,
+					estimated_cost_usd: 0,
+					fine_grained_unavailable: { code: "invalid_range" },
+				},
+			},
+		});
+
+		const body = JSON.parse(await toolText(await inFlight));
+		// The totals are unfiltered; the caller must see that the model filter did not apply.
+		const [entry] = body.fleets[0].instances;
+		expect(entry.fine_grained).toBeUndefined();
+		expect(entry.fine_grained_unavailable).toEqual({ code: "invalid_range" });
+	});
+
 	it("bobi_usage_summary returns partial data when one instance is unavailable", async () => {
 		const fleetName = `partial-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 		const live = await liveInstance("live", fleetName);
