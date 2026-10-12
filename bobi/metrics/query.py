@@ -248,7 +248,12 @@ def _timestamp(value: object, name: str) -> float:
     raise MetricsQueryError(f"{name} must be an ISO-8601 or epoch timestamp", "invalid_range")
 
 
-def _time_range(args: dict[str, Any], *, now: float | None = None) -> tuple[int, int]:
+def _time_range(
+    args: dict[str, Any],
+    *,
+    now: float | None = None,
+    max_seconds: float | None = MAX_RANGE_SECONDS,
+) -> tuple[int, int]:
     now = time.time() if now is None else now
     explicit = args.get("from") is not None or args.get("to") is not None
     legacy = args.get("window_seconds") is not None or args.get("end_at") is not None
@@ -270,8 +275,12 @@ def _time_range(args: dict[str, Any], *, now: float | None = None) -> tuple[int,
             raise MetricsQueryError("window_seconds must be positive", "invalid_range")
         end = now if args.get("end_at") is None else _timestamp(args["end_at"], "end_at")
         start = end - window
-    if end <= start or end - start > MAX_RANGE_SECONDS:
-        raise MetricsQueryError("time range must be positive and at most 31 days", "invalid_range")
+    if not (math.isfinite(start * 1_000_000) and math.isfinite(end * 1_000_000)):
+        raise MetricsQueryError("time range is out of bounds", "invalid_range")
+    if end <= start:
+        raise MetricsQueryError("time range must be positive", "invalid_range")
+    if max_seconds is not None and end - start > max_seconds:
+        raise MetricsQueryError("time range must be at most 31 days", "invalid_range")
     return int(start * 1_000_000), int(end * 1_000_000)
 
 
@@ -574,7 +583,6 @@ class MetricsQueries:
             conn.close()
 
     def summary(self, args: dict[str, Any]) -> dict[str, object]:
-        start, end = _time_range(args)
         session = str(args.get("session") or "").strip() or None
         session_id = str(args.get("session_id") or "").strip() or None
         session_name = str(args.get("session_name") or "").strip() or None
@@ -601,6 +609,9 @@ class MetricsQueries:
         group_by = [str(item) for item in raw_group_by]
         if len(group_by) != len(set(group_by)) or any(item not in group_columns for item in group_by):
             raise MetricsQueryError("unsupported or duplicate group_by dimension", "bad_request")
+        # Argument errors come first, so a malformed request fails the same way
+        # whether or not its range is within the 31-day cap.
+        start, end = _time_range(args)
 
         def build(conn: sqlite3.Connection) -> dict[str, object]:
             filters = ["t.started_at_us>=?", "t.started_at_us<?"]

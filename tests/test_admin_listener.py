@@ -193,6 +193,116 @@ def test_usage_command_defaults_to_a_24_hour_window(monkeypatch):
     assert seen[0]["window_seconds"] == 24 * 60 * 60
 
 
+def _usage_listener(tmp_path, monkeypatch, published=None):
+    listener = _listener(published=published)
+    listener.project_root = tmp_path
+    monkeypatch.setattr(
+        listener, "_read_usage",
+        lambda args: {"window": {"seconds": args.get("window_seconds")}},
+    )
+    return listener
+
+
+@pytest.mark.parametrize("days", [3, 31, 32, 90, 365])
+def test_usage_command_serves_the_legacy_summary_for_any_window_without_metrics(
+    tmp_path, monkeypatch, days,
+):
+    # No metrics.db: windows the fine-grained layer refuses (over 31 days)
+    # must still answer with the legacy fold, as before fine-grained metrics.
+    listener = _usage_listener(tmp_path, monkeypatch)
+    window = days * 24 * 60 * 60
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": window}))
+    assert _wait(lambda: listener._published)
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"] == {"usage": {"window": {"seconds": window}}}
+
+
+def test_usage_command_serves_the_legacy_summary_for_a_long_from_to_range(
+    tmp_path, monkeypatch,
+):
+    listener = _usage_listener(tmp_path, monkeypatch)
+    end = 1_800_000_000
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"from": end - 90 * 86400, "to": end}))
+    assert _wait(lambda: listener._published)
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"]["usage"]["window"]["seconds"] == 90 * 86400
+
+
+@pytest.mark.parametrize("message", [
+    "metrics database is busy",
+    "metrics query exceeded its one-second deadline",
+])
+def test_usage_command_omits_the_fine_grained_block_when_metrics_are_busy(
+    tmp_path, monkeypatch, message,
+):
+    from bobi.metrics.query import MetricsQueries, MetricsQueryError
+
+    def busy(self, args):
+        raise MetricsQueryError(message, "metrics_busy", retry_after_ms=250)
+
+    monkeypatch.setattr(MetricsQueries, "summary", busy)
+    listener = _usage_listener(tmp_path, monkeypatch)
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": 3600}))
+    assert _wait(lambda: listener._published)
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"] == {"usage": {"window": {"seconds": 3600}}}
+    expected = 1 if "deadline" in message else 0
+    assert listener.metrics_query_health()["deadline_cancellations"] == expected
+
+
+def test_usage_command_serves_the_legacy_summary_when_admission_is_refused(
+    tmp_path, monkeypatch,
+):
+    listener = _usage_listener(tmp_path, monkeypatch)
+    monkeypatch.setattr(listener._metrics_slots, "acquire", lambda blocking=False: False)
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": 3600}))
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"] == {"usage": {"window": {"seconds": 3600}}}
+
+
+def test_usage_command_serves_the_legacy_summary_after_shutdown_begins(
+    tmp_path, monkeypatch,
+):
+    listener = _usage_listener(tmp_path, monkeypatch)
+    listener._metrics_shutdown_grace_seconds = 0.01
+    listener.stop()
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": 3600}))
+    data = listener._published[-1][2]
+    assert data["status"] == "done"
+    assert data["result"] == {"usage": {"window": {"seconds": 3600}}}
+
+
+@pytest.mark.parametrize(("args", "code"), [
+    ({"from": 1_800_000_000}, "invalid_range"),
+    ({"from": 1_800_000_000, "to": 1_700_000_000}, "invalid_range"),
+    ({"from": 1_700_000_000, "to": 1_800_000_000, "window_seconds": 60}, "invalid_range"),
+    ({"from": 0, "to": 1e303}, "invalid_range"),
+    ({"from": -1e303, "to": 0}, "invalid_range"),
+    ({"window_seconds": 3600, "group_by": "model"}, "bad_request"),
+    ({"window_seconds": 90 * 86400, "group_by": "model"}, "bad_request"),
+])
+def test_usage_command_keeps_caller_errors_visible(tmp_path, monkeypatch, args, code):
+    # The legacy fallback covers fine-grained refusals only; a malformed
+    # request still fails, whatever its range.
+    listener = _usage_listener(tmp_path, monkeypatch)
+    (tmp_path / "state" / "metrics").mkdir(parents=True)
+    (tmp_path / "state" / "metrics" / "metrics.db").touch()
+    listener._dispatch(_event("usage", command_id="u1", args=args))
+    assert _wait(lambda: listener._published)
+    data = listener._published[0][2]
+    assert data["status"] == "error"
+    assert data["result"]["code"] == code
+
+
 @pytest.mark.parametrize("window", [0, -1, "invalid", True])
 def test_usage_command_rejects_an_explicit_invalid_window(window):
     listener = _listener()

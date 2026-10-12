@@ -362,7 +362,10 @@ Admin aliases and corresponding read-only MCP tools:
 | `metrics_turn` | `usage_turn` | `bobi_usage_turn` |
 
 Session/turn aliases require supervisor 0.4.0 or newer; summary retains legacy
-compatibility. Queries have bounded range (31 days), rows (200), response
+compatibility: when the fine-grained block is refused (`metrics_not_ready`,
+`metrics_busy`, or a range over 31 days) it answers with the legacy fold alone,
+and malformed arguments still fail.
+Queries have bounded range (31 days), rows (200), response
 size (512 KiB), and execution time. Saturation returns `metrics_busy`;
 missing storage returns `metrics_not_ready`. Session pagination uses
 filter-bound cursors. Protect the fleet operator token.

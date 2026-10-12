@@ -81,6 +81,8 @@ _RUN_ACTIONS = frozenset({"resume_run", "remind_run", "close_run"})
 _METRICS_COMMANDS = frozenset({
     "usage", "usage_session", "usage_turn",
 })
+# Fine-grained refusals that leave `usage` answering with its legacy summary.
+_USAGE_FALLBACK_CODES = frozenset({"metrics_not_ready", "metrics_busy", "invalid_range"})
 METRICS_QUERY_WORKERS = 4
 METRICS_QUERY_QUEUE_CAPACITY = 8
 METRICS_QUERY_CAPACITY = METRICS_QUERY_WORKERS + METRICS_QUERY_QUEUE_CAPACITY
@@ -372,6 +374,12 @@ class AdminListener:
                     self._metrics_futures.add(future)
             else:
                 self._metrics_rejected += 1
+        if not admitted and command == "usage":
+            # `usage` answered synchronously before fine-grained metrics
+            # existed; a full or stopping executor costs only the
+            # fine-grained block, never the legacy summary.
+            self._publish_legacy_usage(command_id, args)
+            return
         if not admitted:
             self._publish_result(
                 command_id,
@@ -388,6 +396,21 @@ class AdminListener:
             )
         )
 
+    def _publish_legacy_usage(self, command_id: str, args: dict) -> None:
+        from bobi.metrics.query import MetricsQueryError
+
+        try:
+            result = {"usage": self._legacy_usage(args)}
+        except (MetricsQueryError, AdminCommandError) as exc:
+            self._publish_result(
+                command_id, "error", {"code": exc.code, **exc.detail}, str(exc),
+            )
+        except Exception as exc:
+            log.exception("supervisor: legacy usage fallback failed")
+            self._publish_result(command_id, "error", None, str(exc))
+        else:
+            self._publish_result(command_id, "done", result, None)
+
     def _run_metrics_query(self, command: str, args: dict) -> dict:
         """Measure one admitted query without widening its public response."""
         started = time.monotonic()
@@ -397,12 +420,7 @@ class AdminListener:
         try:
             return self._execute_metrics_query(command, args)
         except Exception as exc:
-            # The query layer exposes deadline expiry through the stable busy
-            # protocol code. Keep the more specific reason internal to health.
-            if (getattr(exc, "code", None) == "metrics_busy"
-                    and "deadline" in str(exc).lower()):
-                with self._metrics_state:
-                    self._metrics_deadline_cancellations += 1
+            self._count_deadline_miss(exc)
             raise
         finally:
             elapsed_ms = (time.monotonic() - started) * 1000
@@ -412,31 +430,47 @@ class AdminListener:
                 self._metrics_latencies_ms.append(elapsed_ms)
                 self._metrics_state.notify_all()
 
+    def _count_deadline_miss(self, exc: Exception) -> None:
+        # The query layer exposes deadline expiry through the stable busy
+        # protocol code. Keep the more specific reason internal to health.
+        if (getattr(exc, "code", None) == "metrics_busy"
+                and "deadline" in str(exc).lower()):
+            with self._metrics_state:
+                self._metrics_deadline_cancellations += 1
+
+    def _legacy_usage(self, args: dict) -> dict:
+        """The pre-fine-grained `usage` fold, for a legacy or `from`/`to` range."""
+        legacy_args = dict(args)
+        if args.get("from") is not None or args.get("to") is not None:
+            from bobi.metrics.query import _time_range
+
+            # The legacy fold has no range cap; only the fine-grained
+            # block is limited to 31 days.
+            start_us, end_us = _time_range(args, max_seconds=None)
+            legacy_args.pop("from", None)
+            legacy_args.pop("to", None)
+            legacy_args["window_seconds"] = (end_us - start_us) / 1_000_000
+            legacy_args["end_at"] = end_us / 1_000_000
+        return self._read_usage(legacy_args)
+
     def _execute_metrics_query(self, command: str, args: dict) -> dict:
         from bobi.metrics.query import MetricsQueries, MetricsQueryError
 
         if command == "usage":
-            legacy_args = dict(args)
-            if args.get("from") is not None or args.get("to") is not None:
-                from bobi.metrics.query import _time_range
-
-                start_us, end_us = _time_range(args)
-                legacy_args.pop("from", None)
-                legacy_args.pop("to", None)
-                legacy_args["window_seconds"] = (end_us - start_us) / 1_000_000
-                legacy_args["end_at"] = end_us / 1_000_000
-            legacy = self._read_usage(legacy_args)
+            legacy = self._legacy_usage(args)
             if self.project_root is None:
                 return {"usage": legacy}
             queries = MetricsQueries(self.project_root)
             try:
                 legacy.update(queries.summary(args))
             except MetricsQueryError as exc:
-                # Backward compatibility: a deployment with metrics disabled
-                # still serves the pre-existing usage summary. Other query
-                # failures remain visible rather than silently degrading.
-                if exc.code != "metrics_not_ready":
+                # Backward compatibility: `usage` answered every window before
+                # fine-grained metrics existed. When the fine-grained layer
+                # cannot serve this request (metrics off, a range over its
+                # 31-day cap, or busy), answer with the legacy summary alone.
+                if exc.code not in _USAGE_FALLBACK_CODES:
                     raise
+                self._count_deadline_miss(exc)
             return {"usage": legacy}
         queries = MetricsQueries(self.project_root)
         method = {
