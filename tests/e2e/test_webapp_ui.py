@@ -115,6 +115,17 @@ class TestMetricsView:
         expect(rows).to_have_count(4)
         expect(page.locator(".metrics-tile strong").first).to_have_text("720")
 
+    def test_turns_render_when_only_the_summary_is_refused(self, webapp, page):
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        page.route("**/metrics/summary?**", lambda route: route.fulfill(
+            status=400, json={"error": "metrics query exceeded its one-second deadline; "
+                                       "narrow the range", "code": "query_too_slow"}))
+        page.set_viewport_size({"width": 1440, "height": 1000})
+        page.goto(webapp.agent_url() + "/metrics")
+
+        expect(page.locator(".metrics-table-panel tbody tr")).to_have_count(4)
+        expect(page.locator(".metrics-note").first).to_contain_text("Totals are stale")
+
     @pytest.mark.parametrize("failure", ["404", "500", "hung"])
     def test_jev_header_falls_back_within_deadline(self, webapp, page, failure):
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))

@@ -907,3 +907,42 @@ async def test_codex_adapter_exposes_lossless_usage_and_legacy_cost():
     assert result.costs[0].cached_input_tokens == 1024
     assert result.usage[0].cache_write_input_tokens == 128
     assert result.usage[0].reasoning_output_tokens == 12
+
+
+@pytest.mark.parametrize("mode", ["enabled", "off"])
+def test_a_prompt_that_is_not_valid_utf8_still_runs_its_turn(tmp_path, monkeypatch, mode):
+    import asyncio
+
+    from bobi import paths
+
+    monkeypatch.setenv("BOBI_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(metrics_runtime.METRICS_MODE_ENV, mode)
+    paths.bind_root(tmp_path)
+    queries = []
+
+    class _Client:
+        provider = "anthropic"
+
+        async def query(self, text):
+            queries.append(text)
+
+        async def receive_response(self):
+            yield TurnResult(session_id="s", result_text="ok")
+
+    session = Session("surrogate", str(tmp_path), extra_options={"model": "cheap"})
+    session._client = _Client()
+    session._state = "waiting_input"
+    text = "half an emoji \ud83d"
+
+    async def run():
+        session._input_ready = asyncio.Event()
+        await session._process_message(Message(id="m1", sender="user", text=text))
+
+    asyncio.run(run())
+    assert queries == [text]
+    assert session._state == "waiting_input"
+
+
+@pytest.mark.parametrize("text", ["plain", "half an emoji \ud83d", ""])
+def test_prompt_bytes_counts_any_text(text):
+    assert metrics_runtime.prompt_bytes(text) == len(text.encode("utf-8", "surrogatepass"))

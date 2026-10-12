@@ -82,7 +82,8 @@ _METRICS_COMMANDS = frozenset({
     "usage", "usage_session", "usage_turn",
 })
 # Fine-grained refusals that leave `usage` answering with its legacy summary.
-_USAGE_FALLBACK_CODES = frozenset({"metrics_not_ready", "metrics_busy", "invalid_range"})
+_USAGE_FALLBACK_CODES = frozenset(
+    {"metrics_not_ready", "metrics_busy", "query_too_slow", "invalid_range"})
 METRICS_QUERY_WORKERS = 4
 METRICS_QUERY_QUEUE_CAPACITY = 8
 METRICS_QUERY_CAPACITY = METRICS_QUERY_WORKERS + METRICS_QUERY_QUEUE_CAPACITY
@@ -431,10 +432,7 @@ class AdminListener:
                 self._metrics_state.notify_all()
 
     def _count_deadline_miss(self, exc: Exception) -> None:
-        # The query layer exposes deadline expiry through the stable busy
-        # protocol code. Keep the more specific reason internal to health.
-        if (getattr(exc, "code", None) == "metrics_busy"
-                and "deadline" in str(exc).lower()):
+        if getattr(exc, "code", None) == "query_too_slow":
             with self._metrics_state:
                 self._metrics_deadline_cancellations += 1
 

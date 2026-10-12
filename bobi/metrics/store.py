@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 from bobi.metrics.events import MetricsEvent, canonical_json
 from bobi.costs import model_identity
@@ -18,6 +19,8 @@ from bobi.metrics.schema import (
     SCHEMA_VERSION,
 )
 from bobi.metrics.spool import FrameRecord
+
+log = logging.getLogger(__name__)
 
 def connect(path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
     db_path = Path(path)
@@ -90,12 +93,14 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _verify_duplicate(
+def _is_identical_duplicate(
     conn: sqlite3.Connection,
     event: MetricsEvent,
     segment_path: str,
     segment_offset: int,
-) -> None:
+) -> bool:
+    """True when the rows that share this event's deduplication keys are this
+    exact event; False when one of them says something else."""
     rows = conn.execute(
         "SELECT event_id, schema_version, event_type, session_id, turn_id, "
         "invocation_id, source, payload_sha256, producer_id, producer_sequence, "
@@ -121,10 +126,14 @@ def _verify_duplicate(
         "source": event.source,
         "payload_sha256": payload_sha256,
     }
-    if not rows or any(
+    return bool(rows) and not any(
         any(row[key] != value for key, value in identity.items()) for row in rows
-    ):
-        raise ValueError("metrics event conflicts with an existing deduplication key")
+    )
+
+
+class StageResult(NamedTuple):
+    staged: int
+    conflicts: int
 
 
 def stage_frames(
@@ -132,11 +141,18 @@ def stage_frames(
     *,
     segment_path: Path | str,
     frames: Iterable[FrameRecord],
-) -> int:
-    """Durably stage complete frames and advance the cursor in one transaction."""
+) -> StageResult:
+    """Durably stage complete frames and advance the cursor in one transaction.
+
+    A frame whose deduplication keys already name a different event (a rerun
+    reconcile after its session row changed) is set aside: the first event
+    stands, the frame is logged and counted, and the cursor moves past it, so
+    one conflict never stops the frames and segments after it.
+    """
     path = str(Path(segment_path))
     received_at_us = time.time_ns() // 1000
     staged = 0
+    conflicts = 0
     last_frame: FrameRecord | None = None
     conn.execute("BEGIN IMMEDIATE")
     try:
@@ -170,8 +186,12 @@ def stage_frames(
             )
             if cursor.rowcount:
                 staged += 1
-            else:
-                _verify_duplicate(conn, event, path, frame.offset)
+            elif not _is_identical_duplicate(conn, event, path, frame.offset):
+                conflicts += 1
+                log.warning(
+                    "metrics: set aside event %s at %s:%d; it conflicts with "
+                    "an event already imported", event.event_id, path, frame.offset,
+                )
             last_frame = frame
         if last_frame is not None:
             conn.execute(
@@ -196,7 +216,7 @@ def stage_frames(
     except Exception:
         conn.rollback()
         raise
-    return staged
+    return StageResult(staged, conflicts)
 
 
 def cursor_offset(conn: sqlite3.Connection, segment_path: Path | str) -> int:

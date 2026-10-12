@@ -28,7 +28,7 @@ from bobi.brain.base import (
 from bobi.brain_availability import observe_brain_turn
 from bobi.inbox import Inbox, Message
 from bobi.metrics.routing import may_rerun_on_control
-from bobi.metrics.runtime import observe_turn
+from bobi.metrics.runtime import observe_turn, prompt_bytes
 from bobi.sdk import (
     save_session_id,
     load_session_id,
@@ -1330,7 +1330,7 @@ class Session:
                 trigger_id=msg.id,
                 is_user_initiated=msg.sender != "launch",
                 model_requested=self._session_model(),
-                prompt_bytes=len(msg.text.encode("utf-8")),
+                prompt_bytes=prompt_bytes(msg.text),
             )
             self._metrics_observation = observation
             log_activity(

@@ -245,8 +245,9 @@ than failing the command.
 not zero. It accepts the legacy `window_seconds`/`end_at` pair or an explicit
 `from`/`to` range, but never both. The legacy fold has no range cap. When the
 fine-grained layer cannot serve the request (`metrics_not_ready`,
-`metrics_busy` from the query or from a full or stopping executor, or a range
-over 31 days), `usage` still answers `done` with the legacy fold alone and
+`metrics_busy` from the query or from a full or stopping executor,
+`query_too_slow`, or a range over 31 days), `usage` still answers `done` with
+the legacy fold alone and
 omits the fine-grained keys. Malformed arguments still fail with
 `bad_request` or `invalid_range`.
 
@@ -262,7 +263,9 @@ fine-grained part of `usage`, run on a dedicated four-worker read-only executor
 with eight queued requests, for 12 total admitted requests. Saturation returns
 `result.code=metrics_busy` for the drill-downs without waiting behind SQLite
 work; `usage` answers with its legacy fold instead. Each accepted
-query has a one-second SQLite progress deadline; list responses are capped at
+query has a one-second SQLite progress deadline; a miss returns
+`result.code=query_too_slow`, which is not retryable (narrow the range or
+filters) and counts toward `deadline_cancellations`; list responses are capped at
 200 rows and every result is capped at 512 KiB. No prompt, response, tool input,
 tool output, content-derived prompt/tool hash, assignment-key hash, raw provider
 usage, project/local path, or free-form metadata body is returned.

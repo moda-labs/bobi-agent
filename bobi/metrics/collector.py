@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import sqlite3
 import threading
 import time
@@ -13,6 +15,7 @@ from bobi.fsutil import atomic_write_json, try_file_lock
 from bobi.metrics.projection import project_pending
 from bobi.metrics.spool import SpoolCorruptionError, iter_frames
 from bobi.metrics.store import (
+    StageResult,
     connect,
     cursor_offset,
     migrate,
@@ -20,6 +23,80 @@ from bobi.metrics.store import (
 )
 
 log = logging.getLogger(__name__)
+
+
+_SEGMENT_OWNER = re.compile(r"(?:producer|reconciler)-(\d+)-")
+
+
+def project_all(conn: sqlite3.Connection) -> dict[str, int]:
+    """Project every pending raw event, in batches."""
+    projection = {"selected": 0, "projected": 0, "deferred": 0, "quarantined": 0}
+    while True:
+        batch = project_pending(conn)
+        for key in projection:
+            projection[key] += batch[key]
+        if batch["selected"] == 0:
+            break
+    return {key: projection[key] for key in ("projected", "deferred", "quarantined")}
+
+
+# A fully imported segment is retired only once it has been quiet this long.
+# Producer liveness is a pid check, so every writer of a spool must share this
+# process's pid namespace; the quiet period covers a writer between appends.
+_RETIRE_AFTER_SECONDS = 5 * 60
+
+
+def _retirable(segment: Path) -> bool:
+    """True for a fully imported segment nothing will append to again.
+
+    A reconciler writes and closes its segment within one call, so age alone
+    decides. A producer must also have exited; a reused pid reads as alive,
+    which only delays retirement.
+    """
+    match = _SEGMENT_OWNER.match(segment.parent.name)
+    if not match:
+        return False
+    try:
+        if time.time() - segment.stat().st_mtime < _RETIRE_AFTER_SECONDS:
+            return False
+    except OSError:
+        return False
+    if segment.parent.name.startswith("reconciler-"):
+        return True
+    try:
+        os.kill(int(match.group(1)), 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _retire_segment(conn: sqlite3.Connection, segment: Path) -> dict[str, int]:
+    """Delete a retirable segment, and its directory once no segment is left.
+
+    Its events are already in ``raw_events``. Returns the drop and writer-error
+    counts from the producer's health file when the directory goes, so the
+    collector can keep them.
+    """
+    segment.unlink()
+    conn.execute("DELETE FROM spool_cursors WHERE segment_path=?", (str(segment),))
+    conn.commit()
+    if any(segment.parent.glob("*.telemetry")):
+        return {}
+    counts: dict[str, int] = {}
+    try:
+        data = json.loads((segment.parent / "health.json").read_text())
+        counts = {
+            "telemetry_events_dropped": int(data.get("telemetry_events_dropped") or 0),
+            "writer_errors": int(data.get("writer_errors") or 0),
+        }
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    for leftover in segment.parent.iterdir():
+        leftover.unlink()
+    segment.parent.rmdir()
+    return counts
 
 
 class MetricsCollector:
@@ -41,42 +118,38 @@ class MetricsCollector:
         conn = connect(self.db_path)
         try:
             migrate(conn)
-            start = cursor_offset(conn, segment_path)
             stage_error = None
             try:
-                staged = self._stage_segment(conn, Path(segment_path), start)
+                stage = self._stage_segment(
+                    conn, Path(segment_path), cursor_offset(conn, segment_path)
+                )
             except SpoolCorruptionError as exc:
-                staged = 0
+                stage = StageResult(0, 0)
                 stage_error = exc
-            projection = {
-                "selected": 0,
-                "projected": 0,
-                "deferred": 0,
-                "quarantined": 0,
-            }
-            while True:
-                batch = project_pending(conn)
-                for key in projection:
-                    projection[key] += batch[key]
-                if batch["selected"] == 0:
-                    break
+            projection = project_all(conn)
             if stage_error is not None:
                 raise stage_error
             return {
                 "role": "active",
-                "staged": staged,
-                "projected": projection["projected"],
-                "deferred": projection["deferred"],
-                "quarantined": projection["quarantined"],
+                "staged": stage.staged,
+                "conflicts": stage.conflicts,
+                **projection,
             }
         finally:
             conn.close()
 
     @staticmethod
-    def _stage_segment(conn, segment_path: Path, start: int) -> int:
-        staged = 0
+    def _stage_segment(conn, segment_path: Path, start: int) -> StageResult:
+        staged = conflicts = 0
         batch = []
         batch_started_ns = time.perf_counter_ns()
+
+        def flush() -> None:
+            nonlocal staged, conflicts
+            result = stage_frames(conn, segment_path=segment_path, frames=batch)
+            staged += result.staged
+            conflicts += result.conflicts
+
         frames = iter(iter_frames(segment_path, start))
         while True:
             try:
@@ -85,9 +158,7 @@ class MetricsCollector:
                 break
             except Exception:
                 if batch:
-                    staged += stage_frames(
-                        conn, segment_path=segment_path, frames=batch
-                    )
+                    flush()
                 raise
             batch.append(frame)
             deadline_reached = (
@@ -95,14 +166,12 @@ class MetricsCollector:
             )
             if len(batch) < 500 and not deadline_reached:
                 continue
-            staged += stage_frames(
-                conn, segment_path=segment_path, frames=batch
-            )
+            flush()
             batch = []
             batch_started_ns = time.perf_counter_ns()
         if batch:
-            staged += stage_frames(conn, segment_path=segment_path, frames=batch)
-        return staged
+            flush()
+        return StageResult(staged, conflicts)
 
     def prepare(self) -> str:
         """Create/migrate the read model under the non-blocking collector lock."""
@@ -137,6 +206,11 @@ class MetricsCollectorService:
         self.health_path = self.metrics_root / "collector.state.json"
         self._reconciliation_attempts: dict[str, int] = {}
         self._load_reconciliation_attempts()
+        # Counters that must outlive one cycle and a restart.
+        self._lasting = self._load_lasting_counters()
+        # One warning per segment and error type; repeats go to debug.
+        self._reported_failures: set[tuple[str, str]] = set()
+        self._retired_since_publish = False
         self.collector = MetricsCollector(self.db_path)
         self.poll_interval = poll_interval
         self.reconcile_interval = reconcile_interval
@@ -169,6 +243,7 @@ class MetricsCollectorService:
             "reconciliation_attempts": dict(self._reconciliation_attempts),
             "reconciliation_retry_exhausted_turns": 0,
             "uncovered_turns": 0,
+            **self._lasting,
         }
 
     def _load_reconciliation_attempts(self) -> None:
@@ -181,6 +256,26 @@ class MetricsCollectorService:
                 }
         except (OSError, ValueError, AttributeError):
             pass
+
+    _LASTING_COUNTERS = (
+        "conflicting_events", "last_conflict_at_us",
+        "retired_producer_events_dropped", "retired_producer_writer_errors",
+    )
+
+    def _load_lasting_counters(self) -> dict[str, int | None]:
+        lasting: dict[str, int | None] = {
+            "conflicting_events": 0, "last_conflict_at_us": None,
+            "retired_producer_events_dropped": 0, "retired_producer_writer_errors": 0,
+        }
+        try:
+            saved = json.loads(self.health_path.read_text())
+        except (OSError, ValueError):
+            return lasting
+        if isinstance(saved, dict):
+            for key in self._LASTING_COUNTERS:
+                if type(saved.get(key)) is int and saved[key] >= 0:
+                    lasting[key] = saved[key]
+        return lasting
 
     def start(self) -> None:
         if not self._started:
@@ -216,31 +311,87 @@ class MetricsCollectorService:
         }
 
     def _collect_once_locked(self) -> dict[str, int | str]:
+        """One cycle: one connection, one migrate, then only the segments with
+        bytes past their cursor. A segment that fails, for any reason, is
+        counted and skipped so it cannot stop the ones after it."""
         totals: dict[str, int | str] = {
-            "role": "active",
-            "staged": 0,
-            "projected": 0,
-            "deferred": 0,
-            "quarantined": 0,
-            "corrupt_segments": 0,
+            **self._empty_result("active"), "conflicts": 0, "failed_segments": 0,
         }
-        self.collector.prepare_locked()
-        for segment in sorted(self.spool_root.glob("*/*.telemetry")):
-            try:
-                result = self.collector.collect_segment_locked(segment)
-            except SpoolCorruptionError:
-                log.debug(
-                    "metrics: corrupt spool segment isolated: %s",
-                    segment,
-                    exc_info=True,
-                )
-                totals["corrupt_segments"] = (
-                    int(totals["corrupt_segments"]) + 1
-                )
-                continue
-            for key in ("staged", "projected", "deferred", "quarantined"):
-                totals[key] = int(totals[key]) + int(result[key])
+        conn = connect(self.db_path)
+        try:
+            migrate(conn)
+            cursors = {
+                str(row["segment_path"]): int(row["committed_offset"])
+                for row in conn.execute(
+                    "SELECT segment_path, committed_offset FROM spool_cursors")
+            }
+            for segment in sorted(self.spool_root.glob("*/*.telemetry")):
+                try:
+                    size = segment.stat().st_size
+                except OSError:
+                    continue
+                start = cursors.get(str(segment), 0)
+                if start >= size:
+                    if _retirable(segment):
+                        self._retire(conn, segment)
+                    continue
+                try:
+                    stage = self.collector._stage_segment(conn, segment, start)
+                except SpoolCorruptionError:
+                    log.debug("metrics: corrupt spool segment isolated: %s",
+                              segment, exc_info=True)
+                    totals["corrupt_segments"] = int(totals["corrupt_segments"]) + 1
+                    continue
+                except Exception as exc:
+                    self._report_failure(segment, exc)
+                    totals["failed_segments"] = int(totals["failed_segments"]) + 1
+                    totals["failure"] = type(exc).__name__
+                    continue
+                totals["staged"] = int(totals["staged"]) + stage.staged
+                totals["conflicts"] = int(totals["conflicts"]) + stage.conflicts
+                if stage.conflicts:
+                    self._lasting["conflicting_events"] = (
+                        int(self._lasting["conflicting_events"] or 0) + stage.conflicts)
+                    self._lasting["last_conflict_at_us"] = time.time_ns() // 1000
+            for key, value in project_all(conn).items():
+                totals[key] = int(totals[key]) + value
+        finally:
+            conn.close()
         return totals
+
+    def _take_over(self) -> None:
+        """Become the active collector: state the previous one saved wins over
+        whatever this instance read when it started on standby."""
+        self._load_reconciliation_attempts()
+        self._lasting = self._load_lasting_counters()
+        self._set_health(role="active",
+                         reconciliation_attempts=dict(self._reconciliation_attempts),
+                         **self._lasting)
+
+    def _report_failure(self, segment: Path, exc: Exception) -> None:
+        key = (str(segment), type(exc).__name__)
+        if key in self._reported_failures:
+            log.debug("metrics: spool segment still failing: %s", segment, exc_info=True)
+            return
+        self._reported_failures.add(key)
+        log.warning("metrics: spool segment skipped until it imports: %s",
+                    segment, exc_info=True)
+
+    def _retire(self, conn: sqlite3.Connection, segment: Path) -> None:
+        try:
+            counts = _retire_segment(conn, segment)
+        except (OSError, sqlite3.Error):
+            log.debug("metrics: could not retire spool segment %s", segment, exc_info=True)
+            return
+        self._lasting["retired_producer_events_dropped"] = int(
+            self._lasting["retired_producer_events_dropped"] or 0
+        ) + counts.get("telemetry_events_dropped", 0)
+        self._lasting["retired_producer_writer_errors"] = int(
+            self._lasting["retired_producer_writer_errors"] or 0
+        ) + counts.get("writer_errors", 0)
+        if counts:
+            # The producer's own file is gone; these counts now live only here.
+            self._retired_since_publish = True
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -249,8 +400,7 @@ class MetricsCollectorService:
                     self._refresh_health(self._empty_result("standby"))
                     self._stop.wait(self.poll_interval)
                     continue
-                self._load_reconciliation_attempts()
-                self._set_health(role="active", reconciliation_attempts=dict(self._reconciliation_attempts))
+                self._take_over()
                 while not self._stop.is_set():
                     self._cycle_locked()
                     self._stop.wait(self.poll_interval)
@@ -373,10 +523,14 @@ class MetricsCollectorService:
             finally:
                 conn.close()
         corrupt_segments = int(result.get("corrupt_segments", 0))
+        failed_segments = int(result.get("failed_segments", 0))
+        conflicts = int(result.get("conflicts", 0))
+        drops += int(self._lasting["retired_producer_events_dropped"] or 0)
+        writer_errors += int(self._lasting["retired_producer_writer_errors"] or 0)
         self._set_health(
             status=(
                 "degraded"
-                if corrupt_segments
+                if corrupt_segments or failed_segments
                 else "running" if result["role"] == "active" else "standby"
             ),
             role=result["role"],
@@ -388,14 +542,22 @@ class MetricsCollectorService:
                 if oldest_uncommitted_ns is not None else 0.0
             ),
             last_success_at_us=now_us,
-            last_error="SpoolCorruptionError" if corrupt_segments else None,
-            rejected_events=corrupt_segments,
+            last_error=(
+                "SpoolCorruptionError" if corrupt_segments
+                else str(result.get("failure") or "SegmentImportError") if failed_segments
+                else "ConflictingEvent" if conflicts else None
+            ),
+            rejected_events=corrupt_segments + failed_segments + conflicts,
             quarantined_events=quarantined,
             telemetry_events_dropped=drops,
             producer_writer_errors=writer_errors,
             producer_count=producers,
+            **self._lasting,
         )
-        self._publish_health()
+        # A conflict is rare and worth keeping: write it now, not on the
+        # once-a-second schedule.
+        self._publish_health(force=bool(conflicts) or self._retired_since_publish)
+        self._retired_since_publish = False
 
     def _set_health(self, **updates: object) -> None:
         with self._health_lock:

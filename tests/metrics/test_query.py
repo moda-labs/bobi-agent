@@ -3,6 +3,7 @@
 import httpx
 import json
 import sqlite3
+import time
 import pytest
 from bobi.admin_client import AdminClientError, run_admin_command
 from bobi.cli import main, metrics
@@ -883,7 +884,7 @@ def test_sqlite_lock_is_retryable_metrics_busy(metrics_root, monkeypatch):
     assert error.value.detail == {"retry_after_ms": 250}
 
 
-def test_sqlite_progress_deadline_is_retryable_metrics_busy(metrics_root):
+def test_sqlite_progress_deadline_is_a_non_retryable_refusal(metrics_root):
     queries = MetricsQueries(metrics_root, deadline_seconds=0)
 
     def expensive(conn):
@@ -896,9 +897,9 @@ def test_sqlite_progress_deadline_is_retryable_metrics_busy(metrics_root):
 
     with pytest.raises(MetricsQueryError) as error:
         queries._run(expensive)
-    assert error.value.code == "metrics_busy"
+    assert error.value.code == "query_too_slow"
     assert "deadline" in str(error.value)
-    assert error.value.detail == {"retry_after_ms": 250}
+    assert error.value.detail == {}
 
 
 def test_python_query_processing_respects_deadline(metrics_root, monkeypatch):
@@ -909,8 +910,8 @@ def test_python_query_processing_respects_deadline(metrics_root, monkeypatch):
         return {"late": True}
     with pytest.raises(MetricsQueryError) as error:
         MetricsQueries(metrics_root, deadline_seconds=1)._run(processing)
-    assert error.value.code == "metrics_busy"
-    assert error.value.detail == {"retry_after_ms": 250}
+    assert error.value.code == "query_too_slow"
+    assert error.value.detail == {}
 
 
 def test_metrics_status_reports_database_and_reconciliation(monkeypatch, tmp_path):
@@ -1274,3 +1275,93 @@ def test_routing_savings_count_fallback_reasons_per_pick():
     assert haiku["fallback_turns"] == 3
     assert haiku["fallback_reasons"] == {"policy_low_confidence": 2, "policy_timeout": 1}
     assert sonnet["fallback_reasons"] == {}
+
+
+# --- cost does not grow with history -----------------------------------------
+
+def _insert_once(conn, statement):
+    sql, params = statement
+    conn.execute(sql.replace("INSERT INTO", "INSERT OR IGNORE INTO", 1), params)
+
+
+def _seed_history(root, *, old_turns, recent_turns, now):
+    """Turns of four calls each: `old_turns` a week back, `recent_turns` in the
+    last hour."""
+    conn = connect(root / "state" / "metrics" / "metrics.db")
+    migrate(conn)
+    conn.execute("INSERT OR IGNORE INTO sessions(session_id,session_name,brain,provider,"
+                 "started_at_us,status) VALUES('h','agent','claude','anthropic',0,'completed')")
+    rows = [(f"old-{n}", int((now - 7 * 86400) * 1e6) + n) for n in range(old_turns)]
+    rows += [(f"new-{n}", int((now - 600) * 1e6) + n) for n in range(recent_turns)]
+    for turn_id, at in rows:
+        conn.execute("INSERT OR IGNORE INTO turns(turn_id,session_id,turn_index,trigger_kind,"
+                     "is_user_initiated,started_at_us,ended_at_us,status) "
+                     "VALUES(?,'h',?,'user',1,?,?,'completed')", (turn_id, at, at, at + 10))
+        for k in range(4):
+            model = "claude-haiku-4-5" if k == 3 else "claude-opus-5-5"
+            conn.execute("INSERT OR IGNORE INTO llm_invocations(invocation_id,turn_id,"
+                         "invocation_index,provider,model_selected,started_at_us,status) "
+                         "VALUES(?,?,?,'anthropic',?,?,'completed')",
+                         (f"{turn_id}-{k}", turn_id, k, model, at + k))
+            _insert_once(conn, _usage(f"u-{turn_id}-{k}", "invocation", model, 100, 10,
+                                      inv=f"{turn_id}-{k}", turn=turn_id, at=at + k))
+        _insert_once(conn, _usage(f"u-{turn_id}", "turn", "claude-opus-5-5[1m]", 300, 30,
+                                  turn=turn_id, at=at + 9))
+        conn.execute(
+            "INSERT OR IGNORE INTO router_decisions(router_decision_id,turn_id,router_name,"
+            "router_version,candidate_models_json,model_selected,router_latency_ms,"
+            "decided_at_us,metadata_json) VALUES(?,?,'jev','1','[]','claude-opus-5-5',1,?,?)",
+            (f"d-{turn_id}", turn_id, at,
+             json.dumps({"policy": {"call_id": f"call-{turn_id}", "status": "ok"}})))
+    fill_model_keys(conn)
+    conn.commit()
+    conn.close()
+
+
+def _vm_steps(monkeypatch, run):
+    """SQLite progress-handler ticks (one per 1000 VM steps) spent by `run`."""
+    import bobi.metrics.store as store_module
+
+    ticks = [0]
+
+    class Counting(sqlite3.Connection):
+        def set_progress_handler(self, handler, n):
+            def counted():
+                ticks[0] += 1
+                return handler()
+            super().set_progress_handler(counted, n)
+
+    real = sqlite3.connect
+    monkeypatch.setattr(store_module.sqlite3, "connect",
+                        lambda *a, **k: real(*a, factory=Counting, **k))
+    try:
+        run()
+    finally:
+        monkeypatch.setattr(store_module.sqlite3, "connect", real)
+    return ticks[0]
+
+
+def test_summary_of_the_last_hour_does_not_grow_with_older_history(tmp_path, monkeypatch):
+    now = time.time()
+    args = {"window_seconds": 3600, "end_at": now, "include_dashboard": True}
+    _seed_history(tmp_path, old_turns=200, recent_turns=5, now=now)
+    queries = MetricsQueries(tmp_path, deadline_seconds=60)
+    small = _vm_steps(monkeypatch, lambda: queries.summary(dict(args)))
+    _seed_history(tmp_path, old_turns=1000, recent_turns=5, now=now)
+    large = _vm_steps(monkeypatch, lambda: queries.summary(dict(args)))
+
+    assert queries.summary(dict(args))["totals"]["input_tokens"] == 5 * (300 + 100)
+    assert large <= small * 1.5 + 5, (small, large)
+
+
+def test_turn_list_of_the_last_hour_does_not_grow_with_older_history(tmp_path, monkeypatch):
+    now = time.time()
+    args = {"window_seconds": 3600, "end_at": now, "limit": 50}
+    _seed_history(tmp_path, old_turns=200, recent_turns=5, now=now)
+    queries = MetricsQueries(tmp_path, deadline_seconds=60)
+    small = _vm_steps(monkeypatch, lambda: queries.turns(dict(args)))
+    _seed_history(tmp_path, old_turns=1000, recent_turns=5, now=now)
+    large = _vm_steps(monkeypatch, lambda: queries.turns(dict(args)))
+
+    assert len(queries.turns(dict(args))["turns"]) == 5
+    assert large <= small * 1.5 + 5, (small, large)

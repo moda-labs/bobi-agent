@@ -69,6 +69,20 @@ class TestMetrics:
         assert _client().get(base + "/summary", params={**self.RANGE, "from": "bad"}).status_code == 400
         assert _client().get(base + "/turns", params={**self.RANGE, "limit": 201}).status_code == 422
 
+    def test_a_query_too_slow_is_a_client_error_without_retry(self, bobi_install, monkeypatch):
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.webapp.runtime import LocalRuntime
+
+        def too_slow(self, name, view, args):
+            raise MetricsQueryError("metrics query exceeded its one-second deadline", "query_too_slow")
+
+        monkeypatch.setattr(LocalRuntime, "metrics", too_slow)
+        response = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/summary",
+                                 params=self.RANGE)
+        assert response.status_code == 400
+        assert response.json()["code"] == "query_too_slow"
+        assert "retry-after" not in response.headers
+
     def test_metrics_reader_saturation_release_and_unsupported_runtime(self, bobi_install):
         from bobi.metrics.query import MetricsQueryError
         from bobi.webapp.runtime import LocalRuntime, TeamRuntime

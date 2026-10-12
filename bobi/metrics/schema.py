@@ -2,7 +2,7 @@
 
 SCHEMA_VERSION = 1
 # Bump when the best_usage view changes; migrate() rebuilds the view (it holds no data).
-BEST_USAGE_VERSION = 3
+BEST_USAGE_VERSION = 4
 
 
 # Tables whose model column gets a ``model_key`` (``bobi.costs.model_identity``):
@@ -263,6 +263,7 @@ CREATE TABLE IF NOT EXISTS cost_measurements (
 CREATE INDEX IF NOT EXISTS idx_sessions_provider_session ON sessions(provider, provider_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at_us);
 CREATE INDEX IF NOT EXISTS idx_turns_session_started ON turns(session_id, started_at_us);
+CREATE INDEX IF NOT EXISTS idx_turns_started ON turns(started_at_us);
 CREATE INDEX IF NOT EXISTS idx_turns_trigger ON turns(trigger_kind, trigger_id);
 CREATE INDEX IF NOT EXISTS idx_steps_run ON workflow_steps(run_key, step_index, attempt);
 CREATE INDEX IF NOT EXISTS idx_invocations_turn ON llm_invocations(turn_id, invocation_index);
@@ -275,6 +276,9 @@ CREATE INDEX IF NOT EXISTS idx_usage_supersedes ON usage_measurements(supersedes
 CREATE INDEX IF NOT EXISTS idx_cost_turn ON cost_measurements(turn_id, scope, is_estimated);
 CREATE INDEX IF NOT EXISTS idx_cost_invocation ON cost_measurements(invocation_id, is_estimated);
 CREATE INDEX IF NOT EXISTS idx_router_experiment ON router_decisions(experiment_id, variant_id, decided_at_us);
+-- A turn's latest decision, and earlier turns that reused its policy call.
+CREATE INDEX IF NOT EXISTS idx_router_turn ON router_decisions(turn_id, decided_at_us);
+CREATE INDEX IF NOT EXISTS idx_router_policy_call ON router_decisions(json_extract(metadata_json, '$.policy.call_id'));
 CREATE INDEX IF NOT EXISTS idx_raw_projection ON raw_events(projection_state, projection_not_before_us, received_at_us);
 -- Rows still waiting for a model_key (written by hand or by an older Bobi);
 -- migrate keys them, and this keeps that lookup off a full scan.
@@ -283,7 +287,9 @@ CREATE INDEX IF NOT EXISTS idx_usage_unkeyed ON usage_measurements(model) WHERE 
 CREATE INDEX IF NOT EXISTS idx_cost_unkeyed ON cost_measurements(model) WHERE model_key IS NULL;
 
 CREATE VIEW IF NOT EXISTS best_usage AS
-WITH candidates AS (
+-- Not materialized: an outer filter on turn_id reaches the index, so a
+-- query pays for the turns it reads rather than for all history.
+WITH candidates AS NOT MATERIALIZED (
     SELECT
         u.*,
         (u.input_tokens IS NOT NULL)
@@ -309,7 +315,10 @@ WITH candidates AS (
             WHEN 'local_tokenizer' THEN 20
             WHEN 'calibrated_estimator' THEN 10
             ELSE 0
-        END AS source_priority
+        END AS source_priority,
+        -- One model under two spellings is one measurement. A row not yet
+        -- keyed falls back to its own name, never to a shared NULL.
+        COALESCE(u.model_key, u.model) AS usage_key
     FROM usage_measurements AS u
     WHERE NOT EXISTS (
         SELECT 1
@@ -320,57 +329,48 @@ WITH candidates AS (
         AND NOT (u.scope = 'turn' AND u.is_estimated = 0 AND u.measurement_source = 'provider_stream'
                  AND newer.measurement_source = 'claude_transcript')
     )
-), ranked AS (
-    SELECT
-        candidates.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY
-                scope,
-                turn_id,
-                COALESCE(invocation_id, ''),
-                provider,
-                -- One model under two spellings is one measurement. A row not
-                -- yet keyed falls back to its own name, never to a shared NULL.
-                COALESCE(model_key, model)
-            ORDER BY
-                is_estimated ASC,
-                -- Source before detail: a transcript row carrying the 5m/1h
-                -- cache split must not displace Claude's terminal total.
-                source_priority DESC,
-                completeness DESC,
-                token_semantics_version DESC,
-                observed_at_us DESC,
-                measurement_id DESC
-        ) AS usage_rank
-    FROM candidates
 )
 SELECT
-    measurement_id,
-    scope,
-    turn_id,
-    invocation_id,
-    provider,
-    model,
-    COALESCE(model_key, model) AS model_key,
-    provider_event_id,
-    measurement_source,
-    is_estimated,
-    estimator_name,
-    estimator_version,
-    token_semantics_version,
-    input_tokens,
-    uncached_input_tokens,
-    cache_read_input_tokens,
-    cache_write_input_tokens,
-    cache_write_5m_input_tokens,
-    cache_write_1h_input_tokens,
-    cache_write_unknown_ttl_input_tokens,
-    cache_write_breakdown_complete,
-    output_tokens,
-    reasoning_output_tokens,
-    observed_at_us,
-    raw_usage_json,
-    supersedes_measurement_id
-FROM ranked
-WHERE usage_rank = 1;
+    c.measurement_id,
+    c.scope,
+    c.turn_id,
+    c.invocation_id,
+    c.provider,
+    c.model,
+    c.usage_key AS model_key,
+    c.provider_event_id,
+    c.measurement_source,
+    c.is_estimated,
+    c.estimator_name,
+    c.estimator_version,
+    c.token_semantics_version,
+    c.input_tokens,
+    c.uncached_input_tokens,
+    c.cache_read_input_tokens,
+    c.cache_write_input_tokens,
+    c.cache_write_5m_input_tokens,
+    c.cache_write_1h_input_tokens,
+    c.cache_write_unknown_ttl_input_tokens,
+    c.cache_write_breakdown_complete,
+    c.output_tokens,
+    c.reasoning_output_tokens,
+    c.observed_at_us,
+    c.raw_usage_json,
+    c.supersedes_measurement_id
+FROM candidates AS c
+-- The best candidate per scope, turn, invocation, provider and model:
+-- exact first, then source (a transcript row with the 5m/1h cache split
+-- must not displace Claude's terminal total), then detail, then newest.
+WHERE NOT EXISTS (
+    SELECT 1 FROM candidates AS better
+    WHERE better.turn_id = c.turn_id
+    AND better.scope = c.scope
+    AND COALESCE(better.invocation_id, '') = COALESCE(c.invocation_id, '')
+    AND better.provider = c.provider
+    AND better.usage_key = c.usage_key
+    AND (better.is_estimated, -better.source_priority, -better.completeness,
+         -better.token_semantics_version, -better.observed_at_us, c.measurement_id)
+      < (c.is_estimated, -c.source_priority, -c.completeness,
+         -c.token_semantics_version, -c.observed_at_us, better.measurement_id)
+);
 """

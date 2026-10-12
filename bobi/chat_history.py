@@ -224,7 +224,13 @@ def _entry(kind: str, role: str, text: str, at: str, tool: str = "",
     value and never on key presence."""
     return {"kind": kind, "role": role, "text": text, "at": at, "tool": tool,
             "truncated": truncated, "is_error": is_error,
-            "total_bytes": len(text.encode("utf-8")) if total_bytes is None else total_bytes}
+            "total_bytes": _utf8_size(text) if total_bytes is None else total_bytes}
+
+
+def _utf8_size(text: str) -> int:
+    # A transcript can hold half an emoji (a lone surrogate from a cut string);
+    # its size must not be what fails the whole view.
+    return len(text.encode("utf-8", "surrogatepass"))
 
 
 def _tool_blocks(content, *, role: str, at: str) -> list[dict]:
@@ -247,7 +253,7 @@ def _tool_blocks(content, *, role: str, at: str) -> list[dict]:
                 KIND_TOOL_RESULT, role, preview, at,
                 truncated=len(preview) < len(text),
                 is_error=bool(block.get("is_error")),
-                total_bytes=len(text.encode("utf-8"))))
+                total_bytes=_utf8_size(text)))
     return blocks
 
 
@@ -270,20 +276,81 @@ def _tool_input_summary(payload) -> str:
             return value.strip()[:200]
     return ", ".join(sorted(payload)[:6])
 
-def _transcript_records(path: Path, *, bounded: bool = False):
-    deadline = time.monotonic() + 0.25
-    scanned = 0
-    with path.open() as transcript:
-        for line in transcript:
-            scanned += len(line.encode("utf-8"))
-            if bounded and (scanned > 16 * 1024 * 1024 or time.monotonic() >= deadline):
-                raise OSError("transcript preview exceeded its read budget")
-            try:
-                record = json.loads(line)
-            except ValueError:
+# A turn's window is read from the newest end of the file, within this budget.
+# Past it the read stops and returns what it has: the newest records, which are
+# what a turn view almost always asks for.
+_WINDOW_READ_BYTES = 16 * 1024 * 1024
+_WINDOW_READ_SECONDS = 0.25
+_WINDOW_READ_CHUNK = 64 * 1024
+# Transcripts are append-ordered, not time-ordered: Claude stamps hook and
+# queued-command attachments with when they were made (seen up to ~6 minutes
+# back). The read stops only at a record this far before the window.
+_WINDOW_STOP_SLACK_US = 15 * 60 * 1_000_000
+
+
+def _parse_record(line: bytes | str) -> dict | None:
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _record_us(record: dict) -> int | None:
+    try:
+        at = datetime.fromisoformat(str(record.get("timestamp") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int(at.timestamp() * 1_000_000) if at.tzinfo is not None else None
+
+
+def _lines_newest_first(path: Path):
+    """The file's lines from the end, within the window read budget."""
+    deadline = time.monotonic() + _WINDOW_READ_SECONDS
+    with path.open("rb") as transcript:
+        position = transcript.seek(0, os.SEEK_END)
+        floor = max(0, position - _WINDOW_READ_BYTES)
+        # Pieces of the line being assembled, newest piece first; joined once
+        # when the line is complete, so a long line is not copied per chunk.
+        partial: list[bytes] = []
+        while position > floor and time.monotonic() < deadline:
+            size = min(_WINDOW_READ_CHUNK, position - floor)
+            position -= size
+            transcript.seek(position)
+            pieces = transcript.read(size).split(b"\n")
+            if len(pieces) == 1:
+                partial.append(pieces[0])
                 continue
-            if isinstance(record, dict):
-                yield record
+            newest = b"".join([pieces[-1], *reversed(partial)])
+            partial = [pieces[0]]
+            yield newest
+            yield from reversed(pieces[1:-1])
+        if position == 0 and partial:
+            yield b"".join(reversed(partial))
+
+
+def _transcript_records(path: Path, *, after_us: int | None = None,
+                        before_us: int | None = None):
+    """Records oldest first. With a time window, read newest first and stop at
+    the first record well before the window, so a long transcript still yields
+    its latest turns; callers apply the window to each record themselves."""
+    if after_us is None and before_us is None:
+        with path.open() as transcript:
+            for line in transcript:
+                record = _parse_record(line)
+                if record is not None:
+                    yield record
+        return
+    newest_first = []
+    for line in _lines_newest_first(path):
+        record = _parse_record(line)
+        if record is None:
+            continue
+        at = _record_us(record)
+        if after_us is not None and at is not None and at < after_us - _WINDOW_STOP_SLACK_US:
+            break
+        newest_first.append(record)
+    yield from reversed(newest_first)
 
 
 def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
@@ -327,7 +394,7 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
         return _from_codex() if brain in (None, "") else []
 
     out = deque(maxlen=limit)
-    for obj in _transcript_records(path, bounded=after_us is not None or before_us is not None):
+    for obj in _transcript_records(path, after_us=after_us, before_us=before_us):
         if obj.get("type") not in ("human", "user", "assistant"):
             continue
         at = str(obj.get("timestamp", "") or "")
@@ -410,7 +477,7 @@ def read_codex_transcript_messages(session_id: str,
         return []
 
     out = deque(maxlen=limit)
-    for obj in _transcript_records(path, bounded=after_us is not None or before_us is not None):
+    for obj in _transcript_records(path, after_us=after_us, before_us=before_us):
         if obj.get("type") != "response_item":
             continue
         if after_us is not None or before_us is not None:

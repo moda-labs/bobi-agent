@@ -29,7 +29,7 @@ from bobi.sdk import (
 )
 from bobi.brain.turns import drain_turn
 from bobi.metrics.routing import may_rerun_on_control
-from bobi.metrics.runtime import TurnObservation, observe_turn
+from bobi.metrics.runtime import TurnObservation, observe_turn, prompt_bytes
 from bobi.subagent import _emit_lifecycle_event
 from bobi.timeutil import now_iso
 from bobi.workflow.schema import Workflow, StepDef
@@ -1342,7 +1342,7 @@ async def _run_workflow_async(
             if context_pending:
                 prompt = _context_prefix() + prompt
                 context_pending = False
-            telemetry_context["prompt_bytes"] = len(prompt.encode("utf-8"))
+            telemetry_context["prompt_bytes"] = prompt_bytes(prompt)
             log.info(f"Step {step.name}: injecting prompt ({len(prompt)} chars)")
 
             turn_observation = observe_turn(
@@ -1407,9 +1407,7 @@ async def _run_workflow_async(
                 try:
                     await client.connect()
                     resume_prompt = _turn_budget_resume_prompt(step, final_try)
-                    telemetry_context["prompt_bytes"] = len(
-                        resume_prompt.encode("utf-8")
-                    )
+                    telemetry_context["prompt_bytes"] = prompt_bytes(resume_prompt)
                     turn_observation = observe_turn(
                         session_name,
                         provider=getattr(client, "provider", "anthropic"),
@@ -1456,7 +1454,7 @@ async def _run_workflow_async(
                     effort=current_effort, max_turns=current_max_turns,
                 )
                 await client.connect()
-                telemetry_context["prompt_bytes"] = len(prompt.encode("utf-8"))
+                telemetry_context["prompt_bytes"] = prompt_bytes(prompt)
                 turn_observation = observe_turn(
                     session_name,
                     provider=getattr(client, "provider", "anthropic"),
@@ -1507,9 +1505,7 @@ async def _run_workflow_async(
                     f"Please update `{session_handoff_path(session_name, step.name)}` "
                     "with these fields and confirm."
                 )
-                telemetry_context["prompt_bytes"] = len(
-                    fix_prompt.encode("utf-8")
-                )
+                telemetry_context["prompt_bytes"] = prompt_bytes(fix_prompt)
                 turn_observation = observe_turn(
                     session_name,
                     provider=getattr(client, "provider", "anthropic"),

@@ -2103,9 +2103,11 @@ export function mountMetrics(element, { api, name, session = "" }) {
     }
     if (revision !== modelRevision) return;
 
-    const failure = results.slice(0, 2).find(r => !r.ok);
-    if (failure) {
-      note.textContent = `${failure.data?.error || "Could not read metrics."} Previous values, if any, are stale.`;
+    // Turns render on their own: a summary that is refused (too slow, busy)
+    // must not blank the turn list beside it.
+    const [summaryResult, turnsResult] = results;
+    if (!turnsResult.ok) {
+      note.textContent = `${turnsResult.data?.error || "Could not read metrics."} Previous values, if any, are stale.`;
     } else {
       if (results[2]?.ok) {
         const range = `${params.get("from")}/${params.get("to")}`;
@@ -2118,7 +2120,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
         recentSessions = [...results[2].data.sessions, ...recentSessions.filter(item => !known.has(item.session_id))];
         updateSessionFilterUI();
       }
-      renderSummary(results[0].data);
+      if (summaryResult.ok) renderSummary(summaryResult.data);
 
       const allTurns = results[1].data.turns || [];
       const selectedTurnId = currentTurns[activeTurnIndex]?.turn_id;
@@ -2131,7 +2133,10 @@ export function mountMetrics(element, { api, name, session = "" }) {
       }
 
       drawTurns();
-      note.textContent = "Read-only metrics · refreshed " + new Date().toLocaleTimeString();
+      const refreshed = new Date().toLocaleTimeString();
+      note.textContent = summaryResult.ok
+        ? "Read-only metrics · refreshed " + refreshed
+        : `${summaryResult.data?.error || "Could not read the summary."} Totals are stale; turns refreshed ${refreshed}.`;
 
       pager.replaceChildren();
       const nextCursor = results[1].data.next_cursor;

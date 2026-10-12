@@ -232,17 +232,17 @@ def test_usage_command_serves_the_legacy_summary_for_a_long_from_to_range(
     assert data["result"]["usage"]["window"]["seconds"] == 90 * 86400
 
 
-@pytest.mark.parametrize("message", [
-    "metrics database is busy",
-    "metrics query exceeded its one-second deadline",
+@pytest.mark.parametrize(("message", "code"), [
+    ("metrics database is busy", "metrics_busy"),
+    ("metrics query exceeded its one-second deadline", "query_too_slow"),
 ])
 def test_usage_command_omits_the_fine_grained_block_when_metrics_are_busy(
-    tmp_path, monkeypatch, message,
+    tmp_path, monkeypatch, message, code,
 ):
     from bobi.metrics.query import MetricsQueries, MetricsQueryError
 
     def busy(self, args):
-        raise MetricsQueryError(message, "metrics_busy", retry_after_ms=250)
+        raise MetricsQueryError(message, code)
 
     monkeypatch.setattr(MetricsQueries, "summary", busy)
     listener = _usage_listener(tmp_path, monkeypatch)
@@ -448,7 +448,7 @@ def test_metrics_query_health_reports_activity_rejections_deadlines_and_latency(
         if outcome == "deadline":
             raise MetricsQueryError(
                 "metrics query exceeded its one-second deadline",
-                "metrics_busy", retry_after_ms=250,
+                "query_too_slow",
             )
         if outcome == "blocked":
             started.set()

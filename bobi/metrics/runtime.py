@@ -1015,6 +1015,15 @@ def get_runtime(root: Path | str | None = None) -> MetricsRuntime:
     return _runtime
 
 
+def prompt_bytes(text: str) -> int:
+    """UTF-8 size of a prompt, for metrics only.
+
+    A prompt can hold a lone surrogate (half an emoji cut by an upstream
+    truncation); counting its bytes must never be what fails the turn.
+    """
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
 def observe_turn(session_name: str, **kwargs: Any) -> TurnObservation:
     try:
         return get_runtime().begin_turn(session_name, **kwargs)

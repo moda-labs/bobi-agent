@@ -1,6 +1,7 @@
 """Durable ingestion, SQLite integrity, and recovery regressions."""
 
 import json
+import os
 import pytest
 import sqlite3
 import threading
@@ -33,6 +34,7 @@ from bobi.metrics.spool import (
 )
 from bobi.metrics.store import (
     connect,
+    cursor_offset,
     fill_model_keys,
     integrity_check,
     migrate,
@@ -543,6 +545,190 @@ def test_corrupt_segment_does_not_starve_later_segments(tmp_path):
         conn.close()
 
 
+def _session_event(producer_id, sequence, session_id, *, status="completed", event_id=None):
+    payload = {"session_id": session_id, "session_name": "agent", "brain": "stub",
+               "provider": "stub", "started_at_us": 1, "status": status}
+    kwargs = {"event_id": event_id} if event_id else {}
+    return MetricsEvent(event_type="session.recorded", producer_id=producer_id,
+                        producer_sequence=sequence, source="test",
+                        session_id=session_id, payload=payload, **kwargs)
+
+
+def test_a_conflicting_frame_does_not_stop_later_frames_or_segments(tmp_path):
+    service = MetricsCollectorService(tmp_path)
+    original = _session_event("producer-1-a", 1, "s1")
+    with SpoolWriter(service.spool_root / "producer-1-a" / "1.telemetry") as writer:
+        writer.append(original)
+    assert service.collect_once()["staged"] == 1
+    with SpoolWriter(service.spool_root / "reconciler-1-b" / "2.telemetry") as writer:
+        writer.append(_session_event("reconciler-1-b", 1, "s1", status="failed",
+                                     event_id=original.event_id))
+        writer.append(_session_event("reconciler-1-b", 2, "s2"))
+    with SpoolWriter(service.spool_root / "reconciler-1-c" / "3.telemetry") as writer:
+        writer.append(_session_event("reconciler-1-c", 1, "s3"))
+
+    result = service.collect_once()
+    service._refresh_health(result)
+
+    assert result["conflicts"] == 1
+    assert result["staged"] == 2
+    conn = connect(service.db_path, readonly=True)
+    try:
+        assert {row[0]: row[1] for row in conn.execute(
+            "SELECT session_id, status FROM sessions")} == {
+            "s1": "completed", "s2": "completed", "s3": "completed"}
+    finally:
+        conn.close()
+    assert service.health()["status"] != "degraded"
+
+
+def test_a_segment_that_fails_for_any_reason_does_not_stop_the_others(tmp_path, monkeypatch):
+    from bobi.metrics import collector as collector_module
+
+    service = MetricsCollectorService(tmp_path)
+    for name in ("a", "b"):
+        with SpoolWriter(service.spool_root / f"producer-1-{name}" / "1.telemetry") as writer:
+            writer.append(_session_event(f"producer-1-{name}", 1, f"s-{name}"))
+    real = collector_module.iter_frames
+
+    def failing(path, start=0):
+        if "producer-1-a" in str(path):
+            raise RuntimeError("unexpected")
+        return real(path, start)
+
+    monkeypatch.setattr(collector_module, "iter_frames", failing)
+    result = service.collect_once()
+
+    assert result["failed_segments"] == 1
+    assert result["staged"] == 1
+
+
+def test_a_cycle_opens_one_connection_and_skips_consumed_segments(tmp_path, monkeypatch):
+    from bobi.metrics import collector as collector_module
+
+    service = MetricsCollectorService(tmp_path)
+    for index in range(5):
+        with SpoolWriter(service.spool_root / f"producer-{os.getpid()}-{index}" / "1.telemetry") as writer:
+            writer.append(_session_event("p", index, f"s{index}"))
+    service.collect_once()
+    calls = {"connect": 0, "migrate": 0, "iter_frames": 0}
+    for name in calls:
+        real = getattr(collector_module, name)
+
+        def counted(*args, _real=real, _name=name, **kwargs):
+            calls[_name] += 1
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(collector_module, name, counted)
+
+    service.collect_once()
+
+    assert calls == {"connect": 1, "migrate": 1, "iter_frames": 0}
+
+
+def _age(path, seconds):
+    then = time.time() - seconds
+    os.utime(path, (then, then))
+
+
+def test_quiet_imported_segments_of_exited_writers_are_retired(tmp_path):
+    import subprocess
+    import sys
+
+    dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    service = MetricsCollectorService(tmp_path)
+    gone = service.spool_root / f"producer-{dead}-x" / "1.telemetry"
+    fresh = service.spool_root / f"producer-{dead}-y" / "1.telemetry"
+    alive = service.spool_root / f"producer-{os.getpid()}-z" / "1.telemetry"
+    reconciler = service.spool_root / f"reconciler-{os.getpid()}-r" / "1.telemetry"
+    for index, path in enumerate((gone, fresh, alive, reconciler)):
+        with SpoolWriter(path) as writer:
+            writer.append(_session_event("p", index, f"s{index}"))
+    (gone.parent / "health.json").write_text(json.dumps(
+        {"telemetry_events_dropped": 3, "writer_errors": 1}))
+    service.collect_once()  # imports all four
+    for path in (gone, alive, reconciler):
+        _age(path, 10 * 60)
+
+    result = service.collect_once()
+    service._refresh_health(result)
+
+    assert not gone.parent.exists()
+    assert not reconciler.parent.exists()
+    assert fresh.exists() and alive.exists()
+    health = service.health()
+    assert health["telemetry_events_dropped"] == 3
+    assert health["producer_writer_errors"] == 1
+    conn = connect(service.db_path, readonly=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 4
+        assert sorted(row[0] for row in conn.execute("SELECT segment_path FROM spool_cursors")) == \
+            sorted([str(fresh), str(alive)])
+    finally:
+        conn.close()
+
+
+def test_a_conflict_stays_in_collector_health(tmp_path):
+    service = MetricsCollectorService(tmp_path)
+    original = _session_event("producer-1-a", 1, "s1")
+    with SpoolWriter(service.spool_root / "producer-1-a" / "1.telemetry") as writer:
+        writer.append(original)
+    service._cycle_locked()
+    with SpoolWriter(service.spool_root / "reconciler-1-b" / "2.telemetry") as writer:
+        writer.append(_session_event("reconciler-1-b", 1, "s1", status="failed",
+                                     event_id=original.event_id))
+    service._cycle_locked()
+    service._cycle_locked()
+
+    assert service.health()["conflicting_events"] == 1
+    saved = json.loads(service.health_path.read_text())
+    assert saved["conflicting_events"] == 1
+    assert saved["last_conflict_at_us"]
+    assert MetricsCollectorService(tmp_path).health()["conflicting_events"] == 1
+
+
+def test_a_collector_taking_over_keeps_the_saved_counters(tmp_path):
+    standby = MetricsCollectorService(tmp_path)  # started before anything was saved
+    active = MetricsCollectorService(tmp_path)
+    original = _session_event("producer-1-a", 1, "s1")
+    with SpoolWriter(active.spool_root / "producer-1-a" / "1.telemetry") as writer:
+        writer.append(original)
+    active._cycle_locked()
+    with SpoolWriter(active.spool_root / "reconciler-1-b" / "2.telemetry") as writer:
+        writer.append(_session_event("reconciler-1-b", 1, "s1", status="failed",
+                                     event_id=original.event_id))
+    active._cycle_locked()
+
+    standby._take_over()
+    standby._cycle_locked()
+    standby._publish_health(force=True)
+
+    assert json.loads(standby.health_path.read_text())["conflicting_events"] == 1
+
+
+def test_a_segment_that_keeps_failing_is_reported_once(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from bobi.metrics import collector as collector_module
+
+    service = MetricsCollectorService(tmp_path)
+    with SpoolWriter(service.spool_root / "producer-1-a" / "1.telemetry") as writer:
+        writer.append(_session_event("producer-1-a", 1, "s1"))
+
+    def failing(path, start=0):
+        raise sqlite3.IntegrityError("drifted")
+
+    monkeypatch.setattr(collector_module, "iter_frames", failing)
+    with caplog.at_level(logging.WARNING, logger="bobi.metrics.collector"):
+        for _ in range(3):
+            service._cycle_locked()
+
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    assert service.health()["last_error"] == "IntegrityError"
+    assert service.health()["status"] == "degraded"
+
+
 def _store_event(event_type, sequence, payload, **ids):
     return MetricsEvent(
         event_type=event_type,
@@ -912,12 +1098,16 @@ def test_duplicate_event_id_requires_identical_event_content(tmp_path):
 
     MetricsCollector(db).collect_segment(first_segment)
     conn = connect(db)
-    with pytest.raises(ValueError, match="deduplication key"):
-        stage_frames(
-            conn,
-            segment_path=second_segment,
-            frames=iter_frames(second_segment),
-        )
+    result = stage_frames(
+        conn,
+        segment_path=second_segment,
+        frames=iter_frames(second_segment),
+    )
+    # The first event stands; the conflicting one is set aside, not imported,
+    # and the cursor still moves past it.
+    assert (result.staged, result.conflicts) == (0, 1)
+    assert conn.execute("SELECT payload_json FROM raw_events").fetchone()[0].count('"completed"') == 1
+    assert cursor_offset(conn, second_segment) == second_segment.stat().st_size
     conn.close()
 
 

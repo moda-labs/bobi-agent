@@ -169,8 +169,22 @@ disabled; endpoint overrides require HTTPS and the configured host/port.
 The hot path enqueues bounded events. A background producer writes framed
 append-only spools; one elected collector stages immutable `raw_events` and
 projects normalized rows. Out-of-order parents defer children; duplicate
-events are idempotent. Invalid events are quarantined. Queue acceptance is not
-a durability guarantee; failed routing admission falls back safely.
+events are idempotent. Invalid events are quarantined. A frame that reuses an
+imported event's id with different content (a rerun reconcile after its
+session row changed) is set aside: the first event stands, the frame is logged
+and counted in collector health (`conflicting_events` and `last_conflict_at_us`,
+kept across restarts), and import continues past it. Queue acceptance is not a durability guarantee;
+failed routing admission falls back safely.
+
+Each collector cycle opens one connection, migrates once, and reads only the
+segments with bytes past their cursor. A segment that fails for any reason is
+skipped for that cycle without stopping the others; health reports
+`status=degraded` with the error type in `last_error`, and the log warns once
+per segment and error type. A fully imported segment that has been quiet for
+five minutes is deleted, with its directory once empty, when its writer is
+done: a reconciler segment always, a producer segment once that process has
+exited. The retired producer's drop and writer-error counts stay in collector
+health.
 
 SQLite connections enable WAL, foreign keys, a busy timeout, and automatic
 checkpointing. Readers are read-only and query-only. Metrics failures must not
@@ -320,7 +334,7 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   Long prompts collapse to 180px with a full-prompt toggle. Maintenance prompts have a system label; actual user messages retain their user label.
   Tool-result previews allow 4,000 characters, preserve line or word boundaries, and retain original byte counts and truncation flags. Long results expand from ten lines or 220px into a scrollable view; floating copy controls copy all available preview text. Earlier discarded preview content cannot be reconstructed without its original transcript.
   Slack thread links have a distinct clickable affordance. Turns without a valid Slack thread link show no origin badge.
-  Transcript scans stop after 16 MiB or 250 ms per file, with a one-second overall enrichment budget; oversized or unavailable transcripts do not block the manager or alter telemetry.
+  A turn's transcript window is read from the newest end of the file and stops at the first record more than 15 minutes older than the window (records are appended, not time-ordered: hook attachments carry earlier timestamps), or after 16 MiB or 250 ms per file, keeping the newest part it read; there is a one-second overall enrichment budget. A long transcript therefore still shows its latest turns, and oversized or unavailable transcripts do not block the manager or alter telemetry.
   The local authenticated turns endpoint adds 60-character prompt and response previews, tool counts, canonical reported/estimated cost totals, and recorded Slack conversation references when available; unknown origins fall back to the trigger kind.
   Conversation content is not added to SQLite, Admin RPC, or supervisor MCP responses.
 
@@ -382,11 +396,14 @@ Admin aliases and corresponding read-only MCP tools:
 
 Session/turn aliases require supervisor 0.4.0 or newer; summary retains legacy
 compatibility: when the fine-grained block is refused (`metrics_not_ready`,
-`metrics_busy`, or a range over 31 days) it answers with the legacy fold alone,
-and malformed arguments still fail.
+`metrics_busy`, `query_too_slow`, or a range over 31 days) it answers with the
+legacy fold alone, and malformed arguments still fail.
 Queries have bounded range (31 days), rows (200), response
-size (512 KiB), and execution time. Saturation returns `metrics_busy`;
-missing storage returns `metrics_not_ready`. Session pagination uses
+size (512 KiB), and execution time. Saturation returns `metrics_busy` (retry);
+a query that misses its one-second deadline returns `query_too_slow` (do not
+retry; narrow the range or filters); missing storage returns `metrics_not_ready`.
+A query's cost follows the turns in its range, not the size of the history:
+`best_usage` picks each turn's best rows through the turn index. Session pagination uses
 filter-bound cursors. Protect the fleet operator token.
 
 ```bash

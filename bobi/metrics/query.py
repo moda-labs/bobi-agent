@@ -206,6 +206,16 @@ class MetricsQueryError(Exception):
         super().__init__(message)
 
 
+def _too_slow() -> MetricsQueryError:
+    # Not worth an automatic retry: the same query over the same data will most
+    # likely miss again (contention can also cause a miss, and is reported as
+    # ``metrics_busy`` when SQLite says busy). This asks for a narrower range.
+    return MetricsQueryError(
+        "metrics query exceeded its one-second deadline; narrow the range or filters",
+        "query_too_slow",
+    )
+
+
 def _row(row: sqlite3.Row | None, *, omit: tuple[str, ...] = ()) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -570,12 +580,12 @@ class MetricsQueries:
             conn.execute("BEGIN")
             payload = _bounded(build(conn))
             if time.monotonic() >= deadline:
-                raise MetricsQueryError("metrics query exceeded its deadline", "metrics_busy", retry_after_ms=250)
+                raise _too_slow()
             return payload
         except sqlite3.DatabaseError as exc:
             message = str(exc).lower()
             if "interrupted" in message:
-                raise MetricsQueryError("metrics query exceeded its one-second deadline", "metrics_busy", retry_after_ms=250) from exc
+                raise _too_slow() from exc
             if "locked" in message or "busy" in message:
                 raise MetricsQueryError("metrics database is busy", "metrics_busy", retry_after_ms=250) from exc
             raise MetricsQueryError("metrics database is unavailable", "metrics_not_ready", retry_after_ms=1000) from exc
