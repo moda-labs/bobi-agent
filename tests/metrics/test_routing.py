@@ -846,6 +846,35 @@ def test_resume_after_a_control_rerun_stays_on_the_control_model(monkeypatch, tm
         assert runtime.close(timeout=2)
 
 
+def test_turns_after_a_control_rerun_record_the_fallback(monkeypatch, tmp_path):
+    from bobi.metrics.routing import candidate_failed
+
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        routed = asyncio.run(resolve_route(context(), runtime=runtime))
+        failed = runtime.begin_turn("agent", provider="openai", model_requested="cheap")
+        failed.finish(status="failed", error_kind="provider_error")
+        assert candidate_failed(routed.decision, session_name="agent", brain="codex", model="cheap",
+                                error="model unavailable", root=tmp_path, runtime=runtime) == "control"
+        rerun = runtime.begin_turn("agent", provider="openai", model_requested="control")
+        rerun.finish(status="completed")
+    finally:
+        assert runtime.close(timeout=2)
+    MetricsCollectorService(tmp_path).collect_once()
+    conn = connect(tmp_path / "state/metrics/metrics.db", readonly=True)
+    try:
+        rows = {row["turn_id"]: row for row in conn.execute("SELECT * FROM router_decisions")}
+    finally:
+        conn.close()
+    # The rerun ran the control model: it is a fallback, never a routed pick.
+    assert (rows[failed.turn_id]["model_selected"], rows[failed.turn_id]["fallback_reason"]) == ("cheap", None)
+    assert (rows[rerun.turn_id]["model_selected"], rows[rerun.turn_id]["fallback_reason"]) == (
+        "control", "candidate_failed")
+
+
 def test_workflow_checkpoint_keeps_the_control_model_after_a_rerun(bobi_install, monkeypatch):
     from bobi.metrics.routing import RouteOutcome
     from bobi.workflow import orchestrator

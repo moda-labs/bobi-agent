@@ -266,7 +266,9 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   including canonical terminal usage whose model uses a provider alias.
 - Tiles and UTC buckets use canonical usage, not the sum of provenance rows.
   The summary has **Total Input Tokens**, **Total Output Tokens** and **Total Spend (USD)** tiles; cache-read tokens and their share of input appear in the input tile, for example `8,885,624 (87.3% cache read)`.
-  Missing dimensions read **not recorded**; estimate flags remain in telemetry without UI suffixes, and
+  The spend tile and turn rows add provider-reported and estimated dollars and
+  mark the estimate with `~`, for example `$1.5000 + ~$0.2500`.
+  Missing dimensions read **not recorded**; estimate flags remain in telemetry without an `est` suffix, and
   invocation coverage separates exact, estimated, and unknown measurements.
 - Routing shows the recommendation, policy confidence, selected and
   recorded provider models, latency, and fallbacks. Distinct call IDs count policy calls;
@@ -292,6 +294,12 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   estimates equal Claude Code's own reported cost on 24; the remaining turn
   differs because Claude Code prices Sonnet 5.5 cache reads at $0.20 where the
   official page lists $0.10.
+- A **routed turn** is one whose latest decision is an enforced policy pick
+  with no fallback. Shadow turns and fallback turns (including the turns after
+  a picked model failed and the session reran on the control model) ran the
+  control model, so they are not routed and carry no saving. `routing` counts
+  them as `fallback_turns` and `shadow_turns`; with no routed turn the card
+  names both counts instead of the savings figures.
 - The routing card prices each routed turn's canonical tokens at list price
   three ways: on the model that ran, on the cheapest candidate in that
   decision's `candidate_models` (**always cheapest**), and on the most expensive
@@ -302,8 +310,7 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   Savings** is one flat table with a row per picked model (merged across route
   sets, busiest first): share / turns, **Actual Spend**, **Baseline Cost
   (Flagship)** (the same turns on the most expensive candidate) and **Net
-  Savings**; the flagship's own row reads *Baseline*. A `Fallback ×N` badge on
-  the model names the recorded fallback reasons on hover. Models are shown by
+  Savings**; the flagship's own row reads *Baseline*. Models are shown by
   their real ids; there are no capability tiers. The always-cheapest cost and `captured_pct` (the share of
   the largest possible saving the router kept) stay in the payload. This card
   and the spend tiles use Title Case and green savings by operator decision,
@@ -315,10 +322,13 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   at their executed price on every side. Turns whose executed model or any
   candidate has no list price are left out and named in `unpriced_models`.
   Each candidate set is one entry in `route_sets` with its candidates' rates,
-  picks, per-pick `routed_cost_usd` / `ceiling_cost_usd` / `fallback_turns` /
-  `fallback_reasons` (reason to turn count), and the set's own saving; a pick
+  picks, per-pick `routed_cost_usd` / `ceiling_cost_usd`, and the set's own saving; a pick
   outside the candidate list is appended with `off_list: true`. Claude Code aliases (`opus`, `sonnet`, `haiku`) and a
   context suffix (`claude-opus-5-5[1m]`) price as the current model.
+- The header chip reads the summary's collector health: `collector: live` only
+  while the collector reports `running` with a heartbeat under 30 seconds old
+  (`collector.live`); otherwise it names the state (`stale`, `degraded`,
+  `stopped`, `not running`), or `unknown` when the summary could not be read.
 - The web view shows no telemetry health strip; collector state, coverage,
   import lag and reconciliation errors stay in the `summary` payload and the
   CLI.
@@ -352,7 +362,7 @@ Authenticated, read-only endpoints under `/api/agents/{name}/metrics`:
 
 | Endpoint | Parameters | Response |
 |---|---|---|
-| `summary` | Required ISO `from`, `to`; optional `model`, `session_name` | Canonical totals, coverage, UTC buckets, routing counts/models, `routing.savings`, collector health |
+| `summary` | Required ISO `from`, `to`; optional `model`, `session_name` | Canonical totals, coverage, UTC buckets, routing counts/models, `routing.savings`, collector health with `live` |
 | `turns` | Same range/filters; optional `session_id`, `limit`, `cursor` | Newest-first turns, usage, invocations, allowlisted policy fields, `costs` (`reported_cost_usd`, `estimated_cost_usd`, `list_price_usd`), local conversation previews, `next_cursor` |
 | `sessions` | Required `from`, `to`; optional `limit`, `cursor` | Distinct recent lifecycles (`session_id`, name, start/end timestamps, status), `next_cursor` |
 | `sessions/{id}` | Optional `limit`, `cursor` | Existing session detail and bounded turn page |
@@ -370,8 +380,7 @@ here):
  "priced_turns": 3, "unpriced_turns": 0, "escalated_turns": 2, "unpriced_models": [],
  "route_sets": [{"candidates": [{"model": "haiku",
    "prices": {"input_per_mtok": 1.0, "cached_input_per_mtok": 0.1, "output_per_mtok": 5.0},
-   "turns": 1, "off_list": false, "routed_cost_usd": 0.0015, "ceiling_cost_usd": 0.003,
-   "fallback_turns": 0, "fallback_reasons": {}}],
+   "turns": 1, "off_list": false, "routed_cost_usd": 0.0015, "ceiling_cost_usd": 0.003}],
   "control_model": "haiku", "floor_model": "haiku", "ceiling_model": "sonnet",
   "turns": 3, "routed_cost_usd": 0.0075, "ceiling_cost_usd": 0.009,
   "floor_cost_usd": 0.0045, "saved_pct": 16.7}]}

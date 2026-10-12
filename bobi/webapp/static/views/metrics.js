@@ -450,11 +450,15 @@ function routeExplanation(route = {}) {
   return ["Default Config", "Executed the configured model without a policy override"];
 }
 
-// Recorded dollars win; the server's list-price figure is a labelled fallback.
+// Provider-reported dollars plus list-price estimates, the estimate marked "~".
+function spendText(reported, estimated) {
+  return [reported > 0 && money(reported), estimated > 0 && "~" + money(estimated)].filter(Boolean).join(" + ");
+}
+
 function costText(costs = {}) {
-  if (costs?.reported_cost_usd != null) return money(costs.reported_cost_usd);
-  if (costs?.estimated_cost_usd != null) return money(costs.estimated_cost_usd);
-  if (costs?.list_price_usd != null && costs.list_price_usd > 0) return "~" + money(costs.list_price_usd);
+  const spend = spendText(costs?.reported_cost_usd, costs?.estimated_cost_usd);
+  if (spend) return spend;
+  if (costs?.list_price_usd > 0) return "~" + money(costs.list_price_usd);
   return "—";
 }
 
@@ -558,12 +562,10 @@ function modelRows(savings) {
   const rows = new Map();
   (savings.route_sets || []).forEach(set => set.candidates.forEach(candidate => {
     if (!candidate.turns) return;
-    const row = rows.get(candidate.model) || { ...candidate, turns: 0, routed: 0, baseline: 0, fallback: 0, reasons: {}, isBaseline: true };
+    const row = rows.get(candidate.model) || { ...candidate, turns: 0, routed: 0, baseline: 0, isBaseline: true };
     row.turns += candidate.turns;
     row.routed += candidate.routed_cost_usd || 0;
     row.baseline += candidate.ceiling_cost_usd || 0;
-    row.fallback += candidate.fallback_turns || 0;
-    Object.entries(candidate.fallback_reasons || {}).forEach(([reason, count]) => { row.reasons[reason] = (row.reasons[reason] || 0) + count; });
     row.isBaseline &&= candidate.model === set.ceiling_model;
     rows.set(candidate.model, row);
   }));
@@ -635,12 +637,6 @@ function breakdownTable(rows, savings) {
     const code = node("code", item.model);
     code.title = `${rateText(item.prices)} per MTok in / out`;
     model.append(node("span", "", `jev-dist-swatch ${item.swatch}`), code);
-    if (item.fallback) {
-      const flag = node("span", `Fallback ×${item.fallback}`, "jev-flag is-fallback");
-      const reasons = Object.entries(item.reasons).map(([reason, count]) => `${count} × ${fallbackText(reason)}`);
-      flag.title = `${plural(item.fallback, "turn")} sent to the control model: ${reasons.join("; ") || "reason not recorded"}`;
-      model.append(flag);
-    }
     if (item.off_list) model.append(node("span", "Off list", "jev-flag"));
     row.append(model, shareCell(item.turns),
       node("td", usd(item.routed), "num bobi-tnum"),
@@ -668,17 +664,23 @@ function jevValueCard(routing) {
   const fallbackTurns = routing.fallback_turns || 0;
   const savings = routing.savings || {};
   const priced = savings.saved_pct != null;
+  const decided = fallbackTurns + (routing.shadow_turns || 0) > 0;
 
   const head = node("div", "", "analytics-card-head");
   const title = node("span", "", "analytics-card-title");
   title.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10M4 12h16M4 18h7"/><circle cx="17" cy="6" r="2"/><circle cx="14" cy="18" r="2"/></svg>`;
   title.append(document.createTextNode(" Model Routing Value (JEV)"));
-  head.append(title, node("span", routedTurns > 0 ? "routing active" : "passthrough", "chip " + (routedTurns > 0 ? "chip-accent" : "")));
+  head.append(title, node("span", routedTurns > 0 ? "routing active" : decided ? "not routing" : "passthrough", "chip " + (routedTurns > 0 ? "chip-accent" : "")));
   card.append(head);
 
   if (!routedTurns) {
+    const shadowTurns = routing.shadow_turns || 0;
+    const parts = ["No routed turns in this window."];
+    if (fallbackTurns) parts.push(`${plural(fallbackTurns, "turn")} fell back to the control model.`);
+    if (shadowTurns) parts.push(`${plural(shadowTurns, "shadow decision")} kept the control model.`);
+    if (!fallbackTurns && !shadowTurns) parts.push("Every turn ran on its configured model.");
     const standby = node("div", "", "ratio-standby-state");
-    standby.append(node("span", "", "standby-dot"), node("span", "No routed turns in this window. Every turn ran on its configured model.", "standby-text"));
+    standby.append(node("span", "", "standby-dot"), node("span", parts.join(" "), "standby-text"));
     card.append(standby);
     return card;
   }
@@ -710,7 +712,7 @@ function jevValueCard(routing) {
   if (savings.unpriced_turns) notes.push(`${plural(savings.unpriced_turns, "routed turn")} left out: no list price for ${(savings.unpriced_models || []).join(", ") || "a model"}.`);
   const unmeasured = routedTurns - (savings.priced_turns || 0) - (savings.unpriced_turns || 0);
   if (unmeasured > 0) notes.push(`${plural(unmeasured, "routed turn")} without recorded usage.`);
-  if (priced) notes.unshift("* Baseline Cost (Flagship) prices every turn on the most expensive model its router could pick. Fallback turns ran the configured Control Model.");
+  if (priced) notes.unshift("* Baseline Cost (Flagship) prices every turn on the most expensive model its router could pick. Shadow and fallback turns ran the control model and are not counted.");
   card.append(node("p", notes.join(" "), "metrics-note jev-footnote"));
   return card;
 }
@@ -1442,7 +1444,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
   ahName.append(node("p", "Token accounting, stream telemetry, and TypeSafe JEV routing decisions", "desc"));
 
   const ahRight = node("div", "", "ah-right");
-  const collectorChip = node("span", "● collector: live", "chip");
+  const collectorChip = node("span", "collector: …", "chip");
   const jevHeaderBtn = node("button", "JEV: Disabled", "btn bobi-btn small jev-header-btn disabled");
   jevHeaderBtn.type = "button";
   jevHeaderBtn.title = `Configure TypeSafe JEV dynamic model routing for ${name}`;
@@ -1979,6 +1981,13 @@ export function mountMetrics(element, { api, name, session = "" }) {
     drawerHead.append(left, center, right);
   }
 
+  // No summary (refused, not ready) means no collector health: say unknown, never live.
+  function renderCollector(collector) {
+    collectorChip.textContent = !collector ? "collector: unknown" : collector.live ? "● collector: live"
+      : `collector: ${collector.status === "running" ? "stale" : collector.status || "not running"}`;
+    collectorChip.classList.toggle("chip-accent", collector?.live === true);
+  }
+
   function renderSummary(data) {
     summary.replaceChildren();
 
@@ -1986,13 +1995,10 @@ export function mountMetrics(element, { api, name, session = "" }) {
     const tiles = node("div", "", "metrics-tiles");
     const reportedCost = data.totals.reported_cost_usd;
     const estCost = data.totals.estimated_cost_usd;
-    const hasSpend = reportedCost != null || estCost != null;
-    let costDisplay = "—";
-    let costSub = "No spend recorded";
-    if (hasSpend) {
-      costDisplay = costText(data.totals);
-      if (costDisplay !== "—") costSub = "Recorded provider cost";
-    }
+    const costDisplay = spendText(reportedCost, estCost) || "—";
+    const costSub = costDisplay === "—" ? "No spend recorded"
+      : reportedCost > 0 && estCost > 0 ? "Provider cost + list-price estimate"
+      : reportedCost > 0 ? "Recorded provider cost" : "List-price estimate, no provider cost";
 
     const cacheRead = data.totals.cache_read_input_tokens;
     const cachePercent = data.totals.input_tokens > 0 && cacheRead != null
@@ -2108,6 +2114,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
     // Turns render on their own: a summary that is refused (too slow, busy)
     // must not blank the turn list beside it.
     const [summaryResult, turnsResult] = results;
+    renderCollector(summaryResult.ok ? summaryResult.data.collector || {} : null);
     if (!turnsResult.ok) {
       note.textContent = `${turnsResult.data?.error || "Could not read metrics."} Previous values, if any, are stale.`;
     } else {

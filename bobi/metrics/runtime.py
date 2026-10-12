@@ -147,6 +147,17 @@ class MetricsRuntime:
         self._emitted_sessions.add(session_id)
         return True
 
+    def reroute(self, session_name: str, decision: RouterDecision) -> None:
+        """Record *decision* on the session's later turns; earlier turns keep theirs."""
+        session_id = self._session_ids.get(session_name)
+        context = self._session_contexts.get(session_id) if session_id else None
+        if context is None:
+            return
+        metadata = json.loads(str(context.get("metadata_json") or "{}"))
+        if isinstance(metadata, dict) and "router_assignment" in metadata:
+            metadata["router_assignment"] = projection_fields(decision)
+            context["metadata_json"] = _json(metadata)
+
     def discard_route(self, session_name: str) -> None:
         """Discard unexecuted routing metadata after a persistence failure."""
         session_id = self._session_ids.get(session_name)
@@ -978,6 +989,11 @@ def _emit_tool(
 
 
 _runtime: MetricsRuntime | None = None
+
+
+def current_runtime() -> MetricsRuntime | None:
+    """This process's metrics runtime, if one was started; never creates one."""
+    return _runtime if _runtime is not None and _runtime.pid == os.getpid() else None
 
 
 def get_runtime(root: Path | str | None = None) -> MetricsRuntime:

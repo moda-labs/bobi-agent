@@ -3868,12 +3868,6 @@ button.metrics-session-chip-inline:focus-visible { outline: 2px solid var(--bobi
   font-size: 10.5px;
   color: var(--text-secondary);
 }
-.jev-flag.is-fallback {
-  border-style: solid;
-  border-color: color-mix(in srgb, var(--status-waiting) 45%, transparent);
-  background: color-mix(in srgb, var(--status-waiting) 10%, transparent);
-  color: color-mix(in srgb, var(--status-waiting) 80%, var(--bobi-ink));
-}
 .jev-cell-baseline { color: var(--text-secondary) !important; }
 .jev-saved { font-weight: var(--weight-semibold); color: var(--jev-saved); }
 .jev-saved-none { color: var(--text-secondary); }

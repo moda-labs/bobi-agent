@@ -140,14 +140,18 @@ def _project_admitted_router_decision(
     turn_id = turn_payload.get("turn_id")
     if not isinstance(turn_id, str) or not turn_id:
         return
+    decision_id = deterministic_metric_id("route", turn_id, assignment["experiment_id"])
+    # The session's route can change mid-session (a failed pick reruns on the
+    # control model); a decision the turn already recorded keeps its own route.
+    if conn.execute("SELECT 1 FROM router_decisions WHERE router_decision_id=?",
+                    (decision_id,)).fetchone():
+        return
     try:
         _project_row(
             conn,
             TARGETS["router_decision.recorded"],
             {
-                "router_decision_id": deterministic_metric_id(
-                    "route", turn_id, assignment["experiment_id"]
-                ),
+                "router_decision_id": decision_id,
                 "turn_id": turn_id,
                 **assignment,
                 "decided_at_us": (

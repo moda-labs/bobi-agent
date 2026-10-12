@@ -29,6 +29,8 @@ from bobi import paths
 from bobi.chat_history import read_chat, read_transcript_messages
 
 DEFAULT_CHAT_TIMEOUT = 300
+# Collector health older than this is not live (it is rewritten every second).
+COLLECTOR_STALE_US = 30_000_000
 
 def _clean_event_text(text: str) -> str:
     lines = text.strip().splitlines()
@@ -1100,6 +1102,12 @@ class LocalRuntime(TeamRuntime):
                     "status", "db_ready", "import_lag_ms", "last_success_at_us",
                     "reconciliation_errors", "uncovered_turns", "telemetry_events_dropped",
                 )}
+                # A crash leaves "running" behind; a stale heartbeat is not live.
+                last = data["collector"]["last_success_at_us"]
+                data["collector"]["live"] = (
+                    data["collector"]["status"] == "running" and type(last) is int
+                    and 0 <= time.time_ns() // 1000 - last < COLLECTOR_STALE_US
+                )
             from bobi.metrics.query import MAX_RESPONSE_BYTES
 
             if len(json.dumps(data, ensure_ascii=True).encode()) > MAX_RESPONSE_BYTES:

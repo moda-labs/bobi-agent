@@ -14,7 +14,7 @@ from bobi.metrics.features import build_features
 from bobi.metrics.policies.typesafe import TypeSafePolicy
 from bobi.metrics.policy import PolicyRequest, call_policy, policy_breaker
 from bobi.metrics.router import EXPERIMENT_CONFIG_ENV, RouterDecision, load_experiment
-from bobi.metrics.runtime import MetricsRuntime, get_runtime
+from bobi.metrics.runtime import MetricsRuntime, current_runtime, get_runtime
 from bobi.sdk import load_session_brain, load_session_id, load_session_model, load_session_route, save_session_route
 
 log = logging.getLogger(__name__)
@@ -62,11 +62,12 @@ def may_rerun_on_control(decision: RouterDecision | None, *, error_kind: str, to
 
 
 def candidate_failed(decision: RouterDecision | None, *, session_name: str, brain: str,
-                     model: str, error: str, root=None) -> str | None:
+                     model: str, error: str, root=None, runtime: MetricsRuntime | None = None) -> str | None:
     """The control model to retry on when a policy-chosen model failed, else None.
 
     Only a session the policy moved off its control model qualifies; the
-    incident (attempted model, brain, provider, error, fallback) is logged."""
+    incident (attempted model, brain, provider, error, fallback) is logged, and
+    the session's later turns record the fallback instead of the failed pick."""
     if decision is None or not decision.control_model or not model or model == decision.control_model:
         return None
     from bobi.costs import model_provider
@@ -78,6 +79,9 @@ def candidate_failed(decision: RouterDecision | None, *, session_name: str, brai
         "error": redact_secrets(str(error or "unknown error"))[0][:500],
         "fallback_model": decision.control_model,
     }, root)
+    runtime = runtime or current_runtime()
+    if runtime is not None:
+        runtime.reroute(session_name, rerouted_to_control(decision))
     if decision.entry_point != "workflow_start":
         # The session now runs the control model; its saved route must say so,
         # or the next resume finds a stale route. A workflow keeps its route in

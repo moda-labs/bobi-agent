@@ -1300,6 +1300,80 @@ class TestMetricsView:
         # An unlisted candidate is named, never priced by guess.
         expect(card.locator(".jev-footnote")).to_contain_text("1 routed turn left out: no list price for cx/gpt-7-nova")
 
+    def test_metrics_collector_chip_follows_recorded_health(self, webapp, page):
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        health = webapp.install.state_dir / "metrics/collector.state.json"
+        page.goto(webapp.agent_url() + "/metrics")
+        expect(page.locator(".metrics-tile strong").first).to_have_text("720")
+        chip = page.locator(".ah-right .chip")
+        # No collector has written its health: nothing is importing.
+        expect(chip).to_have_text("collector: not running")
+        now_us = time.time_ns() // 1000
+        for state, text in (({"status": "running", "last_success_at_us": now_us}, "● collector: live"),
+                            ({"status": "degraded", "last_success_at_us": now_us}, "collector: degraded"),
+                            ({"status": "running", "last_success_at_us": now_us - 120_000_000}, "collector: stale")):
+            health.write_text(json.dumps(state))
+            page.locator("#metrics-refresh").click()
+            expect(chip).to_have_text(text)
+        health.write_text(json.dumps({"status": "running", "last_success_at_us": time.time_ns() // 1000}))
+        page.locator("#metrics-refresh").click()
+        expect(chip).to_have_text("● collector: live")
+        # A refused summary carries no health: the chip must not keep claiming live.
+        page.route("**/metrics/summary?**", lambda route: route.fulfill(
+            status=503, json={"error": "metrics are busy", "code": "metrics_busy"}))
+        page.locator("#metrics-refresh").click()
+        expect(chip).to_have_text("collector: unknown")
+
+    def test_metrics_spend_tile_marks_estimates(self, webapp, page):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        conn = connect(webapp.install.state_dir / "metrics/metrics.db")
+        conn.execute("INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,model,"
+                     "amount_usd,measurement_source,is_estimated,observed_at_us) VALUES('c-est','turn','s1',"
+                     "'t-routine','gateway','claude-haiku-4-5',0.25,'price_snapshot',1,?)",
+                     (int(time.time() * 1_000_000),))
+        rekey(conn)
+        conn.commit()
+        conn.close()
+        page.goto(webapp.agent_url() + "/metrics")
+        tile = page.locator(".metrics-tile.tile-cost")
+        expect(tile.locator("strong")).to_have_text("~$0.2500")
+        expect(tile.locator(".tile-sub")).to_have_text("List-price estimate, no provider cost")
+
+        conn = connect(webapp.install.state_dir / "metrics/metrics.db")
+        conn.execute("INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,model,"
+                     "amount_usd,measurement_source,is_estimated,observed_at_us) VALUES('c-bill','turn','s1',"
+                     "'t-pro','gateway','claude-sonnet-5-5',1.5,'provider_stream',0,?)",
+                     (int(time.time() * 1_000_000),))
+        rekey(conn)
+        conn.commit()
+        conn.close()
+        page.locator("#metrics-refresh").click()
+        # A bill and an estimate both count; neither hides the other.
+        expect(tile.locator("strong")).to_have_text("$1.5000 + ~$0.2500")
+        expect(tile.locator(".tile-sub")).to_have_text("Provider cost + list-price estimate")
+
+    @pytest.mark.parametrize("change,shown", [
+        ("metadata_json=json_set(metadata_json,'$.policy.mode','shadow')", "3 shadow decisions kept the control model."),
+        ("fallback_reason='policy_low_confidence'", "4 turns fell back to the control model."),
+    ])
+    def test_jev_card_claims_no_savings_for_unrouted_turns(self, webapp, page, change, shown):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        conn = connect(webapp.install.state_dir / "metrics/metrics.db")
+        conn.execute(f"UPDATE router_decisions SET {change}")
+        conn.commit()
+        conn.close()
+        page.goto(webapp.agent_url() + "/metrics")
+        card = page.locator(".jev-summary-card")
+        expect(card).to_contain_text("No routed turns in this window.")
+        # The policy still ran: an outage or a shadow rollout is not "routing off".
+        expect(card).to_contain_text(shown)
+        expect(card.locator(".analytics-card-head .chip")).to_have_text("not routing")
+        expect(card).not_to_contain_text("cheaper")
+
 
 # --- opening a route --------------------------------------------------------
 

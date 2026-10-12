@@ -70,7 +70,6 @@ def test_dashboard_canonical_usage_routing_and_privacy(tmp_path):
     assert route_set["candidates"][0]["routed_cost_usd"] == pytest.approx(
         estimate_cost("gateway", "claude-haiku-4-5", 100, 0, 0), abs=1e-6)
     assert route_set["candidates"][1]["ceiling_cost_usd"] == route_set["candidates"][1]["routed_cost_usd"]
-    assert route_set["candidates"][1]["fallback_turns"] == 0
     assert route_set["candidates"][1]["prices"] == {
         "input_per_mtok": 2.0, "cached_input_per_mtok": 0.1, "output_per_mtok": 10.0}
 
@@ -119,6 +118,31 @@ def test_dashboard_routing_savings_hold_helper_calls_constant(tmp_path):
     assert savings["ceiling_cost_usd"] == pytest.approx(ceiling + helper, abs=1e-6)
     assert savings["floor_cost_usd"] == pytest.approx(floor + helper, abs=1e-6)
     assert savings["route_sets"][0]["turns"] == 3
+
+
+@pytest.mark.parametrize("change,counted", [
+    ("metadata_json=json_set(metadata_json,'$.policy.mode','shadow')", "shadow_turns"),
+    ("fallback_reason='policy_low_confidence'", "fallback_turns"),
+    ("fallback_reason='candidate_failed'", "fallback_turns"),
+])
+def test_dashboard_routing_counts_only_enforced_picks(tmp_path, change, counted):
+    seed_dashboard(tmp_path, 1_000_000)
+    conn = connect(tmp_path / "state/metrics/metrics.db")
+    conn.execute(f"UPDATE router_decisions SET {change} WHERE turn_id<>'t-pro'")
+    conn.commit()
+    conn.close()
+    routing = MetricsQueries(tmp_path).summary({
+        "from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z", "include_dashboard": True,
+    })["routing"]
+    # A shadow or fallback turn ran the control model: the router saved nothing on it.
+    assert routing["routed_turns"] == 1
+    # Two seeded decisions changed; the second session already fell back before routing.
+    assert routing[counted] == 2 + (counted == "fallback_turns")
+    savings = routing["savings"]
+    assert savings["priced_turns"] == 1
+    assert [(c["model"], c["turns"]) for c in savings["route_sets"][0]["candidates"]] == [
+        ("haiku", 0), ("sonnet", 1)]
+    assert savings["saved_usd"] == 0
 
 
 @pytest.mark.parametrize("model", ["SONNET", "sOnNeT", "  sonnet  ", "CLAUDE-SONNET-5"])
@@ -1238,7 +1262,7 @@ def test_cli_prints_wire_envelope(monkeypatch):
 
 def _routed_row(turn_id, model, selected, candidates, input_tokens=1000, output_tokens=100):
     return {"turn_id": turn_id, "model": model, "model_selected": selected,
-            "candidate_models_json": json.dumps(candidates), "control_model": candidates[0], "fallback_reason": None,
+            "candidate_models_json": json.dumps(candidates), "control_model": candidates[0],
             "input_tokens": input_tokens, "cache_read_input_tokens": 0, "output_tokens": output_tokens}
 
 
@@ -1280,20 +1304,6 @@ def test_routing_savings_drop_helper_cost_of_unpriced_turns():
     assert savings["priced_turns"] == 1 and savings["unpriced_turns"] == 1
     assert savings["unpriced_models"] == ["cx/gpt-7-nova"]
     assert savings["ceiling_cost_usd"] == priced["ceiling_cost_usd"]
-
-
-def test_routing_savings_count_fallback_reasons_per_pick():
-    from bobi.metrics.query import _routing_savings
-
-    candidates = ["haiku", "sonnet"]
-    rows = [_routed_row(f"t{index}", "claude-haiku-4-5", "haiku", candidates) for index in range(3)]
-    rows[0]["fallback_reason"] = rows[1]["fallback_reason"] = "policy_low_confidence"
-    rows[2]["fallback_reason"] = "policy_timeout"
-    [route_set] = _routing_savings(rows)["route_sets"]
-    haiku, sonnet = route_set["candidates"]
-    assert haiku["fallback_turns"] == 3
-    assert haiku["fallback_reasons"] == {"policy_low_confidence": 2, "policy_timeout": 1}
-    assert sonnet["fallback_reasons"] == {}
 
 
 # --- cost does not grow with history -----------------------------------------

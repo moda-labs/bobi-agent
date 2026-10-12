@@ -404,12 +404,16 @@ def _price_dict(model: str | None) -> dict[str, float] | None:
     return dict(zip(("input_per_mtok", "cached_input_per_mtok", "output_per_mtok"), prices))
 
 
+# A turn the router steered: an enforced policy pick with no fallback. Shadow
+# and fallback turns ran the control model, so the router saved nothing there.
+_ROUTED_TURN = "json_extract(d.metadata_json,'$.policy.mode')='enforce' AND d.fallback_reason IS NULL"
+
+
 def _pick_costs(pick: dict[str, Any] | None) -> dict[str, object]:
     """Spend of the turns routed to one candidate, routed and on the set's strongest pick."""
     if not pick:
-        return {"routed_cost_usd": None, "ceiling_cost_usd": None, "fallback_turns": 0, "fallback_reasons": {}}
-    return {"routed_cost_usd": round(pick["routed"], 6), "ceiling_cost_usd": round(pick["ceiling"], 6),
-            "fallback_turns": pick["fallback_turns"], "fallback_reasons": dict(sorted(pick["fallback_reasons"].items()))}
+        return {"routed_cost_usd": None, "ceiling_cost_usd": None}
+    return {"routed_cost_usd": round(pick["routed"], 6), "ceiling_cost_usd": round(pick["ceiling"], 6)}
 
 
 def _routing_savings(rows: list[sqlite3.Row]) -> dict[str, object]:
@@ -477,13 +481,9 @@ def _routing_savings(rows: list[sqlite3.Row]) -> dict[str, object]:
             item["candidate_costs"][name] += value
         item["turns"] += 1
         item["selected"][picked] = item["selected"].get(picked, 0) + 1
-        pick = item["picks"].setdefault(picked, {"routed": 0.0, "ceiling": 0.0, "fallback_turns": 0, "fallback_reasons": {}})
+        pick = item["picks"].setdefault(picked, {"routed": 0.0, "ceiling": 0.0})
         pick["routed"] += routed
         pick["ceiling"] += ceiling
-        if first["fallback_reason"]:
-            pick["fallback_turns"] += 1
-            reasons = pick["fallback_reasons"]
-            reasons[first["fallback_reason"]] = reasons.get(first["fallback_reason"], 0) + 1
         priced_turns += 1
         if costs.get(picked, routed) > floor:
             escalated_turns += 1
@@ -902,7 +902,9 @@ class MetricsQueries:
                 ).fetchall()
                 decision_where = where
                 routing = conn.execute(
-                    "SELECT COUNT(*) AS turns,COUNT(d.router_decision_id) AS routed_turns,"
+                    f"SELECT COUNT(*) AS turns,COUNT(CASE WHEN {_ROUTED_TURN} THEN 1 END) AS routed_turns,"
+                    "COUNT(CASE WHEN json_extract(d.metadata_json,'$.policy.mode')='shadow' "
+                    "AND d.fallback_reason IS NULL THEN 1 END) AS shadow_turns,"
                     "COUNT(DISTINCT json_extract(d.metadata_json,'$.policy.call_id')) AS policy_calls,"
                     "SUM(CASE WHEN d.fallback_reason IS NOT NULL OR "
                     "json_extract(s.metadata_json,'$.router_fallback.fallback_reason') IS NOT NULL "
@@ -926,7 +928,7 @@ class MetricsQueries:
                 # One row per routed turn and executed model, folded per turn in
                 # Python; aggregated server-side, so it is not bound by MAX_ROWS.
                 routed_usage = conn.execute(
-                    "SELECT t.turn_id,b.model,d.model_selected,d.candidate_models_json,d.control_model,d.fallback_reason,"
+                    "SELECT t.turn_id,b.model,d.model_selected,d.candidate_models_json,d.control_model,"
                     "SUM(b.input_tokens) AS input_tokens,"
                     "SUM(b.cache_read_input_tokens) AS cache_read_input_tokens,"
                     "SUM(b.cache_write_input_tokens) AS cache_write_input_tokens,"
@@ -936,7 +938,7 @@ class MetricsQueries:
                     "JOIN router_decisions d ON d.router_decision_id=(SELECT latest.router_decision_id "
                     "FROM router_decisions latest WHERE latest.turn_id=t.turn_id "
                     "ORDER BY latest.decided_at_us DESC,latest.router_decision_id DESC LIMIT 1) "
-                    f"WHERE {decision_where} AND ({chosen_usage}) GROUP BY t.turn_id,b.model",
+                    f"WHERE {decision_where} AND {_ROUTED_TURN} AND ({chosen_usage}) GROUP BY t.turn_id,b.model",
                     tuple(params),
                 ).fetchall()
                 _enforce_row_count(list(buckets), list(models))

@@ -4,6 +4,7 @@ calls and read a real (temp) BOBI_HOME via the bobi_install fixture;
 TestMultiAgentRealService runs the real service layer on purpose (#706)."""
 
 import json
+import time
 
 import pytest
 import yaml
@@ -53,6 +54,30 @@ class TestMetrics:
         assert _client().get(base + "/turns/absent").status_code == 404
         assert _client().get(base + "/sessions/absent").status_code == 404
         assert _client().get("/api/agents/absent/metrics/summary", params=self.RANGE).status_code == 404
+
+    def test_metrics_summary_says_whether_the_collector_is_live(self, bobi_install):
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        health = bobi_install.state_dir / "metrics/collector.state.json"
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/summary"
+        now_us = time.time_ns() // 1000
+
+        def live():
+            return _client().get(url, params=self.RANGE).json()["collector"]["live"]
+
+        assert live() is False
+        health.write_text(json.dumps({"status": "running", "last_success_at_us": now_us}))
+        assert live() is True
+        health.write_text(json.dumps({"status": "degraded", "last_success_at_us": now_us}))
+        assert live() is False
+        # A collector that died mid-run leaves "running" behind with an old heartbeat.
+        health.write_text(json.dumps({"status": "running", "last_success_at_us": now_us - 120_000_000}))
+        assert live() is False
+        # A clock stepped back must not keep a dead collector live.
+        health.write_text(json.dumps({"status": "running", "last_success_at_us": now_us + 120_000_000}))
+        assert live() is False
+        for garbage in ('{"status": "running", "last_success_at_us": "soon"}', "{not json"):
+            health.write_text(garbage)
+            assert live() is False
 
     def test_metrics_unavailable_validation_and_security(self, bobi_install):
         base = f"/api/agents/{bobi_install.agent_name}/metrics"
