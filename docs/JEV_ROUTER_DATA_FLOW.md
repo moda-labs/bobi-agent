@@ -279,7 +279,9 @@ fails:
   `jev_candidate_failed` incident (attempted model, brain, provider, redacted
   error, fallback model) and the session reconnects on `control_model`.
 - **First turn fails**: `may_rerun_on_control` allows one rerun on
-  `control_model` only when no tool ran (a rerun would repeat side effects), the
+  `control_model` only when no tool ran in any attempt of the turn (a rerun
+  would repeat side effects; a turn lost without a terminal result counts as
+  having run tools, and Codex error results carry the tools they ran), the
   error is not one the control model shares (`NO_MODEL_FALLBACK_KINDS`:
   authentication, credits exhausted, turn cap), and the decision was made fresh
   rather than reused from a saved session.

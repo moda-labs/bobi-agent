@@ -441,10 +441,7 @@ class _CodexSession:
                         ended_at_us=observed_at_us,
                         status="completed",
                     )],
-                    tool_executions=[
-                        BrainToolExecution(**state)
-                        for state in tool_states.values()
-                    ],
+                    tool_executions=_tool_executions(tool_states),
                 )
                 return
             elif etype in ("turn.failed", "error"):
@@ -456,15 +453,22 @@ class _CodexSession:
                     is_error=True,
                     error_kind=classify_brain_unavailability("", detail),
                     result_text=detail,
+                    tool_executions=_tool_executions(tool_states),
                 )
                 return
 
-        # Stream ended without a terminal event — treat as a lost turn.
+        # Stream ended without a terminal event — treat as a lost turn. The
+        # tools it ran still count: a rerun would repeat their side effects.
         yield TurnResult(
             session_id=self._thread_id or "",
             is_error=True,
             result_text="codex exited without completing the turn",
+            tool_executions=_tool_executions(tool_states),
         )
+
+
+def _tool_executions(tool_states: dict[str, dict[str, Any]]) -> list[BrainToolExecution]:
+    return [BrainToolExecution(**state) for state in tool_states.values()]
 
 
 class CodexBrain(GatewayAwareEngine):

@@ -135,9 +135,11 @@ line, to `run/state/jev_routing_fallback.log`. Two events appear there:
   `subagent_persistent`), supervised subagents, and workflow runs
   (`workflow_start`), where the first prompt step reruns and later same-agent
   steps stay on the control model. A failed turn reruns only when nothing would
-  repeat (`may_rerun_on_control`): no tool ran in it (a rerun would repeat a
-  push or a post), the error is not a turn-cap, authentication or credit
-  failure (the control model would fail the same way), and the decision was
+  repeat (`may_rerun_on_control`): no tool ran in any attempt of it (a
+  rerun would repeat a push or a post; a turn that ends without a terminal
+  result counts as having run tools, since nothing records which did), the
+  error is not a turn-cap, authentication or credit failure (the control
+  model would fail the same way), and the decision was
   made fresh, not reused from a saved session route. Otherwise the failure
   stands. A failed connect always falls back, since nothing ran. The router
   decision keeps the policy's pick, so the dashboard still attributes the turn

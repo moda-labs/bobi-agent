@@ -1427,8 +1427,10 @@ async def _run_workflow_async(
                         f"{drain.error}; resume failed: "
                         f"{_named_exception(e)}",
                         drain.error_kind,
+                        tools_ran=drain.tools_ran,
                     )
                     break
+                earlier_tools_ran = drain.tools_ran
                 drain = await _drain_response(
                     client,
                     session_name,
@@ -1436,6 +1438,8 @@ async def _run_workflow_async(
                     telemetry_context=telemetry_context,
                     observation=turn_observation,
                 )
+                # A tool that ran before the resume still makes a rerun unsafe.
+                drain = drain._replace(tools_ran=drain.tools_ran or earlier_tools_ran)
 
             if (drain.final_text is None
                     and may_rerun_on_control(route_decision, error_kind=drain.error_kind,
@@ -1697,8 +1701,10 @@ async def _drain_response(
     )
     msg = outcome.result
     if msg is None:
+        # No terminal result means no record of which tools ran, so a rerun
+        # could repeat a side effect the lost turn already caused.
         return DrainResult(None, outcome.failure, outcome.failure_kind,
-                           tools_ran=outcome.failure_kind == "tool_crash")
+                           tools_ran=True)
     if msg.is_error:
         # Prefer the brain's own diagnosis. result_text is EMPTY on a
         # turn-cap kill, which is how "turn failed" - a literal fallback -

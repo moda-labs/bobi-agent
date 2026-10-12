@@ -972,7 +972,9 @@ class Session:
                     self._last_is_error = msg.is_error
                     self._last_error_kind = msg.error_kind
                     self._last_error_message = msg.error_message
-                    self._last_tools_ran = bool(msg.tool_executions)
+                    # Accumulated across a message's retries: a tool that ran in
+                    # any attempt makes a control-model rerun unsafe.
+                    self._last_tools_ran = self._last_tools_ran or bool(msg.tool_executions)
                     cost = msg.total_cost_usd or 0.0
                     self._total_cost_usd += cost
                     self._total_duration_ms += msg.duration_ms
@@ -1336,6 +1338,7 @@ class Session:
                 {"sender": msg.sender, "text": msg.text[:200]},
                 session=self.name,
             )
+            self._last_tools_ran = False
             await self._client.query(msg.text)
             response = await self._drain_turn()
 
