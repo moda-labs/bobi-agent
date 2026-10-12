@@ -1121,6 +1121,18 @@ class TestMultiAgentRealService:
 
 
 class TestRoutingConfig:
+
+    @staticmethod
+    def _agent_runs(bobi_install, brain, *, gateway=""):
+        """Install the agent's brain the way an operator does: in its own ``run/.env``."""
+        from bobi import paths
+
+        env_file = paths.env_path(bobi_install.repo_path)
+        kept = [line for line in (env_file.read_text().splitlines() if env_file.exists() else [])
+                if not line.startswith(("BOBI_BRAIN=", "BOBI_GATEWAY_BASE_URL="))]
+        extra = [f"BOBI_BRAIN={brain}"] + ([f"BOBI_GATEWAY_BASE_URL={gateway}"] if gateway else [])
+        env_file.write_text("\n".join(kept + extra) + "\n")
+
     def test_jev_config_without_experiment_is_disabled_not_missing(self, bobi_install):
         route = "metrics/jev-config"
         response = _client().get(f"/api/agents/{bobi_install.agent_name}/{route}")
@@ -1143,13 +1155,13 @@ class TestRoutingConfig:
         assert not {"gateway", "priced_models", "unpriced_models"} & set(config)
         assert config["config_error"] == ""
         broken = {**concise_config(), "min_confidence": 7}
-        paths.env_path(bobi_install.repo_path).write_text("# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(broken) + "\n")
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" + json.dumps(broken) + "\n")
         config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
         # A saved policy that fails validation is named instead of silently shown as defaults.
         assert config["enabled"] is False and "min_confidence" in config["config_error"]
-        paths.env_path(bobi_install.repo_path).write_text("# BOBI_METRICS_EXPERIMENT_JSON={not json\n")
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON={not json\n")
         config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
-        assert config["config_error"] == "BOBI_METRICS_EXPERIMENT_JSON is not valid JSON"
+        assert config["config_error"] == "BOBI_METRICS_EXPERIMENT_DISABLED_JSON is not valid JSON"
 
     def test_jev_config_does_not_hide_runtime_failure(self, bobi_install, monkeypatch):
         def unavailable(env):
@@ -1231,7 +1243,7 @@ class TestRoutingConfig:
         assert deleted.json()["enabled"] is False and deleted.json()["mode"] == "off"
         assert deleted.json()["raw_json"] == ""
         assert parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"] == ""
-        assert "# BOBI_METRICS_EXPERIMENT_JSON=" not in env_file.read_text()
+        assert "BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" not in env_file.read_text()
         assert load_experiment(project_env(bobi_install.repo_path)) is None
         assert dict(os.environ) == before
         assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
@@ -1278,11 +1290,7 @@ class TestRoutingConfig:
         from bobi.config import parse_env_file
 
         # A gateway does not widen the roster: JEV routes only between the brain's own models.
-        if gateway:
-            monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "https://gateway.invalid/v1")
-        else:
-            monkeypatch.delenv("BOBI_GATEWAY_BASE_URL", raising=False)
-        monkeypatch.setenv("BOBI_BRAIN", brain)
+        self._agent_runs(bobi_install, brain, gateway="https://gateway.invalid/v1" if gateway else "")
         url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
         config = _client().get(url).json()
         assert config["agent_brain"] == brain and "gateway" not in config
@@ -1313,6 +1321,46 @@ class TestRoutingConfig:
         # A saved policy that can never route this agent is flagged on read.
         assert "does not match" in _client().get(url).json()["config_warnings"][0]
 
+    def test_jev_follows_the_agent_brain_not_the_web_app_process(self, bobi_install, monkeypatch):
+        import yaml
+        from bobi import paths
+
+        # Starting a codex team from the UI pins the brain in this process.
+        monkeypatch.setenv("BOBI_BRAIN", "codex")
+        monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "https://gateway.invalid/v1")
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        config = _client().get(url).json()
+        assert config["agent_brain"] == "claude"
+        assert not any(model.startswith("gpt-") for model in config["native_models"])
+        policy = {"mode": "shadow", "roles": ["engineer"], "instructions": "Route by difficulty."}
+        assert _client().post(url, json={**policy, "control_model": "haiku",
+                                         "candidate_models": ["haiku", "sonnet"]}).status_code == 200
+        rejected = _client().post(url, json={**policy, "control_model": "gpt-5.6-luna",
+                                             "candidate_models": ["gpt-5.6-luna", "gpt-5.6-sol"]})
+        assert rejected.status_code == 400 and "claude brain" in rejected.json()["error"]
+        # The sandbox's native-brain gate reads the same source.
+        response, _ = self._sandbox_run(bobi_install, monkeypatch, brain="claude")
+        assert response.status_code == 200, response.text
+        # agent.yaml's brain.kind wins over run/.env, as when the agent starts.
+        agent_yaml = paths.agent_yaml_path(bobi_install.repo_path)
+        agent_yaml.write_text(yaml.safe_dump({**yaml.safe_load(agent_yaml.read_text()), "brain": {"kind": "codex"}}))
+        self._agent_runs(bobi_install, "claude")
+        assert _client().get(url).json()["agent_brain"] == "codex"
+
+    def test_declared_brain_ignores_a_gateway_left_in_run_env(self, bobi_install):
+        import yaml
+        from bobi import paths
+        from bobi.webapp.runtime import _agent_brain
+
+        agent_yaml = paths.agent_yaml_path(bobi_install.repo_path)
+        agent_yaml.write_text(yaml.safe_dump({**yaml.safe_load(agent_yaml.read_text()), "brain": {"kind": "claude"}}))
+        self._agent_runs(bobi_install, "claude", gateway="https://gateway.invalid/v1")
+        # The agent starts on the native endpoint agent.yaml declares, not the stale gateway.
+        assert _agent_brain(bobi_install.repo_path) == ("claude", False)
+        agent_yaml.write_text(yaml.safe_dump({**yaml.safe_load(agent_yaml.read_text()),
+                                              "brain": {"kind": "claude", "base_url": "https://gw.invalid/v1"}}))
+        assert _agent_brain(bobi_install.repo_path) == ("claude", True)
+
     def test_jev_config_reports_whether_the_policy_key_is_set(self, bobi_install, monkeypatch):
         from bobi import paths
         from tests.metrics.test_routing import concise_config
@@ -1332,11 +1380,10 @@ class TestRoutingConfig:
         from bobi import paths
         from bobi.brain import BrainUsage, StreamDelta, TurnResult
 
-        monkeypatch.delenv("BOBI_GATEWAY_BASE_URL", raising=False)
-        monkeypatch.setenv("BOBI_BRAIN", brain)
         paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps({
             "control_model": "haiku", "candidate_models": ["haiku", "sonnet"],
             "instructions": "Route by difficulty."}) + "\n")
+        self._agent_runs(bobi_install, brain)
         calls = []
 
         class FakeBrain:
@@ -1401,8 +1448,25 @@ class TestRoutingConfig:
         restored = _client().post(url, json={"mode": "enforce"}).json()
         assert restored["enabled"] is True and restored["instructions"] == concise_config()["instructions"]
 
+    def test_disabled_policy_survives_a_setup_env_rewrite(self, bobi_install):
+        from bobi import paths
+        from bobi.setup.actions import read_env, write_env
+        from tests.metrics.test_routing import concise_config
+
+        paths.env_path(bobi_install.repo_path).write_text(
+            "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        assert _client().post(url, json={"mode": "off"}).status_code == 200
+        # Setup saving a credential rewrites the whole .env through the one serializer.
+        write_env(bobi_install.repo_path, {**read_env(bobi_install.repo_path), "SLACK_BOT_TOKEN": "xoxb-test"})
+        config = _client().get(url).json()
+        assert config["enabled"] is False and config["configured_mode"] == "enforce"
+        assert config["candidate_models"] == concise_config()["candidate_models"]
+        restored = _client().post(url, json={"mode": "enforce"}).json()
+        assert restored["enabled"] is True and restored["instructions"] == concise_config()["instructions"]
+        assert "BOBI_METRICS_EXPERIMENT_DISABLED_JSON" not in read_env(bobi_install.repo_path)
+
     def test_jev_edit_preserves_advanced_policy_and_updates_criteria(self, bobi_install, monkeypatch):
-        monkeypatch.setenv("BOBI_BRAIN", "codex")
         from bobi import paths
         from bobi.config import parse_env_file
         from bobi.metrics.router import ExperimentConfig
@@ -1411,10 +1475,11 @@ class TestRoutingConfig:
         raw = {**concise_config(), "brain": "codex", "deadline_ms": 1750,
                "control_model": "gpt-5.6-luna", "candidate_models": ["gpt-5.6-luna", "gpt-5.6-sol"],
                "endpoint": "https://example.invalid/systemone", "prompt_egress": "redacted",
-               "max_prompt_bytes": 4096, "entry_points": ["session_start"],
+               "max_prompt_bytes": 4096, "entry_points": ["subagent_phase"],
                "criteria": {"gpt-5.6-luna": "Retain this criterion", "gpt-5.6-sol": "Removed criterion"}}
         env_file = paths.env_path(bobi_install.repo_path)
         env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\n")
+        self._agent_runs(bobi_install, "codex")
         response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config", json={
             "candidate_models": ["gpt-5.6-luna", "gpt-5.4"], "instructions": "Edited instructions"})
         assert response.status_code == 200, response.text
@@ -1422,7 +1487,7 @@ class TestRoutingConfig:
         policy = ExperimentConfig.from_mapping(saved).policy
         assert policy.brain == "codex" and policy.deadline_ms == 1750
         assert policy.prompt_egress == "redacted" and policy.max_prompt_bytes == 4096
-        assert policy.entry_points == ("session_start",)
+        assert policy.entry_points == ("subagent_phase",)
         options = json.loads(policy.options_json)
         assert options["endpoint"] == "https://example.invalid/systemone"
         assert options["instructions"] == "Edited instructions"
@@ -1441,7 +1506,7 @@ class TestRoutingConfig:
                      "policy": {"name": "typesafe-jev", "mode": "shadow", "candidate_models": ["haiku", "sonnet"]}}
         env_file = paths.env_path(bobi_install.repo_path)
         url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
-        for line in ("BOBI_METRICS_EXPERIMENT_JSON=", "# BOBI_METRICS_EXPERIMENT_JSON="):
+        for line in ("BOBI_METRICS_EXPERIMENT_JSON=", "BOBI_METRICS_EXPERIMENT_DISABLED_JSON="):
             env_file.write_text(line + json.dumps(long_form) + "\nOTHER_TOKEN=synthetic-private\n")
             response = _client().get(url)
             assert response.status_code == 200, response.text
@@ -1636,7 +1701,7 @@ class TestRoutingConfig:
         env_file = paths.env_path(bobi_install.repo_path)
         minimal = {field: concise_config()[field] for field in ("control_model", "candidate_models", "instructions")}
         minimal["prompt_egress"] = "redacted"
-        env_file.write_text("# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(minimal) +
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" + json.dumps(minimal) +
                             "\nTYPESAFE_API_KEY=configured-test-key\n")
         database = bobi_install.state_dir / "metrics/metrics.db"
         connection = connect(database)
@@ -1683,7 +1748,7 @@ class TestRoutingConfig:
         assert "\n".join(connection.iterdump()) == before
         connection.close()
         assert {path: path.read_bytes() for path in files_before} == files_before
-        assert env_file.read_text().startswith("# BOBI_METRICS_EXPERIMENT_JSON=")
+        assert env_file.read_text().startswith("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=")
 
     @pytest.mark.parametrize("body", [b'{"api_key":"private-canary",', b'[]',
         b'{"prompt":"test","api_key":"private-canary","extra":"' + b'x' * 131072 + b'"}',

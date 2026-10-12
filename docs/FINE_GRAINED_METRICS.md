@@ -50,8 +50,8 @@ Optional flat fields include `brain` (`auto` by default: route whichever brain
 the agent runs; `claude` or `codex` pins one), `entry_points`,
 `criteria` (a description per candidate), `min_confidence` (0.85),
 `deadline_ms` (3000), `endpoint`, `policy_version`, `prompt_egress` (`none`),
-and `max_prompt_bytes` (8192). Default entry points are `session_start`,
-`subagent_phase`, `subagent_persistent`, `subagent_supervised`, and
+and `max_prompt_bytes` (8192). Default entry points are all four that a caller
+produces: `subagent_phase`, `subagent_persistent`, `subagent_supervised`, and
 `workflow_start`; default criteria name each candidate and defer to the routing
 instructions. `control_model` must be a candidate, candidates must be unique,
 and instructions must be non-empty. Explicit null/empty defaults are rejected.
@@ -61,7 +61,9 @@ is sent. The web editor offers this as **Prompt sent to JEV**, defaulting a new
 policy to redacted.
 
 Saving checks that the policy can run on the agent. A pinned `brain` must match
-the agent's brain (`BOBI_BRAIN`, else `agent.yaml` `brain.kind`). Candidates
+the agent's brain (`agent.yaml` `brain.kind`, else `BOBI_BRAIN` in the agent's
+`run/.env`, the order the agent starts with; the web app's own environment
+never counts). Candidates
 must be models that brain runs (`bobi.costs.native_models`), with or without a
 gateway; the save rejects another vendor's model (`opus` on codex, `gpt-5.4` on
 claude) with the fix in the message, for example `gpt-5.4 is not an Anthropic
@@ -84,8 +86,9 @@ read-only. Change them in `run/.env` or through the API. The control / fallback 
 cannot drift off it. Saving rejects two names for one model (`opus` and
 `claude-opus-5-5`), because the policy would split its probability between
 them. Save errors name the field (`invalid JEV configuration: min_confidence
-must be between 0 and 1`). Setting the mode to **Disabled** keeps the policy as
-a commented line for re-enabling; **Reset / Delete** removes it. In shadow mode
+must be between 0 and 1`). Setting the mode to **Disabled** keeps the policy in
+`BOBI_METRICS_EXPERIMENT_DISABLED_JSON` for re-enabling; **Reset / Delete**
+removes it. In shadow mode
 the policy is called and recorded but turns run the control model.
 
 ### Interactive sandbox
@@ -103,7 +106,7 @@ prompt is followed through four numbered steps, the way production handles it:
    tokens and a list-price estimate.
 
 Role and entry point offer only the policy's scope (entry point defaults to
-`session_start`). The test always uses the policy's saved key
+the policy's first one). The test always uses the policy's saved key
 (`TYPESAFE_API_KEY` in `run/.env`); the tab says so, or disables **Run test**
 when the key is not set (`credential_configured` in `GET .../jev-config`).
 
@@ -121,8 +124,11 @@ subscription the answer counts against the account's usage limits.
 
 ### Fallback log and failed candidates
 
-Every routing fallback is written to the agent log and, one JSON object per
-line, to `run/state/jev_routing_fallback.log`. Two events appear there:
+Routing incidents are written to the agent log and, one JSON object per line
+with a `logged_at` timestamp, to `run/state/jev_routing_fallback.log`.
+Fallbacks the policy step decided (`policy_*`, `route_persistence_failed`) are
+not written there; they live on the decision row. Two events appear in the
+file:
 
 - `jev_routing_fallback`: routing made no decision (`fallback_reason` is one of
   the session-level reasons, or `admission_rejected`).
@@ -131,7 +137,7 @@ line, to `run/state/jev_routing_fallback.log`. Two events appear there:
   `attempted_model`, `brain`, `provider`, the redacted `error` and
   `fallback_model`. The session does not fail: it starts a fresh brain session
   on the control model and reruns the task once. This covers every routed
-  entry point: `Session`-backed sessions (`session_start`, `subagent_phase`,
+  entry point: `Session`-backed sessions (`subagent_phase`,
   `subagent_persistent`), supervised subagents, and workflow runs
   (`workflow_start`), where the first prompt step reruns and later same-agent
   steps stay on the control model. A failed turn reruns only when nothing would
@@ -149,7 +155,7 @@ line, to `run/state/jev_routing_fallback.log`. Two events appear there:
 and Host guard. Its JSON body accepts `prompt`, optional `features`
 (`role`, `entry_point`, `brain`), `api_key`, and `endpoint`. It calls the
 saved TypeSafe policy directly with bounded, redacted test text, not production
-transcripts. The policy may be disabled/commented out. It never starts a session, opens SQLite, or emits metrics. Requests
+transcripts. The policy may be disabled. It never starts a session, opens SQLite, or emits metrics. Requests
 are real TypeSafe API calls and may incur vendor charges.
 
 The response includes `selected_model`, `confidence`, `probabilities`,
@@ -443,7 +449,14 @@ values, not agreement with the original provider receipt.
 
 Gateway sessions retain `provider=gateway`. Reconciliation chooses the parser
 from the stored Claude/Codex brain. A historical unspecified brain requires one
-unambiguous transcript format; it never guesses between both formats.
+unambiguous transcript format; it never guesses between both formats. A Codex
+rollout is read by its shape, not its `cli_version`: per-turn
+`token_usage_record` rows, or cumulative `token_count` snapshots turned into
+per-turn deltas (the shape of the 0.144.5 CLI the image pins, and of 0.159).
+A rollout mixing both keeps every turn: a record wins for its turn, and a
+finished turn without one takes its snapshot delta. A rollout with a completed
+turn but neither shape is a contract error, retried like any other; a turn
+still running is not.
 
 Background reconciliation makes at most three failed attempts per turn, persists
 counts in `collector.state.json`, and reports retry exhaustion. Restore missing

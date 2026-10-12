@@ -760,36 +760,36 @@ _BRAIN_PROVIDER = {"claude": "anthropic", "codex": "openai"}
 _PROVIDER_TITLE = {"anthropic": "Anthropic", "openai": "OpenAI"}
 
 
-def _agent_brain(root: Path, env: dict) -> tuple[str, bool]:
+def _agent_brain(root: Path) -> tuple[str, bool]:
     """The engine an agent runs (``claude`` / ``codex``) and whether it dials a gateway.
 
-    The process env (``BOBI_BRAIN``, ``BOBI_GATEWAY_BASE_URL``) overrides the
-    installed ``agent.yaml`` brain block, as at agent start."""
+    Read from the agent's own files only, in the order the agent starts with
+    (``bobi.env.child_agent_env``): the installed ``agent.yaml`` ``brain.kind``
+    wins, else ``BOBI_BRAIN`` from ``run/.env``. The web app's process env is
+    not the agent's: starting a codex team from the UI pins ``BOBI_BRAIN`` in
+    this process."""
     from bobi.brain import BRAIN_KIND_ALIASES, DEFAULT_BRAIN, normalize_brain_kind
-    from bobi.config import Config
+    from bobi.config import Config, parse_env_file
 
     try:
         config = Config.load(root)
     except Exception:
         config = Config()
-    kind = env.get("BOBI_BRAIN") or config.brain_kind or DEFAULT_BRAIN
-    gateway = bool(env.get("BOBI_GATEWAY_BASE_URL") or config.brain_base_url or kind in BRAIN_KIND_ALIASES)
+    env = parse_env_file(paths.env_path(root))
+    kind = config.brain_kind or env.get("BOBI_BRAIN") or DEFAULT_BRAIN
+    # A brain agent.yaml declares brings its own endpoint; run/.env's gateway applies only otherwise.
+    gateway = bool(config.brain_is_gateway if config.brain_kind else (
+        env.get("BOBI_GATEWAY_BASE_URL") or config.brain_base_url or kind in BRAIN_KIND_ALIASES))
     return normalize_brain_kind(kind), gateway
 
 
 def _saved_experiment(root, env: dict):
-    """The policy the sandbox tests: the saved line, or the commented line a
-    disabled policy keeps."""
+    """The policy the sandbox tests: the active one, or the one a disabled policy keeps."""
     import json
 
-    from bobi.metrics.router import ExperimentConfig
+    from bobi.metrics.router import DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, ExperimentConfig
 
-    raw = env.get("BOBI_METRICS_EXPERIMENT_JSON", "").strip()
-    if not raw:
-        for line in paths.env_path(root).read_text().splitlines() if paths.env_path(root).exists() else []:
-            if line.startswith("# BOBI_METRICS_EXPERIMENT_JSON="):
-                raw = line.split("=", 1)[1].strip()
-                break
+    raw = env.get(EXPERIMENT_CONFIG_ENV, "").strip() or env.get(DISABLED_EXPERIMENT_CONFIG_ENV, "").strip()
     if not raw:
         raise ValueError("configure a JEV policy before simulating routing")
     return ExperimentConfig.from_mapping(json.loads(raw))
@@ -860,7 +860,7 @@ class LocalRuntime(TeamRuntime):
         from bobi.config import project_env
         from bobi.metrics.features import build_features
         from bobi.metrics.policies.typesafe import TypeSafePolicy
-        from bobi.metrics.policy import PolicyError, PolicyRequest, guard_result
+        from bobi.metrics.policy import ENTRY_POINTS, PolicyError, PolicyRequest, guard_result
         from bobi.metrics.query import MetricsQueryError
         from bobi.redact import redact_secrets
 
@@ -878,9 +878,8 @@ class LocalRuntime(TeamRuntime):
             if any(field in payload and not isinstance(payload[field], str) for field in ("api_key", "endpoint")):
                 raise ValueError("credential and endpoint overrides must be strings")
             role = context.get("role", "engineer")
-            entry_point = context.get("entry_point", "session_start")
-            if entry_point not in ("session_start", "subagent_phase", "subagent_persistent",
-                                   "subagent_supervised", "workflow_start"):
+            entry_point = context.get("entry_point")
+            if entry_point is not None and entry_point not in ENTRY_POINTS:
                 raise ValueError("unsupported sandbox entry point")
             if context.get("brain", "claude") not in ("claude", "codex"):
                 raise ValueError("unsupported sandbox brain")
@@ -889,8 +888,9 @@ class LocalRuntime(TeamRuntime):
             policy_config = config.policy
             if not isinstance(role, str) or role not in policy_config.roles:
                 raise ValueError("unsupported sandbox role")
+            entry_point = entry_point or policy_config.entry_points[0]
             brain = context.get("brain") or (
-                policy_config.brain if policy_config.brain != "auto" else _agent_brain(root, env)[0])
+                policy_config.brain if policy_config.brain != "auto" else _agent_brain(root)[0])
             options = json.loads(policy_config.options_json)
             endpoint = payload.get("endpoint") or options.get("endpoint", "https://api.typesafe.ai/v1/systemone")
             if not isinstance(endpoint, str):
@@ -991,7 +991,7 @@ class LocalRuntime(TeamRuntime):
             policy_config = _saved_experiment(root, env).policy
             if model not in policy_config.candidate_models:
                 raise ValueError("model must be one of the policy's candidates")
-            engine, gateway = _agent_brain(root, env)
+            engine, gateway = _agent_brain(root)
         except (ValueError, TypeError, AttributeError, OSError, RecursionError):
             raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
         if engine != "claude" or gateway:
@@ -1114,7 +1114,8 @@ class LocalRuntime(TeamRuntime):
         from bobi.config import project_env
         from bobi.metrics.policies.typesafe import DEFAULT_ENDPOINT
         from bobi.metrics.policy import POLICY_CREDENTIAL_ENV, POLICY_NAME
-        from bobi.metrics.router import EXPERIMENT_CONFIG_ENV, SHORT_DEFAULTS, ExperimentConfig, load_experiment
+        from bobi.metrics.router import (DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, SHORT_DEFAULTS,
+                                         ExperimentConfig, load_experiment)
         from bobi.prompts.resolver import discover_roles
         from bobi.chat_history import safe_name
         from bobi.costs import native_models
@@ -1138,15 +1139,8 @@ class LocalRuntime(TeamRuntime):
         if "engineer" not in available_roles:
             available_roles.append("engineer")
 
-        raw_val = env.get(EXPERIMENT_CONFIG_ENV, "").strip()
-        if not raw_val and env_file.exists():
-            try:
-                for line in env_file.read_text().splitlines():
-                    if line.startswith("# BOBI_METRICS_EXPERIMENT_JSON="):
-                        raw_val = line.split("=", 1)[1].strip()
-                        break
-            except OSError:
-                pass
+        raw_key = EXPERIMENT_CONFIG_ENV if env.get(EXPERIMENT_CONFIG_ENV, "").strip() else DISABLED_EXPERIMENT_CONFIG_ENV
+        raw_val = env.get(raw_key, "").strip()
 
         config_error = ""
         try:
@@ -1155,7 +1149,7 @@ class LocalRuntime(TeamRuntime):
             configured = None
             config_error = str(exc)
 
-        agent_brain, _ = _agent_brain(root, env)
+        agent_brain, _ = _agent_brain(root)
 
         def model_fields(candidates: list[str], policy_brain: str) -> dict:
             return {
@@ -1211,16 +1205,16 @@ class LocalRuntime(TeamRuntime):
             try:
                 parsed = json.loads(raw_val)
             except ValueError:
-                config_error = config_error or f"{EXPERIMENT_CONFIG_ENV} is not valid JSON"
+                config_error = config_error or f"{raw_key} is not valid JSON"
             else:
                 try:
                     if not isinstance(parsed, dict):
-                        raise ValueError(f"{EXPERIMENT_CONFIG_ENV} must contain an object")
+                        raise ValueError(f"{raw_key} must contain an object")
                     experiment = ExperimentConfig.from_mapping(parsed)
                 except (ValueError, TypeError) as exc:
                     config_error = config_error or str(exc)
         if experiment is not None:
-            # A disabled policy kept as a commented line, ready to re-enable.
+            # A disabled policy, kept ready to re-enable.
             return {
                 "enabled": False,
                 "raw_json": json.dumps(parsed, indent=2),
@@ -1244,7 +1238,7 @@ class LocalRuntime(TeamRuntime):
             "candidate_models": [],
             "roles": ["engineer", "director"],
             "available_roles": available_roles,
-            "entry_points": ["subagent_persistent", "subagent_phase", "workflow_start"],
+            "entry_points": list(SHORT_DEFAULTS["entry_points"]),
             "min_confidence": SHORT_DEFAULTS["min_confidence"],
             "deadline_ms": SHORT_DEFAULTS["deadline_ms"],
             "credential_env": POLICY_CREDENTIAL_ENV,
@@ -1267,7 +1261,8 @@ class LocalRuntime(TeamRuntime):
         from bobi.config import _DOTENV_LOADED
         from bobi.fsutil import atomic_write_text, file_lock
         from bobi.metrics.query import MetricsQueryError
-        from bobi.metrics.router import EXPERIMENT_CONFIG_ENV, ExperimentConfig, default_criteria
+        from bobi.metrics.router import (DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, ExperimentConfig,
+                                         default_criteria)
         from bobi.chat_history import safe_name
         from bobi.costs import model_identity
 
@@ -1331,7 +1326,7 @@ class LocalRuntime(TeamRuntime):
                 raw = current.get("raw_json")
                 previous = json.loads(raw) if raw else {}
                 if not enabled:
-                    # Switching the mode to off keeps the policy as a commented line so it
+                    # Switching the mode to off keeps the policy under its own key so it
                     # can be re-enabled; DELETE (enabled: false) removes it.
                     config_json = json.dumps(previous, ensure_ascii=True) if previous and payload.get("mode") == "off" else ""
                 else:
@@ -1367,11 +1362,12 @@ class LocalRuntime(TeamRuntime):
                     # Saves always write the minimal short form.
                     config_json = json.dumps(experiment.to_mapping(), ensure_ascii=True, allow_nan=False)
                 replacement = [f"{EXPERIMENT_CONFIG_ENV}={config_json}"] if enabled else (
-                    [f"# {EXPERIMENT_CONFIG_ENV}={config_json}", f"{EXPERIMENT_CONFIG_ENV}="] if config_json else [f"{EXPERIMENT_CONFIG_ENV}="])
+                    [f"{EXPERIMENT_CONFIG_ENV}=", f"{DISABLED_EXPERIMENT_CONFIG_ENV}={config_json}"] if config_json
+                    else [f"{EXPERIMENT_CONFIG_ENV}="])
                 new_lines = []
                 replaced = False
                 for line in lines:
-                    if re.match(r"^\s*(?:#\s*)?BOBI_METRICS_EXPERIMENT_JSON\s*=", line):
+                    if re.match(r"^\s*(?:#\s*)?BOBI_METRICS_EXPERIMENT_(?:DISABLED_)?JSON\s*=", line):
                         if not replaced:
                             new_lines.extend(replacement)
                             replaced = True

@@ -52,7 +52,7 @@ key supplied as `TYPESAFE_API_KEY` in the same `.env` or the environment.
 | `criteria` | one generic line per candidate | Must cover exactly the candidates |
 | `prompt_egress` | `none` | `none` (features only) or `redacted` (also the redacted task text) |
 | `roles` | `director`, `engineer` | Allowlist of roles that are routed |
-| `entry_points` | all five | Subset of `session_start`, `subagent_phase`, `subagent_persistent`, `subagent_supervised`, `workflow_start` |
+| `entry_points` | all four | Subset of `subagent_phase`, `subagent_persistent`, `subagent_supervised`, `workflow_start` |
 | `brain` | `auto` | `auto` follows the agent's brain; `claude` or `codex` pins it |
 | `min_confidence` | `0.85` | `[0, 1]` |
 | `deadline_ms` | `3000` | `50`-`3000`, covers capacity wait and the HTTP call |
@@ -71,8 +71,10 @@ from the editor writes the short form over the old line.
 
 The editor always saves the minimal form (`ExperimentConfig.to_mapping`): the
 key fields plus any setting or label that differs from its default. Setting the
-mode to `off` keeps the config as a commented `# BOBI_METRICS_EXPERIMENT_JSON=`
-line so it can be re-enabled; deleting removes it. A saved config applies when
+mode to `off` empties `BOBI_METRICS_EXPERIMENT_JSON` and keeps the config in
+`BOBI_METRICS_EXPERIMENT_DISABLED_JSON` (a real key, so any `.env` rewrite such
+as a setup credential save keeps it) for re-enabling; routing never reads that
+key. Deleting removes both. A saved config applies when
 the agent restarts.
 
 The **config fingerprint** is a SHA-256 of the minimal form without
@@ -83,14 +85,15 @@ thresholds, labels) changes it and makes saved sticky routes stale.
 
 All entry points build a `RoutingContext` and call the single async
 `resolve_route()` in `bobi/metrics/routing.py`, then apply the returned model.
+`Session._run` (`bobi/session.py`) decides before its resume lookup, under the
+entry point its caller named; a session started any other way is not routed.
 
 | Entry point | Caller | Prompt used |
 |---|---|---|
-| `session_start` | `Session._run` (`bobi/session.py`), before the resume lookup | Startup prompt |
 | `subagent_phase` | `run_phase_blocking` (`bobi/subagent.py`) through `Session` | Phase prompt |
 | `subagent_persistent` | `run_persistent_agent` through `Session` | Task |
 | `subagent_supervised` | `_run_agent_supervised`, before its raw brain session | Phase prompt |
-| `workflow_start` | Workflow run start (`bobi/workflow/orchestrator.py`) | Rendered prompt of the first prompt step |
+| `workflow_start` | Workflow run start (`bobi/workflow/orchestrator.py`) | The run's background block (launch input and scopes) plus the rendered prompt of the first prompt step |
 
 `RouteOutcome` carries the model to run and the admitted `RouterDecision`, or no
 decision with an optional `reason` when routing did not decide.
@@ -102,7 +105,7 @@ decision with an optional `reason` when routing did not decide.
    1. eligibility ───────────── ineligible ───────► configured model, no decision
    2. load + validate config ── invalid ──────────► configured model, routing_config_invalid
    3. sticky reuse (not fresh) ─ match ───────────► saved model, status "reused"
-                               └ no match ────────► configured model, routing_sticky_stale
+                               └ no match ────────► saved session's model (else configured), routing_sticky_stale
    4. features + redaction
    5. call_policy(): breaker, capacity, deadline, TypeSafePolicy.decide()
    6. guard_result(): candidates, schema, version, confidence
@@ -141,9 +144,11 @@ A saved route is reused only when all of these hold:
 - when a provider session is saved, that session ran `model_selected` (an
   operator who later relaunched with another model keeps that model).
 
-Otherwise the session runs its configured model and records
-`routing_sticky_stale`; an error while reading the record records
-`routing_sticky_invalid`. Reuse re-admits the saved decision with
+Otherwise it records `routing_sticky_stale`; an error while reading the record
+records `routing_sticky_invalid`. Either way a resumed session keeps the model
+its saved provider session ran (a config edit never switches a session
+mid-transcript); with no resumable session under this brain it runs its
+configured model. Reuse re-admits the saved decision with
 `policy.status = "reused"` and makes no policy call. A workflow reads only its
 own checkpoint record, never the session route file.
 
@@ -258,6 +263,7 @@ After a decision, these run `control_model` and are stored as the row's
 | `policy_version_drift` | Answered by another release line |
 | `policy_low_confidence` | Confidence below `min_confidence` |
 | `route_persistence_failed` | The route file could not be written; the decision is re-admitted on control |
+| `candidate_failed` | The policy's model failed to start or failed its first turn and the session reran on control (6.1). Saved on the route, so it appears on the rows of later resumes; the failing session's own row keeps the policy's model |
 
 Without a decision, the session runs its configured model and the reason is
 stored in the session's `router_fallback` metadata: `routing_brain_mismatch`,
@@ -286,6 +292,11 @@ fails:
   authentication, credits exhausted, turn cap), and the decision was made fresh
   rather than reused from a saved session.
 
+After either rerun the saved route (the session route file, or a workflow's
+checkpoint) is rewritten to `control_model` with `fallback_reason:
+candidate_failed`, so the next resume reuses the control model instead of
+finding a stale route.
+
 ## 7. Privacy and credentials
 
 - Prompt text leaves the host only with `prompt_egress: redacted`, after the
@@ -293,8 +304,8 @@ fails:
   retention approval before enabling routing.
 - Task text, policy responses and free-text reasons are never stored or logged;
   `tier` is stored only if it matches `^[a-z0-9_]{1,64}$`.
-- `provider_subprocess_env` removes `BOBI_METRICS_EXPERIMENT_JSON` and
-  `TYPESAFE_API_KEY` from Claude and Codex subprocesses. Claude launch options
+- `provider_subprocess_env` removes `BOBI_METRICS_EXPERIMENT_JSON`,
+  `BOBI_METRICS_EXPERIMENT_DISABLED_JSON` and `TYPESAFE_API_KEY` from Claude and Codex subprocesses. Claude launch options
   blank them explicitly because the SDK merges options over the parent
   environment. A non-secret marker names the blanked variables so root-bound
   Bobi CLI children restore them from the runtime `.env`; provider launches
@@ -316,7 +327,7 @@ fails:
 - Unit: `tests/metrics/test_routing.py` covers config validation, the long-form
   rejection, fingerprints, guards, breaker, redaction, environment scrubbing,
   sticky reuse, fallbacks and the rerun rule. Its scripted-turn matrix runs all
-  five entry points against a loopback TypeSafe server, including timeout, 5xx,
+  four entry points against a loopback TypeSafe server, including timeout, 5xx,
   401/403, 429, malformed, invalid-model, low-confidence and version-drift
   faults, and checks the projected decision rows.
 - Webapp: `tests/test_webapp_server.py` covers the editor and sandbox contracts.

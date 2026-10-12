@@ -278,7 +278,7 @@ class TestMetricsView:
         config = concise_config()
         config["endpoint"] = "https://api.typesafe.ai/v1/sandbox-test"
         config["prompt_egress"] = "redacted"
-        env_file.write_text("# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(config) + "\nTYPESAFE_API_KEY=browser-test-key\n")
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" + json.dumps(config) + "\nTYPESAFE_API_KEY=browser-test-key\n")
         env_before = env_file.read_bytes()
         client_class = httpx.AsyncClient
         calls = []
@@ -338,7 +338,7 @@ class TestMetricsView:
         dialog.locator("#jev-config-mode").select_option("off")
         dialog.get_by_role("tab", name="Test Routing").click()
         expect(dialog.get_by_label("TypeSafe endpoint", exact=True)).to_have_count(0)
-        expect(dialog.get_by_label("Entry Point", exact=True)).to_have_value("session_start")
+        expect(dialog.get_by_label("Entry Point", exact=True)).to_have_value("subagent_phase")
         expect(dialog.get_by_role("button", name="Save Changes")).to_be_hidden()
         # The sandbox always uses the saved key; there is no key field to override it.
         expect(dialog.locator("#jev-test-key")).to_have_count(0)
@@ -1046,7 +1046,7 @@ class TestMetricsView:
 
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         env_file = paths.env_path(webapp.install.repo_path)
-        env_file.write_text("UNRELATED_SETTING=preserved\n# BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        env_file.write_text("UNRELATED_SETTING=preserved\nBOBI_METRICS_EXPERIMENT_DISABLED_JSON=" + json.dumps(concise_config()) + "\n")
         before = env_file.read_bytes()
         requests = []
         page.on("request", lambda request: requests.append((request.method, request.url, request.post_data)))
@@ -1147,7 +1147,7 @@ class TestMetricsView:
         assert deleted.value.status == 200 and not deleted.value.json()["enabled"]
         assert deleted.value.json()["mode"] == "off"
         assert not deleted.value.json()["raw_json"]
-        assert not any(line.startswith("# BOBI_METRICS_EXPERIMENT_JSON=") for line in env_file.read_text().splitlines())
+        assert not any(line.startswith("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=") for line in env_file.read_text().splitlines())
         assert "BOBI_METRICS_EXPERIMENT_JSON=\n" in env_file.read_text()
         assert "UNRELATED_SETTING=preserved" in env_file.read_text()
         _metrics_capture(page, "jev-reset-1440")

@@ -96,6 +96,16 @@ JSONL = {
 {"timestamp":"2026-09-25T00:00:02.100Z","ordinal":6,"type":"turn_context","payload":{"turn_id":"turn-v0159-2","model":"gpt-test"}}
 {"timestamp":"2026-09-25T00:00:02.200Z","ordinal":7,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":230,"cached_input_tokens":90,"cache_write_input_tokens":0,"output_tokens":22,"reasoning_output_tokens":6,"total_tokens":252}}}}
 """,
+    # Captured from codex-cli 0.144.5, the version the image pins, then trimmed
+    # to the fields the usage contract reads (no instructions, paths or account data).
+    "codex-rollout-v0144.jsonl": r"""{"timestamp":"2026-10-12T09:30:32.050Z","type":"session_meta","payload":{"id":"fixture-codex-v0144","cli_version":"0.144.5","originator":"codex_exec","source":"exec","model_provider":"openai","timestamp":"2026-10-12T09:30:31.945Z"}}
+{"timestamp":"2026-10-12T09:30:32.051Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-v0144-1","started_at":1791797432,"model_context_window":258400,"collaboration_mode_kind":"default"}}
+{"timestamp":"2026-10-12T09:30:34.336Z","type":"turn_context","payload":{"turn_id":"turn-v0144-1","model":"gpt-5.6-luna","effort":"low"}}
+{"timestamp":"2026-10-12T09:30:34.344Z","type":"event_msg","payload":{"type":"user_message","message":"Reply with the single word OK.\n"}}
+{"timestamp":"2026-10-12T09:30:36.191Z","type":"event_msg","payload":{"type":"agent_message","message":"OK","phase":"final_answer"}}
+{"timestamp":"2026-10-12T09:30:36.255Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":13364,"cached_input_tokens":8960,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":13369},"last_token_usage":{"input_tokens":13364,"cached_input_tokens":8960,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":13369},"model_context_window":258400}}}
+{"timestamp":"2026-10-12T09:30:36.261Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-v0144-1","last_agent_message":"OK","completed_at":1791797436,"duration_ms":4214}}
+""",
     "codex-stdout.jsonl": r"""{"thread_id":"fixture-codex-thread","type":"thread.started"}
 {"type":"turn.started"}
 {"type":"token_count","usage":{"cached_input_tokens":1024,"input_tokens":2048,"output_tokens":20}}
@@ -148,7 +158,7 @@ def configured(**changes):
     """The short JEV config production writes, routing between control and cheap."""
     return {"experiment_id": "routing-test", "mode": "shadow", "control_model": "control",
             "candidate_models": ["control", "cheap"], "roles": ["engineer"],
-            "entry_points": ["session_start"], "brain": "codex",
+            "entry_points": ["subagent_phase"], "brain": "codex",
             "instructions": "Route simple tasks to cheap.", **changes}
 
 
@@ -165,7 +175,7 @@ def fixed_policy(monkeypatch, model="cheap", *, confidence=1.0, version=None):
 
 
 def context():
-    return RoutingContext("agent", "session_start", "codex", "configured", False,
+    return RoutingContext("agent", "subagent_phase", "codex", "configured", False,
                           "Do a task", "engineer", True)
 
 
@@ -176,4 +186,4 @@ def decision():
         candidate_models=("model-control", "model-treatment"), model_selected="model-control",
         control_model="model-control", router_reason="policy_shadow", router_latency_ms=0.03,
         fallback_reason=None, decided_at_us=100, config_fingerprint="fingerprint",
-        entry_point="session_start", policy_metadata_json='{"status":"not_called"}')
+        entry_point="subagent_phase", policy_metadata_json='{"status":"not_called"}')

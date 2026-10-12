@@ -42,6 +42,7 @@ from bobi.workflow.orchestrator import run_workflow
 from bobi.workflow.schema import StepDef, Workflow
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tests.metrics.helpers import configured, context, decision, fixed_policy
@@ -52,6 +53,13 @@ def concise_config():
             "candidate_models": ["haiku", "sonnet"],
             "roles": ["director", "engineer"],
             "instructions": "Route coding & complex logic to Sonnet; trivial queries to Haiku."}
+
+def test_a_policy_cannot_name_a_bare_session_start_entry_point():
+    # A Session decides with the entry point its caller names; none names a
+    # bare session start, so a policy listing one would never route anything.
+    with pytest.raises(ValueError, match="entry_points"):
+        ExperimentConfig.from_mapping({**concise_config(), "entry_points": ["session_start"]})
+
 
 def test_minimal_jev_config_has_stable_defaults_and_fingerprint():
     raw = {key: concise_config()[key] for key in ("control_model", "candidate_models", "instructions")}
@@ -78,7 +86,8 @@ def test_concise_jev_config_compiles_to_the_typesafe_policy(mode):
     assert config.policy.prompt_egress == "none"
     assert config.policy.brain == "auto"
     assert config.policy.name == "typesafe-jev" and config.policy.credential_env == "TYPESAFE_API_KEY"
-    assert "session_start" in config.policy.entry_points
+    assert config.policy.entry_points == ("subagent_phase", "subagent_persistent",
+                                          "subagent_supervised", "workflow_start")
     assert json.loads(config.policy.options_json)["instructions"] == raw["instructions"]
     assert ExperimentConfig.from_mapping(config.to_mapping()) == config
     TypeSafePolicy(config.policy)
@@ -145,7 +154,7 @@ def test_utf8_head_tail_respects_byte_cap(limit):
 
 
 def test_features_none_never_contains_prompt_and_invalid_identifiers_fail():
-    args = dict(prompt="private prompt", repo_path="/repo", entry_point="session_start",
+    args = dict(prompt="private prompt", repo_path="/repo", entry_point="subagent_phase",
                 role="engineer", brain="codex", prompt_egress="none")
     features, count = build_features(**args)
     assert "task" not in features and count == 0
@@ -263,12 +272,13 @@ def test_restored_claude_route_projects_decision_and_invocation(tmp_path, monkey
 @pytest.mark.parametrize("encoded", [json.dumps(configured()), "invalid-json", "[]", "null", '{"policy": []}'])
 def test_provider_environment_never_carries_the_routing_config_or_policy_key(encoded):
     assert provider_subprocess_env({"BOBI_METRICS_EXPERIMENT_JSON": encoded,
+        "BOBI_METRICS_EXPERIMENT_DISABLED_JSON": encoded,
         "TYPESAFE_API_KEY": "synthetic-policy-secret", "SAFE": "yes"}) == {"SAFE": "yes"}
 
 
 def policy_runtime_config():
     return PolicyConfig("v1", "codex", "shadow", ("control", "cheap"),
-                        ("session_start",), ("engineer",), "none", "{}")
+                        ("subagent_phase",), ("engineer",), "none", "{}")
 
 
 class _FixedPolicy:
@@ -337,6 +347,42 @@ def test_late_authentication_failure_does_not_restart_maximum_cooldown():
     assert breaker.acquire(2) == ("acquired", True)
     breaker.finish(None, probe=True)
     assert breaker.health()["state"] == "closed"
+
+
+def test_successful_probe_closes_a_rate_tripped_circuit():
+    now = [0.0]
+    breaker = CircuitBreaker(clock=lambda: now[0])
+    for failure in [None] * 10 + ["policy_timeout"] * 5:
+        assert breaker.acquire(8) == ("acquired", False)
+        breaker.finish(failure, probe=False)
+    # An outage that outlasts five probes leaves half of the 20-call window failed.
+    for _ in range(5):
+        now[0] += 600
+        assert breaker.acquire(8) == ("acquired", True)
+        breaker.finish("policy_unavailable", probe=True)
+    now[0] += 600
+    assert breaker.acquire(8) == ("acquired", True)
+    breaker.finish(None, probe=True)
+    assert breaker.health() == {"state": "closed", "consecutive_failures": 0,
+                                "opened_at_us": None, "last_failure_kind": None}
+    # The cleared window means one later failure does not re-trip on the outage's history.
+    assert breaker.acquire(8) == ("acquired", False)
+    breaker.finish("policy_timeout", probe=False)
+    assert breaker.health()["state"] == "closed"
+
+
+def test_open_circuit_refuses_calls_without_asking_the_policy():
+    breaker = CircuitBreaker()
+    for _ in range(5):
+        breaker.acquire(8)
+        breaker.finish("policy_timeout", probe=False)
+    calls = []
+    class Policy:
+        async def decide(self, request, *, timeout_s):
+            calls.append(request)
+            return PolicyResult("cheap", 1.0, None, request.pinned_version, None, 0.0)
+    result, reason = asyncio.run(call_policy(Policy(), request(), policy_runtime_config(), breaker=breaker))
+    assert (result, reason, calls) == (None, "policy_circuit_open", [])
 
 
 def test_deadline_includes_capacity_wait_and_releases_cancelled_call():
@@ -644,7 +690,7 @@ def test_ineligible_and_rejected_admission(monkeypatch, tmp_path):
 
 def test_sticky_route_reuses_model_without_policy(monkeypatch, tmp_path):
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(
-        mode="enforce", entry_points=["session_start", "workflow_start"])))
+        mode="enforce", entry_points=["subagent_phase", "workflow_start"])))
     fixed_policy(monkeypatch)
     monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex-test")
     ctx = context()
@@ -687,12 +733,130 @@ def test_sticky_route_does_not_replace_a_later_explicit_model(monkeypatch, tmp_p
     runtime = MetricsRuntime(tmp_path, mode="enabled")
     try:
         outcome = asyncio.run(resolve_route(replace(ctx, fresh=False), runtime=runtime))
-        assert outcome.model == "configured" and outcome.decision is None
+        # The saved transcript ran the operator's model: resuming keeps it.
+        assert outcome.model == "operator-model" and outcome.decision is None
         assert outcome.reason == "routing_sticky_stale"
         assert runtime.begin_turn("agent", provider="openai").router_decision_id is None
         explicit = asyncio.run(resolve_route(replace(ctx, fresh=False, explicit_model=True,
                                                      configured_model="operator-model"), runtime=runtime))
         assert explicit.model == "operator-model" and explicit.decision is None and explicit.reason is None
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_resume_after_a_control_rerun_stays_on_the_control_model(monkeypatch, tmp_path):
+    from bobi.metrics.routing import candidate_failed
+
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        routed = asyncio.run(resolve_route(context(), runtime=runtime))
+        assert routed.model == "cheap"
+        # The policy's model failed its first turn and the session reran on control.
+        assert candidate_failed(routed.decision, session_name="agent", brain="codex", model="cheap",
+                                error="model unavailable", root=tmp_path) == "control"
+        save_session_id("agent", "provider-session", model="control", root=tmp_path)
+    finally:
+        assert runtime.close(timeout=2)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        resumed = asyncio.run(resolve_route(replace(context(), fresh=False, prompt=""), runtime=runtime))
+        assert resumed.model == "control" and resumed.reason is None
+        assert resumed.decision.fallback_reason == "candidate_failed"
+        assert json.loads(resumed.decision.policy_metadata_json)["status"] == "reused"
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_workflow_checkpoint_keeps_the_control_model_after_a_rerun(bobi_install, monkeypatch):
+    from bobi.metrics.routing import RouteOutcome
+    from bobi.workflow import orchestrator
+    from bobi.workflow.orchestrator import DrainResult
+    from bobi.workflow.state import WorkflowRun
+
+    brain = StubBrain()
+    monkeypatch.setenv("BOBI_STUB_BRAIN", "1")
+    monkeypatch.setattr("bobi.brain.get_brain", lambda *args: brain)
+    monkeypatch.setattr("bobi.events.publish.post_event", lambda *args, **kwargs: True)
+    routed = replace(decision(), model_selected="cheap", control_model="control",
+                     candidate_models=("control", "cheap"), entry_point="workflow_start")
+
+    async def route(ctx, **kwargs):
+        return RouteOutcome("cheap", routed)
+
+    monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+    drains = iter([DrainResult(None, "model unavailable", "", tools_ran=False),
+                   DrainResult("done", ""), DrainResult("done", "")])
+
+    async def scripted_drain(*args, **kwargs):
+        return next(drains)
+
+    monkeypatch.setattr(orchestrator, "_drain_response", scripted_drain)
+    assert run_workflow(Workflow(name="routed", steps=[
+        StepDef(name="first", prompt="do the work", agent="engineer"),
+        StepDef(name="second", prompt="finish", agent="engineer")]),
+        task="test", repo="test", cwd=str(bobi_install.repo_path), run_key="rerouted")
+    [run] = WorkflowRun.list_runs()
+    runtime_scope = run.variable_scopes["_runtime"]
+    # A retry of this run resumes from the checkpoint: it must find the control model's route.
+    assert runtime_scope["model"] == "control"
+    assert runtime_scope["route"]["decision"]["model_selected"] == "control"
+    assert runtime_scope["route"]["decision"]["fallback_reason"] == "candidate_failed"
+
+
+def test_workflow_routing_prompt_carries_the_launch_input(bobi_install, monkeypatch):
+    from bobi.metrics.routing import RouteOutcome
+    from bobi.workflow import orchestrator
+    from bobi.workflow.orchestrator import DrainResult
+
+    brain = StubBrain()
+    monkeypatch.setenv("BOBI_STUB_BRAIN", "1")
+    monkeypatch.setattr("bobi.brain.get_brain", lambda *args: brain)
+    monkeypatch.setattr("bobi.events.publish.post_event", lambda *args, **kwargs: True)
+    prompts = []
+
+    async def route(ctx, **kwargs):
+        prompts.append(ctx.prompt)
+        return RouteOutcome("configured")
+
+    async def drain(*args, **kwargs):
+        return DrainResult("done", "")
+
+    monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+    monkeypatch.setattr(orchestrator, "_drain_response", drain)
+    assert run_workflow(Workflow(name="routed", steps=[
+        StepDef(name="setup", prompt="Create a git worktree for this issue.", agent="engineer"),
+        StepDef(name="implement", prompt="Implement the change.", agent="engineer")]),
+        task="Rewrite the billing reconciler in Rust", repo="test",
+        cwd=str(bobi_install.repo_path), run_key="launch-input")
+    [prompt] = prompts
+    assert "Rewrite the billing reconciler in Rust" in prompt
+    assert "Create a git worktree for this issue." in prompt
+
+
+def test_config_edit_never_switches_a_routed_session_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        assert asyncio.run(resolve_route(context(), runtime=runtime)).model == "cheap"
+        save_session_id("agent", "provider-session", model="cheap", root=tmp_path)
+    finally:
+        assert runtime.close(timeout=2)
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(
+        configured(mode="enforce", instructions="Edited routing criteria.")))
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        resumed = asyncio.run(resolve_route(replace(context(), fresh=False, prompt=""), runtime=runtime))
+        assert resumed.model == "cheap" and resumed.decision is None
+        assert resumed.reason == "routing_sticky_stale"
+        # A session saved under another brain cannot resume, so it gets the configured model.
+        monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex-gateway")
+        other = asyncio.run(resolve_route(replace(context(), fresh=False, prompt=""), runtime=runtime))
+        assert other.model == "configured" and other.reason == "routing_sticky_stale"
     finally:
         assert runtime.close(timeout=2)
 
@@ -808,12 +972,11 @@ def fault_server():
 # policy failure. Each failure class is pinned at the adapter level below
 # (HTTP status, malformed body, timeout) and by `guard_result` above.
 @pytest.mark.parametrize("entry_point,mode,fault,reason", [
-    ("session_start", "enforce", None, None),
     ("subagent_phase", "shadow", None, None),
     ("subagent_persistent", "enforce", None, None),
     ("subagent_supervised", "shadow", None, None),
     ("workflow_start", "enforce", None, None),
-    ("session_start", "enforce", "low_confidence", "policy_low_confidence"),
+    ("subagent_phase", "enforce", "low_confidence", "policy_low_confidence"),
 ])
 def test_route_executes_and_projects_a_scripted_turn(bobi_install, monkeypatch, entry_point,
                                                     mode, fault, reason, fault_server):
@@ -936,7 +1099,7 @@ def test_documented_operator_configuration_validates_offline():
 
 def typesafe_policy_config():
     return PolicyConfig("jev-1.13.0", "codex", "shadow",
-        ("control", "cheap"), ("session_start",), ("engineer",), "none",
+        ("control", "cheap"), ("subagent_phase",), ("engineer",), "none",
         json.dumps({"instructions": "Choose a model",
         "criteria": {"control": "Complex task", "cheap": "Simple task"}}))
 
@@ -1118,7 +1281,7 @@ async def test_session_routes_before_resume_and_client_construction(bobi_install
     from bobi.metrics.routing import RouteOutcome, RoutingContext
 
     calls = []
-    context = RoutingContext("agent", "session_start", "codex", "control", False,
+    context = RoutingContext("agent", "subagent_phase", "codex", "control", False,
                              "", "engineer", True)
     session = Session("agent", str(bobi_install.repo_path), extra_options={"model": "control"},
                       fresh=True, routing=context)
@@ -1140,7 +1303,7 @@ async def test_session_routes_before_resume_and_client_construction(bobi_install
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entry_point", ["session_start", "subagent_phase", "subagent_persistent"])
+@pytest.mark.parametrize("entry_point", ["subagent_phase", "subagent_persistent"])
 async def test_session_policy_reaches_construction_and_projection(bobi_install, monkeypatch, entry_point):
     raw = configured(mode="enforce", entry_points=[entry_point])
     routing_context = replace(context(), entry_point=entry_point)
@@ -1195,7 +1358,7 @@ async def test_session_policy_reaches_construction_and_projection(bobi_install, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entry_point", ["session_start", "subagent_phase", "subagent_persistent"])
+@pytest.mark.parametrize("entry_point", ["subagent_phase", "subagent_persistent"])
 async def test_session_explicit_model_bypasses_policy(bobi_install, monkeypatch, entry_point):
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(entry_points=[entry_point])))
     runtime = MetricsRuntime(bobi_install.state_dir.parent, mode="enabled")
@@ -1275,7 +1438,8 @@ def test_stale_sticky_route_records_why_the_session_kept_its_model(monkeypatch, 
     recorded = _recorded_fallbacks(runtime, monkeypatch)
     try:
         outcome = asyncio.run(resolve_route(replace(ctx, fresh=False), runtime=runtime))
-        assert outcome.model == "configured" and outcome.reason == "routing_sticky_stale"
+        # The saved transcript ran cheap; a policy edit never switches it mid-session.
+        assert outcome.model == "cheap" and outcome.reason == "routing_sticky_stale"
         assert recorded == ["routing_sticky_stale"]
         assert any(getattr(record, "fallback_reason", None) == "routing_sticky_stale" for record in caplog.records)
     finally:
@@ -1291,7 +1455,7 @@ def test_sticky_route_read_failure_is_not_called_a_config_error(monkeypatch, tmp
     runtime = MetricsRuntime(tmp_path, mode="enabled")
     try:
         outcome = asyncio.run(resolve_route(replace(context(), fresh=False), runtime=runtime))
-        assert outcome.model == "configured" and outcome.reason == "routing_sticky_invalid"
+        assert outcome.model == "cheap" and outcome.reason == "routing_sticky_invalid"
     finally:
         assert runtime.close(timeout=2)
 
@@ -1313,7 +1477,7 @@ def _fallback_log(root):
     from bobi import paths
 
     path = paths.state_path(root) / "jev_routing_fallback.log"
-    return [json.loads(line.split(" ", 2)[2]) for line in path.read_text().splitlines()] if path.exists() else []
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 @pytest.mark.asyncio
@@ -1321,7 +1485,7 @@ async def test_session_retries_on_control_when_the_routed_model_cannot_start(bob
     from bobi.metrics.routing import RouteOutcome
 
     routed = replace(decision(), model_selected="broken-model", control_model="control")
-    context = RoutingContext("agent", "session_start", "claude", "configured", False, "", "engineer", True)
+    context = RoutingContext("agent", "subagent_phase", "claude", "configured", False, "", "engineer", True)
     session = Session("agent", str(bobi_install.repo_path), fresh=True, routing=context)
     async def route(ctx):
         return RouteOutcome("broken-model", routed)
@@ -1343,6 +1507,7 @@ async def test_session_retries_on_control_when_the_routed_model_cannot_start(bob
     assert connects == ["broken-model", "control"]
     [incident] = _fallback_log(bobi_install.repo_path)
     assert incident["event"] == "jev_candidate_failed" and incident["attempted_model"] == "broken-model"
+    assert datetime.fromisoformat(incident["logged_at"]).tzinfo is not None
     assert incident["fallback_model"] == "control" and incident["brain"] == "claude"
     assert "not found" in incident["error"] and "private-value" not in incident["error"]
 
@@ -1357,7 +1522,7 @@ async def test_session_reruns_a_failed_first_turn_on_control(bobi_install, monke
     from bobi.inbox import Message
 
     session = Session("agent", str(bobi_install.repo_path), fresh=True,
-                      routing=RoutingContext("agent", "session_start", "claude", "configured", False, "", "engineer", True))
+                      routing=RoutingContext("agent", "subagent_phase", "claude", "configured", False, "", "engineer", True))
     session._extra_options["model"] = routed_model
     session._route_decision = replace(decision(), model_selected=routed_model, control_model="control")
     session._set_state("waiting_input")

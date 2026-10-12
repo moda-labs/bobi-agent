@@ -818,7 +818,9 @@ async def _run_workflow_async(
         routing_context = RoutingContext(
             session_name, "workflow_start", normalize_brain_kind(session_brain_label()),
             first_prompt_model, bool(launch_model or first_prompt_step.model),
-            _build_step_prompt(first_prompt_step, ctx, session_name, first_prompt_step.name),
+            # The decision holds for every later same-agent step, so it must see
+            # the launch input, not only the first step's template.
+            _context_prefix() + _build_step_prompt(first_prompt_step, ctx, session_name, first_prompt_step.name),
             role or current_agent, fresh, repo_path=cwd, run_key=run_key,
             workflow_name=workflow.name, step_name=first_prompt_step.name,
             existing_transcript=bool(saved_id),
@@ -936,8 +938,8 @@ async def _run_workflow_async(
 
     def _route_to_control(error: str) -> bool:
         """Switch the run to the control model after the policy's choice failed; log it."""
-        nonlocal current_model, routed_model, route_decision
-        from bobi.metrics.routing import candidate_failed
+        nonlocal current_model, routed_model, route_decision, route_record
+        from bobi.metrics.routing import candidate_failed, rerouted_to_control
 
         decision, route_decision = route_decision, None
         if routed_model is None or current_model != routed_model:
@@ -946,6 +948,10 @@ async def _run_workflow_async(
                                    brain=routing_context.brain, model=current_model, error=error)
         if control:
             routed_model = current_model = control
+            if route_record is not None:
+                # The next checkpoint saves the route the run now follows, so a
+                # retry resumes on the control model instead of finding it stale.
+                route_record = {**route_record, "decision": asdict(rerouted_to_control(decision))}
         return bool(control)
 
     async def _open_session() -> bool:

@@ -12,6 +12,9 @@ from bobi.config import _PROVIDER_CLEARED_ENV
 from bobi.metrics.policy import POLICY_CREDENTIAL_ENV, PolicyConfig
 
 EXPERIMENT_CONFIG_ENV = "BOBI_METRICS_EXPERIMENT_JSON"
+# A disabled policy, kept as a real key (not a comment) so every .env rewrite
+# preserves it for re-enabling. Routing never reads it.
+DISABLED_EXPERIMENT_CONFIG_ENV = "BOBI_METRICS_EXPERIMENT_DISABLED_JSON"
 # Every routed decision records this variant: the config always calls the policy.
 TREATMENT_VARIANT = "treatment_jev"
 LONG_FORM_ERROR = "long-form experiment config is no longer supported; save from the editor to rewrite it"
@@ -20,7 +23,7 @@ LONG_FORM_ERROR = "long-form experiment config is no longer supported; save from
 SHORT_DEFAULTS: dict[str, object] = {
     "mode": "enforce",
     "roles": ["director", "engineer"],
-    "entry_points": ["session_start", "subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start"],
+    "entry_points": ["subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start"],
     "brain": "auto",
     "prompt_egress": "none",
     "min_confidence": 0.85,
@@ -48,10 +51,10 @@ def provider_subprocess_env(
     base: Mapping[str, str] | None = None,
     *, blank_inherited: bool = False,
 ) -> dict[str, str]:
-    """Remove the routing config and the policy credential from provider subprocesses."""
+    """Remove the routing config (active or disabled) and the policy credential from provider subprocesses."""
     env = dict(os.environ if base is None else base)
     env.pop(_PROVIDER_CLEARED_ENV, None)
-    removed = {EXPERIMENT_CONFIG_ENV, POLICY_CREDENTIAL_ENV}
+    removed = {EXPERIMENT_CONFIG_ENV, DISABLED_EXPERIMENT_CONFIG_ENV, POLICY_CREDENTIAL_ENV}
     for name in removed:
         env.pop(name, None)
     if blank_inherited:

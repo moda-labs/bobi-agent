@@ -1,6 +1,7 @@
 """Fresh-session routing coordinator; never called from turn observation."""
 
 from dataclasses import asdict, dataclass, fields, replace
+from datetime import datetime
 import json
 import logging
 import os
@@ -25,18 +26,20 @@ NO_MODEL_FALLBACK_KINDS = (ERROR_KIND_AUTHENTICATION, ERROR_KIND_CREDITS_EXHAUST
 
 
 def log_routing_incident(record: dict[str, object], root=None) -> None:
-    """Write one routing fallback to the agent log and its dedicated file.
+    """Write one routing incident to the agent log and its dedicated file.
 
     ``state/jev_routing_fallback.log`` holds one JSON object per line, so an
-    operator can read every fallback without searching the manager log."""
+    operator can read every no-decision fallback, refused admission and failed
+    routed model without searching the manager log. Fallbacks the policy step
+    decided (``policy_*``, ``route_persistence_failed``) live on the decision row."""
     line = json.dumps(record, sort_keys=True, ensure_ascii=True)
     log.warning("metrics: %s", line, extra=dict(record))
     try:
         from bobi import paths
-        from bobi.logs import stamped
 
+        logged_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
         with open(paths.state_dir(root) / FALLBACK_LOG_NAME, "a", encoding="utf-8") as handle:
-            handle.write(stamped("WARNING", line) + "\n")
+            handle.write(json.dumps({"logged_at": logged_at, **record}, sort_keys=True, ensure_ascii=True) + "\n")
     except OSError as exc:
         log.debug("metrics: routing fallback log unavailable (%s)", type(exc).__name__)
 
@@ -75,7 +78,25 @@ def candidate_failed(decision: RouterDecision | None, *, session_name: str, brai
         "error": redact_secrets(str(error or "unknown error"))[0][:500],
         "fallback_model": decision.control_model,
     }, root)
+    if decision.entry_point != "workflow_start":
+        # The session now runs the control model; its saved route must say so,
+        # or the next resume finds a stale route. A workflow keeps its route in
+        # its own checkpoint.
+        from bobi.brain import session_brain_label
+
+        try:
+            save_session_route(session_name, {"brain": session_brain_label(),
+                "decision": asdict(rerouted_to_control(decision))}, root=root)
+        except (OSError, ValueError, TypeError) as exc:
+            log.warning("metrics: corrected session route not saved (%s)", type(exc).__name__)
     return decision.control_model
+
+
+def rerouted_to_control(decision: RouterDecision) -> RouterDecision:
+    """*decision* after its model failed and the control model took over."""
+    return replace(decision, model_selected=decision.control_model,
+                   router_reason="policy_fallback", fallback_reason="candidate_failed")
+
 
 @dataclass(frozen=True)
 class RoutingContext:
@@ -105,8 +126,8 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
     fallback = RouteOutcome(ctx.configured_model)
     stage = "runtime"
 
-    def recorded_fallback(reason: str, error_kind: str = "") -> RouteOutcome:
-        """Run the configured model and record why routing did not decide."""
+    def recorded_fallback(reason: str, error_kind: str = "", model: str | None = None) -> RouteOutcome:
+        """Run *model* (default: the configured one) and record why routing did not decide."""
         log_routing_incident({"event": "jev_routing_fallback", "session": ctx.session_name,
                               "fallback_reason": reason, "error_kind": error_kind},
                              runtime.root if runtime is not None else None)
@@ -117,7 +138,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
                     fallback_reason=reason, error_kind=error_kind)
             except Exception as recording_error:
                 log.warning("metrics: routing fallback recording failed (%s)", type(recording_error).__name__)
-        return RouteOutcome(ctx.configured_model, reason=reason)
+        return RouteOutcome(ctx.configured_model if model is None else model, reason=reason)
 
     def admission_rejected(model: str) -> RouteOutcome:
         # The store refused the session record (turns already ran or the spool is
@@ -153,7 +174,9 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             decision = _saved_decision(ctx, runtime, sticky_record, saved_id, fingerprint,
                                        policy_config.candidate_models)
             if decision is None:
-                return recorded_fallback("routing_sticky_stale")
+                # Never switch a resumed session's model: keep the one its transcript ran.
+                return recorded_fallback("routing_sticky_stale",
+                                         model=_resumed_model(ctx, runtime, saved_id))
             if runtime.admit_route(ctx.session_name, decision, brain=ctx.brain,
                     role=ctx.role, run_key=ctx.run_key, workflow_name=ctx.workflow_name):
                 return RouteOutcome(decision.model_selected, decision)
@@ -219,10 +242,25 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         reason = {"config": "routing_config_invalid", "policy": "routing_policy_unavailable",
                   "metrics": "routing_metrics_unavailable", "sticky": "routing_sticky_invalid",
                   }.get(stage, "routing_unavailable")
-        return recorded_fallback(reason, type(exc).__name__)
+        resumed = None
+        if stage == "sticky":
+            try:
+                resumed = _resumed_model(ctx, runtime, saved_id)
+            except Exception:
+                pass
+        return recorded_fallback(reason, type(exc).__name__, model=resumed)
 
 
 _DECISION_FIELDS = frozenset(field.name for field in fields(RouterDecision))
+
+
+def _resumed_model(ctx: RoutingContext, runtime: MetricsRuntime, saved_id: str) -> str | None:
+    """The model the saved session ran, when this brain can resume it; else None."""
+    from bobi.brain import session_brain_label
+
+    if not saved_id or load_session_brain(ctx.session_name, root=runtime.root) != session_brain_label():
+        return None
+    return load_session_model(ctx.session_name, root=runtime.root)
 
 
 def _saved_decision(ctx: RoutingContext, runtime: MetricsRuntime, sticky_record: dict[str, object] | None,

@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 
 POLICY_NAME = "typesafe-jev"
 POLICY_CREDENTIAL_ENV = "TYPESAFE_API_KEY"
-ENTRY_POINTS = ("session_start", "subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start")
+ENTRY_POINTS = ("subagent_phase", "subagent_persistent", "subagent_supervised", "workflow_start")
 
 
 @dataclass(frozen=True)
@@ -220,9 +220,11 @@ class CircuitBreaker:
                 self._last_failure = failure
             self._history.append(bool(failure))
             self._failures = self._failures + 1 if failure else 0
-            if authentication or (probe and failure) or self._failures >= 5 or (
+            # Only a failure can trip the circuit: a successful probe after an outage
+            # must close it even though the window still holds the outage's failures.
+            if failure and (authentication or probe or self._failures >= 5 or (
                 len(self._history) >= 10 and sum(self._history) / len(self._history) >= 0.5
-            ):
+            )):
                 if self._state != "open" or probe or (authentication and self._cooldown < 600.0):
                     self._cooldown = 600.0 if authentication else (
                         min(600.0, self._cooldown * 2) if probe else 30.0

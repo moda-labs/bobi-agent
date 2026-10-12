@@ -14,9 +14,6 @@ class ProviderContractError(ValueError):
     """The provider event does not match a supported exact-usage contract."""
 
 
-SUPPORTED_CODEX_ROLLOUT_PREFIXES = ("0.156.", "0.157.", "0.159.")
-
-
 def _token(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
@@ -316,10 +313,18 @@ def parse_codex_rollout_records(
     path: Path | str,
     model: str = "codex",
 ) -> list[ProviderUsageRecord]:
-    """Select the final exact usage row per turn from a supported rollout."""
+    """Select the final exact usage row per turn from a Codex rollout.
+
+    The parser follows the rollout's shape, not its ``cli_version``: Codex
+    writes either ``token_usage_record`` rows (per turn) or ``event_msg``
+    ``token_count`` snapshots of the session's cumulative usage, which are
+    turned into per-turn deltas. A rollout with turns but neither shape is
+    rejected once a turn completed, so a future format fails loudly instead of
+    reading as zero."""
     latest: dict[str, ProviderUsageRecord] = {}
     cumulative: dict[str, tuple[dict[str, Any], int, int]] = {}
     turn_order: list[str] = []
+    completed_turns: set[str] = set()
     turn_models: dict[str, str] = {}
     provider_session_id = ""
     cli_version = ""
@@ -350,6 +355,9 @@ def parse_codex_rollout_records(
                     current_turn_id = str(payload.get("turn_id") or "")
                     if current_turn_id and current_turn_id not in turn_order:
                         turn_order.append(current_turn_id)
+                    continue
+                if payload_type == "task_complete":
+                    completed_turns.add(str(payload.get("turn_id") or current_turn_id))
                     continue
                 if payload_type == "token_count" and current_turn_id:
                     info = payload.get("info") or {}
@@ -393,43 +401,48 @@ def parse_codex_rollout_records(
             previous = latest.get(turn_id)
             if previous is None or ordinal >= previous.ordinal:
                 latest[turn_id] = record
-    if cli_version and not cli_version.startswith(SUPPORTED_CODEX_ROLLOUT_PREFIXES):
+    if not latest and not cumulative and completed_turns:
         raise ProviderContractError(
-            f"unsupported codex rollout version: {cli_version}"
+            f"codex rollout has no usage in a known shape (cli {cli_version or 'unknown'})"
         )
-    if cli_version.startswith("0.159."):
-        previous: dict[str, Any] = {}
-        for turn_id in turn_order:
-            snapshot = cumulative.get(turn_id)
-            if snapshot is None:
-                continue
-            usage, observed_at_us, ordinal = snapshot
-            delta = {}
-            for key, value in usage.items():
-                prior = previous.get(key)
-                if (
-                    isinstance(value, int)
-                    and not isinstance(value, bool)
-                    and isinstance(prior, int)
-                    and not isinstance(prior, bool)
-                ):
-                    delta[key] = value - prior if value >= prior else value
-                else:
-                    delta[key] = value
-            previous = usage
-            parsed = codex_usage(
-                delta,
-                model=turn_models.get(turn_id) or model,
-                provider_event_id=turn_id,
-                source="codex_rollout",
-            )
-            latest[turn_id] = ProviderUsageRecord(
-                usage=parsed,
-                observed_at_us=observed_at_us,
-                provider_session_id=provider_session_id,
-                provider_turn_id=turn_id,
-                ordinal=ordinal,
-            )
+    records_shape = bool(latest)
+    previous: dict[str, Any] = {}
+    for turn_id in turn_order:
+        snapshot = cumulative.get(turn_id)
+        if snapshot is None:
+            continue
+        if turn_id in latest or (records_shape and turn_id not in completed_turns):
+            # A per-turn record is exact, and in a rollout that writes records an
+            # unfinished turn's snapshot is partial: either only moves the baseline.
+            previous = snapshot[0]
+            continue
+        usage, observed_at_us, ordinal = snapshot
+        delta = {}
+        for key, value in usage.items():
+            prior = previous.get(key)
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and isinstance(prior, int)
+                and not isinstance(prior, bool)
+            ):
+                delta[key] = value - prior if value >= prior else value
+            else:
+                delta[key] = value
+        previous = usage
+        parsed = codex_usage(
+            delta,
+            model=turn_models.get(turn_id) or model,
+            provider_event_id=turn_id,
+            source="codex_rollout",
+        )
+        latest[turn_id] = ProviderUsageRecord(
+            usage=parsed,
+            observed_at_us=observed_at_us,
+            provider_session_id=provider_session_id,
+            provider_turn_id=turn_id,
+            ordinal=ordinal,
+        )
     return [latest[key] for key in sorted(latest)]
 
 

@@ -419,6 +419,7 @@ const FALLBACK_TEXT = {
   policy_invalid_response: "policy returned an unusable answer",
   policy_version_drift: "policy reported a different version than configured",
   route_persistence_failed: "session route could not be saved",
+  candidate_failed: "the policy's model failed, so the control model took over",
   routing_config_invalid: "routing policy failed validation",
   routing_policy_unavailable: "routing policy could not be loaded",
   routing_metrics_unavailable: "metrics store was unavailable",
@@ -2261,8 +2262,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
     const cfg = currentRoutingConfig;
     // Production routes only the policy's roles, so the sandbox offers only those.
     const scopedRoles = cfg.roles?.length ? cfg.roles : ["director", "engineer"];
-    const testEntries = (cfg.entry_points?.length ? [...cfg.entry_points] : ["session_start"])
-      .sort((a, b) => (b === "session_start") - (a === "session_start"));
+    const testEntries = cfg.entry_points?.length ? [...cfg.entry_points] : ["subagent_phase"];
     const EGRESS_TEXT = {
       redacted: "Redacted task text (secrets and paths removed)",
       none: "Metadata only (size, role, entry point)",

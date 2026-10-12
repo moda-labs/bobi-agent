@@ -1798,17 +1798,64 @@ def test_reconciled_turn_aggregate_preserves_unreported_dimensions_as_null(metri
     assert aggregate.cache_write_breakdown_complete is False
 
 
-def test_codex_rollout_parser_rejects_unknown_versions(metrics_fixtures, tmp_path):
-    source = metrics_fixtures / "codex-rollout.jsonl"
-    target = tmp_path / "rollout.jsonl"
-    lines = source.read_text().splitlines()
+def test_codex_rollout_from_the_pinned_cli_reconciles(metrics_fixtures):
+    [record] = parse_codex_rollout_records(metrics_fixtures / "codex-rollout-v0144.jsonl")
+    assert (record.provider_session_id, record.provider_turn_id) == ("fixture-codex-v0144", "turn-v0144-1")
+    assert record.usage.model == "gpt-5.6-luna"
+    assert (record.usage.input_tokens, record.usage.cache_read_input_tokens,
+            record.usage.output_tokens) == (13364, 8960, 5)
+
+
+@pytest.mark.parametrize("fixture", ["codex-rollout.jsonl", "codex-rollout-v0159.jsonl"])
+def test_codex_rollout_parser_follows_the_shape_not_the_version(metrics_fixtures, tmp_path, fixture):
+    lines = (metrics_fixtures / fixture).read_text().splitlines()
     first = json.loads(lines[0])
     first["payload"]["cli_version"] = "9.0.0"
-    lines[0] = json.dumps(first)
-    target.write_text("\n".join(lines) + "\n")
+    target = tmp_path / "rollout.jsonl"
+    target.write_text("\n".join([json.dumps(first), *lines[1:]]) + "\n")
+    assert parse_codex_rollout_records(target) == parse_codex_rollout_records(metrics_fixtures / fixture)
 
-    with pytest.raises(ProviderContractError, match="unsupported codex rollout"):
-        parse_codex_rollout_records(target)
+
+def _rollout(tmp_path, *events):
+    target = tmp_path / "rollout.jsonl"
+    target.write_text("\n".join(json.dumps({"timestamp": f"2026-09-25T00:00:{index:02d}.000Z", **event})
+                                for index, event in enumerate(events)) + "\n")
+    return target
+
+
+def _event(payload):
+    return {"type": "event_msg", "payload": payload}
+
+
+def test_codex_rollout_with_a_completed_turn_but_no_known_usage_shape_is_rejected(tmp_path):
+    started = [{"type": "session_meta", "payload": {"id": "fixture", "cli_version": "9.0.0"}},
+               _event({"type": "task_started", "turn_id": "turn-1"}),
+               _event({"type": "usage_v2", "tokens": {"in": 1, "out": 1}})]
+    # A turn still running has no usage yet; that is not a format change.
+    assert parse_codex_rollout_records(_rollout(tmp_path, *started)) == []
+    completed = _rollout(tmp_path, *started, _event({"type": "task_complete", "turn_id": "turn-1"}))
+    with pytest.raises(ProviderContractError, match="no usage in a known shape.*9.0.0"):
+        parse_codex_rollout_records(completed)
+
+
+def test_codex_rollout_mixing_both_usage_shapes_keeps_every_turn(tmp_path):
+    def snapshot(total):
+        return _event({"type": "token_count", "info": {"total_token_usage": {"input_tokens": total, "output_tokens": 1}}})
+    records = parse_codex_rollout_records(_rollout(
+        tmp_path,
+        {"type": "session_meta", "payload": {"id": "fixture", "cli_version": "9.0.0"}},
+        _event({"type": "task_started", "turn_id": "t1"}),
+        snapshot(100),
+        {"type": "token_usage_record", "payload": {"turn_id": "t1",
+                                                  "turn_token_usage": {"input_tokens": 100, "output_tokens": 1}}},
+        _event({"type": "task_started", "turn_id": "t2"}),
+        snapshot(250),
+        _event({"type": "task_complete", "turn_id": "t2"}),
+        # A turn still running has a partial snapshot and no record yet.
+        _event({"type": "task_started", "turn_id": "t3"}),
+        snapshot(260),
+    ))
+    assert [(record.provider_turn_id, record.usage.input_tokens) for record in records] == [("t1", 100), ("t2", 150)]
 
 
 def test_scheduled_reconciliation_skips_active_turns(monkeypatch, tmp_path):
