@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -22,10 +23,30 @@ from bobi.metrics.spool import FrameRecord
 
 log = logging.getLogger(__name__)
 
+def _keep_private(db_path: Path) -> None:
+    """Create the read model at 0600 and tighten one created looser.
+
+    It copies every spool payload, so it is as private as the 0600 segments.
+    SQLite creates ``-wal`` and ``-shm`` with the database file's mode; the
+    existing ones are tightened too. This mode is the point, so the file is
+    created here rather than through ``fsutil``'s atomic writes."""
+    os.close(os.open(db_path, os.O_CREAT | os.O_RDWR, 0o600))
+    for candidate in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+        try:
+            if candidate.stat().st_mode & 0o077:
+                os.chmod(candidate, 0o600)
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            # Another user's file: opening it still works, tightening is theirs to do.
+            log.warning("metrics: %s is readable by other users and not ours to chmod", candidate.name)
+
+
 def connect(path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
     db_path = Path(path)
     if not readonly:
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        _keep_private(db_path)
         conn = sqlite3.connect(db_path, timeout=5.0)
     else:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)

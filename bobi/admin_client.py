@@ -83,6 +83,11 @@ def run_admin_command(
     command = ALIASES.get(alias)
     if command is None:
         raise AdminClientError(f"unknown metrics command {alias}")
+    from bobi.events.server import _is_loopback_or_tls
+
+    if not _is_loopback_or_tls(base_url):
+        # Every request carries the operator token; never send it in cleartext off-host.
+        raise AdminClientError("the admin URL must use https unless it is a loopback address")
     base = base_url.rstrip("/")
     auth = {"Authorization": f"Bearer {token}"}
     instance_path = f"/fleet/instances/{_segment(fleet)}/{_segment(instance)}"

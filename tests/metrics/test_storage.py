@@ -2287,3 +2287,29 @@ def test_supervised_manager_does_not_start_a_second_metrics_collector(
         signal.signal(signal.SIGTERM, previous_term)
 
     assert calls == []
+    # Only this manager defers to the supervisor; nothing it spawns inherits that.
+    assert "BOBI_METRICS_COLLECTOR_OWNER" not in os.environ
+
+
+def test_read_model_files_are_as_private_as_the_spool(tmp_path):
+    db = tmp_path / "state" / "metrics" / "metrics.db"
+    previous = os.umask(0o022)
+    try:
+        conn = connect(db)
+        migrate(conn)
+        conn.commit()
+        modes = {path.name: path.stat().st_mode & 0o777 for path in db.parent.iterdir()}
+        conn.close()
+    finally:
+        os.umask(previous)
+    # The database copies every spool payload, so it gets the segments' 0600.
+    assert modes["metrics.db"] == 0o600
+    assert modes["metrics.db-wal"] == 0o600 and modes["metrics.db-shm"] == 0o600
+
+
+def test_an_existing_world_readable_read_model_is_tightened(tmp_path):
+    db = tmp_path / "metrics.db"
+    sqlite3.connect(db).close()
+    os.chmod(db, 0o644)
+    connect(db).close()
+    assert db.stat().st_mode & 0o777 == 0o600

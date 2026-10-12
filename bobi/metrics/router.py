@@ -51,7 +51,10 @@ def provider_subprocess_env(
     base: Mapping[str, str] | None = None,
     *, blank_inherited: bool = False,
 ) -> dict[str, str]:
-    """Remove the routing config (active or disabled) and the policy credential from provider subprocesses."""
+    """Remove the routing config (active or disabled) and the policy credential from provider subprocesses.
+
+    ``blank_inherited`` builds the full blanked environment a Claude child sees
+    after the SDK merge; launches use :func:`provider_env_delta` instead."""
     env = dict(os.environ if base is None else base)
     env.pop(_PROVIDER_CLEARED_ENV, None)
     removed = {EXPERIMENT_CONFIG_ENV, DISABLED_EXPERIMENT_CONFIG_ENV, POLICY_CREDENTIAL_ENV}
@@ -62,6 +65,34 @@ def provider_subprocess_env(
         env.update(dict.fromkeys(removed, ""))
         env[_PROVIDER_CLEARED_ENV] = ",".join(sorted(removed))
     return env
+
+
+# The Claude SDK drops an inherited CLAUDECODE and sets its own entrypoint.
+_SDK_OWNED_ENV = frozenset({"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"})
+
+
+def provider_env_delta(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """What a Claude SDK subprocess must see differently from this process.
+
+    The SDK merges ``options.env`` over this process's environment, so only the
+    changes are passed: the agent spawn ``PATH``, *overrides* (the gateway
+    pins), and blanks for routing variables this process holds. An empty value
+    already counts as unset and is not blanked again. The marker names the
+    blanked routing variables so a root-bound Bobi CLI child restores them from
+    its runtime ``.env``."""
+    from bobi.env import agent_spawn_env
+
+    wanted = provider_subprocess_env({**agent_spawn_env(), **(overrides or {})})
+    delta = {name: value for name, value in wanted.items()
+             if os.environ.get(name) != value and name not in _SDK_OWNED_ENV}
+    withheld = sorted(name for name, value in os.environ.items()
+                      if value and name not in wanted and name not in _SDK_OWNED_ENV)
+    delta.update(dict.fromkeys(withheld, ""))
+    routing = [name for name in withheld
+               if name in {EXPERIMENT_CONFIG_ENV, DISABLED_EXPERIMENT_CONFIG_ENV, POLICY_CREDENTIAL_ENV}]
+    if routing:
+        delta[_PROVIDER_CLEARED_ENV] = ",".join(routing)
+    return delta
 
 
 @dataclass(frozen=True)

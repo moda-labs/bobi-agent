@@ -160,6 +160,11 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         stage = "config"
         config = load_experiment()
         if config is None:
+            from bobi.config import _UNRESTORED_PROVIDER_ENV
+
+            if EXPERIMENT_CONFIG_ENV in _UNRESTORED_PROVIDER_ENV:
+                # A provider launch withheld the parent's config and this runtime's .env has none.
+                return recorded_fallback("routing_config_unrestored")
             return fallback
         policy_config = config.policy
         fingerprint = config.fingerprint()
@@ -190,12 +195,19 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         model = config.control_model
         metadata: dict[str, object] = {"name": policy_config.name, "version": policy_config.version,
                                        "mode": policy_config.mode, "egress": policy_config.prompt_egress}
+        secrets: tuple[str, ...] = ()
+        if policy_config.prompt_egress != "none":
+            from bobi.config import project_env
+            from bobi.redact import env_secret_values
+
+            # The runtime's own credentials never leave in the task text, whatever their shape.
+            secrets = env_secret_values(project_env(runtime.root))
         features, redactions = build_features(
             prompt=ctx.prompt, repo_path=ctx.repo_path, entry_point=ctx.entry_point,
             role=ctx.role, brain=ctx.brain, phase=ctx.phase,
             workflow_name=ctx.workflow_name, step_name=ctx.step_name,
             prompt_egress=policy_config.prompt_egress,
-            max_prompt_bytes=policy_config.max_prompt_bytes,
+            max_prompt_bytes=policy_config.max_prompt_bytes, secrets=secrets,
         )
         request = PolicyRequest(config.feature_schema_version, features,
             policy_config.candidate_models, config.control_model, policy_config.version)

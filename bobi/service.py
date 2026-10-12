@@ -618,6 +618,10 @@ def run_manager_from_config(
     from bobi.sdk import set_project_root
 
     set_project_root(project_path)
+    # The supervisor names itself collector owner for this manager only: read
+    # it, then drop it so no agent, tool or nested manager spawned from here
+    # skips its own collector.
+    collector_owner = os.environ.pop("BOBI_METRICS_COLLECTOR_OWNER", "").strip()
 
     from bobi.brain import set_process_brain_from_config
 
@@ -659,7 +663,6 @@ def run_manager_from_config(
         from bobi.metrics.collector import MetricsCollectorService
         from bobi.metrics.runtime import ENABLED_MODES, resolve_mode
 
-        collector_owner = os.environ.get("BOBI_METRICS_COLLECTOR_OWNER", "").strip()
         if resolve_mode() in ENABLED_MODES and collector_owner != "supervisor":
             metrics_collector = MetricsCollectorService(project_path)
             metrics_collector.start()

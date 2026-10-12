@@ -973,6 +973,25 @@ class Response:
         return self._body
 
 
+@pytest.mark.parametrize("alias", ["metrics_summary", "metrics_turn"])
+def test_client_never_sends_the_operator_token_over_cleartext_to_a_remote_host(monkeypatch, alias):
+    sent = []
+    monkeypatch.setattr("bobi.admin_client.http.post", lambda url, **kwargs: sent.append(url))
+    monkeypatch.setattr("bobi.admin_client.http.get", lambda url, **kwargs: sent.append(url))
+    with pytest.raises(AdminClientError, match="https"):
+        run_admin_command(base_url="http://events.example.com:8080", token="secret", fleet="f",
+                          instance="i", alias=alias, args={"turn_id": "t1"})
+    assert sent == []
+
+
+def test_client_allows_cleartext_to_loopback(monkeypatch):
+    monkeypatch.setattr("bobi.admin_client.http.post", lambda url, **kwargs: Response(
+        202, {"command_id": "c1", "status": "done", "result": {"usage": {}}}))
+    result = run_admin_command(base_url="http://127.0.0.1:8787", token="secret", fleet="f",
+                               instance="i", alias="metrics_summary", args={})
+    assert result["status"] == "done"
+
+
 def test_client_maps_alias_and_polls_terminal_result(monkeypatch):
     calls = []
     monkeypatch.setattr("bobi.admin_client.http.post", lambda url, **kwargs: (

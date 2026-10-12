@@ -58,7 +58,7 @@ and instructions must be non-empty. Explicit null/empty defaults are rejected.
 To classify actual task text in production,
 explicitly set `prompt_egress` to `redacted`; otherwise only structural context
 is sent. The web editor offers this as **Prompt sent to JEV**, defaulting a new
-policy to redacted.
+policy to metadata only (`none`), the same as a hand-written config.
 
 Saving checks that the policy can run on the agent. A pinned `brain` must match
 the agent's brain (`agent.yaml` `brain.kind`, else `BOBI_BRAIN` in the agent's
@@ -205,6 +205,10 @@ export BOBI_AGENT_NAME="my-agent"
 export METRICS_DB="$BOBI_HOME/agents/$BOBI_AGENT_NAME/run/state/metrics/metrics.db"
 sqlite3 -readonly "$METRICS_DB" 'PRAGMA integrity_check; PRAGMA foreign_key_check;'
 ```
+
+The database holds a copy of every spool payload, so it is created at mode
+0600 like the spool segments (its `-wal` and `-shm` follow); one created looser
+by an earlier version is tightened on the next open.
 
 
 ## Exact accounting
@@ -410,7 +414,9 @@ a query that misses its one-second deadline returns `query_too_slow` (do not
 retry; narrow the range or filters); missing storage returns `metrics_not_ready`.
 A query's cost follows the turns in its range, not the size of the history:
 `best_usage` picks each turn's best rows through the turn index. Session pagination uses
-filter-bound cursors. Protect the fleet operator token.
+filter-bound cursors. Protect the fleet operator token: `bobi admin` refuses an
+`--url` that is neither `https` nor a loopback address, since every request
+carries it.
 
 ```bash
 bobi admin metrics_turn --url "$BOBI_ADMIN_URL" --fleet "$BOBI_FLEET"   --instance "$BOBI_INSTANCE" --args '{"turn_id":"<turn-id>"}' --wait --json

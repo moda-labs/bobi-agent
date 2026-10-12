@@ -3,20 +3,25 @@
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 
-from bobi.redact import redact_secrets
+from bobi.redact import redact_secrets, scrub_values
 
 _ABSOLUTE_PATH = re.compile(
     r'''(?P<quote>["'`])(?P<quoted>(?:[A-Za-z]:[\\/]|\\\\|/)[^\r\n]*?)(?P=quote)'''
     r'''|(?<![\w:/])(?:[A-Za-z]:[\\/]|\\\\|/)[^\s"'<>`]+'''
 )
 
-def prepare_task(prompt: str, *, repo_path: str, max_bytes: int) -> tuple[str, int]:
+def prepare_task(prompt: str, *, repo_path: str, max_bytes: int,
+                 secrets: tuple[str, ...] = ()) -> tuple[str, int]:
+    """The task text a policy may receive: memory removed, the runtime's own
+    credential values (*secrets*) and secret shapes redacted, paths relativized."""
     if max_bytes < 1:
         raise ValueError("prompt byte limit must be positive")
     memory = re.search(r"(?m)^## Long-Term Memory\s*$", prompt)
     if memory:
         prompt = prompt[:memory.start()]
+    prompt, scrubbed = scrub_values(prompt, secrets)
     prompt, redactions = redact_secrets(prompt)
+    redactions += scrubbed
     windows_root = PureWindowsPath(repo_path)
     root = (windows_root if windows_root.is_absolute()
             else PurePosixPath(repo_path) if repo_path.startswith("/") else None)
@@ -49,7 +54,8 @@ def prepare_task(prompt: str, *, repo_path: str, max_bytes: int) -> tuple[str, i
 def build_features(*, prompt: str, repo_path: str, entry_point: str, role: str,
                    brain: str, phase: str = "", workflow_name: str = "",
                    step_name: str = "", prompt_egress: str,
-                   max_prompt_bytes: int = 8192) -> tuple[dict[str, object], int]:
+                   max_prompt_bytes: int = 8192,
+                   secrets: tuple[str, ...] = ()) -> tuple[dict[str, object], int]:
     if prompt_egress not in {"none", "redacted"}:
         raise ValueError("explicit prompt egress is required")
     features: dict[str, object] = {"prompt_bytes": len(prompt.encode("utf-8"))}
@@ -62,6 +68,6 @@ def build_features(*, prompt: str, repo_path: str, entry_point: str, role: str,
         features[name] = value
     if prompt_egress == "none":
         return features, 0
-    task, redactions = prepare_task(prompt, repo_path=repo_path, max_bytes=max_prompt_bytes)
+    task, redactions = prepare_task(prompt, repo_path=repo_path, max_bytes=max_prompt_bytes, secrets=secrets)
     features["task"] = task
     return features, redactions

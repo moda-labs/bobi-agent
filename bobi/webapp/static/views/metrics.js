@@ -427,6 +427,7 @@ const FALLBACK_TEXT = {
   routing_brain_mismatch: "policy is pinned to a different brain than this agent runs",
   routing_sticky_stale: "resumed session's saved route no longer matches the policy",
   routing_sticky_invalid: "resumed session's saved route could not be read",
+  routing_config_unrestored: "the parent's routing config was withheld and this agent's run/.env has none",
   admission_rejected: "metrics store did not accept the route",
 };
 
@@ -2375,8 +2376,8 @@ export function mountMetrics(element, { api, name, session = "" }) {
           <div class="jev-form-group">
             <label class="jev-field-label" for="jev-config-egress">Prompt sent to JEV</label>
             <select id="jev-config-egress" aria-describedby="jev-egress-hint">
-              <option value="redacted">Redacted task text (recommended)</option>
-              <option value="none">Metadata only (strict privacy)</option>
+              <option value="none">Metadata only (default)</option>
+              <option value="redacted">Redacted task text (more accurate routing)</option>
             </select>
             <p class="jev-form-hint" id="jev-egress-hint"></p>
           </div>
@@ -2436,7 +2437,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
       redacted: "JEV reads the task with secrets, credentials and local paths removed, so it can judge difficulty. Test Routing sends the same.",
       none: "JEV sees only prompt size, role and entry point, never the task text. Routing is less accurate. Test Routing sends the same.",
     };
-    egressInput.value = cfg.prompt_egress === "none" ? "none" : "redacted";
+    egressInput.value = cfg.prompt_egress === "redacted" ? "redacted" : "none";
     const syncEgress = () => { egressHint.textContent = EGRESS_HINTS[egressInput.value]; };
     syncEgress();
     egressInput.addEventListener("change", syncEgress);

@@ -500,6 +500,31 @@ def test_make_session_scrubs_metrics_routing_secrets(monkeypatch):
         assert name in captured["env"]["BOBI_INTERNAL_PROVIDER_CLEARED_ENV"].split(",")
 
 
+@pytest.mark.parametrize("routing_env", [{}, {"TYPESAFE_API_KEY": "", "BOBI_METRICS_EXPERIMENT_JSON": ""}])
+def test_make_session_passes_only_what_differs_from_this_process(monkeypatch, routing_env):
+    import os
+
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+    for name in ("TYPESAFE_API_KEY", "BOBI_METRICS_EXPERIMENT_JSON", "BOBI_METRICS_EXPERIMENT_DISABLED_JSON"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in routing_env.items():
+        monkeypatch.setenv(name, value)  # empty counts as unset
+    captured, _options = _capture_options()
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
+
+    env = captured.get("env") or {}
+    # The SDK merges options.env over this process's env and owns these two.
+    assert "CLAUDECODE" not in env and "CLAUDE_CODE_ENTRYPOINT" not in env
+    assert not {"TYPESAFE_API_KEY", "BOBI_METRICS_EXPERIMENT_JSON",
+                "BOBI_INTERNAL_PROVIDER_CLEARED_ENV"} & set(env)
+    assert all(os.environ.get(name) != value for name, value in env.items())
+
+
 def test_make_session_max_buffer_size_env_override(monkeypatch):
     monkeypatch.setenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", str(8 * 1024 * 1024))
     captured, _options = _capture_options()

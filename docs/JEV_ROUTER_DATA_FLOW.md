@@ -166,7 +166,15 @@ rotation and stale-token recovery pass `preserve_route=True` and keep it.
 | `task` | Only with `prompt_egress: redacted` |
 
 The task text is prepared by stripping any `## Long-Term Memory` section,
-applying `redact_secrets` (`bobi/redact.py`), replacing paths inside the repo
+replacing the exact value of every credential-named variable in the runtime
+environment (`run/.env` plus the process env: a name with a `_` segment such as
+`KEY`, `TOKEN`, `SECRET`, `PASS`, `PASSWORD`, `PWD`, `CREDENTIAL`, `AUTH`,
+`COOKIE` or `PRIVATE`, but never `PWD`, `OLDPWD`, `XAUTHORITY` or `*_SOCK`;
+values of 6+ characters that are not paths or booleans, and numbers only under
+password-like names), applying `redact_secrets` (`bobi/redact.py`: known token
+shapes, `NAME=value` and quoted `"name": "value"` pairs for secret-like names
+including upper-case env-style `*_TOKEN`, `*_KEY` and `*_PASS`, and
+`scheme://user:pass@` userinfo), replacing paths inside the repo
 with relative ones and paths outside it with `[path]`, and truncating to
 `max_prompt_bytes` as head + tail on a UTF-8 boundary. Transcripts, system
 prompts, file contents and environment variables are never sent.
@@ -268,8 +276,12 @@ After a decision, these run `control_model` and are stored as the row's
 Without a decision, the session runs its configured model and the reason is
 stored in the session's `router_fallback` metadata: `routing_brain_mismatch`,
 `routing_sticky_stale`, `routing_sticky_invalid`, `routing_config_invalid`,
-`routing_policy_unavailable`, `routing_metrics_unavailable`,
-`routing_unavailable`. `admission_rejected` (the producer refused the session
+`routing_config_unrestored`, `routing_policy_unavailable`,
+`routing_metrics_unavailable`, `routing_unavailable`.
+`routing_config_unrestored` means a provider launch withheld the parent's
+routing config from this process and this process's runtime `.env` has none to
+restore: the parent had it as real process env, this process belongs to an
+agent without routing, or routing was disabled since the parent started. `admission_rejected` (the producer refused the session
 record, so nothing is enrolled) can only be logged.
 
 The no-decision reasons and `admission_rejected` are also written as JSON
@@ -305,9 +317,12 @@ finding a stale route.
 - Task text, policy responses and free-text reasons are never stored or logged;
   `tier` is stored only if it matches `^[a-z0-9_]{1,64}$`.
 - `provider_subprocess_env` removes `BOBI_METRICS_EXPERIMENT_JSON`,
-  `BOBI_METRICS_EXPERIMENT_DISABLED_JSON` and `TYPESAFE_API_KEY` from Claude and Codex subprocesses. Claude launch options
-  blank them explicitly because the SDK merges options over the parent
-  environment. A non-secret marker names the blanked variables so root-bound
+  `BOBI_METRICS_EXPERIMENT_DISABLED_JSON` and `TYPESAFE_API_KEY` from Claude
+  and Codex subprocesses. The Claude SDK merges `options.env` over the parent
+  environment, so Claude launches pass only a delta (`provider_env_delta`): the
+  spawn `PATH`, gateway pins, and blanks for the routing variables this process
+  actually holds (an empty value counts as unset). `CLAUDECODE` and
+  `CLAUDE_CODE_ENTRYPOINT` are left to the SDK. A non-secret marker names the blanked variables so root-bound
   Bobi CLI children restore them from the runtime `.env`; provider launches
   scrub them again.
 - The JEV config and sandbox endpoints return whether the key is set, never the

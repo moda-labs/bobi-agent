@@ -1294,7 +1294,8 @@ class TestRoutingConfig:
         url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
         config = _client().get(url).json()
         assert config["agent_brain"] == brain and "gateway" not in config
-        assert config["brain"] == "auto" and config["prompt_egress"] == "redacted"
+        # A new policy sends no task text until the operator opts in.
+        assert config["brain"] == "auto" and config["prompt_egress"] == "none"
         response = _client().post(url, json={"mode": "shadow", "control_model": candidates[0],
             "candidate_models": candidates, "roles": ["engineer"], "instructions": "Route by difficulty."})
         if problem:
@@ -1304,8 +1305,8 @@ class TestRoutingConfig:
         assert response.status_code == 200, response.text
         saved = json.loads(parse_env_file(paths.env_path(bobi_install.repo_path))["BOBI_METRICS_EXPERIMENT_JSON"])
         # The policy follows whichever brain the agent runs (the default, so not
-        # written) and keeps the chosen egress.
-        assert "brain" not in saved and saved["prompt_egress"] == "redacted"
+        # written) and sends metadata only.
+        assert "brain" not in saved and saved["prompt_egress"] == "none"
         assert response.json()["config_warnings"] == []
 
     def test_jev_pinned_brain_must_match_the_agent(self, bobi_install, monkeypatch):
@@ -1950,7 +1951,8 @@ class TestRoutingConfig:
         from tests.metrics.test_routing import concise_config
 
         paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(
-            {**concise_config(), "prompt_egress": egress}) + "\nTYPESAFE_API_KEY=saved-test-key\n")
+            {**concise_config(), "prompt_egress": egress}) + "\nTYPESAFE_API_KEY=saved-test-key\n"
+            "BILLING_DB_PASS=billing-local-pass\n")
         client_class = httpx.AsyncClient
         sent = []
         def handler(request):
@@ -1962,8 +1964,10 @@ class TestRoutingConfig:
         monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
             lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
         response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-route",
-                                  json={"prompt": "Refactor the billing module"})
+                                  json={"prompt": "Refactor the billing module using billing-local-pass"})
         assert response.status_code == 200, response.text
         assert response.json()["prompt_egress"] == egress
         assert ("task" in sent[0]) is (egress == "redacted")
-        assert sent[0]["prompt_bytes"] == len("Refactor the billing module")
+        assert sent[0]["prompt_bytes"] == len("Refactor the billing module using billing-local-pass")
+        # The agent's own credential values never leave, whatever their shape.
+        assert sent[0].get("task", "") in ("", "Refactor the billing module using [redacted]")

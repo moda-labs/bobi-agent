@@ -154,6 +154,8 @@ def test_make_session_injects_gateway_env_when_pinned(monkeypatch):
 
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:11434")
     monkeypatch.setenv("BOBI_BRAIN_MODEL", "qwen3:14b")
+    # An ambient vendor key must be blanked, not inherited, under a gateway.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-vendor-key")
     with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
         ClaudeSDKClient=MagicMock(),
         ClaudeAgentOptions=_options,
@@ -169,6 +171,8 @@ def test_make_session_injects_gateway_env_when_pinned(monkeypatch):
 
 
 def test_make_session_native_without_pin(monkeypatch):
+    # The spawn PATH puts the user bin dirs first; a parent PATH without them differs.
+    monkeypatch.setenv("PATH", "/usr/bin")
     captured = {}
 
     def _options(**kwargs):
@@ -202,6 +206,7 @@ async def test_stream_once_injects_gateway_env(monkeypatch):
         TextBlock=type("TB", (), {}),
     )
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:4000")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-vendor-key")
     monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     with patch.dict("sys.modules", {"claude_agent_sdk": fake_sdk}):
         async for _ in ClaudeBrain().stream_once(

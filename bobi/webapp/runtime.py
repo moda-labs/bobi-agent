@@ -905,13 +905,13 @@ class LocalRuntime(TeamRuntime):
             if not isinstance(key, str) or len(key) > 4096 or any(char in key for char in "\r\n"):
                 raise ValueError("invalid simulation credential")
             policy = TypeSafePolicy(policy_config, api_key=key)
-            secrets = tuple(value for value in (key, env.get(policy_config.credential_env, "")) if value)
-            for secret in secrets:
-                prompt = prompt.replace(secret, "[redacted]")
+            from bobi.redact import env_secret_values
+
+            secrets = tuple(sorted({key, *env_secret_values(env)} - {""}, key=len, reverse=True))
             features, _ = build_features(prompt=prompt,
                 repo_path=str(root), role=role,
                 entry_point=entry_point, brain=brain, prompt_egress=policy_config.prompt_egress,
-                max_prompt_bytes=policy_config.max_prompt_bytes)
+                max_prompt_bytes=policy_config.max_prompt_bytes, secrets=secrets)
             features["prompt_bytes"] = prompt_bytes
         except (ValueError, TypeError, AttributeError, OSError, RecursionError):
             raise MetricsQueryError("invalid sandbox input or JEV configuration", "invalid_simulation") from None
@@ -1244,8 +1244,8 @@ class LocalRuntime(TeamRuntime):
             "credential_env": POLICY_CREDENTIAL_ENV,
             "endpoint": DEFAULT_ENDPOINT,
             "brain": "auto",
-            # A new policy recommends redacted task text.
-            "prompt_egress": "redacted",
+            # A new policy sends no task text until the operator opts in.
+            "prompt_egress": SHORT_DEFAULTS["prompt_egress"],
             "instructions": "",
             "applies_on": "agent_restart",
             "restart_required": True,

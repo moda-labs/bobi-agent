@@ -46,28 +46,29 @@ be served over TLS.
 
 ## Model-policy egress
 
-Semantic model policies introduce a separate outbound destination from the
-brain provider. The built-in TypeSafe adapter calls
-`https://api.typesafe.ai/v1/systemone`; an operator-selected HTTPS endpoint is
-another trusted destination, not an event-bus permission. Include this endpoint
-in egress-proxy controls (epic #395). Policy adapters are executable plugins and
-must be trusted before installation.
+JEV model routing introduces a separate outbound destination from the brain
+provider. The TypeSafe policy calls `https://api.typesafe.ai/v1/systemone`; an
+operator-set `endpoint` in the short-form config is another trusted destination,
+not an event-bus permission. Include it in egress-proxy controls (epic #395).
+The config lives in `BOBI_METRICS_EXPERIMENT_JSON` (short form only; see
+[JEV_ROUTER_DATA_FLOW.md](JEV_ROUTER_DATA_FLOW.md)).
 
-- Prompt transmission requires explicit `policy.egress.prompt`: `none` sends
-  structured routing features only; `redacted` also sends a bounded task excerpt.
-  Features-only requests still disclose role/workflow identifiers and prompt size.
+- Task text leaves the host only with `prompt_egress: redacted`. The default,
+  for hand-written configs and for policies saved from the web editor alike, is
+  `none`: structured routing features only. Features still disclose the role,
+  entry point, workflow/step names and prompt size.
 - Redaction is best-effort, not a data-loss-prevention guarantee. Memory blocks
-  are removed, known credential shapes are scrubbed, and external absolute paths
-  are replaced. Do not opt into prompt egress for restricted workloads without
+  are removed; the exact values of the runtime's credential-named variables,
+  known token shapes, secret `name=value` / `"name": "value"` pairs and URL
+  userinfo are scrubbed; external absolute paths are replaced. Do not opt into prompt egress for restricted workloads without
   reviewing the destination and account-specific processing/retention terms.
-- The control arm makes no policy request. Shadow mode can still send treatment
-  input to the policy even though the control model executes; shadow is not an
-  offline or no-egress mode.
-- Policy keys belong in the environment variable named by `credential_env`, not
-  experiment JSON or adapter options. Configured and registered keys, plus
-  `TYPESAFE_API_KEY`, are removed from brain subprocess environments even before
-  policy initialization, including Codex MCP preflight. Never put credentials
-  in candidate criteria or instructions.
+- Shadow mode still calls the policy (and sends the task excerpt when egress is
+  `redacted`) even though the control model executes; shadow is not an offline
+  or no-egress mode. A disabled policy (mode off in the editor) sends nothing.
+- The policy key is `TYPESAFE_API_KEY` in the environment or the runtime
+  `run/.env`, never in the config JSON. The key and the routing config (active
+  or disabled) are removed from Claude and Codex subprocess environments. Never
+  put credentials in candidate criteria or instructions.
 - The TypeSafe adapter uses per-call HTTP clients, follows no redirects, retries
   neither errors nor rate limits, and parses bounded responses. Error reporting
   contains reason codes rather than response bodies. Raw task/response text must
@@ -75,8 +76,8 @@ must be trusted before installation.
 - Public TypeSafe documentation states that customer requests/responses are not
   used for training. Zero data retention is an enterprise offering, not a default
   guarantee. Verify the actual account contract before enabling live prompt egress.
-- Sticky route records contain model/experiment metadata, not prompts or raw
-  assignment keys. Protect the runtime state directory against unauthorized
+- Sticky route records contain model/experiment metadata, not prompts or
+  credentials. Protect the runtime state directory against unauthorized
   writes: a locally modified sticky record is not a trusted policy decision.
 
 ## Event-bus trust: bubbles and proof-of-access

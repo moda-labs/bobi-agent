@@ -33,7 +33,7 @@ from bobi.metrics.router import (
 from bobi.metrics.routing import RoutingContext, resolve_route
 from bobi.metrics.runtime import MetricsRuntime
 from bobi.metrics.store import connect
-from bobi.redact import redact_secrets
+from bobi.redact import REDACTION_PLACEHOLDER, env_secret_values, redact_secrets
 from bobi.sdk import load_session_route, save_session_id, save_session_route
 from bobi.session import Session
 from bobi.setup.actions import redact_secrets as setup_redact
@@ -133,6 +133,82 @@ def test_shared_redaction_preserves_setup_import():
     assert setup_redact is redact_secrets
     assert redact_secrets("API_KEY=private-value")[0] == "API_KEY=[redacted]"
     assert redact_secrets("sk-abcdefghijklmnopqrstu-other-private")[0] == "[redacted]"
+
+
+def test_redaction_leaves_words_that_merely_contain_sk_dash():
+    text = "check out branch task-implement-fine-grained-metrics and ask-for-review"
+    assert redact_secrets(text) == (text, 0)
+
+
+@pytest.mark.parametrize("text,leaked", [
+    ("DB_PASSWORD=hunter2", "hunter2"),
+    ('{"password": "hunter2"}', "hunter2"),
+    ("{'client_secret': 'hunter2'}", "hunter2"),
+    ("GH_TOKEN=gho_short123", "gho_short123"),
+    ("export SLACK_TOKEN=abc123", "abc123"),
+    ("postgres://admin:pw@db/prod", "admin:pw"),
+    ("SECRET_KEY=django-local", "django-local"),
+    ("DB_PASS=hunter2", "hunter2"),
+    ("AWS_SECRET_ACCESS_KEY=abc/def", "abc/def"),
+    ('{"password": "it\'s a secret"}', "s a secret"),
+    ("_PASSWORD=hunter2", "hunter2"),
+    ("__API_KEY=abcdef", "abcdef"),
+    ("secret_key = 'django-local'", "django-local"),
+])
+def test_redaction_catches_common_secret_shapes(text, leaked):
+    redacted, count = redact_secrets(text)
+    assert leaked not in redacted and count >= 1
+    assert REDACTION_PLACEHOLDER in redacted
+
+
+def test_redaction_keeps_ordinary_token_prose():
+    for text in ("max token: 500", "the token count is 12", "postgres://db/prod", "key: 5",
+                 "the keyboard and compass are in the passport case", "id = Column(primary_key=True)",
+                 "rows.sort(sort_key=lambda row: row.id)", "next_page_token: str", "first_pass: done"):
+        assert redact_secrets(text) == (text, 0)
+
+
+@pytest.mark.parametrize("text", ["a." * 100_000, "a_" * 50_000 + "=x", "x://" + "a:" * 50_000],
+                         ids=["dotted", "underscored", "userinfo"])
+def test_redaction_stays_linear_on_adversarial_text(text):
+    started = time.monotonic()
+    redact_secrets(text)
+    assert time.monotonic() - started < 1.0
+
+
+def test_env_scrubbing_skips_paths_numbers_and_process_bookkeeping():
+    env = {"PWD": "/repo", "OLDPWD": "/home/dev", "SSH_AUTH_SOCK": "/tmp/agent.sock",
+           "XAUTHORITY": "/home/dev/.Xauthority", "MAX_TOKENS": "4096", "USE_AUTH": "true",
+           "KEYBOARD_LAYOUT": "dvorak-programmer", "STRIPE_KEY": "rk_local_123456",
+           "AUTH_TIMEOUT": "300000", "DB_PASSWORD": "12345678", "API_TOKEN": "~tilde-local"}
+    assert set(env_secret_values(env)) == {"rk_local_123456", "12345678", "~tilde-local"}
+    task, _ = prepare_task("edit /repo/app/main.py in /application", repo_path="/repo", max_bytes=8192,
+                           secrets=env_secret_values(env))
+    assert task == "edit app/main.py in [path]"
+
+
+def test_task_scrubs_exact_secret_values_from_the_environment():
+    env = {"DB_PASS": "hunter2", "STRIPE_WEBHOOK_SECRET": "whsec-local", "BOBI_BRAIN": "claude",
+           "EMPTY_TOKEN": ""}
+    task, count = prepare_task("run the deploy with hunter2 then whsec-local on claude",
+                               repo_path="/repo", max_bytes=8192, secrets=env_secret_values(env))
+    assert task == "run the deploy with [redacted] then [redacted] on claude" and count == 2
+
+
+def test_routed_task_never_carries_a_runtime_credential_value(monkeypatch, tmp_path):
+    from bobi import paths
+
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce", prompt_egress="redacted")))
+    paths.env_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    paths.env_path(tmp_path).write_text("DB_PASS=hunter2-local\nBOBI_BRAIN=codex\n")
+    calls = fixed_policy(monkeypatch)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        asyncio.run(resolve_route(replace(context(), prompt="connect with hunter2-local on codex"), runtime=runtime))
+    finally:
+        assert runtime.close(timeout=2)
+    [request] = calls
+    assert request.features["task"] == "connect with [redacted] on codex"
 
 
 def test_task_strips_memory_and_redacts_paths_and_credentials():
@@ -1400,6 +1476,30 @@ def _recorded_fallbacks(runtime, monkeypatch):
         return admit(session_name, decision, **kwargs)
     monkeypatch.setattr(runtime, "admit_route", spy)
     return recorded
+
+
+def test_routing_withheld_from_a_child_and_not_restored_is_recorded(monkeypatch, tmp_path):
+    import os
+
+    from bobi import config as config_module
+    from bobi.config import load_dotenv
+
+    (tmp_path / "package").mkdir()
+    (tmp_path / ".env").write_text("UNRELATED=1\n")
+    # A provider launch blanked the routing config the parent had as real process env.
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "")
+    monkeypatch.setenv("BOBI_INTERNAL_PROVIDER_CLEARED_ENV", "BOBI_METRICS_EXPERIMENT_JSON")
+    monkeypatch.setattr(config_module, "_UNRESTORED_PROVIDER_ENV", set())
+    load_dotenv(tmp_path)
+    assert "BOBI_METRICS_EXPERIMENT_JSON" not in os.environ
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    recorded = _recorded_fallbacks(runtime, monkeypatch)
+    try:
+        outcome = asyncio.run(resolve_route(context(), runtime=runtime))
+        assert outcome.model == "configured" and outcome.reason == "routing_config_unrestored"
+        assert recorded == ["routing_config_unrestored"]
+    finally:
+        assert runtime.close(timeout=2)
 
 
 @pytest.mark.parametrize("policy_brain,agent_brain,routed", [
