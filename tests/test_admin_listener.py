@@ -273,6 +273,23 @@ def test_usage_command_serves_the_legacy_summary_when_admission_is_refused(
     assert data["result"] == _legacy_only(3600, "metrics_busy")
 
 
+def test_runs_never_reads_metrics_on_the_dispatch_thread(tmp_path, monkeypatch):
+    # The hosted runs table polls this every few seconds on the thread that
+    # serves stop and restart; it shows registry figures only.
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("metrics read on the admin dispatch thread")
+
+    monkeypatch.setattr("bobi.webapp.runs.metrics_session_usage", forbidden)
+    listener = _listener()
+    listener.project_root = tmp_path
+    (tmp_path / "state" / "metrics").mkdir(parents=True)
+    (tmp_path / "state" / "metrics" / "metrics.db").touch()
+    listener._dispatch(_event("runs", command_id="r1", args={}))
+    data = listener._published[0][2]
+    assert data["status"] == "done", data
+    assert data["result"]["counts"]["all"] == 0
+
+
 def test_refused_usage_never_reads_metrics_on_the_dispatch_thread(tmp_path, monkeypatch):
     # The fallback runs on the thread that also serves stop and restart, so it
     # folds the registry only and never waits on SQLite.

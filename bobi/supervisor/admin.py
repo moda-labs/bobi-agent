@@ -715,6 +715,9 @@ class AdminListener:
             query=str(args.get("query") or ""),
             offset=max(0, offset or 0),
             limit=limit if limit and limit > 0 else DEFAULT_LIMIT,
+            # Polled on the dispatch thread that also serves stop and restart:
+            # registry figures only, never a SQLite read.
+            metrics=False,
         )
 
     def _read_overview(self) -> dict:

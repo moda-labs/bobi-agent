@@ -237,7 +237,10 @@ the full set, not the capped rows.
 
 `runs` coerces its pagination args the way the local runtime does: a
 non-positive or unparseable `limit` falls back to the builder default rather
-than failing the command.
+than failing the command. Its usage figures come from the session registry only; unlike the
+local web app, it never reads `metrics.db` for sessions the registry recorded
+no usage for, because it runs on the thread that also serves lifecycle
+commands.
 
 `usage` preserves the legacy fold and additively includes
 `metrics_schema_version`, fine-grained `totals`, optional `groups`, and

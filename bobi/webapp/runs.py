@@ -507,7 +507,8 @@ def build_usage_summary(root: Path, *, window_seconds: float,
 
 def build_runs(root: Path, *, manager_name: str = "", status: str = "",
                query: str = "", offset: int = 0,
-               limit: int = DEFAULT_LIMIT, now: float | None = None) -> dict:
+               limit: int = DEFAULT_LIMIT, now: float | None = None,
+               metrics: bool = True) -> dict:
     """Everything this agent did, newest first, live runs at the top.
 
     ``status`` and ``query`` filter before ``offset`` / ``limit`` paginate.
@@ -516,7 +517,7 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     and the pager stay honest.
     """
     now = time.time() if now is None else now
-    rows = _all_rows(root, manager_name=manager_name, now=now)
+    rows = _all_rows(root, manager_name=manager_name, now=now, metrics=metrics)
 
     counts = {"all": len(rows), "running": 0, "awaiting_action": 0,
               "failed": 0}
