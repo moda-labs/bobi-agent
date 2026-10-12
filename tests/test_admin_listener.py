@@ -357,6 +357,28 @@ def test_metrics_executor_capacity_matches_documented_workers_and_queue():
     assert METRICS_QUERY_CAPACITY == 12
 
 
+def test_metrics_admission_refuses_only_the_request_past_capacity(monkeypatch):
+    listener = _listener()
+    listener._metrics_shutdown_grace_seconds = 0.01
+    release = threading.Event()
+
+    def blocked_query(_command, _args):
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    monkeypatch.setattr(listener, "_execute_metrics_query", blocked_query)
+    try:
+        for index in range(METRICS_QUERY_CAPACITY + 1):
+            listener._dispatch(_event("usage_turn", command_id=f"query-{index}",
+                                      args={"turn_id": f"turn-{index}"}))
+        refused = [data for _topic, _source, data in listener._published if data["status"] == "error"]
+        assert [(data["command_id"], data["result"]) for data in refused] == [
+            (f"query-{METRICS_QUERY_CAPACITY}", {"code": "metrics_busy", "retry_after_ms": 250})]
+    finally:
+        release.set()
+        listener.stop()
+
+
 def test_metrics_dispatch_rejects_after_shutdown_begins(monkeypatch):
     listener = _listener()
     listener._metrics_shutdown_grace_seconds = 0.01

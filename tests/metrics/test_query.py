@@ -1290,6 +1290,18 @@ def test_routing_savings_count_each_turn_once_across_model_rows():
     assert savings["escalated_turns"] == 1
 
 
+def test_routing_savings_price_one_hour_cache_writes():
+    from bobi.costs import estimate_cost
+    from bobi.metrics.query import _routing_savings
+
+    row = {**_routed_row("t1", "claude-sonnet-5-5", "sonnet", ["haiku", "sonnet"]),
+           "cache_write_input_tokens": 2000, "cache_write_1h_input_tokens": 2000}
+    one_hour = estimate_cost("gateway", "claude-sonnet-5-5", 1000, 100, 0, 2000, 2000)
+    # One-hour writes bill above five-minute writes; dropping them would undercount.
+    assert one_hour > estimate_cost("gateway", "claude-sonnet-5-5", 1000, 100, 0, 2000, 0)
+    assert _routing_savings([row])["routed_cost_usd"] == pytest.approx(one_hour, abs=1e-6)
+
+
 def test_routing_savings_drop_helper_cost_of_unpriced_turns():
     from bobi.metrics.query import _routing_savings
 

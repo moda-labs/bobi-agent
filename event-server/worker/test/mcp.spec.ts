@@ -302,10 +302,13 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 		expect((usageTurn.inputSchema as { required?: string[] }).required?.sort()).toEqual([
 			"fleet", "instance", "turn_id",
 		]);
+		// Each issues an admin command, which writes a command record: not read-only.
 		for (const name of [
-			"bobi_usage_summary", "bobi_usage_session", "bobi_usage_turn",
+			"bobi_usage_summary", "bobi_usage_session", "bobi_usage_turn", "bobi_read_transcript",
 		]) {
-			expect(tools.find((tool) => tool.name === name)?.annotations?.readOnlyHint).toBe(true);
+			const annotations = tools.find((tool) => tool.name === name)?.annotations;
+			expect(annotations?.readOnlyHint).toBe(false);
+			expect(annotations?.destructiveHint).toBe(false);
 		}
 
 		// `reason` is the audit control on lifecycle: it has to be REQUIRED at the

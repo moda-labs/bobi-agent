@@ -946,3 +946,15 @@ def test_a_prompt_that_is_not_valid_utf8_still_runs_its_turn(tmp_path, monkeypat
 @pytest.mark.parametrize("text", ["plain", "half an emoji \ud83d", ""])
 def test_prompt_bytes_counts_any_text(text):
     assert metrics_runtime.prompt_bytes(text) == len(text.encode("utf-8", "surrogatepass"))
+
+
+def test_a_metrics_startup_failure_never_fails_the_turn(monkeypatch, tmp_path):
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("metrics store unavailable")
+
+    monkeypatch.setattr(metrics_runtime, "get_runtime", unavailable)
+    monkeypatch.chdir(tmp_path)
+    observation = metrics_runtime.observe_turn("agent", provider="openai")
+    observation.finish(status="completed")
+    # The fallback observer records nothing anywhere.
+    assert list(tmp_path.iterdir()) == []

@@ -210,7 +210,7 @@ an incident.
 | `transcript` | `{"session": "<name>", "detail": bool}` (both optional) | `{"messages": [...]}`, plus `{"session", "entries": [...], "usage": {...}}` when `detail` is set |
 | `roster` | — | `{"subagents": [...]}` |
 | `spend` | — | `{"spend": {...}}` |
-| `usage` | `{"window_seconds"?: number, "end_at"?: epoch}`; window defaults to 24 hours | `{"usage": {"window", "jobs", "tokens", "cost_usd", "estimated_cost_usd"}}` |
+| `usage` | `{"window_seconds"?: number, "end_at"?: epoch}` or `{"from", "to"}` (ISO); window defaults to 24 hours. Optional fine-grained filters below | `{"usage": {"window", "jobs", "tokens", "cost_usd", "estimated_cost_usd"}}` |
 | `usage_session` | `{"session_id": string, "cursor"?, "limit"?, "include_turns"?}` | `{"usage_session": {"session", "turns", "next_cursor", "coverage"}}` |
 | `usage_turn` | `{"turn_id": string}` | `{"usage_turn": {"turn", "workflow_steps", "invocations", "tool_executions", "usage_measurements", "cost_measurements", "router_decisions", "coverage"}}` |
 | `session_log` | — | `{"sessions": [...], "counts": {...}, "truncated": bool}` |
@@ -243,7 +243,22 @@ than failing the command.
 `metrics_schema_version`, fine-grained `totals`, optional `groups`, and
 `coverage` when `metrics.db` is available. Unknown token dimensions are `null`,
 not zero. It accepts the legacy `window_seconds`/`end_at` pair or an explicit
-`from`/`to` range, but never both. The legacy fold has no range cap. When the
+`from`/`to` range, but never both; `from`/`to` are ISO times with a UTC offset
+or epoch numbers. The fine-grained part also takes these optional arguments;
+the legacy fold ignores them:
+
+| Argument | Effect |
+|---|---|
+| `session` | turns whose session id or session name matches; ignored when `session_id` or `session_name` is set |
+| `session_id`, `session_name` | turns of that session id, name, or both |
+| `model` | case-insensitive substring of the requested or selected invocation model (totals also match the usage row's model) |
+| `run_key` | turns of one workflow or job run |
+| `experiment_id`, `variant_id` | turns with a router decision for that experiment or variant |
+| `routing` | `jev`/`routed`: turns with a router decision; `direct`/`baseline`/`none`: turns without one; any other value filters nothing |
+| `group_by` | a list of distinct dimensions from `provider`, `model`, `session_id`, `prompt_template_id`, `experiment_id`, `variant_id` |
+| `include_dashboard` | boolean; adds `range`, UTC `buckets` and the `routing` block |
+
+The legacy fold has no range cap. When the
 fine-grained layer cannot serve the request (`metrics_not_ready`,
 `metrics_busy` from the query or from a full or stopping executor,
 `query_too_slow`, or a range over 31 days), `usage` still answers `done` with
@@ -269,8 +284,13 @@ filters) and counts toward `deadline_cancellations`; list responses are capped a
 200 rows and every result is capped at 512 KiB. No prompt, response, tool input,
 tool output, content-derived prompt/tool hash, assignment-key hash, raw provider
 usage, project/local path, or free-form metadata body is returned.
-The heartbeat's existing `metrics` block additively carries a
-`query_executor` object with `accepting`, `active_workers`, `queue_depth`,
+The heartbeat carries a `metrics` block, added with supervisor `0.4.0`:
+`mode` (`disabled` when metrics are off, `unknown` when the collector failed
+to start or its health could not be read), the collector's `status`
+(`starting`, `running`, `standby`, `degraded`, `stopped`, or `disabled`),
+`db_ready`, and the collector's health counters (import lag, spool bytes,
+rejected, quarantined and dropped events, reconciliation counts). It also
+carries a `query_executor` object with `accepting`, `active_workers`, `queue_depth`,
 `rejected_queries`, `deadline_cancellations`, `completed_queries`, and
 `query_latency_ms.{p50,p95,p99}`. Percentiles cover the most recent 1,024
 completed queries and are `null` before the first completion. On shutdown the
@@ -361,7 +381,7 @@ renders.
 ```json
 {
   "deployment":  { "fleet": "...", "instance": "...", "platform": "..." },
-  "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.3.0" },
+  "supervisor":  { "pid": 1, "uptime_s": 1043.2, "version": "0.4.0" },
   "manager": {
     "status": "running" | "idle" | "starting" | "wedged" | "down" | "stopped",
     "pid": 42,
@@ -377,6 +397,7 @@ renders.
   "versions":     { "image": "...", "team_package": "...", "bobi": "0.50.0" },
   "expectations": { "subscriptions": [...], "monitors": [ { "name": "...", "schedule": "..." } ] },
   "event_client": null,
+  "metrics":      { "mode": "enabled", "status": "running", "db_ready": true, "query_executor": { "accepting": true, ... } },
   "generated_at": "2026-07-30T17:04:11Z"
 }
 ```

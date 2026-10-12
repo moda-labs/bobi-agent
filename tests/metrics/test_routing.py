@@ -357,6 +357,16 @@ def policy_runtime_config():
                         ("subagent_phase",), ("engineer",), "none", "{}")
 
 
+def test_confidence_at_the_threshold_is_accepted():
+    import math
+
+    config = policy_runtime_config()
+    result = PolicyResult("cheap", config.min_confidence, None, config.version, None, None)
+    assert guard_result(result, config) is None
+    below = replace(result, confidence=math.nextafter(config.min_confidence, 0))
+    assert guard_result(below, config) == "policy_low_confidence"
+
+
 class _FixedPolicy:
     async def decide(self, request, *, timeout_s):
         return PolicyResult("cheap", 1.0, None, request.pinned_version, None, 0.0)

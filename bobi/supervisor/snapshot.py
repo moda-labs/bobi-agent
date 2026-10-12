@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # container this ships as bundled source with no installed distribution, so an
 # env stamp (set by the image build) or this literal is the source of truth.
 #
-# 0.4.0 adds bounded fine-grained usage session/turn/hotspot/experiment reads.
+# 0.4.0 adds bounded fine-grained usage session/turn reads and the heartbeat metrics block.
 # 0.3.0 adds the rolling usage command used by the fleet MCP summary.
 # 0.2.0 added the single-agent view's six commands (runs / overview /
 # run_details / resume_run / remind_run / close_run) and the additive `detail`

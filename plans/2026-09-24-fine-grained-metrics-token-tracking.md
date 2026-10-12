@@ -979,6 +979,8 @@ Register logically read-only query tools in `event-server/worker/src/mcp.ts`, al
 
 Each tool validates arguments with Zod and returns a pending `command_id` when the supervisor does not answer within the short MCP wait budget. Set `readOnlyHint: true`, `destructiveHint: false`, and `idempotentHint: true`: these tools do not mutate agent or metrics state, and transport/audit records are incidental operational bookkeeping. `bobi_command_result` remains the generic poll mechanism.
 
+Amendment 2026-10-12: the usage tools are `readOnlyHint: false`. Each issues an admin command, which writes a command record, and the server's own rule (on `bobi_read_transcript`) marks such tools not read-only. They stay non-destructive and idempotent.
+
 Security and privacy:
 
 - Reuse the operator-token and bubble-scoped admin boundary documented in `docs/ADMIN_PROTOCOL.md`.

@@ -478,7 +478,9 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 					.max(3)
 					.optional(),
 			}),
-			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+			// Not read-only: it issues an admin command to each instance, which writes
+			// a command record. Non-destructive and safely repeatable.
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 		},
 		async ({ days, fleet: fleetFilter, session_id, run_key, model, experiment_id, variant_id, group_by }) => {
 			const endAtMs = Date.now();
@@ -623,7 +625,9 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 				title,
 				description,
 				inputSchema,
-				annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+				// Not read-only: it issues an admin command, which writes a command
+				// record. Non-destructive and safely repeatable.
+				annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
 			},
 			async (args) => {
 				const values = args as Record<string, unknown>;

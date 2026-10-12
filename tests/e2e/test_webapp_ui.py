@@ -28,6 +28,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +51,13 @@ RESUME_URL = re.compile(r"/resume")
 
 # The runs table pages at 100. One row past it is the whole pager contract.
 PAGE_SIZE = 100
-METRICS_CAPTURES = Path(__file__).resolve().parents[2] / ".tmp/metrics-modernization/hardening/screenshots"
+# Set per test to its tmp_path, so screenshots never land in the checkout.
+METRICS_CAPTURES: Path
+
+
+@pytest.fixture(autouse=True)
+def _metrics_captures(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "METRICS_CAPTURES", tmp_path / "screenshots", raising=False)
 
 
 def _metrics_capture(page, name):
@@ -1750,7 +1757,7 @@ class TestRunModal:
 
         lines = page.locator(".transcript .tr-line")
         expect(lines).to_have_count(3)
-        expect(lines.nth(0).locator(".ts")).to_have_text(re.compile(r"(?:09|16):15:00"))
+        expect(lines.nth(0).locator(".ts")).to_have_text("09:15:00")
         expect(lines.nth(0).locator(".who")).to_have_text("user")
         expect(lines.nth(0).locator(".txt")).to_have_text("fix the flaky test")
         expect(lines.nth(1).locator(".who")).to_have_text("agent")
