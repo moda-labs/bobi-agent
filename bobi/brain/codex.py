@@ -32,6 +32,7 @@ import json
 import time
 from typing import Any, AsyncIterator
 
+from bobi.brain import usage_baseline as baseline_store
 from bobi.brain.base import (
     AssistantText,
     BrainCost,
@@ -290,8 +291,9 @@ class _CodexSession:
         self._effort = effort
         self._runner = runner or _spawn_codex
         self._pending: str | None = None
-        self._usage_baseline: dict[str, Any] = {}
-        self._usage_baseline_ready = not bool(resume)
+        saved = baseline_store.load("codex", resume) if resume else None
+        self._usage_baseline: dict[str, Any] = saved or {}
+        self._usage_baseline_ready = not resume or bool(saved)
         # Effective MCP servers (rendered into config.toml at make_session).
         # Codex has no live status introspection, so the preflight probe reaches
         # each server directly through get_mcp_status below (#428 Stage 4).
@@ -410,6 +412,8 @@ class _CodexSession:
                 )
                 self._usage_baseline = dict(cumulative_usage)
                 self._usage_baseline_ready = True
+                if cumulative_usage and self._thread_id:
+                    baseline_store.save("codex", self._thread_id, self._usage_baseline)
                 # Deliberately do NOT feed codex usage to the manager's context-
                 # rotation metric. codex exec reports a per-turn AGGREGATE (summed
                 # across internal model calls), which over-counts context fill by

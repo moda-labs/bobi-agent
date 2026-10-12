@@ -2,7 +2,18 @@
 
 SCHEMA_VERSION = 1
 # Bump when the best_usage view changes; migrate() rebuilds the view (it holds no data).
-BEST_USAGE_VERSION = 2
+BEST_USAGE_VERSION = 3
+
+
+# Tables whose model column gets a ``model_key`` (``bobi.costs.model_identity``):
+# one model recorded under several spellings (``claude-opus-5-5[1m]``,
+# ``claude-haiku-4-5-20251001``, an alias, a route prefix) shares one key.
+MODEL_KEY_SOURCES = {
+    "llm_invocations": "model_selected",
+    "usage_measurements": "model",
+    "cost_measurements": "model",
+}
+
 
 SCHEMA_SQL = r"""
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -137,6 +148,7 @@ CREATE TABLE IF NOT EXISTS llm_invocations (
     provider TEXT NOT NULL,
     model_requested TEXT,
     model_selected TEXT NOT NULL,
+    model_key TEXT,
     provider_event_id TEXT,
     provider_request_id TEXT,
     started_at_us INTEGER NOT NULL,
@@ -180,6 +192,7 @@ CREATE TABLE IF NOT EXISTS usage_measurements (
     invocation_id TEXT REFERENCES llm_invocations(invocation_id) DEFERRABLE INITIALLY DEFERRED,
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
+    model_key TEXT,
     provider_event_id TEXT,
     measurement_source TEXT NOT NULL,
     is_estimated INTEGER NOT NULL CHECK (is_estimated IN (0, 1)),
@@ -230,6 +243,7 @@ CREATE TABLE IF NOT EXISTS cost_measurements (
     invocation_id TEXT REFERENCES llm_invocations(invocation_id) DEFERRABLE INITIALLY DEFERRED,
     provider TEXT NOT NULL,
     model TEXT,
+    model_key TEXT,
     amount_usd REAL NOT NULL CHECK (amount_usd >= 0),
     measurement_source TEXT NOT NULL,
     is_estimated INTEGER NOT NULL CHECK (is_estimated IN (0, 1)),
@@ -262,6 +276,11 @@ CREATE INDEX IF NOT EXISTS idx_cost_turn ON cost_measurements(turn_id, scope, is
 CREATE INDEX IF NOT EXISTS idx_cost_invocation ON cost_measurements(invocation_id, is_estimated);
 CREATE INDEX IF NOT EXISTS idx_router_experiment ON router_decisions(experiment_id, variant_id, decided_at_us);
 CREATE INDEX IF NOT EXISTS idx_raw_projection ON raw_events(projection_state, projection_not_before_us, received_at_us);
+-- Rows still waiting for a model_key (written by hand or by an older Bobi);
+-- migrate keys them, and this keeps that lookup off a full scan.
+CREATE INDEX IF NOT EXISTS idx_invocations_unkeyed ON llm_invocations(model_selected) WHERE model_key IS NULL;
+CREATE INDEX IF NOT EXISTS idx_usage_unkeyed ON usage_measurements(model) WHERE model_key IS NULL;
+CREATE INDEX IF NOT EXISTS idx_cost_unkeyed ON cost_measurements(model) WHERE model_key IS NULL;
 
 CREATE VIEW IF NOT EXISTS best_usage AS
 WITH candidates AS (
@@ -276,11 +295,6 @@ WITH candidates AS (
         + (u.cache_write_unknown_ttl_input_tokens IS NOT NULL)
         + (u.output_tokens IS NOT NULL)
         + (u.reasoning_output_tokens IS NOT NULL) AS completeness,
-        -- One model under two spellings is one measurement: Claude Code's
-        -- terminal usage names "claude-opus-5-5[1m]" what its transcript
-        -- names "claude-opus-5-5".
-        CASE WHEN instr(u.model, '[') > 0 THEN substr(u.model, 1, instr(u.model, '[') - 1)
-             ELSE u.model END AS model_key,
         CASE u.measurement_source
             WHEN 'provider_reconciled' THEN 70
             -- Claude Code's terminal usage is its billed total for the turn,
@@ -315,11 +329,15 @@ WITH candidates AS (
                 turn_id,
                 COALESCE(invocation_id, ''),
                 provider,
-                model_key
+                -- One model under two spellings is one measurement. A row not
+                -- yet keyed falls back to its own name, never to a shared NULL.
+                COALESCE(model_key, model)
             ORDER BY
                 is_estimated ASC,
-                completeness DESC,
+                -- Source before detail: a transcript row carrying the 5m/1h
+                -- cache split must not displace Claude's terminal total.
                 source_priority DESC,
+                completeness DESC,
                 token_semantics_version DESC,
                 observed_at_us DESC,
                 measurement_id DESC
@@ -333,6 +351,7 @@ SELECT
     invocation_id,
     provider,
     model,
+    COALESCE(model_key, model) AS model_key,
     provider_event_id,
     measurement_source,
     is_estimated,

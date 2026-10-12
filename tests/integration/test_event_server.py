@@ -2168,7 +2168,7 @@ def test_metrics_summary_default_round_trip_against_real_workerd(
 
     from bobi.cli import main
     from bobi.events import publish
-    from bobi.metrics.store import connect, migrate
+    from bobi.metrics.store import connect, fill_model_keys, migrate
     from bobi.supervisor.admin import AdminListener
 
     root = tmp_path / "metrics-admin-runtime"
@@ -2242,6 +2242,7 @@ def test_metrics_summary_default_round_trip_against_real_workerd(
          "sonnet", 0.01, "provider_stream", 0, now_us - 60_000_000,
          '{"private":"not-public"}'),
     )
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
 

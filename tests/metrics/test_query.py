@@ -7,9 +7,9 @@ import pytest
 from bobi.admin_client import AdminClientError, run_admin_command
 from bobi.cli import main, metrics
 from bobi.metrics.query import MAX_RESPONSE_BYTES, MAX_ROWS, MetricsQueries, MetricsQueryError
-from bobi.metrics.store import connect, migrate
+from bobi.metrics.store import connect, fill_model_keys, migrate
 from click.testing import CliRunner
-from tests.metrics.helpers import seed_dashboard
+from tests.metrics.helpers import rekey, seed_dashboard
 
 
 def test_dashboard_canonical_usage_routing_and_privacy(tmp_path):
@@ -79,6 +79,7 @@ def test_dashboard_routing_savings_name_unpriced_candidates(tmp_path):
     conn = connect(tmp_path / "state/metrics/metrics.db")
     conn.execute("UPDATE router_decisions SET candidate_models_json='[\"haiku\",\"cx/gpt-7-nova\"]' "
                  "WHERE turn_id='t-routine'")
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
     savings = MetricsQueries(tmp_path).summary({
@@ -102,6 +103,7 @@ def test_dashboard_routing_savings_hold_helper_calls_constant(tmp_path):
                  "measurement_source,is_estimated,input_tokens,output_tokens,cache_read_input_tokens,"
                  "observed_at_us,token_semantics_version) VALUES('u1h','invocation','t-pro','i1h','gateway',"
                  "'claude-haiku-4-5','provider_stream',0,1000,100,0,1000001,1)")
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
     savings = MetricsQueries(tmp_path).summary({
@@ -156,6 +158,7 @@ def test_model_substring_filter_preserves_tool_cost_and_coverage_totals(metrics_
                  "model_selected='vendor/sonnet-SelectedAlias' WHERE invocation_id='i1'")
     conn.execute("UPDATE usage_measurements SET model='vendor/sonnet-SelectedAlias' WHERE invocation_id='i1'")
     conn.execute("UPDATE cost_measurements SET model='vendor/sonnet-SelectedAlias' WHERE invocation_id='i1'")
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
     queries = MetricsQueries(metrics_root)
@@ -175,6 +178,7 @@ def test_dashboard_model_and_routing_filters_include_matching_turn_coverage(tmp_
         "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_selected,started_at_us,status) "
         "VALUES('second','t-unknown',1,'gateway','other',4000000,'completed')"
     )
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
     summary = MetricsQueries(tmp_path).summary({
@@ -195,6 +199,7 @@ def test_model_like_pattern_treats_wildcards_as_literal_substrings(tmp_path, mod
     seed_dashboard(tmp_path, 1_000_000)
     conn = connect(tmp_path / "state/metrics/metrics.db")
     conn.execute("UPDATE llm_invocations SET model_requested=? WHERE invocation_id='i0'", ("prefix%_\\suffix",))
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
     queries = MetricsQueries(tmp_path)
@@ -324,6 +329,7 @@ def metrics_root(tmp_path):
         "router_latency_ms,decided_at_us) VALUES"
         "('r1','t1','exp1','control','assigned','jev','1','[\"sonnet\"]','sonnet',4.5,2050000)"
     )
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
     return root
@@ -369,6 +375,7 @@ def test_public_query_projections_do_not_expand_with_private_schema_columns(metr
     conn.execute("UPDATE sessions SET future_secret='session-secret'")
     conn.execute("UPDATE turns SET future_secret='turn-secret'")
     conn.execute("UPDATE llm_invocations SET future_secret='invocation-secret'")
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
 
@@ -434,7 +441,7 @@ def _inv(invocation_id, model="sonnet", *, turn="t1", index=1, start=2910000):
 
 
 def _usage(measurement_id, scope, model, input_tokens, output_tokens, *, inv=None,
-           turn="t1", estimated=0, at=3000000, cache=(None, None, None)):
+           turn="t1", estimated=0, at=3000000, cache=(None, None, None), source=None):
     return (
         "INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,"
         "model,measurement_source,is_estimated,estimator_name,estimator_version,"
@@ -442,7 +449,7 @@ def _usage(measurement_id, scope, model, input_tokens, output_tokens, *, inv=Non
         "cache_write_input_tokens,cache_write_5m_input_tokens,output_tokens,observed_at_us) "
         "VALUES(?,?,?,?,'anthropic',?,?,?,?,?,1,?,?,?,?,?,?)",
         (measurement_id, scope, turn, inv, model,
-         "calibrated_estimator" if estimated else "provider_stream", estimated,
+         source or ("calibrated_estimator" if estimated else "provider_stream"), estimated,
          "fixture" if estimated else None, "1" if estimated else None,
          input_tokens, *cache, output_tokens, at),
     )
@@ -546,6 +553,57 @@ PRECEDENCE_CASES = [
             ("summary", BY_MODEL, "groups:model,input_tokens", [("claude-versioned", 100)]),
         ],
         id="single-invocation-model-alias-not-double-counted",
+    ),
+    pytest.param(
+        ["UPDATE llm_invocations SET model_selected='claude-opus-5-5'",
+         "UPDATE usage_measurements SET model='claude-opus-5-5' WHERE scope='invocation'",
+         _inv("i2", "claude-haiku-4-5", index=2),
+         _usage("u2", "invocation", "claude-haiku-4-5", 50, 10, inv="i2"),
+         _usage("u-turn-opus", "turn", "claude-opus-5-5[1m]", 3000, 100, at=3000001),
+         _usage("u-turn-haiku", "turn", "claude-haiku-4-5", 50, 10, at=3000001)],
+        [
+            ("summary", BY_MODEL, "totals.input_tokens", 3050),
+            ("summary", BY_MODEL, "totals.output_tokens", 110),
+            ("summary", BY_MODEL, "groups:model,input_tokens",
+             [("claude-haiku-4-5", 50), ("claude-opus-5-5[1m]", 3000)]),
+        ],
+        id="two-model-turn-context-window-alias-not-double-counted",
+    ),
+    pytest.param(
+        ["DELETE FROM usage_measurements",
+         "UPDATE llm_invocations SET model_selected='claude-haiku-4-5-20251001'",
+         _usage("u-turn", "turn", "claude-haiku-4-5-20251001", 1000, 300),
+         _usage("u-transcript", "turn", "claude-haiku-4-5", 1000, 200, at=3000001,
+                source="claude_transcript")],
+        [
+            ("summary", WINDOW, "totals.input_tokens", 1000),
+            ("summary", WINDOW, "totals.output_tokens", 300),
+        ],
+        id="dated-and-undated-model-id-are-one-measurement",
+    ),
+    pytest.param(
+        ["UPDATE llm_invocations SET model_selected='claude-sonnet-5-5'",
+         "UPDATE usage_measurements SET model='claude-sonnet-5-5' WHERE scope='invocation'",
+         _inv("i2", "claude-haiku-4-5", index=2),
+         _usage("u2", "invocation", "claude-haiku-4-5", 50, 10, inv="i2"),
+         _usage("u-turn-sonnet", "turn", "sonnet", 100, 30, at=3000001),
+         _usage("u-turn-haiku", "turn", "claude-haiku-4-5", 50, 10, at=3000001)],
+        [
+            ("summary", WINDOW, "totals.input_tokens", 150),
+            ("summary", WINDOW, "totals.output_tokens", 40),
+        ],
+        id="two-model-turn-alias-not-double-counted",
+    ),
+    pytest.param(
+        ["DELETE FROM usage_measurements",
+         _usage("u-turn", "turn", "sonnet", 1200, 300),
+         _usage("u-transcript", "turn", "sonnet", 1000, 250, at=3000001,
+                cache=(0, 40, 40), source="claude_transcript")],
+        [
+            ("summary", WINDOW, "totals.input_tokens", 1200),
+            ("summary", WINDOW, "totals.output_tokens", 300),
+        ],
+        id="claude-terminal-total-beats-a-more-detailed-transcript",
     ),
     pytest.param(
         ["DELETE FROM usage_measurements WHERE measurement_id='u1'",
@@ -672,6 +730,7 @@ def test_usage_and_cost_precedence(metrics_root, setup, checks):
     for statement in setup:
         sql, params = (statement, ()) if isinstance(statement, str) else statement
         conn.execute(sql, params)
+    rekey(conn)  # setup may rename a model
     conn.commit()
     conn.close()
 
@@ -697,6 +756,7 @@ def test_session_keyset_cursor_is_stable_when_an_earlier_turn_is_inserted(metric
         "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
         "started_at_us,status) VALUES('t2','s1',1,'user',1,4000000,'completed')"
     )
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
 
@@ -709,6 +769,7 @@ def test_session_keyset_cursor_is_stable_when_an_earlier_turn_is_inserted(metric
         "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
         "started_at_us,status) VALUES('t0','s1',-1,'user',1,1000000,'completed')"
     )
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
 
@@ -738,6 +799,7 @@ def test_turn_rejects_more_than_200_combined_child_rows(metrics_root):
             for index in range(196)
         ],
     )
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
 
@@ -752,6 +814,7 @@ def test_serialized_response_is_capped_at_512_kib(metrics_root):
         "UPDATE sessions SET session_name=? WHERE session_id='s1'",
         ("x" * (MAX_RESPONSE_BYTES + 1),),
     )
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
 

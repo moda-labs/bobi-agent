@@ -261,6 +261,127 @@ def test_turn_aggregate_fills_missing_dimensions_from_exact_invocations(tmp_path
     assert row["cache_read_input_tokens"] == 7
 
 
+def _two_model_turn(tmp_path, *, total_cost_usd):
+    """An opus turn whose haiku subagent ran inside it; Claude names the
+    terminal opus row with its context window, the stream without."""
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    observation = runtime.begin_turn(
+        "agent", provider="anthropic", model_requested="claude-opus-5-5"
+    )
+    opus_call = BrainUsage(model="claude-opus-5-5", input_tokens=3000,
+                           cache_read_input_tokens=200, output_tokens=100)
+    haiku_call = BrainUsage(model="claude-haiku-4-5", input_tokens=50,
+                            cache_read_input_tokens=0, output_tokens=10)
+    observation.record_result(TurnResult(
+        total_cost_usd=total_cost_usd,
+        usage=[
+            BrainUsage(model="claude-opus-5-5[1m]", input_tokens=3000, output_tokens=100,
+                       raw_usage={"costUSD": 0.30} if total_cost_usd else {}),
+            BrainUsage(model="claude-haiku-4-5", input_tokens=50, output_tokens=10,
+                       raw_usage={"costUSD": 0.02} if total_cost_usd else {}),
+        ],
+        invocations=[
+            BrainInvocation(model="claude-opus-5-5", provider_event_id="m1", usage=opus_call),
+            BrainInvocation(model="claude-haiku-4-5", provider_event_id="m2", usage=haiku_call),
+        ],
+    ))
+    observation.finish(status="completed")
+    runtime.finish_session("agent", status="completed")
+    assert runtime.close(timeout=2)
+    service = MetricsCollectorService(tmp_path)
+    service.collect_once()
+    return service
+
+
+def test_turn_aggregate_fills_dimensions_across_a_context_window_suffix(tmp_path):
+    service = _two_model_turn(tmp_path, total_cost_usd=0.32)
+    conn = connect(service.db_path, readonly=True)
+    try:
+        row = conn.execute(
+            "SELECT cache_read_input_tokens FROM best_usage "
+            "WHERE scope='turn' AND model='claude-opus-5-5[1m]'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["cache_read_input_tokens"] == 200
+
+
+@pytest.mark.parametrize("total_cost_usd", [0.32, 0.0], ids=["reported", "estimated"])
+def test_model_filtered_summary_of_a_two_model_turn(tmp_path, total_cost_usd):
+    from bobi.metrics.query import MetricsQueries
+
+    _two_model_turn(tmp_path, total_cost_usd=total_cost_usd)
+    queries = MetricsQueries(tmp_path)
+    cost = "reported_cost_usd" if total_cost_usd else "estimated_cost_usd"
+    summaries = {model: queries.summary({"window_seconds": 3600, "model": model})["totals"]
+                 for model in ("opus", "haiku")}
+
+    assert summaries["opus"]["input_tokens"] == 3000
+    assert summaries["haiku"]["input_tokens"] == 50
+    assert summaries["haiku"][cost] < summaries["opus"][cost]
+    whole = queries.summary({"window_seconds": 3600})["totals"]
+    assert summaries["opus"][cost] + summaries["haiku"][cost] == pytest.approx(whole[cost])
+    if total_cost_usd:
+        assert summaries["opus"][cost] == pytest.approx(0.30)
+        assert summaries["haiku"][cost] == pytest.approx(0.02)
+
+
+def _invocation_rows(service):
+    conn = connect(service.db_path, readonly=True)
+    try:
+        return {row["model_selected"]: row["model_requested"] for row in conn.execute(
+            "SELECT model_selected, model_requested FROM llm_invocations")}
+    finally:
+        conn.close()
+
+
+def _cost_rows(service):
+    conn = connect(service.db_path, readonly=True)
+    try:
+        return sorted((row["model"] or "", row["amount_usd"]) for row in conn.execute(
+            "SELECT model, amount_usd FROM cost_measurements"))
+    finally:
+        conn.close()
+
+
+def test_requested_model_stays_on_its_own_invocations_only(tmp_path):
+    service = _two_model_turn(tmp_path, total_cost_usd=0.32)
+    assert _invocation_rows(service) == {
+        "claude-opus-5-5": "claude-opus-5-5", "claude-haiku-4-5": None,
+    }
+
+
+def test_a_single_model_turn_keeps_its_requested_alias(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    observation = runtime.begin_turn("agent", provider="anthropic", model_requested="opus")
+    observation.record_result(TurnResult(invocations=[
+        BrainInvocation(model="claude-opus-5-5-20260101", provider_event_id="m1"),
+    ]))
+    observation.finish(status="completed")
+    runtime.finish_session("agent", status="completed")
+    assert runtime.close(timeout=2)
+    service = MetricsCollectorService(tmp_path)
+    service.collect_once()
+    assert _invocation_rows(service) == {"claude-opus-5-5-20260101": "opus"}
+
+
+def test_per_model_costs_that_do_not_add_up_stay_one_unattributed_row(tmp_path):
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    observation = runtime.begin_turn("agent", provider="anthropic")
+    observation.record_result(TurnResult(total_cost_usd=0.50, usage=[
+        BrainUsage(model="claude-opus-5-5", input_tokens=10, output_tokens=1,
+                   raw_usage={"costUSD": 0.30}),
+        BrainUsage(model="claude-haiku-4-5", input_tokens=10, output_tokens=1,
+                   raw_usage={"costUSD": 0.02}),
+    ]))
+    observation.finish(status="completed")
+    runtime.finish_session("agent", status="completed")
+    assert runtime.close(timeout=2)
+    service = MetricsCollectorService(tmp_path)
+    service.collect_once()
+    assert _cost_rows(service) == [("", pytest.approx(0.50))]
+
+
 def test_turn_aggregate_fills_alias_dimension_without_rewriting_model(tmp_path):
     runtime = MetricsRuntime(tmp_path, mode="enabled")
     observation = runtime.begin_turn(

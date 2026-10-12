@@ -190,14 +190,18 @@ sqlite3 -readonly "$METRICS_DB" 'PRAGMA integrity_check; PRAGMA foreign_key_chec
 ## Exact accounting
 
 - Use `best_usage`, not all `usage_measurements`: the latter retains
-  superseded estimates and duplicate scopes. One model under two spellings
+  superseded estimates and duplicate scopes. One model under several spellings
   (`claude-opus-5-5[1m]` in Claude Code's terminal usage, `claude-opus-5-5`
-  in its transcript) is one measurement. At turn scope, Claude's exact
-  terminal total outranks the transcript even when reconciliation marked it
-  superseded, because it includes background calls the transcript never logs;
-  per call, the transcript stays preferred because streamed output counts are
-  partial. The view is rebuilt on collector start when its definition changes
-  (`best_usage_version` in `schema_meta`).
+  in its transcript, a dated id, a Claude Code alias, a route prefix) is one
+  measurement. `llm_invocations`, `usage_measurements` and `cost_measurements`
+  carry a `model_key` column for this (`bobi.costs.model_identity`, written at
+  projection and backfilled on migrate); join and compare on it, and keep
+  `model` for display. At turn scope, Claude's exact terminal total outranks
+  the transcript even when the transcript carries more detail or
+  reconciliation marked the total superseded, because it includes background
+  calls the transcript never logs; per call, the transcript stays preferred
+  because streamed output counts are partial. The view is rebuilt on collector
+  start when its definition changes (`best_usage_version` in `schema_meta`).
 - `measurement_source=provider_stream` and `is_estimated=0` identify provider
   facts. Transcript reconciliation can also recover exact facts. Unknown
   dimensions stay `NULL`, never zero.
@@ -208,6 +212,19 @@ sqlite3 -readonly "$METRICS_DB" 'PRAGMA integrity_check; PRAGMA foreign_key_chec
 - Cache reads/writes and reasoning dimensions retain provider semantics.
   Tool byte sizes and attributed tokens are not provider billing totals.
 - Provider-reported and estimated costs are separate, never added together.
+- A turn that ran several models (a subagent on another model) gets one cost
+  row per model: Claude's per-model `costUSD` splits the reported total when
+  every model has one and they add up, otherwise one row with no model. Each
+  model's estimate is its own row. `llm_invocations.model_requested` is set
+  only on invocations of the requested model in such a turn, so a filter on
+  the requested model does not count the other model's calls.
+- Claude's `total_cost_usd` / `modelUsage` and Codex's turn usage count the
+  whole provider session, including turns from before a resume in a new
+  process. Each turn reports the difference from the previous turn's totals,
+  which are saved per session under `state/usage_baselines/`. A resumed session
+  with no saved totals (started before they were kept, or idle for more than 30
+  days, after which the file is pruned) reports no usage for its first turn
+  rather than the whole session again.
 - Exact usage can coexist with uncovered turns elsewhere. Report both local
   turn evidence and global collector/reconciliation debt.
 

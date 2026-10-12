@@ -653,15 +653,6 @@ def session_usage(root: Path, session: str) -> dict:
 
     entry = SessionRegistry(root).get(session)
     if entry is None:
-        from bobi.webapp.runs import _metrics_usage_by_session
-        t_usage = _metrics_usage_by_session(root).get(session)
-        if t_usage:
-            return {
-                "started_at": 0.0, "ended_at": 0.0,
-                "tokens": t_usage.get("total_tokens", 0),
-                "cost_usd": t_usage.get("cost_usd", 0.0),
-                "status": "",
-            }
         return {"started_at": 0.0, "ended_at": 0.0, "tokens": 0,
                 "cost_usd": 0.0, "status": ""}
     tokens = sum(
@@ -671,11 +662,14 @@ def session_usage(root: Path, session: str) -> dict:
         if isinstance(u, dict))
     cost_usd = round(entry.total_cost_usd or 0.0, 6)
     if tokens == 0 and cost_usd == 0.0:
-        from bobi.webapp.runs import _metrics_usage_by_session
-        t_usage = _metrics_usage_by_session(root).get(session)
+        from bobi.webapp.runs import metrics_session_usage
+        t_usage = metrics_session_usage(root, {
+            session: (entry.started_at, entry.terminal_at or time.time()),
+        }).get(session)
         if t_usage:
-            tokens = t_usage.get("total_tokens", 0)
-            cost_usd = t_usage.get("cost_usd", 0.0)
+            # The header's contract is a count; an unknown total stays 0 here.
+            tokens = t_usage["total_tokens"] or 0
+            cost_usd = t_usage["cost_usd"]
     return {
         "started_at": entry.started_at or 0.0,
         "ended_at": entry.terminal_at or 0.0,

@@ -1157,6 +1157,55 @@ async def test_resumed_session_omits_ambiguous_first_cumulative_total():
     assert second.total_cost_usd == pytest.approx(0.05)
 
 
+def _claude_process(monkeypatch, messages, *, resume=None):
+    """A _ClaudeSession built the way a new agent process builds it."""
+    monkeypatch.setattr(
+        _ClaudeSession, "_new_client", lambda self: _FakeSDKClient(messages)
+    )
+    return _ClaudeSession(SimpleNamespace(resume=resume))
+
+
+@pytest.mark.asyncio
+async def test_resume_in_a_new_process_reports_only_the_new_turn(tmp_path, monkeypatch):
+    # The CLI's totals stay session-cumulative after a resume in a new process.
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    before = _claude_process(monkeypatch, [_result(
+        total_cost_usd=0.42,
+        model_usage={"claude-opus-5": {"inputTokens": 100, "outputTokens": 10}},
+    )])
+    first = [message async for message in before.receive_response()][-1]
+
+    after = _claude_process(monkeypatch, [_result(
+        total_cost_usd=0.50,
+        model_usage={"claude-opus-5": {"inputTokens": 130, "outputTokens": 14}},
+    )], resume="sess-xyz")
+    resumed = [message async for message in after.receive_response()][-1]
+
+    assert first.total_cost_usd == pytest.approx(0.42)
+    assert resumed.total_cost_usd == pytest.approx(0.08)
+    assert resumed.usage[0].uncached_input_tokens == 30
+    assert resumed.usage[0].output_tokens == 4
+    assert resumed.costs == [resumed.usage[0].legacy_cost()]
+
+
+@pytest.mark.asyncio
+async def test_resume_without_a_saved_baseline_reports_no_usage(tmp_path, monkeypatch):
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    session = _claude_process(monkeypatch, [_result(
+        total_cost_usd=0.50,
+        model_usage={"claude-opus-5": {"inputTokens": 130, "outputTokens": 14}},
+    )], resume="sess-xyz")
+    resumed = [message async for message in session.receive_response()][-1]
+
+    assert resumed.total_cost_usd == 0
+    assert resumed.usage == []
+    assert resumed.costs == []
+
+
 @pytest.mark.asyncio
 async def test_receive_response_preserves_structured_auth_failure():
     """Claude's assistant error field is the stable auth classifier."""

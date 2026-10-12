@@ -653,3 +653,109 @@ class TestUsageSummary:
         assert summary["cost_usd"] == 1.25
         assert summary["estimated_cost_usd"] > 0
         assert summary["window"]["seconds"] == 3 * 86400
+
+
+def _metrics_turn(install, turn_id, *, session_id, name, at, input_tokens, output_tokens,
+                  reported=None, estimated=None):
+    """One turn in the fine-grained metrics store, `at` seconds since the epoch."""
+    from bobi.metrics.store import connect, migrate
+
+    path = install.repo_path / "state" / "metrics" / "metrics.db"
+    conn = connect(path)
+    migrate(conn)
+    at_us = int(at * 1_000_000)
+    conn.execute(
+        "INSERT OR IGNORE INTO sessions(session_id,session_name,brain,provider,started_at_us,status) "
+        "VALUES(?,?,'claude','anthropic',?,'completed')", (session_id, name, at_us))
+    conn.execute(
+        "INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
+        "started_at_us,ended_at_us,status) VALUES(?,?,0,'user',1,?,?,'completed')",
+        (turn_id, session_id, at_us, at_us + 1000))
+    conn.execute(
+        "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
+        "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
+        "observed_at_us) VALUES(?,'turn',?,'anthropic','claude-opus-5-5','provider_stream',0,1,?,?,?)",
+        (f"use-{turn_id}", turn_id, input_tokens, output_tokens, at_us))
+    for amount, is_estimated in ((reported, 0), (estimated, 1)):
+        if amount is not None:
+            conn.execute(
+                "INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,"
+                "provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) "
+                "VALUES(?,'turn',?,?,'anthropic','claude-opus-5-5',?,?,?,?)",
+                (f"cost-{turn_id}-{is_estimated}", session_id, turn_id, amount,
+                 "calibrated_estimator" if is_estimated else "provider_stream",
+                 is_estimated, at_us))
+    conn.commit()
+    conn.close()
+
+
+class TestMetricsUsageFallback:
+    """A session the registry recorded no usage for reads its own metrics."""
+
+    def test_counts_only_the_sessions_own_lifetime(self, bobi_install):
+        _metrics_turn(bobi_install, "old", session_id="m-old", name="worker",
+                      at=NOW - 7200, input_tokens=5000, output_tokens=500, reported=2.0)
+        _metrics_turn(bobi_install, "new", session_id="m-new", name="worker",
+                      at=NOW - 500, input_tokens=100, output_tokens=10, reported=0.05)
+        _session(bobi_install, "worker", started_at=NOW - 600, terminal_at=NOW - 300)
+
+        row = _by_key(_rows(bobi_install))["session:worker"]
+
+        assert row["tokens"] == 110
+        assert row["cost_usd"] == pytest.approx(0.05)
+
+    def test_an_unknown_dimension_stays_unknown(self, bobi_install):
+        _metrics_turn(bobi_install, "new", session_id="m-new", name="worker",
+                      at=NOW - 500, input_tokens=100, output_tokens=None)
+        _session(bobi_install, "worker", started_at=NOW - 600, terminal_at=NOW - 300)
+
+        row = _by_key(_rows(bobi_install))["session:worker"]
+
+        assert row["tokens"] is None
+
+    def test_an_estimate_never_reads_as_a_reported_cost(self, bobi_install):
+        _metrics_turn(bobi_install, "new", session_id="m-new", name="worker",
+                      at=NOW - 500, input_tokens=100, output_tokens=10, estimated=0.04)
+        _session(bobi_install, "worker", started_at=NOW - 600, terminal_at=NOW - 300)
+
+        row = _by_key(_rows(bobi_install))["session:worker"]
+
+        assert row["cost_usd"] == 0
+        assert row["est_cost_usd"] == pytest.approx(0.04)
+
+    def test_usage_summary_counts_the_session_once_for_its_own_window(self, bobi_install):
+        _metrics_turn(bobi_install, "old", session_id="m-old", name="worker",
+                      at=NOW - 7200, input_tokens=5000, output_tokens=500)
+        _metrics_turn(bobi_install, "new", session_id="m-new", name="worker",
+                      at=NOW - 500, input_tokens=100, output_tokens=10)
+        _session(bobi_install, "worker", started_at=NOW - 600, terminal_at=NOW - 300)
+
+        summary = runs_model.build_usage_summary(
+            bobi_install.repo_path, manager_name=MANAGER, window_seconds=3600, now=NOW)
+
+        assert summary["tokens"]["total"] == 110
+
+    def test_transcript_header_reads_the_sessions_own_metrics(self, bobi_install):
+        from bobi.webapp.runtime import session_usage
+
+        _metrics_turn(bobi_install, "old", session_id="m-old", name="worker",
+                      at=NOW - 7200, input_tokens=5000, output_tokens=500, reported=2.0)
+        _metrics_turn(bobi_install, "new", session_id="m-new", name="worker",
+                      at=NOW - 500, input_tokens=100, output_tokens=10, reported=0.05)
+        _session(bobi_install, "worker", started_at=NOW - 600, terminal_at=NOW - 300)
+
+        header = session_usage(bobi_install.repo_path, "worker")
+
+        assert header["tokens"] == 110
+        assert header["cost_usd"] == pytest.approx(0.05)
+
+    def test_a_corrupt_metrics_database_leaves_the_page_working(self, bobi_install):
+        path = bobi_install.repo_path / "state" / "metrics" / "metrics.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4096)
+        _session(bobi_install, "worker", started_at=NOW - 600, terminal_at=NOW - 300)
+
+        row = _by_key(_rows(bobi_install))["session:worker"]
+
+        assert row["tokens"] == 0
+        assert row["cost_usd"] == 0

@@ -10,8 +10,19 @@ from bobi.metrics.router import RouterDecision
 from bobi.metrics.routing import RoutingContext
 
 
+def rekey(conn):
+    """Key every metrics row from its current model name, after a fixture
+    inserted or renamed rows outside projection."""
+    from bobi.metrics.schema import MODEL_KEY_SOURCES
+    from bobi.metrics.store import fill_model_keys
+
+    for table in MODEL_KEY_SOURCES:
+        conn.execute(f"UPDATE {table} SET model_key=NULL")
+    fill_model_keys(conn)
+
+
 def seed_dashboard(root, started_at_us):
-    from bobi.metrics.store import connect, migrate
+    from bobi.metrics.store import connect, fill_model_keys, migrate
 
     conn = connect(root / "state/metrics/metrics.db")
     migrate(conn)
@@ -59,6 +70,7 @@ def seed_dashboard(root, started_at_us):
         "VALUES('terminal','turn','t-reused','gateway','sonnet','provider_stream',0,320,80,50,?,1)",
         (started_at_us + 2_000_000,),
     )
+    fill_model_keys(conn)
     conn.commit()
     conn.close()
 

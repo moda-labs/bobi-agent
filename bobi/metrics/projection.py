@@ -7,7 +7,9 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from bobi.costs import model_identity
 from bobi.metrics.events import deterministic_metric_id
+from bobi.metrics.schema import MODEL_KEY_SOURCES
 from bobi.metrics.store import raw_payload
 
 ORPHAN_TTL_US = 24 * 60 * 60 * 1_000_000
@@ -90,6 +92,9 @@ def _project_row(
         raise ValueError(f"missing {target.primary_key}")
     allowed = _columns(conn, target.table)
     values = {key: value for key, value in payload.items() if key in allowed}
+    model_column = MODEL_KEY_SOURCES.get(target.table)
+    if model_column and values.get(model_column) is not None:
+        values["model_key"] = model_identity(str(values[model_column]))
     names = list(values)
     placeholders = ",".join("?" for _ in names)
     updates = []

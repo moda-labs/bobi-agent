@@ -199,6 +199,35 @@ async def test_resumed_thread_omits_ambiguous_first_cumulative_total():
 
 
 @pytest.mark.asyncio
+async def test_resume_in_a_new_process_reports_only_the_new_turn(tmp_path):
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    before = _CodexSession(cwd="/w", instructions="", runner=_runner_of([
+        {"type": "thread.started", "thread_id": "th-saved"},
+        {"type": "turn.completed", "usage": {
+            "input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10,
+        }},
+    ]))
+    await before.query("first")
+    first = (await _drain(before))[-1]
+
+    after = _CodexSession(cwd="/w", instructions="", resume="th-saved",
+                          runner=_runner_of([{"type": "turn.completed", "usage": {
+                              "input_tokens": 140, "cached_input_tokens": 50,
+                              "output_tokens": 13,
+                          }}]))
+    await after.query("second")
+    resumed = (await _drain(after))[-1]
+
+    assert first.usage[0].input_tokens == 100
+    assert resumed.usage[0].input_tokens == 40
+    assert resumed.usage[0].cache_read_input_tokens == 30
+    assert resumed.usage[0].output_tokens == 3
+    assert resumed.costs == [resumed.usage[0].legacy_cost()]
+
+
+@pytest.mark.asyncio
 async def test_usage_limit_failure_is_classified_as_exhausted_credits():
     events = [
         {"type": "thread.started", "thread_id": "th-limit"},

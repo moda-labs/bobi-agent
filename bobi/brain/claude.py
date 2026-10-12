@@ -27,6 +27,7 @@ from contextlib import suppress
 from dataclasses import replace
 from typing import Any, AsyncIterator
 
+from bobi.brain import usage_baseline as baseline_store
 from bobi.brain.base import (
     ERROR_KIND_MAX_TURNS,
     AssistantText,
@@ -141,7 +142,15 @@ class _ClaudeSession:
         self._client = self._new_client()
         self._model_usage_baseline: dict[str, dict[str, Any]] = {}
         self._total_cost_baseline = 0.0
-        self._cumulative_usage_ready = not bool(getattr(options, "resume", None))
+        resume = getattr(options, "resume", None)
+        self._cumulative_usage_ready = not resume
+        saved = baseline_store.load("claude", resume) if resume else None
+        saved_usage = _model_usage_snapshot((saved or {}).get("model_usage"))
+        saved_cost = (saved or {}).get("total_cost_usd")
+        if saved_usage and isinstance(saved_cost, (int, float)):
+            self._model_usage_baseline = saved_usage
+            self._total_cost_baseline = float(saved_cost)
+            self._cumulative_usage_ready = True
 
     def _new_client(self) -> Any:
         from claude_agent_sdk import ClaudeSDKClient
@@ -411,6 +420,10 @@ class _ClaudeSession:
                     self._model_usage_baseline = usage_snapshot
                     self._total_cost_baseline = float(cumulative_cost)
                     self._cumulative_usage_ready = True
+                    baseline_store.save("claude", result.session_id, {
+                        "model_usage": usage_snapshot,
+                        "total_cost_usd": float(cumulative_cost),
+                    })
                 result.invocations = invocations
                 if getattr(self, "provider", "anthropic") == "gateway":
                     _align_result_usage_models(result)

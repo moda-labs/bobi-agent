@@ -145,6 +145,16 @@ Session usage is cumulative rather than a token-level time series. A terminal
 job that completes inside the window therefore contributes its whole usage;
 the summary does not claim to split a long job across calendar boundaries.
 
+A session whose registry entry recorded no usage reads it from the
+fine-grained metrics instead ([FINE_GRAINED_METRICS.md](FINE_GRAINED_METRICS.md)),
+through the same query as the metrics views and limited to that session's own
+lifetime, so an earlier session with the same name is never counted. Unknown
+token counts stay unknown, and an estimate fills only `est_cost_usd`. All
+such sessions are read in one query, so a page costs at most one metrics
+deadline. A session older than the metrics range cap (31 days) gets no
+figure. The transcript header uses the same lookup, and shows an unknown
+total as 0 because its `tokens` field is a count.
+
 ## What is deliberately not here
 
 Per-run latency (not captured) · sub-run time-series cost (no data) · decisions

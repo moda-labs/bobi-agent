@@ -39,7 +39,7 @@ pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import expect  # noqa: E402
 
 from tests.test_webapp_runs import NOW, _monitor, _session, _workflow  # noqa: E402
-from tests.metrics.helpers import seed_dashboard  # noqa: E402
+from tests.metrics.helpers import rekey, seed_dashboard  # noqa: E402
 
 RUNS_URL = re.compile(r"/api/agents/[^/]+/runs\?")
 DETAILS_URL = re.compile(r"/api/agents/[^/]+/runs/[^/]+/details")
@@ -79,6 +79,7 @@ class TestMetricsView:
         connection = connect(webapp.install.state_dir / "metrics/metrics.db")
         connection.execute("UPDATE llm_invocations SET model_requested='claude-opus-5-5', model_selected='claude-opus-5-5' WHERE invocation_id='i0'")
         connection.execute("UPDATE usage_measurements SET model='claude-opus-5-5' WHERE measurement_id='u0'")
+        rekey(connection)
         connection.commit()
         connection.close()
         held = []
@@ -183,6 +184,7 @@ class TestMetricsView:
         connection.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
         connection.execute("UPDATE turns SET trigger_kind='sleep_cycle', is_user_initiated=0 WHERE turn_id='t-routine'")
         connection.execute("UPDATE turns SET trigger_kind='startup', is_user_initiated=0 WHERE turn_id='t-pro'")
+        rekey(connection)
         connection.commit()
         connection.close()
         long_context = ("維護 context " * 500).rstrip()
@@ -257,6 +259,7 @@ class TestMetricsView:
         database = webapp.install.state_dir / "metrics/metrics.db"
         connection = connect(database)
         connection.execute("UPDATE sessions SET session_name=?", ("session-name-" * 30,))
+        rekey(connection)
         connection.commit()
         before = "\n".join(connection.iterdump())
         connection.close()
@@ -441,6 +444,7 @@ class TestMetricsView:
         conn.execute("UPDATE sessions SET provider_session_id='e2e-worker-a' WHERE session_id='s1'")
         conn.execute("UPDATE sessions SET provider_session_id='current-provider' WHERE session_id='s2'")
         conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        rekey(conn)
         conn.commit()
         conn.close()
         prompt = "Event: slack/message\n  Explain **WAL** and `SQLite`. <img src=x onerror=window.metricsInjected=true>\n  conversation: slack:T123:channel:C123:thread:1791360056.16\n  channel_name: eng-team"
@@ -571,6 +575,7 @@ class TestMetricsView:
         conn.execute("INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_requested,model_selected,started_at_us,status) VALUES('i0-step2','turn_01a117cb-7aec-7d84-a959-e912efb493f6',1,'anthropic','claude-haiku','claude-haiku-4-5-20251001',?,'completed')", (started + 400000,))
         conn.execute("INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,model,measurement_source,is_estimated,input_tokens,output_tokens,cache_read_input_tokens,observed_at_us,token_semantics_version) VALUES('u-inv-2','invocation','turn_01a117cb-7aec-7d84-a959-e912efb493f6','i0-step2','anthropic','claude-haiku-4-5-20251001','provider_stream',0,79032,1,76193,?,1)", (started + 400000,))
         conn.execute("INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) VALUES('cost-turn','turn','ses_dabfcc7634bd07e444b889b44d0da7297c8611305855adf63eab16ad41eda7c5','turn_01a117cb-7aec-7d84-a959-e912efb493f6','anthropic','claude-haiku-4-5-20251001',0.261109,'provider_stream',0,?)", (started + 800000,))
+        rekey(conn)
         conn.commit()
         conn.close()
 
@@ -778,6 +783,7 @@ class TestMetricsView:
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
         conn.execute("UPDATE router_decisions SET fallback_reason=?,metadata_json=json_set(metadata_json,'$.policy.mode',?,'$.policy.confidence',0.34,'$.policy.recommended_model','sonnet') WHERE turn_id='t-routine'", (fallback, mode))
+        rekey(conn)
         conn.commit()
         conn.close()
         page.goto(webapp.agent_url() + "/metrics")
@@ -809,6 +815,7 @@ class TestMetricsView:
         conn.execute("UPDATE sessions SET provider_session_id='e2e-worker-a' WHERE session_id='s1'")
         conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
         conn.execute("INSERT INTO tool_executions(tool_execution_id,turn_id,triggering_invocation_id,tool_name,tool_kind,started_at_us,ended_at_us,status) VALUES('tool-ui','t-routine','i0','Bash','shell',?,?,'completed')", (started + 200000, started + 400000))
+        rekey(conn)
         conn.commit()
         conn.close()
         at = datetime.fromtimestamp((started + 200000) / 1_000_000, timezone.utc).isoformat()
@@ -890,6 +897,7 @@ class TestMetricsView:
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         connection = connect(webapp.install.state_dir / "metrics/metrics.db")
         connection.execute("UPDATE usage_measurements SET is_estimated=1 WHERE measurement_id='u0'")
+        rekey(connection)
         connection.commit()
         connection.close()
         page.set_viewport_size({"width": 1440, "height": 1000})
@@ -927,6 +935,7 @@ class TestMetricsView:
         for index, trigger in [(4, "inbox"), (5, "startup")]:
             connection.execute("INSERT INTO turns(turn_id,session_id,turn_index,started_at_us,ended_at_us,status,trigger_kind,is_user_initiated) VALUES(?,'s2',?,?,?,'completed',?,0)",
                 ("t-" + trigger, index, started + index * 1_000_000, started + index * 1_000_000 + 900000, trigger))
+        rekey(connection)
         connection.commit()
         connection.close()
         messages = [
@@ -1150,6 +1159,7 @@ class TestMetricsView:
         connection = connect(webapp.install.repo_path / "state/metrics/metrics.db")
         payload = '<img src=x onerror="window.metricsInjected=true">'
         connection.execute("UPDATE router_decisions SET model_selected=?", (payload,))
+        rekey(connection)
         connection.commit()
         connection.close()
         page.locator("#metrics-refresh").click()
@@ -1272,6 +1282,7 @@ class TestMetricsView:
         conn = connect(webapp.install.repo_path / "state/metrics/metrics.db")
         conn.execute("UPDATE router_decisions SET candidate_models_json='[\"haiku\",\"cx/gpt-7-nova\"]' "
                      "WHERE turn_id='t-routine'")
+        rekey(conn)
         conn.commit()
         conn.close()
         page.locator("#metrics-refresh").click()

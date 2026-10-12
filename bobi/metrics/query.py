@@ -92,12 +92,12 @@ def _strict_sum(column: str) -> str:
 def _complete_effective_invocation_usage(alias: str) -> str:
     return (
         f"EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id={alias}.turn_id "
-        f"AND i.model_selected={alias}.model) "
+        f"AND i.model_key={alias}.model_key) "
         f"AND NOT EXISTS (SELECT 1 FROM llm_invocations i WHERE i.turn_id={alias}.turn_id "
-        f"AND i.model_selected={alias}.model "
+        f"AND i.model_key={alias}.model_key "
         "AND NOT EXISTS (SELECT 1 FROM best_usage measured "
         "WHERE measured.scope='invocation' AND measured.invocation_id=i.invocation_id "
-        f"AND measured.model={alias}.model))"
+        f"AND measured.model_key={alias}.model_key))"
     )
 
 
@@ -105,14 +105,14 @@ def _exact_turn_usage_exists(alias: str) -> str:
     return (
         "EXISTS (SELECT 1 FROM best_usage turn_exact "
         f"WHERE turn_exact.scope='turn' AND turn_exact.turn_id={alias}.turn_id "
-        f"AND turn_exact.model={alias}.model AND turn_exact.is_estimated=0)"
+        f"AND turn_exact.model_key={alias}.model_key AND turn_exact.is_estimated=0)"
     )
 
 
 def _single_invocation_model_has_exact_turn(alias: str) -> str:
     """Treat a sole invocation/terminal model mismatch as a provider alias."""
     return (
-        f"((SELECT COUNT(DISTINCT i.model_selected) FROM llm_invocations i "
+        f"((SELECT COUNT(DISTINCT i.model_key) FROM llm_invocations i "
         f"WHERE i.turn_id={alias}.turn_id)=1 AND EXISTS ("
         "SELECT 1 FROM best_usage turn_exact "
         f"WHERE turn_exact.scope='turn' AND turn_exact.turn_id={alias}.turn_id "
@@ -572,7 +572,7 @@ class MetricsQueries:
             if time.monotonic() >= deadline:
                 raise MetricsQueryError("metrics query exceeded its deadline", "metrics_busy", retry_after_ms=250)
             return payload
-        except sqlite3.OperationalError as exc:
+        except sqlite3.DatabaseError as exc:
             message = str(exc).lower()
             if "interrupted" in message:
                 raise MetricsQueryError("metrics query exceeded its one-second deadline", "metrics_busy", retry_after_ms=250) from exc
@@ -581,6 +581,65 @@ class MetricsQueries:
             raise MetricsQueryError("metrics database is unavailable", "metrics_not_ready", retry_after_ms=1000) from exc
         finally:
             conn.close()
+
+    def session_totals(
+        self, windows: list[tuple[str, float, float]],
+    ) -> dict[str, dict[str, object]]:
+        """Usage and cost per session name, each inside its own window.
+
+        One read for many sessions: the runs table asks for every session the
+        registry recorded no usage for. ``windows`` holds ``(session_name,
+        start, end)`` in epoch seconds; a window over the range cap is left out
+        rather than failing the others. Same selection rule as ``summary``.
+        """
+        spans: list[tuple[str, int, int]] = []
+        for name, start, end in windows:
+            try:
+                spans.append((name, *_time_range({"from": start, "to": end})))
+            except MetricsQueryError:
+                continue
+        if not spans:
+            return {}
+
+        def build(conn: sqlite3.Connection) -> dict[str, object]:
+            # Find each session's turns first, then join the read model by
+            # turn: filtering after the join would rank every row in history.
+            scope = (
+                "WITH w(name,start_us,end_us) AS (VALUES "
+                + ",".join("(?,?,?)" for _ in spans) + "), "
+                "cand AS MATERIALIZED (SELECT w.name,t.turn_id FROM w "
+                "JOIN sessions s ON s.session_name=w.name "
+                "JOIN turns t ON t.session_id=s.session_id "
+                "AND t.started_at_us>=w.start_us AND t.started_at_us<w.end_us) "
+            )
+            params = [value for span in spans for value in span]
+            totals: dict[str, dict[str, object]] = {}
+            for row in conn.execute(
+                scope + ", chosen AS (SELECT cand.name,b.turn_id,"
+                + ",".join(f"b.{column}" for column in TOKEN_COLUMNS)
+                + " FROM cand CROSS JOIN best_usage b ON b.turn_id=cand.turn_id "
+                f"WHERE {_chosen_usage()}) "
+                "SELECT name,COUNT(DISTINCT turn_id) AS turns,"
+                + ",".join(_strict_sum(column) for column in TOKEN_COLUMNS)
+                + " FROM chosen GROUP BY name",
+                params,
+            ):
+                totals[row["name"]] = {**dict(row), "reported_cost_usd": None,
+                                       "estimated_cost_usd": None}
+            for row in conn.execute(
+                scope + "SELECT cand.name,"
+                "SUM(CASE WHEN c.is_estimated=0 THEN c.amount_usd END) AS reported_cost_usd,"
+                "SUM(CASE WHEN c.is_estimated=1 THEN c.amount_usd END) AS estimated_cost_usd "
+                "FROM cand CROSS JOIN cost_measurements c ON c.turn_id=cand.turn_id "
+                f"WHERE {_chosen_cost()} GROUP BY cand.name",
+                params,
+            ):
+                entry = totals.setdefault(row["name"], {"name": row["name"], "turns": 0})
+                entry["reported_cost_usd"] = row["reported_cost_usd"]
+                entry["estimated_cost_usd"] = row["estimated_cost_usd"]
+            return {"sessions": totals}
+
+        return self._run(build)["sessions"]  # type: ignore[return-value]
 
     def summary(self, args: dict[str, Any]) -> dict[str, object]:
         session = str(args.get("session") or "").strip() or None
@@ -638,7 +697,7 @@ class MetricsQueries:
                     model_filter = (
                         "(lower(b.model) LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM llm_invocations i "
                         "WHERE i.turn_id=t.turn_id AND (i.invocation_id=b.invocation_id "
-                        f"OR i.model_selected=b.model) AND {_model_match('i')}))"
+                        f"OR i.model_key=b.model_key) AND {_model_match('i')}))"
                     )
                 filters.append(model_filter)
                 params.extend([model_pattern] * (2 if dashboard else 3))
@@ -765,7 +824,10 @@ class MetricsQueries:
                 "SELECT COUNT(*) FROM tool_executions x JOIN turns t ON t.turn_id=x.turn_id JOIN sessions s ON s.session_id=t.session_id WHERE " + non_usage_where,
                 tuple(tool_params),
             ).fetchone()[0])
-            cost_filters = [item.replace("b.model", "c.model").replace("b.invocation_id", "c.invocation_id") for item in filters]
+            cost_filters = [
+                item.replace("b.model", "c.model").replace("b.invocation_id", "c.invocation_id")
+                for item in filters
+            ]
             costs = conn.execute(
                 "WITH chosen_cost AS (SELECT c.* FROM cost_measurements c "
                 "JOIN turns t ON t.turn_id=c.turn_id JOIN sessions s ON s.session_id=t.session_id WHERE " +

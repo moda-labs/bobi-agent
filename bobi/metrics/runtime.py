@@ -6,12 +6,14 @@ import atexit
 import itertools
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
+from bobi.costs import model_identity
 from bobi.metrics.events import MetricsEvent, deterministic_metric_id, uuid7
 from bobi.metrics.producer import MetricsProducer
 from bobi.metrics.policy import policy_health
@@ -718,7 +720,14 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
     )
 
     invocation_rows, provider_ids = _invocation_rows(observation, ended_at_us)
+    # A subagent call on another model was not the turn's requested model;
+    # stamping it would let a filter on the requested model count it too.
+    invocation_models = {model_identity(row[1].model) for row in invocation_rows if row[1].model}
     for index, (invocation_id, invocation, result) in enumerate(invocation_rows, 1):
+        requested = observation.model_requested or None
+        if (requested and invocation.model and len(invocation_models) > 1
+                and model_identity(invocation.model) != model_identity(requested)):
+            requested = None
         started = invocation.started_at_us or observation.started_at_us
         ended = invocation.ended_at_us or ended_at_us
         runtime.emit(
@@ -731,7 +740,7 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
                 "parent_invocation_id": None,
                 "invocation_index": index,
                 "provider": observation.provider,
-                "model_requested": observation.model_requested or None,
+                "model_requested": requested,
                 "model_selected": invocation.model or observation.model_requested or "unknown",
                 "provider_event_id": invocation.provider_event_id or None,
                 "provider_request_id": None,
@@ -793,7 +802,12 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
             usage_by_model.setdefault(usage.model or "unknown", []).append(usage)
     for model, usage_items in usage_by_model.items():
         aggregate = _aggregate_usage(usage_items)
-        invocation_items = invocation_usage_by_model.get(model, [])
+        invocation_items = [
+            item
+            for invocation_model, items in invocation_usage_by_model.items()
+            if model_identity(invocation_model) == model_identity(model)
+            for item in items
+        ]
         if (
             not invocation_items
             and len(usage_by_model) == 1
@@ -841,35 +855,19 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
 
     total_cost = sum(result.total_cost_usd or 0.0 for result in observation.results)
     if total_cost > 0:
+        # A multi-model turn's total is split by the per-model costs Claude
+        # reports with it, so a model-filtered summary gets its model's share.
         models = sorted(usage_by_model)
-        runtime.emit(
-            "cost.recorded",
-            {
-                "cost_measurement_id": _stable_id("cost", observation.turn_id, "turn"),
-                "scope": "turn",
-                "session_id": observation.session_id,
-                "turn_id": observation.turn_id,
-                "invocation_id": None,
-                "provider": observation.provider,
-                "model": models[0] if len(models) == 1 else None,
-                "amount_usd": total_cost,
-                "measurement_source": "provider_stream",
-                "is_estimated": 0,
-                "provider_event_id": provider_turn_id or None,
-                "observed_at_us": ended_at_us,
-                "raw_cost_json": None,
-            },
-            session_id=observation.session_id,
-            turn_id=observation.turn_id,
-        )
+        shares = (
+            _reported_model_costs(usage_by_model, total_cost) if len(models) > 1 else None
+        ) or {models[0] if len(models) == 1 else None: total_cost}
+        source, is_estimated, id_parts = "provider_stream", 0, ()
     else:
         from bobi.costs import estimate_cost
-        est_total = 0.0
-        primary_model = None
+        shares = {}
         for m, usages in (usage_by_model or invocation_usage_by_model).items():
-            primary_model = primary_model or m
             agg = _aggregate_usage(usages)
-            est_total += estimate_cost(
+            amount = estimate_cost(
                 observation.provider,
                 m,
                 input_tokens=agg.get("input_tokens") or 0,
@@ -878,27 +876,50 @@ def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) ->
                 cache_write_tokens=agg.get("cache_write_input_tokens") or 0,
                 cache_write_1h_tokens=agg.get("cache_write_1h_input_tokens") or 0,
             )
-        if est_total > 0:
-            runtime.emit(
-                "cost.recorded",
-                {
-                    "cost_measurement_id": _stable_id("cost", observation.turn_id, "turn", "est"),
-                    "scope": "turn",
-                    "session_id": observation.session_id,
-                    "turn_id": observation.turn_id,
-                    "invocation_id": None,
-                    "provider": observation.provider,
-                    "model": primary_model,
-                    "amount_usd": est_total,
-                    "measurement_source": "calibrated_estimator",
-                    "is_estimated": 1,
-                    "provider_event_id": provider_turn_id or None,
-                    "observed_at_us": ended_at_us,
-                    "raw_cost_json": None,
-                },
-                session_id=observation.session_id,
-                turn_id=observation.turn_id,
-            )
+            if amount > 0:
+                shares[m] = amount
+        source, is_estimated, id_parts = "calibrated_estimator", 1, ("est",)
+    for model, amount in shares.items():
+        per_model = (model,) if len(shares) > 1 else ()
+        runtime.emit(
+            "cost.recorded",
+            {
+                "cost_measurement_id": _stable_id(
+                    "cost", observation.turn_id, "turn", *id_parts, *per_model
+                ),
+                "scope": "turn",
+                "session_id": observation.session_id,
+                "turn_id": observation.turn_id,
+                "invocation_id": None,
+                "provider": observation.provider,
+                "model": model,
+                "amount_usd": amount,
+                "measurement_source": source,
+                "is_estimated": is_estimated,
+                "provider_event_id": provider_turn_id or None,
+                "observed_at_us": ended_at_us,
+                "raw_cost_json": None,
+            },
+            session_id=observation.session_id,
+            turn_id=observation.turn_id,
+        )
+
+
+def _reported_model_costs(
+    usage_by_model: Mapping[str, list[BrainUsage]], total_cost: float
+) -> dict[str, float] | None:
+    """Claude's per-model ``costUSD``, when every model has one and they add up."""
+    costs: dict[str, float] = {}
+    for model, items in usage_by_model.items():
+        values = [item.raw_usage.get("costUSD") for item in items]
+        if not values or not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) for value in values
+        ):
+            return None
+        costs[model] = float(sum(values))
+    if not math.isclose(sum(costs.values()), total_cost, rel_tol=1e-6, abs_tol=1e-9):
+        return None
+    return costs
 
 
 def _emit_tool(

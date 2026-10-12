@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Iterable
 
 from bobi.metrics.events import MetricsEvent, canonical_json
-from bobi.metrics.schema import BEST_USAGE_VERSION, SCHEMA_SQL, SCHEMA_VERSION
+from bobi.costs import model_identity
+from bobi.metrics.schema import (
+    BEST_USAGE_VERSION,
+    MODEL_KEY_SOURCES,
+    SCHEMA_SQL,
+    SCHEMA_VERSION,
+)
 from bobi.metrics.spool import FrameRecord
 
 def connect(path: Path | str, *, readonly: bool = False) -> sqlite3.Connection:
@@ -41,6 +47,28 @@ def _meta(conn: sqlite3.Connection, key: str) -> str | None:
     return None if row is None else row[0]
 
 
+def _add_model_key_columns(conn: sqlite3.Connection) -> None:
+    """Add ``model_key`` to a database created before the column existed."""
+    for table in MODEL_KEY_SOURCES:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if columns and "model_key" not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN model_key TEXT")
+
+
+def fill_model_keys(conn: sqlite3.Connection) -> None:
+    """Key every row written without one: rows from before the column existed,
+    or rows written by hand or by an older Bobi rather than through projection.
+    Runs on every migrate; a partial index keeps it to the unkeyed rows."""
+    for table, column in MODEL_KEY_SOURCES.items():
+        models = [row[0] for row in conn.execute(
+            f"SELECT DISTINCT {column} FROM {table} "
+            f"WHERE model_key IS NULL AND {column} IS NOT NULL")]
+        conn.executemany(
+            f"UPDATE {table} SET model_key=? WHERE model_key IS NULL AND {column}=?",
+            [(model_identity(model), model) for model in models],
+        )
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     # Refuse a newer database before touching it: an older Bobi must not
     # rewrite the view or any schema a newer one owns.
@@ -51,7 +79,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     if best_usage is None or int(best_usage) != BEST_USAGE_VERSION:
         # The view holds no data; rebuild it from the current definition.
         conn.execute("DROP VIEW IF EXISTS best_usage")
+    _add_model_key_columns(conn)
     conn.executescript(SCHEMA_SQL)
+    fill_model_keys(conn)
     conn.executemany(
         "INSERT INTO schema_meta(key, value) VALUES(?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

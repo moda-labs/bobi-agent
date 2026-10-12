@@ -31,7 +31,13 @@ from bobi.metrics.spool import (
     encode_frame,
     iter_frames,
 )
-from bobi.metrics.store import connect, integrity_check, migrate, stage_frames
+from bobi.metrics.store import (
+    connect,
+    fill_model_keys,
+    integrity_check,
+    migrate,
+    stage_frames,
+)
 from bobi.supervisor.config import SupervisorConfig
 from bobi.supervisor.supervision import Supervisor
 from dataclasses import replace
@@ -666,6 +672,7 @@ def _seed_turn_usage(conn, rows):
             "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
             "observed_at_us,supersedes_measurement_id) VALUES(?,?,'t1',NULL,'anthropic',?,?,0,1,?,10,1,?)",
             (measurement_id, scope, model, source, input_tokens, supersedes))
+    fill_model_keys(conn)
     conn.commit()
 
 
@@ -679,6 +686,70 @@ def test_best_usage_counts_one_model_under_two_spellings_once(tmp_path):
         ("transcript", "turn", "claude_transcript", "claude-opus-5-5", 1000, None),
     ])
     assert conn.execute("SELECT SUM(input_tokens) FROM best_usage").fetchone()[0] == 1000
+    conn.close()
+
+
+@pytest.mark.parametrize(("model", "key"), [
+    ("claude-opus-5-5[1m]", "claude-opus-5-5"),
+    ("Claude-Opus-5.5", "claude-opus-5-5"),
+    ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+    ("opus", "claude-opus-5-5"),
+    ("cx/gpt-5.6-sol", "gpt-5.6-sol"),
+])
+def test_best_usage_keys_every_spelling_of_a_model_alike(tmp_path, model, key):
+    conn = connect(tmp_path / "metrics.db")
+    migrate(conn)
+    _seed_turn_usage(conn, [("u", "turn", "provider_stream", model, 10, None)])
+    assert tuple(conn.execute("SELECT model, model_key FROM best_usage").fetchone()) == (model, key)
+    conn.close()
+
+
+def test_rows_written_without_a_key_never_merge_two_models(tmp_path):
+    # An older writer leaves model_key NULL; until the next migrate keys it,
+    # each row still counts as its own model.
+    conn = connect(tmp_path / "metrics.db")
+    migrate(conn)
+    conn.execute("INSERT INTO sessions(session_id,session_name,brain,provider,started_at_us,status) "
+                 "VALUES('s1','agent','claude','anthropic',1,'completed')")
+    conn.execute("INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
+                 "started_at_us,status) VALUES('t1','s1',0,'user',1,1,'completed')")
+    for measurement_id, model, tokens in (("a", "claude-opus-5-5", 100), ("b", "claude-haiku-4-5", 7)):
+        conn.execute("INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
+                     "measurement_source,is_estimated,token_semantics_version,input_tokens,"
+                     "output_tokens,observed_at_us) VALUES(?,'turn','t1','anthropic',?,"
+                     "'provider_stream',0,1,?,1,1)", (measurement_id, model, tokens))
+    conn.commit()
+    assert conn.execute("SELECT SUM(input_tokens) FROM best_usage").fetchone()[0] == 107
+
+    migrate(conn)
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM usage_measurements WHERE model_key IS NULL").fetchone()[0] == 0
+    assert conn.execute("SELECT SUM(input_tokens) FROM best_usage").fetchone()[0] == 107
+    conn.close()
+
+
+def test_migrate_keys_rows_written_before_the_model_key_column(tmp_path):
+    conn = connect(tmp_path / "metrics.db")
+    migrate(conn)
+    conn.execute("DROP VIEW best_usage")
+    conn.execute("DROP INDEX idx_usage_unkeyed")
+    conn.execute("ALTER TABLE usage_measurements DROP COLUMN model_key")
+    conn.execute("UPDATE schema_meta SET value='2' WHERE key='best_usage_version'")
+    conn.commit()
+    conn.execute("INSERT INTO sessions(session_id,session_name,brain,provider,started_at_us,status) "
+                 "VALUES('s1','agent','claude','anthropic',1,'completed')")
+    conn.execute("INSERT INTO turns(turn_id,session_id,turn_index,trigger_kind,is_user_initiated,"
+                 "started_at_us,status) VALUES('t1','s1',0,'user',1,1,'completed')")
+    conn.execute("INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
+                 "measurement_source,is_estimated,token_semantics_version,input_tokens,output_tokens,"
+                 "observed_at_us) VALUES('u','turn','t1','anthropic','claude-opus-5-5[1m]',"
+                 "'provider_stream',0,1,10,1,1)")
+    conn.commit()
+
+    migrate(conn)
+
+    assert conn.execute("SELECT model_key FROM best_usage").fetchone()[0] == "claude-opus-5-5"
     conn.close()
 
 
