@@ -1624,6 +1624,9 @@ def test_routing_withheld_from_a_child_and_not_restored_is_recorded(monkeypatch,
     monkeypatch.setattr(config_module, "_UNRESTORED_PROVIDER_ENV", set())
     load_dotenv(tmp_path)
     assert "BOBI_METRICS_EXPERIMENT_JSON" not in os.environ
+    # A detached launch from this process starts a child with its environment.
+    monkeypatch.setattr(config_module, "_UNRESTORED_PROVIDER_ENV", set())
+    load_dotenv(tmp_path)
     runtime = MetricsRuntime(tmp_path, mode="enabled")
     recorded = _recorded_fallbacks(runtime, monkeypatch)
     try:

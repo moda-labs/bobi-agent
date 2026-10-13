@@ -120,7 +120,14 @@ def load_dotenv(project_path: Path) -> None:
         if key not in os.environ:
             os.environ[key] = value
             _DOTENV_LOADED[key] = value
-    _UNRESTORED_PROVIDER_ENV.update(name for name in withheld if not os.environ.get(name))
+    unrestored = [name for name in withheld if not os.environ.get(name)]
+    _UNRESTORED_PROVIDER_ENV.update(unrestored)
+    if unrestored:
+        from bobi.metrics.router import EXPERIMENT_CONFIG_ENV
+
+        if EXPERIMENT_CONFIG_ENV in unrestored:
+            # A detached child launched from here inherits the reason routing is off.
+            os.environ[_PROVIDER_CLEARED_ENV] = EXPERIMENT_CONFIG_ENV
 
 
 def project_env(project_path: Path) -> dict[str, str]:
