@@ -1319,8 +1319,10 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
       cacheWriteCell.append(node("span", number(usage.cache_write_input_tokens), "bobi-tnum token-main-val"));
 
       // 8. Cost Cell
-      // A sole call costs what the turn costs, unless the turn's cost is split by model.
-      const terminalCost = invocations.length === 1 && chosenTurnRows.length === 1 ? chosenTurnRows[0] : null;
+      // A sole call costs what the turn costs, unless the turn's cost is split by model
+      // or covers models the call did not run (the provider billed several for the turn).
+      const terminalCost = invocations.length === 1 && chosenTurnRows.length === 1
+        && (data.cost_models || []).length <= 1 ? chosenTurnRows[0] : null;
       const cost = (data.cost_measurements || []).filter(item => item.invocation_id === invocation.invocation_id)
         .sort((first, second) => first.is_estimated - second.is_estimated || second.observed_at_us - first.observed_at_us)[0] || terminalCost;
       const amountCell = node("div", "", "token-cell");
@@ -1794,6 +1796,19 @@ export function mountMetrics(element, { api, name, session = "" }) {
   let queuedClear = false;
   let queuedPage = false;
   let timer;
+  // A refresh that fell due while the tab was hidden; it runs when the tab is shown again.
+  let dueWhileHidden = null;
+  function whenVisible(refresh) {
+    if (document.hidden) dueWhileHidden = refresh;
+    else refresh();
+  }
+  function handleVisibility() {
+    if (document.hidden || !dueWhileHidden) return;
+    const refresh = dueWhileHidden;
+    dueWhileHidden = null;
+    refresh();
+  }
+  document.addEventListener("visibilitychange", handleVisibility);
   let modelDebounce;
   let searchDebounce;
   let modelRevision = 0;
@@ -1804,7 +1819,9 @@ export function mountMetrics(element, { api, name, session = "" }) {
   const base = `/api/agents/${encodeURIComponent(name)}/metrics`;
 
   let activeTurnIndex = -1;
+  // The whole loaded page, which the drawer walks thread by thread; a search shows only `shownTurns`.
   let currentTurns = [];
+  let shownTurns = [];
   let currentSearch = null;
   let currentDrawerTab = "overview";
   let currentTurnsView = "threads";
@@ -2060,7 +2077,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
   function drawTurns() {
     turns.replaceChildren();
 
-    const head = createSectionHead("", "Recent turns", currentTurns.length, "Individual turns, model execution lifecycle, and token consumption");
+    const head = createSectionHead("", "Recent turns", shownTurns.length, "Individual turns, model execution lifecycle, and token consumption");
     const viewSwitch = node("div", "", "metrics-view-switch");
     const btnThreads = node("button", "By Thread", "btn bobi-btn small" + (currentTurnsView === "threads" ? " active" : ""));
     btnThreads.type = "button";
@@ -2084,8 +2101,8 @@ export function mountMetrics(element, { api, name, session = "" }) {
     if (currentSearch && currentSearch.searched < currentSearch.loaded) {
       turns.append(node("p", `Search covered ${currentSearch.searched} of ${currentSearch.loaded} loaded turns.`, "metrics-note metrics-search-coverage"));
     }
-    turnRows(turns, currentTurns, turn => openAtIndex(currentTurns.indexOf(turn)), name, setSessionFilter, currentTurnsView);
-    if (!currentTurns.length) {
+    turnRows(turns, shownTurns, turn => openAtIndex(currentTurns.indexOf(turn)), name, setSessionFilter, currentTurnsView);
+    if (!shownTurns.length) {
       turns.append(node("p", search.value.trim() ? "No loaded turns match this search." : "No recorded turns in this window.", "runs-empty"));
     }
   }
@@ -2151,8 +2168,12 @@ export function mountMetrics(element, { api, name, session = "" }) {
     // must not blank the turn list beside it.
     const [summaryResult, turnsResult] = results;
     renderCollector(summaryResult.ok ? summaryResult.data.collector || {} : null);
+    // A search refused for want of a reader is asked again shortly, whether or not live refresh is on.
+    const searchBusy = !turnsResult.ok && query.has("q") && turnsResult.data?.code === "metrics_busy";
     if (!turnsResult.ok) {
-      note.textContent = `${turnsResult.data?.error || "Could not read metrics."} Previous values, if any, are stale.`;
+      note.textContent = searchBusy
+        ? "Search is waiting for a free metrics reader; the turns below are from the previous read."
+        : `${turnsResult.data?.error || "Could not read metrics."} Previous values, if any, are stale.`;
     } else {
       if (results[2]?.ok) {
         const range = `${params.get("from")}/${params.get("to")}`;
@@ -2167,9 +2188,9 @@ export function mountMetrics(element, { api, name, session = "" }) {
       }
       if (summaryResult.ok) renderSummary(summaryResult.data);
 
-      const allTurns = results[1].data.turns || [];
       const selectedTurnId = currentTurns[activeTurnIndex]?.turn_id;
-      currentTurns = allTurns;
+      shownTurns = results[1].data.turns || [];
+      currentTurns = [...shownTurns, ...(results[1].data.unmatched_turns || [])];
       currentSearch = results[1].data.search || null;
       if (selectedTurnId) {
         activeTurnIndex = currentTurns.findIndex(turn => turn.turn_id === selectedTurnId);
@@ -2201,8 +2222,14 @@ export function mountMetrics(element, { api, name, session = "" }) {
     }
 
     clearTimeout(timer);
-    // A search re-reads transcripts; it reruns when the search changes, not on a timer.
-    timer = setTimeout(() => { if (auto.checked && !document.hidden && !cursor && !search.value.trim()) load(true, false); }, 10000);
+    dueWhileHidden = null;
+    // A search is refreshed like the plain list. Its cost stays bounded: the server reads
+    // transcripts for at most SEARCH_TRANSCRIPT_BUDGET_S and reuses every unchanged one, so a
+    // refresh re-parses only transcripts that grew since the last read.
+    timer = searchBusy
+      ? setTimeout(() => whenVisible(() => { if (search.value.trim() === query.get("q")) load(); }),
+        Math.max(1000, Number(turnsResult.data?.retry_after_ms) || 0))
+      : setTimeout(() => whenVisible(() => { if (auto.checked && !cursor) load(true, false); }), 10000);
   }
 
   let currentRoutingConfig = null;
@@ -2834,5 +2861,6 @@ export function mountMetrics(element, { api, name, session = "" }) {
     clearTimeout(searchDebounce);
     document.removeEventListener("keydown", handleDrawerKey);
     document.removeEventListener("keydown", handleJevModalKey);
+    document.removeEventListener("visibilitychange", handleVisibility);
   };
 }

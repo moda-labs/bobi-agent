@@ -29,6 +29,32 @@ def _client():
     return c
 
 
+def _first_workflow_prompt(monkeypatch, task: str, instruction: str) -> str:
+    """The first prompt a real workflow run sends its brain, so a search test follows the
+    orchestrator's own templates rather than a copy of them."""
+    from unittest.mock import MagicMock, patch
+
+    from bobi.workflow.orchestrator import run_workflow
+    from bobi.workflow.schema import StepDef, Workflow
+    from tests.test_orchestrator import _recording_brain
+
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
+    brain, _, clients = _recording_brain()
+    workflow = Workflow(name="deploy", steps=[StepDef(name="implement", prompt=instruction),
+                                              StepDef(name="review", prompt="Review it.")])
+    with patch("bobi.brain.get_brain", lambda kind=None: brain), \
+            patch("bobi.workflow.orchestrator.get_registry", return_value=MagicMock()), \
+            patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+            patch("bobi.workflow.orchestrator._setup_worktree", return_value="/tmp"), \
+            patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+            patch("bobi.workflow.orchestrator.save_session_id"), \
+            patch("bobi.brain.turns.save_session_id"), \
+            patch("bobi.workflow.orchestrator.log_activity"), \
+            patch("bobi.brain.turns.log_activity"):
+        assert run_workflow(workflow, task=task, repo="r", cwd="/tmp", run_key="1") is True
+    return clients[0].queries[0]
+
+
 class TestMetrics:
     RANGE = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z"}
 
@@ -348,6 +374,11 @@ class TestMetrics:
         assert matched["turns"][0]["conversation"]["user_message_truncated"] is True
         assert "zebracrossing" not in matched["turns"][0]["conversation"]["user_message"]
         assert matched["next_cursor"] == everything["next_cursor"]
+        # The rest of the page comes back apart, so a thread can still be walked turn by turn.
+        assert "unmatched_turns" not in everything
+        assert [turn["turn_id"] for turn in matched["unmatched_turns"]] == ["t-unknown", "t-reused", "t-pro"]
+        assert matched["unmatched_turns"][0] == next(
+            turn for turn in everything["turns"] if turn["turn_id"] == "t-unknown")
         # The other listed fields still match, as they did in the browser.
         by_model = _client().get(base + "/turns", params={**self.RANGE, "q": "SONNET"}).json()["turns"]
         assert {turn["turn_id"] for turn in by_model} == {"t-pro", "t-reused"}
@@ -358,6 +389,72 @@ class TestMetrics:
         assert _client().get(base + "/turns", params=self.RANGE).json()["turns"][0]["conversation"]["user_message"] is None
         matched = _client().get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
         assert [turn["turn_id"] for turn in matched["turns"]] == ["t-routine"]
+
+        # A word past the drawer's 32 KiB view of the prompt still matches.
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z",
+                                                                "x" * 40000 + " farpastword"),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]))
+        far = _client().get(base + "/turns", params={**self.RANGE, "q": "farpastword"}).json()
+        assert [turn["turn_id"] for turn in far["turns"]] == ["t-routine"]
+        assert far["search"] == {"loaded": 4, "searched": 4}
+
+    # A bootstrap prompt carrying a Slack event, as the manager receives it. The workflow
+    # prompt (`"workflow"` below) is captured from a real run of the orchestrator.
+    EVENT_PROMPT = (
+        "You are an agent in a bobi deployment. How you receive events: one at a time.\n"
+        "Event: slack/message\nconversation: slack:T1:channel:C1:thread:1.2\nchannel_name: ops-room\n"
+        "please check zebraevent logs")
+
+    @pytest.mark.parametrize("prompt,word,found", [
+        # A workflow turn's title is its step instruction; the launch task is still searched.
+        ("workflow", "zebracredential", True),
+        ("workflow", "implement the change", True),
+        # An event's title stops at its metadata; the lines after it are still searched.
+        (EVENT_PROMPT, "zebraevent", True),
+        # Text bobi wraps around the operator's input is not.
+        ("workflow", "repeat steps", False),
+        ("workflow", "background for run", False),
+        ("workflow", "yaml", False),
+        (EVENT_PROMPT, "bobi deployment", False),
+        (EVENT_PROMPT, "channel_name", False),
+        (EVENT_PROMPT, "slack/message", False),
+        # A workflow whose task forwards an event is still a workflow prompt: its task is kept whole.
+        ("forwarded-event", "acme/api", True),
+        ("forwarded-event", "zebraforward", True),
+        ("forwarded-event", "repeat steps", False),
+        ("forwarded-event", "background for run", False),
+    ], ids=["workflow-task", "workflow-instruction", "after-event-metadata", "step-header", "background-header",
+            "yaml-fence", "bootstrap", "event-metadata", "event-line", "forwarded-task-metadata",
+            "forwarded-task-content", "forwarded-step-header", "forwarded-background-header"])
+    def test_metrics_turn_search_matches_operator_text_not_framework_text(
+            self, bobi_install, monkeypatch, tmp_path, prompt, word, found):
+        from bobi.metrics.store import connect
+
+        if prompt == "workflow":
+            prompt = _first_workflow_prompt(monkeypatch, "rotate the zebracredential on staging",
+                                            "Implement the change.")
+            assert "zebracredential" in prompt and "repeat steps" in prompt and "```yaml" in prompt
+        elif prompt == "forwarded-event":
+            prompt = _first_workflow_prompt(
+                monkeypatch, "Event: github/push\nrepo: acme/api\nplease deploy zebraforward", "Deploy it.")
+            assert "Event: github/push" in prompt and "repeat steps" in prompt
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z", prompt),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        listed = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()
+        assert [turn["turn_id"] for turn in listed["turns"]] == (["t-routine"] if found else [])
 
     @pytest.mark.parametrize("brain", ["claude", "codex"])
     def test_metrics_old_turn_uses_timestamp_window_before_tail_limit(self, bobi_install, monkeypatch, tmp_path, brain):

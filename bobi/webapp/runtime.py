@@ -100,7 +100,7 @@ def _clean_event_text(text: str) -> str:
         stripped = line.strip()
         if stripped.startswith("Event:"):
             continue
-        if re.match(r"^(?:conversation|channel|user_id|repo|action|sender|thread_ts|event_ts|channel_name|chat_id|thread_id):\s*", stripped):
+        if _EVENT_METADATA.match(stripped):
             in_meta = True
             continue
         if not in_meta and stripped:
@@ -127,25 +127,66 @@ def _turn_cost_models(data: dict) -> list[str]:
     return list(models.values())
 
 
-def _turn_search_text(turn: dict) -> str:
-    """The text a turn-list search matches: the listed fields, prompt in full."""
+def _turn_search_text(turn: dict, prompt: str | None) -> str:
+    """The text a turn-list search matches: the listed fields and *prompt*, the operator's text in full."""
     conversation = turn.get("conversation") or {}
-    fields = (turn.get("semantic_title"), conversation.get("semantic_title"), conversation.get("user_message"),
+    # The cleaned message is kept too: it joins event lines differently from the raw prompt.
+    fields = (turn.get("semantic_title"), conversation.get("semantic_title"), conversation.get("user_message"), prompt,
               conversation.get("prompt_snippet"), conversation.get("response_snippet"), turn.get("session_name"),
               turn.get("role"), turn.get("session_id"), turn.get("model_selected"), turn.get("fallback_reason"))
     return " ".join(str(value) for value in fields if value).lower()
+
+
+_BOOTSTRAP_MARKERS = ("You are an agent in a bobi deployment", "You are a bobi ", "# Bobi Agent", "How you receive events")
+_EVENT_METADATA = re.compile(r"^(?:conversation|channel|user_id|repo|action|sender|thread_ts|event_ts|channel_name|chat_id|thread_id):\s*")
+# The two blocks the workflow orchestrator puts before a step's instruction, by their shape:
+# a one-line background header over a fenced YAML of the run's scopes, and a one-line step header.
+_WORKFLOW_BACKGROUND = re.compile(r"(?m)^Workflow `[^`\n]+` background for run `[^`\n]*`[^\n]*\n\n```yaml\n([\s\S]*?)\n```\n\n")
+_WORKFLOW_STEP_HEADER = re.compile(r"(?m)^Workflow `[^`\n]+` steps: [^\n]*\n\n")
+
+
+def _prompt_search_text(raw: str) -> str:
+    """The operator's part of one prompt, for a search: the text without what bobi wraps around it.
+
+    Dropped: the agent bootstrap, an event's `Event:` line and metadata lines, and a workflow's
+    background and step headers. Kept: the event's content lines (before and after its metadata),
+    a workflow's launch input and handoffs (the YAML body), and the step instruction.
+    """
+    # A workflow step first: its task may itself carry a forwarded `Event:` block, which is
+    # operator input to keep whole, not an event delivered to this agent.
+    if _WORKFLOW_STEP_HEADER.search(raw):
+        text = _WORKFLOW_BACKGROUND.sub(lambda match: match[1] + "\n", raw)
+        return _WORKFLOW_STEP_HEADER.sub("", text)
+    text = raw
+    if text.lstrip().startswith(_BOOTSTRAP_MARKERS):
+        parts = re.split(r"(?m)^(?=Event:\s*[\w\-\./]+)", text)
+        if len(parts) == 1:
+            return ""
+        text = parts[-1]
+    # An event as delivered: the prompt opens with its `Event:` line.
+    if text.lstrip().startswith("Event:"):
+        return "\n".join(line for line in text.splitlines()
+                         if not line.strip().startswith("Event:") and not _EVENT_METADATA.match(line.strip()))
+    return text
 
 
 def _clean_user_message(raw: str) -> str:
     if not raw:
         return ""
     # Filter out system prompts and agent bootstrap instructions
-    if raw.lstrip().startswith(("You are an agent in a bobi deployment", "You are a bobi ", "# Bobi Agent", "How you receive events")):
+    if raw.lstrip().startswith(_BOOTSTRAP_MARKERS):
         parts = re.split(r"(?m)^(?=Event:\s*[\w\-\./]+)", raw)
         if len(parts) > 1:
             last_part = parts[-1].strip()
             return _clean_event_text(last_part)
         return ""
+
+    # A workflow step before an event: its task may forward an `Event:` block, and its
+    # title is the step instruction after the orchestrator's header.
+    if _WORKFLOW_STEP_HEADER.search(raw):
+        instruction = _WORKFLOW_STEP_HEADER.split(raw)[-1].strip()
+        if instruction:
+            return instruction
 
     if "Event:" in raw:
         return _clean_event_text(raw)
@@ -175,15 +216,18 @@ def _internal_activity_title(text: str, trigger: str) -> str | None:
         return "Idle Standby (No new events)"
     if re.match(r"(?is)^\s*(?:process(?:ing)? (?:the |pending |incoming )?inbox\b|check(?:ing)? (?:the )?inbox\b)", text):
         return "Inbox Event Processing"
-    if text.lstrip().startswith((
-        "You are an agent in a bobi deployment", "You are a bobi ",
-        "# Bobi Agent", "How you receive events",
-    )):
+    if text.lstrip().startswith(_BOOTSTRAP_MARKERS):
         return "Agent Startup & Initialization"
     return None
 
 def _turn_conversation(turn: dict, entries: list[dict], next_started: int | None = None,
-                       session: dict | None = None) -> dict:
+                       session: dict | None = None, full_message: bool = False) -> dict:
+    """The turn's prompt, response and entries, each bounded for the wire.
+
+    With *full_message*, ``search_prompt`` also carries the operator's part of
+    every prompt the turn received, uncut, for a search to match; it is not for
+    the wire.
+    """
     end = turn.get("ended_at_us")
     if end is None and next_started is None and turn.get("status") != "running":
         entries = []
@@ -208,11 +252,15 @@ def _turn_conversation(turn: dict, entries: list[dict], next_started: int | None
     prompt_bytes = prompt.encode("utf-8")
     response_bytes = response.encode("utf-8")
     user_messages = []
+    searchable = []
     internal_titles = []
     trigger = turn.get("trigger_kind") or "agent"
     for text in inputs:
         internal_title = _internal_activity_title(text, trigger)
         cleaned = _clean_user_message(text)
+        # A prompt bobi generated for its own upkeep (sleep cycle, idle, bootstrap) is not searched.
+        if internal_title is None or (internal_title == "Agent Startup & Initialization" and "Event:" in text):
+            searchable.append(_prompt_search_text(text))
         if cleaned and (internal_title is None or (internal_title == "Agent Startup & Initialization" and "Event:" in text)):
             user_messages.append(cleaned)
         elif internal_title:
@@ -266,7 +314,7 @@ def _turn_conversation(turn: dict, entries: list[dict], next_started: int | None
         if preview_bytes > 262144:
             break
         preview.append(entry)
-    return {"status": "matched" if inputs and responses else "partial" if selected else "unavailable",
+    conversation = {"status": "matched" if inputs and responses else "partial" if selected else "unavailable",
             "input": prompt_bytes[:32768].decode("utf-8", errors="ignore") or None,
             "user_message": user_message.encode("utf-8")[:32768].decode("utf-8", errors="ignore") or None,
             "semantic_title": semantic_title,
@@ -275,6 +323,9 @@ def _turn_conversation(turn: dict, entries: list[dict], next_started: int | None
                          or any(entry.get("truncated") for entry in preview),
             "entries": preview, "origin": origin,
             "prompt_snippet": user_message[:60] or None, "response_snippet": response[:60] or None}
+    if full_message:
+        conversation["search_prompt"] = "\n\n".join(part for part in searchable if part) or None
+    return conversation
 
 
 # --- Errors -----------------------------------------------------------------
@@ -1232,14 +1283,15 @@ class LocalRuntime(TeamRuntime):
                             transcripts[key] = []
                             if provider_id:
                                 unread.add(key)
-                    conversation = _turn_conversation(turn, transcripts[key], next_started, session=session)
+                    conversation = _turn_conversation(turn, transcripts[key], next_started, session=session,
+                                                      full_message=bool(search))
                     turn["semantic_title"] = conversation["semantic_title"]
                     if view == "turns":
                         turn["conversation"] = {key: conversation[key] for key in ("status", "origin", "prompt_snippet", "response_snippet", "user_message", "semantic_title")}
                         # Not searched: the transcript was not read in time, or the read stopped
                         # before reaching any of this turn's prompt.
                         unsearched += key in unread or (key in cut and not conversation["user_message"])
-                        if search and search not in _turn_search_text(turn):
+                        if search and search not in _turn_search_text(turn, conversation["search_prompt"]):
                             unmatched.add(turn["turn_id"])
                         # A list row needs a title, not the prompt: the drawer reads the whole text.
                         message = turn["conversation"]["user_message"]
@@ -1251,7 +1303,10 @@ class LocalRuntime(TeamRuntime):
                 if search:
                     # A turn whose transcript was not read in time matched only on its other fields.
                     data["search"] = {"loaded": len(turns), "searched": len(turns) - unsearched}
-                if unmatched:
+                if search:
+                    # The loaded turns the search left out, so the drawer can still step through
+                    # a whole thread rather than only the turns that matched.
+                    data["unmatched_turns"] = [turn for turn in turns if turn["turn_id"] in unmatched]
                     data["turns"] = [turn for turn in turns if turn["turn_id"] not in unmatched]
                 if view == "turn":
                     data["cost_models"] = _turn_cost_models(data)

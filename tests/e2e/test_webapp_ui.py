@@ -1477,6 +1477,20 @@ class TestMetricsView:
         expect(panel.locator("tbody tr td").nth(1)).to_have_text("unattributed")
         expect(panel).not_to_contain_text("claude-haiku-4-5")
 
+    def test_drawer_call_cost_is_not_a_two_model_turn_total(self, webapp, page):
+        # One recorded call; the provider billed two models with one cost for the turn.
+        detail = self._routine_turn_costs(webapp, page, [("c-turn", None, 0.32, False)], extra_sql=[
+            "INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,measurement_source,"
+            f"is_estimated,input_tokens,output_tokens,observed_at_us,token_semantics_version) VALUES('{name}','turn',"
+            f"'t-routine','gateway','{model}','provider_stream',0,50,10,0,1)"
+            for name, model in (("u-haiku", "claude-haiku-4-5"), ("u-sonnet", "claude-sonnet-5-5"))])
+        expect(detail.locator(".panel-cost tbody tr td").nth(1)).to_have_text("unattributed")
+        expect(detail.locator(".panel-usage tbody tr")).to_have_count(1)
+        cell = detail.locator(".panel-usage tbody tr").first.locator("td").last
+        expect(cell).not_to_contain_text("$0.320000")
+        expect(cell.locator(".text-green")).to_have_count(0)
+        _metrics_capture(page, "turn-detail-two-model-turn-call-cost")
+
     @pytest.mark.parametrize("extra_sql,shown", [
         # The same model under its alias is still one model.
         (["INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_requested,"
@@ -1529,14 +1543,177 @@ class TestMetricsView:
         expect(rows).to_contain_text("Review the metrics toolbar")
         expect(coverage).to_have_count(0)
         _metrics_capture(page, "turn-search-full-prompt")
-        # A search is not re-run by the live refresh.
-        reads = _record_requests(page, re.compile(r"/metrics/turns\?"))
-        page.wait_for_timeout(10500)
-        assert reads == []
         search.fill("no-such-word")
         expect(page.locator(".runs-empty")).to_have_text("No loaded turns match this search.")
         page.locator("#metrics-search-clear").click()
         expect(rows).to_have_count(4)
+
+
+    def _thread_of_five(self, webapp, monkeypatch, prompts):
+        """Session s1 as one thread of five turns with the given prompts; returns the
+        start time and a function that records one more turn in it."""
+        from bobi.metrics.store import connect
+
+        started = int((time.time() - 60) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+        conn = connect(webapp.install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='e2e-worker-a' WHERE session_id='s1'")
+        for index, turn_id in ((3, "t-four"), (4, "t-five")):
+            conn.execute("INSERT INTO turns(turn_id,session_id,turn_index,started_at_us,status,trigger_kind,"
+                         "is_user_initiated) VALUES(?,'s1',?,?,'completed','user',1)",
+                         (turn_id, index, started + (index + 1) * 1_000_000))
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        starts = [row[0] for row in conn.execute(
+            "SELECT started_at_us FROM turns WHERE session_id='s1' ORDER BY started_at_us")]
+        conn.close()
+
+        def stamp(at_us):
+            return datetime.fromtimestamp(at_us / 1_000_000, timezone.utc).isoformat()
+
+        lines = []
+        for at_us, prompt in zip(starts, prompts):
+            lines += [_entry("user", prompt, stamp(at_us + 100_000)), _entry("assistant", "Done.", stamp(at_us + 200_000))]
+        _seed_transcript(webapp, monkeypatch, "worker-a", lines)
+
+        def record(turn_id, prompt, input_tokens):
+            at_us = int(time.time() * 1_000_000)
+            conn = connect(webapp.install.state_dir / "metrics/metrics.db")
+            conn.execute("INSERT INTO turns(turn_id,session_id,turn_index,started_at_us,ended_at_us,status,"
+                         "trigger_kind,is_user_initiated) VALUES(?,'s1',5,?,?,'completed','user',1)",
+                         (turn_id, at_us, at_us + 900_000))
+            conn.execute("INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,"
+                         "measurement_source,is_estimated,input_tokens,output_tokens,observed_at_us,"
+                         "token_semantics_version) VALUES(?,'turn',?,'gateway','claude-haiku-4-5',"
+                         "'provider_stream',0,?,7000,?,1)", ("u-" + turn_id, turn_id, input_tokens, at_us))
+            rekey(conn)
+            conn.commit()
+            conn.close()
+            lines.extend([_entry("user", prompt, stamp(at_us + 100_000)), _entry("assistant", "Done.", stamp(at_us + 200_000))])
+            _seed_transcript(webapp, monkeypatch, "worker-a", lines)
+
+        return record
+
+    def test_turn_search_keeps_the_drawer_on_the_whole_thread(self, webapp, page, monkeypatch):
+        self._thread_of_five(webapp, monkeypatch, ["alpha one", "beta two", "alpha three", "gamma four", "alpha five"])
+        page.set_viewport_size({"width": 1440, "height": 1200})
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="Flat", exact=True).click()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(6)
+        search = page.get_by_role("searchbox", name="Search loaded turns")
+        detail = page.get_by_role("dialog", name="Turn detail")
+        counter = detail.locator(".td-nav-counter")
+        with page.expect_response(re.compile(r"/metrics/turns\?.*q=alpha")):
+            search.fill("alpha")
+        expect(rows).to_have_count(3)
+        rows.filter(has_text="alpha three").click()
+        # The position is in the session's thread, as without a search.
+        expect(counter).to_have_text("Turn 3 of 5")
+        expect(detail.locator(".td-badge-turn")).to_have_text("Turn #2")
+        _metrics_capture(page, "turn-search-drawer-thread-position")
+        # Earlier steps to the thread's previous turn, which the search did not match.
+        detail.locator(".td-nav-prev").click()
+        expect(counter).to_have_text("Turn 2 of 5")
+        expect(detail.locator(".td-badge-turn")).to_have_text("Turn #1")
+        page.keyboard.press("ArrowRight")
+        expect(counter).to_have_text("Turn 3 of 5")
+        detail.get_by_role("button", name="Close").click()
+        with page.expect_response(re.compile(r"/metrics/turns\?.*q=three")):
+            search.fill("three")
+        expect(rows).to_have_count(1)
+        rows.first.click()
+        expect(counter).to_have_text("Turn 3 of 5")
+        expect(detail.locator(".td-nav-prev")).to_be_enabled()
+        expect(detail.locator(".td-nav-next")).to_be_enabled()
+
+    def test_turn_search_stays_current_under_live_refresh(self, webapp, page, monkeypatch):
+        record = self._thread_of_five(webapp, monkeypatch, ["one", "two", "three", "four", "five"])
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="Flat", exact=True).click()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(6)
+        search = page.get_by_role("searchbox", name="Search loaded turns")
+        with page.expect_response(re.compile(r"/metrics/turns\?.*q=deploy")):
+            search.fill("deploy")
+        expect(page.locator(".runs-empty")).to_have_text("No loaded turns match this search.")
+        tile = page.locator(".metrics-tile.tile-input strong")
+        before = tile.inner_text()
+        record("t-deploy", "deploy production now", 500_000)
+        # The live refresh re-runs the search over a fresh window: the new turn and its totals appear.
+        expect(rows).to_have_count(1, timeout=15_000)
+        expect(rows).to_contain_text("deploy production now")
+        expect(tile).not_to_have_text(before)
+        with page.expect_response(re.compile(r"/metrics/turns\?.*q=deploy\+production")):
+            search.fill("deploy production")
+        expect(rows).to_have_count(1)
+
+    def test_live_refresh_resumes_when_a_hidden_tab_is_shown(self, webapp, page, monkeypatch):
+        record = self._thread_of_five(webapp, monkeypatch, ["one", "two", "three", "four", "five"])
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="Flat", exact=True).click()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(6)
+        _set_visibility(page, "hidden")
+        record("t-later", "recorded while hidden", 500_000)
+        # The refresh falls due while the tab is hidden: it waits rather than read.
+        page.wait_for_timeout(10500)
+        expect(rows).to_have_count(6)
+        _set_visibility(page, "visible")
+        expect(rows).to_have_count(7)
+        expect(rows.first).to_contain_text("recorded while hidden")
+
+    def test_busy_search_retry_resumes_when_a_hidden_tab_is_shown(self, webapp, page, monkeypatch):
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.webapp.runtime import LocalRuntime
+
+        self._thread_of_five(webapp, monkeypatch, ["alpha one", "beta two", "alpha three", "gamma four", "alpha five"])
+        real = LocalRuntime.metrics
+
+        def busy_once(self, name, view, args):
+            if args.get("q") and not getattr(busy_once, "done", False):
+                busy_once.done = True
+                raise MetricsQueryError("metrics readers are busy", "metrics_busy", retry_after_ms=250)
+            return real(self, name, view, args)
+
+        monkeypatch.setattr(LocalRuntime, "metrics", busy_once)
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="Flat", exact=True).click()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(6)
+        page.locator("#metrics-live").uncheck()
+        with page.expect_response(re.compile(r"/metrics/turns\?.*q=alpha")):
+            page.get_by_role("searchbox", name="Search loaded turns").fill("alpha")
+        _set_visibility(page, "hidden")
+        page.wait_for_timeout(1500)
+        expect(rows).to_have_count(6)
+        _set_visibility(page, "visible")
+        expect(rows).to_have_count(3)
+
+    def test_turn_search_refused_as_busy_is_retried(self, webapp, page, monkeypatch):
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.webapp.runtime import LocalRuntime
+
+        self._thread_of_five(webapp, monkeypatch, ["alpha one", "beta two", "alpha three", "gamma four", "alpha five"])
+        real = LocalRuntime.metrics
+        refused = []
+
+        def busy_once(self, name, view, args):
+            if args.get("q") and not refused:
+                refused.append(args["q"])
+                raise MetricsQueryError("metrics readers are busy", "metrics_busy", retry_after_ms=250)
+            return real(self, name, view, args)
+
+        monkeypatch.setattr(LocalRuntime, "metrics", busy_once)
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="Flat", exact=True).click()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(6)
+        # Live refresh off: the refused search is still answered, not left over the unfiltered rows.
+        page.locator("#metrics-live").uncheck()
+        page.get_by_role("searchbox", name="Search loaded turns").fill("alpha")
+        expect(rows).to_have_count(3, timeout=5_000)
+        assert refused == ["alpha"]
 
 
 # --- opening a route --------------------------------------------------------
@@ -1595,6 +1772,15 @@ def _seed_transcript(webapp, monkeypatch, session, lines):
 def _entry(kind, content, at):
     return json.dumps({"type": kind, "timestamp": at,
                        "message": {"content": content}})
+
+
+def _set_visibility(page, state):
+    """Emulate the tab being hidden or shown, as the browser reports it to the page."""
+    page.evaluate("""state => {
+        Object.defineProperty(document, "visibilityState", {configurable: true, get: () => state});
+        Object.defineProperty(document, "hidden", {configurable: true, get: () => state === "hidden"});
+        document.dispatchEvent(new Event("visibilitychange"));
+    }""", state)
 
 
 def _record_requests(page, pattern=None, method=""):
