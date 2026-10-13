@@ -132,7 +132,10 @@ def _turn_context(conn, turn_id: str):
             "AND started_at_us>? ORDER BY started_at_us LIMIT 1",
             (row["session_id"], row["started_at_us"]),
         ).fetchone()
-        upper = next_turn[0] if next_turn is not None else time.time_ns() // 1000
+        if next_turn is None:
+            # Its transcript is still growing: a recovery now would be partial.
+            raise ReconciliationError(f"turn {turn_id} is still running; reconcile it after it ends")
+        upper = next_turn[0]
     return row, int(upper)
 
 
@@ -164,32 +167,28 @@ def _select_records(
             raise ReconciliationError(
                 f"Claude transcript not found for {provider_session_id}"
             )
-        records = parse_claude_transcript_records(source)
+        records = _parsed(source, parse_claude_transcript_records)
     else:
         source = codex_source
         if source is None:
             raise ReconciliationError(
                 f"Codex rollout not found for {provider_session_id}"
             )
-        records = parse_codex_rollout_records(source)
+        records = _parsed(source, parse_codex_rollout_records)
     records = [replace(record, usage=replace(record.usage, provider=provider)) for record in records]
 
-    used_elsewhere = {
-        str(item[0])
-        for item in conn.execute(
-            "SELECT provider_event_id FROM usage_measurements "
-            "WHERE provider=? AND turn_id<>? AND provider_event_id IS NOT NULL",
-            (provider, row["turn_id"]),
-        )
-    }
     lower_us = int(row["started_at_us"]) - 2_000_000
     upper_us += 5_000_000
     provider_turn_id = str(row["provider_turn_id"] or "")
+    in_window = [record for record in records if lower_us <= record.observed_at_us <= upper_us]
+    used_elsewhere = _used_elsewhere(
+        conn, provider, str(row["turn_id"]),
+        {record.usage.provider_event_id for record in in_window},
+    )
     selected = [
         record
-        for record in records
-        if lower_us <= record.observed_at_us <= upper_us
-        and record.usage.provider_event_id not in used_elsewhere
+        for record in in_window
+        if record.usage.provider_event_id not in used_elsewhere
         and (
             not provider_turn_id
             or claude_format
@@ -203,6 +202,35 @@ def _select_records(
             f"no exact provider usage matched turn {row['turn_id']}"
         )
     return source, selected
+
+
+# One parse per transcript file and version: the turns of one session share it.
+_PARSE_CACHE: dict[tuple[str, int, int], list[ProviderUsageRecord]] = {}
+_PARSE_CACHE_SIZE = 8
+
+
+def _parsed(path: Path, parse) -> list[ProviderUsageRecord]:
+    stat = Path(path).stat()
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    if key not in _PARSE_CACHE:
+        while len(_PARSE_CACHE) >= _PARSE_CACHE_SIZE:
+            _PARSE_CACHE.pop(next(iter(_PARSE_CACHE)))
+        _PARSE_CACHE[key] = parse(path)
+    return _PARSE_CACHE[key]
+
+
+def _used_elsewhere(conn, provider: str, turn_id: str, event_ids: set[str]) -> set[str]:
+    """The candidate provider events another turn already holds."""
+    ids = sorted(event_id for event_id in event_ids if event_id)
+    used: set[str] = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        used.update(str(item[0]) for item in conn.execute(
+            "SELECT provider_event_id FROM usage_measurements WHERE provider=? AND turn_id<>? "
+            f"AND provider_event_id IN ({','.join('?' for _ in chunk)})",
+            (provider, turn_id, *chunk),
+        ))
+    return used
 
 
 def _superseded_estimate(
@@ -271,7 +299,9 @@ def build_reconcile_plan(
             raise ReconciliationError(f"session not found: {session_id}")
         events: list[MetricsEvent] = []
         measurement_ids: list[str] = []
-        producer_id = f"reconciler-{provider}-{turn_id}"
+        # A fresh producer per run: a rerun that selects more records must not
+        # land on the sequence slots an earlier run already holds.
+        producer_id = f"reconciler-{provider}-{turn_id}-{uuid7()}"
         sequence = 0
         events.append(MetricsEvent(
             event_type="session.recorded",
@@ -283,7 +313,7 @@ def build_reconcile_plan(
                 "provider_session_id": provider_session_id,
             },
             event_id=deterministic_event_id(
-                provider, f"{turn_id}:session-correlation"
+                provider, f"{turn_id}:session-correlation:{_digest(dict(session_row))}"
             ),
             emitted_at_us=int(row["started_at_us"]),
             session_id=session_id,
@@ -425,8 +455,10 @@ def build_reconcile_plan(
                 producer_sequence=sequence,
                 source="provider_reconciled",
                 payload=payload,
+                # Named by its content, so a fuller rerun is a new event that
+                # updates the turn row instead of a conflict.
                 event_id=deterministic_event_id(
-                    provider, f"{turn_id}:turn-usage:{record.usage.model}"
+                    provider, f"{turn_id}:turn-usage:{record.usage.model}:{_digest(payload)}"
                 ),
                 emitted_at_us=record.observed_at_us,
                 session_id=session_id,
@@ -444,6 +476,10 @@ def build_reconcile_plan(
         events=tuple(events),
         measurement_ids=tuple(measurement_ids),
     )
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def _measurement_ids(db_path: Path, ids: tuple[str, ...]) -> set[str]:
@@ -530,9 +566,15 @@ def reconcile_missing(
     timeout: float = 60.0,
     collect: bool = True,
     terminal_only: bool = False,
-    retry_attempts: dict[str, int] | None = None,
+    track_attempts: bool = False,
+    budget_seconds: float | None = None,
 ) -> dict[str, object]:
-    """Reconcile turns that currently have no exact turn measurement."""
+    """Reconcile turns that currently have no exact turn measurement.
+
+    ``track_attempts`` is the background pass, run by the collector that owns
+    the database: failures are counted per turn in ``reconcile_attempts``, a
+    turn with three is no longer a candidate, and success clears the count.
+    ``budget_seconds`` ends a pass early; the next pass continues from there."""
     root = Path(root).resolve()
     db_path = root / "state" / "metrics" / "metrics.db"
     conn = connect(db_path, readonly=True)
@@ -548,22 +590,20 @@ def reconcile_missing(
                 "AND u.measurement_source IN ('claude_transcript', 'codex_rollout', 'provider_reconciled')) "
                 "AND s.provider IN ('anthropic', 'openai', 'gateway') "
                 + ("AND t.ended_at_us IS NOT NULL " if terminal_only else "")
+                + ("AND NOT EXISTS (SELECT 1 FROM reconcile_attempts AS r "
+                   "WHERE r.turn_id=t.turn_id AND r.attempts>=3) " if track_attempts else "")
                 + "ORDER BY t.started_at_us"
             )
         ]
     finally:
         conn.close()
-    if retry_attempts is not None:
-        for turn_id in set(retry_attempts) - set(turn_ids):
-            del retry_attempts[turn_id]
+    started = time.monotonic()
     results = []
     failures = []
-    exhausted = 0
+    succeeded: list[str] = []
     for turn_id in turn_ids:
-        # ponytail: three background retries; manual reconciliation handles late transcripts.
-        if retry_attempts is not None and retry_attempts.get(turn_id, 0) >= 3:
-            exhausted += 1
-            continue
+        if budget_seconds is not None and time.monotonic() - started >= budget_seconds:
+            break
         try:
             results.append(
                 reconcile_turn(
@@ -574,10 +614,12 @@ def reconcile_missing(
                     collect=collect,
                 )
             )
+            succeeded.append(turn_id)
         except (ReconciliationError, ProviderContractError, OSError) as exc:
-            if retry_attempts is not None:
-                retry_attempts[turn_id] = retry_attempts.get(turn_id, 0) + 1
             failures.append({"turn_id": turn_id, "error": str(exc)})
+    exhausted = 0
+    if track_attempts:
+        exhausted = _record_attempts(db_path, [item["turn_id"] for item in failures], succeeded)
     return {
         "status": "done" if not failures and not exhausted else "partial",
         "turns_scanned": len(turn_ids),
@@ -595,3 +637,22 @@ def reconcile_missing(
         "failures": failures,
         "results": results,
     }
+
+
+def _record_attempts(db_path: Path, failed: list[str], succeeded: list[str]) -> int:
+    """Count this pass's failures, clear its successes; returns the turns now exhausted."""
+    now_us = time.time_ns() // 1000
+    conn = connect(db_path)
+    try:
+        with conn:
+            conn.executemany(
+                "INSERT INTO reconcile_attempts(turn_id, attempts, last_error_at_us) VALUES(?, 1, ?) "
+                "ON CONFLICT(turn_id) DO UPDATE SET attempts=attempts+1, "
+                "last_error_at_us=excluded.last_error_at_us",
+                [(turn_id, now_us) for turn_id in failed],
+            )
+            conn.executemany("DELETE FROM reconcile_attempts WHERE turn_id=?",
+                             [(turn_id,) for turn_id in succeeded])
+        return int(conn.execute("SELECT COUNT(*) FROM reconcile_attempts WHERE attempts>=3").fetchone()[0])
+    finally:
+        conn.close()

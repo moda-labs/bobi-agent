@@ -440,7 +440,7 @@ def test_scheduled_reconciliation_collects_exact_usage(monkeypatch, tmp_path):
     monkeypatch.setattr(
         reconcile_module,
         "reconcile_missing",
-        lambda root, collect, terminal_only, retry_attempts: (
+        lambda root, collect, terminal_only, track_attempts, budget_seconds: (
             order.append(("reconcile", terminal_only)) or {"errors": 0}
         ),
     )
@@ -465,7 +465,7 @@ def test_scheduled_reconciliation_failures_are_health_only(monkeypatch, tmp_path
     monkeypatch.setattr(
         reconcile_module,
         "reconcile_missing",
-        lambda root, collect, terminal_only, retry_attempts: (
+        lambda root, collect, terminal_only, track_attempts, budget_seconds: (
             _ for _ in ()
         ).throw(RuntimeError("reconcile")),
     )
@@ -1666,6 +1666,48 @@ def test_gateway_reconciliation_rejects_unknown_transcript_format(metrics_fixtur
         reconcile_turn(tmp_path, "turn-gateway", wait=True)
 
 
+def test_reconciling_again_after_the_transcript_grew_adds_the_new_call(monkeypatch, tmp_path):
+    def call(message_id, at):
+        return json.dumps({"isSidechain": False, "type": "assistant", "sessionId": "grow", "timestamp": at,
+                           "uuid": f"entry-{message_id}", "requestId": f"req-{message_id}",
+                           "message": {"id": message_id, "model": "claude-opus-4-8", "role": "assistant",
+                                       "type": "message", "content": [],
+                                       "usage": {"input_tokens": 5, "output_tokens": 100,
+                                                 "cache_read_input_tokens": 0,
+                                                 "cache_creation_input_tokens": 0}}}) + "\n"
+
+    _seed_turn(tmp_path, provider="anthropic", brain="claude", provider_session_id="grow",
+               turn_id="turn-grow", estimate=None)
+    transcript = tmp_path / "grow.jsonl"
+    transcript.write_text(call("msg-a", "2026-09-25T00:00:00.000Z"))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda session_id: transcript)
+    reconcile_turn(tmp_path, "turn-grow", wait=True)
+    with transcript.open("a") as handle:
+        handle.write(call("msg-b", "2026-09-25T00:00:01.000Z"))
+    second = reconcile_turn(tmp_path, "turn-grow", wait=True)
+
+    assert second["status"] == "done"
+    conn = connect(tmp_path / "state" / "metrics" / "metrics.db", readonly=True)
+    try:
+        assert conn.execute("SELECT output_tokens FROM usage_measurements WHERE turn_id='turn-grow' "
+                            "AND scope='turn' AND measurement_source='claude_transcript'").fetchone()[0] == 200
+        assert conn.execute("SELECT COUNT(*) FROM usage_measurements WHERE turn_id='turn-grow' "
+                            "AND scope='invocation'").fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
+def test_a_running_turn_is_not_reconciled(tmp_path):
+    _seed_turn(tmp_path, provider="anthropic", brain="claude", provider_session_id="grow",
+               turn_id="turn-running", estimate=None)
+    conn = connect(tmp_path / "state" / "metrics" / "metrics.db")
+    conn.execute("UPDATE turns SET ended_at_us=NULL, status='running'")
+    conn.commit()
+    conn.close()
+    with pytest.raises(ReconciliationError, match="still running"):
+        reconcile_turn(tmp_path, "turn-running")
+
+
 def test_provider_record_parsers_preserve_correlation_and_deduplicate(metrics_fixtures, ):
     claude = parse_claude_transcript_records(metrics_fixtures / "claude-transcript.jsonl")
     codex = parse_codex_rollout_records(metrics_fixtures / "codex-rollout.jsonl")
@@ -1679,6 +1721,14 @@ def test_provider_record_parsers_preserve_correlation_and_deduplicate(metrics_fi
     assert codex[0].provider_session_id == "fixture-codex-thread"
     assert codex[0].provider_turn_id == "fixture-codex-turn"
     assert codex[0].usage.input_tokens == 4096
+
+
+def _reconcile_attempts(root):
+    conn = connect(root / "state" / "metrics" / "metrics.db")
+    try:
+        return {row[0]: row[1] for row in conn.execute("SELECT turn_id, attempts FROM reconcile_attempts")}
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("error", [ReconciliationError, ProviderContractError, OSError])
@@ -1701,7 +1751,9 @@ def test_background_reconciliation_retries_are_bounded_and_persisted(monkeypatch
         service._publish_health(force=True)
     assert calls == ["missing-turn"] * 3
     assert service.health()["reconciliation_retry_exhausted_turns"] == 1
-    assert service.health()["reconciliation_attempts"] == {"missing-turn": 3}
+    # Per-turn counts live in SQLite, never in health or the heartbeat.
+    assert "reconciliation_attempts" not in service.health()
+    assert _reconcile_attempts(tmp_path) == {"missing-turn": 3}
     assert reconcile_missing(tmp_path)["errors"] == 1
     assert len(calls) == 4
 
@@ -1721,7 +1773,7 @@ def test_standby_collector_preserves_retry_limit_on_takeover(monkeypatch, tmp_pa
     try:
         first.start()
         deadline = time.monotonic() + 2
-        while first.health()["reconciliation_attempts"].get("missing-turn", 0) < 3 and time.monotonic() < deadline:
+        while len(calls) < 3 and time.monotonic() < deadline:
             time.sleep(0.01)
         assert len(calls) == 3
         first._publish_health(force=True)
@@ -1730,13 +1782,12 @@ def test_standby_collector_preserves_retry_limit_on_takeover(monkeypatch, tmp_pa
         while second.health()["status"] == "starting" and time.monotonic() < deadline:
             time.sleep(0.01)
         assert second.health()["role"] == "standby"
-        assert json.loads(first.health_path.read_text())["reconciliation_attempts"] == {"missing-turn": 3}
+        assert _reconcile_attempts(tmp_path) == {"missing-turn": 3}
         assert first.stop(timeout=2)
         deadline = time.monotonic() + 2
         while second.health()["role"] != "active" and time.monotonic() < deadline:
             time.sleep(0.01)
         assert second.health()["role"] == "active"
-        assert second.health()["reconciliation_attempts"] == {"missing-turn": 3}
         assert len(calls) == 3
     finally:
         assert first.stop(timeout=2)
@@ -2212,7 +2263,8 @@ def test_default_spawn_marks_supervisor_as_metrics_collector_owner(
         return object()
 
     monkeypatch.setattr("bobi.supervisor.supervision.subprocess.Popen", popen)
-    supervisor = Supervisor([], SupervisorConfig(), project_root=tmp_path)
+    supervisor = Supervisor([], SupervisorConfig(), project_root=tmp_path,
+                            collector_owner=True)
 
     supervisor._default_spawn()
 

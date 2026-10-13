@@ -485,8 +485,13 @@ finished turn without one takes its snapshot delta. A rollout with a completed
 turn but neither shape is a contract error, retried like any other; a turn
 still running is not.
 
-Background reconciliation makes at most three failed attempts per turn, persists
-counts in `collector.state.json`, and reports retry exhaustion. Restore missing
+Background reconciliation makes at most three failed attempts per turn, keeps
+the counts in the `reconcile_attempts` table, and reports only the number of
+exhausted turns in collector health. A pass stops after five seconds and the
+next pass continues; each transcript is parsed once per pass. A turn still
+running is refused, because its transcript is still growing. Rerunning a
+recovery after the transcript grew adds the new calls: every run writes as its
+own producer, and the turn row's event is named by its content. Restore missing
 transcripts before manually reconciling; manual recovery is not retry-limited.
 Keep unrecoverable turns visible rather than inventing measurements.
 

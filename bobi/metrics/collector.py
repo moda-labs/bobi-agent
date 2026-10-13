@@ -44,6 +44,9 @@ def project_all(conn: sqlite3.Connection) -> dict[str, int]:
 # Producer liveness is a pid check, so every writer of a spool must share this
 # process's pid namespace; the quiet period covers a writer between appends.
 _RETIRE_AFTER_SECONDS = 5 * 60
+# A background reconciliation pass stops after this long and resumes next cycle,
+# so spool import never waits long behind it.
+RECONCILE_BUDGET_SECONDS = 5.0
 
 
 def _retirable(segment: Path) -> bool:
@@ -204,8 +207,6 @@ class MetricsCollectorService:
         self.spool_root = self.metrics_root / "spool"
         self.db_path = self.metrics_root / "metrics.db"
         self.health_path = self.metrics_root / "collector.state.json"
-        self._reconciliation_attempts: dict[str, int] = {}
-        self._load_reconciliation_attempts()
         # Counters that must outlive one cycle and a restart.
         self._lasting = self._load_lasting_counters()
         # One warning per segment and error type; repeats go to debug.
@@ -240,22 +241,10 @@ class MetricsCollectorService:
             "producer_count": 0,
             "last_reconciliation_at_us": None,
             "reconciliation_errors": 0,
-            "reconciliation_attempts": dict(self._reconciliation_attempts),
             "reconciliation_retry_exhausted_turns": 0,
             "uncovered_turns": 0,
             **self._lasting,
         }
-
-    def _load_reconciliation_attempts(self) -> None:
-        try:
-            saved = json.loads(self.health_path.read_text()).get("reconciliation_attempts", {})
-            if isinstance(saved, dict):
-                self._reconciliation_attempts = {
-                    turn_id: count for turn_id, count in saved.items()
-                    if isinstance(turn_id, str) and type(count) is int and 0 < count <= 3
-                }
-        except (OSError, ValueError, AttributeError):
-            pass
 
     _LASTING_COUNTERS = (
         "conflicting_events", "last_conflict_at_us",
@@ -362,11 +351,8 @@ class MetricsCollectorService:
     def _take_over(self) -> None:
         """Become the active collector: state the previous one saved wins over
         whatever this instance read when it started on standby."""
-        self._load_reconciliation_attempts()
         self._lasting = self._load_lasting_counters()
-        self._set_health(role="active",
-                         reconciliation_attempts=dict(self._reconciliation_attempts),
-                         **self._lasting)
+        self._set_health(role="active", **self._lasting)
 
     def _report_failure(self, segment: Path, exc: Exception) -> None:
         key = (str(segment), type(exc).__name__)
@@ -435,7 +421,7 @@ class MetricsCollectorService:
         try:
             reconciliation = reconcile_missing(
                 self.root, collect=False, terminal_only=True,
-                retry_attempts=self._reconciliation_attempts,
+                track_attempts=True, budget_seconds=RECONCILE_BUDGET_SECONDS,
             )
             errors += int(reconciliation["errors"])
             self._set_health(reconciliation_retry_exhausted_turns=reconciliation.get("retry_exhausted_turns", 0))
@@ -458,7 +444,6 @@ class MetricsCollectorService:
         self._set_health(
             last_reconciliation_at_us=time.time_ns() // 1000,
             reconciliation_errors=errors,
-            reconciliation_attempts=dict(self._reconciliation_attempts),
             uncovered_turns=uncovered,
         )
         return result

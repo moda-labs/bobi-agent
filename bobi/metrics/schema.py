@@ -273,6 +273,14 @@ CREATE INDEX IF NOT EXISTS idx_tools_name_time ON tool_executions(tool_name, sta
 CREATE INDEX IF NOT EXISTS idx_usage_turn ON usage_measurements(turn_id, scope, is_estimated, observed_at_us);
 CREATE INDEX IF NOT EXISTS idx_usage_invocation ON usage_measurements(invocation_id, is_estimated, observed_at_us);
 CREATE INDEX IF NOT EXISTS idx_usage_supersedes ON usage_measurements(supersedes_measurement_id);
+-- Reconciliation skips provider events another turn already holds.
+CREATE INDEX IF NOT EXISTS idx_usage_provider_event ON usage_measurements(provider, provider_event_id);
+-- Background reconciliation failures per turn; a turn stops being retried at three.
+CREATE TABLE IF NOT EXISTS reconcile_attempts (
+    turn_id TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL,
+    last_error_at_us INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_cost_turn ON cost_measurements(turn_id, scope, is_estimated);
 CREATE INDEX IF NOT EXISTS idx_cost_invocation ON cost_measurements(invocation_id, is_estimated);
 CREATE INDEX IF NOT EXISTS idx_router_experiment ON router_decisions(experiment_id, variant_id, decided_at_us);
