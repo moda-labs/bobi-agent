@@ -3,12 +3,16 @@
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 
-from bobi.redact import redact_secrets, scrub_values
+from bobi.redact import SECRET_KEY_NAME, redact_secrets, scrub_values
 
 _ABSOLUTE_PATH = re.compile(
     r'''(?P<quote>["'`])(?P<quoted>(?:[A-Za-z]:[\\/]|\\\\|/)[^\r\n]*?)(?P=quote)'''
     r'''|(?<![\w:/])(?:[A-Za-z]:[\\/]|\\\\|/)[^\s"'<>`]+'''
 )
+# A key-name-shaped value: words joined by `-` or `_`, nothing a shape rule
+# would treat as a separator or a value.
+_NAME_SHAPED = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*")
+
 
 def prepare_task(prompt: str, *, repo_path: str, max_bytes: int,
                  secrets: tuple[str, ...] = ()) -> tuple[str, int]:
@@ -20,9 +24,14 @@ def prepare_task(prompt: str, *, repo_path: str, max_bytes: int,
     if memory:
         prompt = prompt[:memory.start()]
     # Whole values first, so a shape rule never splits a long secret. A value
-    # that is a bare word (`BOBI_AUTH=api_key`) can also be a key name the shape
-    # rule needs, so it is scrubbed after the shapes.
-    words = tuple(value for value in secrets if re.fullmatch(r"[A-Za-z_]+", value))
+    # that is a bare word (`AUTH_SCHEME=Bearer`) or a key name
+    # (`API_KEY_HEADER=X-API-Key`) is one the shape rules need to see, so it is
+    # scrubbed after them, together with any other value inside it so the
+    # first pass cannot break it.
+    names = [value for value in secrets
+             if re.fullmatch(r"[A-Za-z_]+", value)
+             or (_NAME_SHAPED.fullmatch(value) and SECRET_KEY_NAME.search(value))]
+    words = tuple(value for value in secrets if any(value in name for name in names))
     prompt, scrubbed = scrub_values(prompt, tuple(value for value in secrets if value not in words))
     prompt, redactions = redact_secrets(prompt)
     prompt, late = scrub_values(prompt, words)

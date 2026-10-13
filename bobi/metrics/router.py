@@ -79,7 +79,8 @@ def provider_env_delta(overrides: Mapping[str, str] | None = None) -> dict[str, 
     pins), and blanks for routing variables this process holds. An empty value
     already counts as unset and is not blanked again. The marker names the
     blanked routing variables so a root-bound Bobi CLI child restores them from
-    its runtime ``.env``."""
+    its runtime ``.env``; one an earlier launch withheld and this process
+    never restored is named again."""
     from bobi.env import agent_spawn_env
 
     wanted = provider_subprocess_env({**agent_spawn_env(), **(overrides or {})})
@@ -87,6 +88,11 @@ def provider_env_delta(overrides: Mapping[str, str] | None = None) -> dict[str, 
              if os.environ.get(name) != value and name not in _SDK_OWNED_ENV}
     withheld = sorted(name for name, value in os.environ.items()
                       if value and name not in wanted and name not in _SDK_OWNED_ENV)
+    # A routing variable an earlier launch withheld and this process never
+    # restored stays withheld, blanked and named like one held here.
+    inherited = [name for name in os.environ.get(_PROVIDER_CLEARED_ENV, "").split(",")
+                 if name and not os.environ.get(name) and name not in withheld]
+    withheld += inherited
     delta.update(dict.fromkeys(withheld, ""))
     routing = [name for name in withheld
                if name in {EXPERIMENT_CONFIG_ENV, DISABLED_EXPERIMENT_CONFIG_ENV, POLICY_CREDENTIAL_ENV}]

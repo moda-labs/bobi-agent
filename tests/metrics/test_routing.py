@@ -207,6 +207,31 @@ def test_keyword_valued_credential_setting_does_not_disable_shape_redaction():
     assert "fakefake1234" not in task and "fakefake5678" not in task
 
 
+@pytest.mark.parametrize("env,text,expected", [
+    ({"DB_PASSWORD": "K9x!pwd=Lm2Qa"}, "login with K9x!pwd=Lm2Qa now", "login with [redacted] now"),
+    ({"PG_CREDENTIALS": "host=10.0.0.5 user=svc password=Hunter2xyz dbname=prod"},
+     "host=10.0.0.5 user=svc password=Hunter2xyz dbname=prod", "[redacted]"),
+    ({"APP_SECRET": "Zq81-api-key-" + "A" * 40 + "!tail9"}, "Zq81-api-key-" + "A" * 40 + "!tail9", "[redacted]"),
+    ({"MY_TOKEN": "abc$apikey='x9Lq'tail"}, "abc$apikey='x9Lq'tail", "[redacted]"),
+    ({"KEY_FIELD": "svc9_api_key", "DB_PASS": "svc9_api"}, "send svc9_api_key=fakefake1234 via svc9_api",
+     "send [redacted]=[redacted] via [redacted]"),
+])
+def test_a_credential_value_that_contains_a_key_name_is_scrubbed_whole(env, text, expected):
+    task, _ = prepare_task(text, repo_path="/repo", max_bytes=8192, secrets=env_secret_values(env))
+    assert task == expected
+
+
+@pytest.mark.parametrize("env,text,secret", [
+    ({"API_KEY_HEADER": "X-API-Key"}, 'curl -H "X-API-Key: fakefake1234" https://api.example.com', "fakefake1234"),
+    ({"AUTH_SCHEME": "api-key"}, "set api-key=fakefake1234", "fakefake1234"),
+    ({"DB_PASSWORD_FIELD": "db2_password"}, "export db2_password=fakefake1234", "fakefake1234"),
+])
+def test_credential_setting_named_like_a_key_does_not_hide_the_key_from_shape_redaction(env, text, secret):
+    task, _ = prepare_task(text, repo_path="/repo", max_bytes=8192, secrets=env_secret_values(env))
+    assert secret not in task and REDACTION_PLACEHOLDER in task
+    assert next(iter(env.values())) not in task
+
+
 @pytest.mark.parametrize("text,expected", [
     ('PASSWORD="hun\\"ter2"', 'PASSWORD="[redacted]"'),
     ('password = """hunter2"""', 'password = """[redacted]"""'),
@@ -216,6 +241,11 @@ def test_keyword_valued_credential_setting_does_not_disable_shape_redaction():
     ('{"password": hunter2, "n": 1}', '{"password": [redacted], "n": 1}'),
     ("DB_PASSWORD=abc,def", "DB_PASSWORD=[redacted]"),
     ('{"password": ' + "x" * 60, '{"password": [redacted]'),
+    ("password: 'it''s-hunter2'", "password: '[redacted]'"),
+    ("password = 'it''s' and user = 'bob'", "password = '[redacted]' and user = 'bob'"),
+    ("password = ''", "password = ''"),
+    ('password = """hunter2\nsecond-line"""', 'password = """[redacted]"""'),
+    ("password = '''hunter2\nsecond-line'''", "password = '''[redacted]'''"),
 ])
 def test_redaction_handles_escaped_quotes_triple_quotes_and_json_delimiters(text, expected):
     assert redact_secrets(text)[0] == expected
@@ -1641,11 +1671,12 @@ def _recorded_fallbacks(runtime, monkeypatch):
     return recorded
 
 
-def test_routing_withheld_from_a_child_and_not_restored_is_recorded(monkeypatch, tmp_path):
+def test_routing_withheld_from_a_launcher_and_not_restored_is_recorded_by_its_child(monkeypatch, tmp_path):
     import os
 
     from bobi import config as config_module
     from bobi.config import load_dotenv
+    from bobi.env import child_agent_env
 
     (tmp_path / "package").mkdir()
     (tmp_path / ".env").write_text("UNRELATED=1\n")
@@ -1655,7 +1686,13 @@ def test_routing_withheld_from_a_child_and_not_restored_is_recorded(monkeypatch,
     monkeypatch.setattr(config_module, "_UNRESTORED_PROVIDER_ENV", set())
     load_dotenv(tmp_path)
     assert "BOBI_METRICS_EXPERIMENT_JSON" not in os.environ
-    # A detached launch from this process starts a child with its environment.
+    # The launcher builds the detached child's environment; the child loads its runtime .env.
+    child_env = child_agent_env(tmp_path)
+    assert "BOBI_METRICS_EXPERIMENT_JSON" not in child_env
+    for name in set(os.environ) - set(child_env):
+        monkeypatch.delenv(name)
+    for name, value in child_env.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setattr(config_module, "_UNRESTORED_PROVIDER_ENV", set())
     load_dotenv(tmp_path)
     runtime = MetricsRuntime(tmp_path, mode="enabled")
@@ -1666,6 +1703,52 @@ def test_routing_withheld_from_a_child_and_not_restored_is_recorded(monkeypatch,
         assert recorded == ["routing_config_unrestored"]
     finally:
         assert runtime.close(timeout=2)
+
+
+@pytest.mark.parametrize("brain", ["claude", "codex"])
+def test_an_unrestored_routing_config_stays_recorded_across_a_second_provider_hop(monkeypatch, tmp_path, brain):
+    import os
+
+    from bobi import config as config_module
+    from bobi.config import load_dotenv
+    from bobi.metrics.router import provider_env_delta
+
+    (tmp_path / "package").mkdir()
+    (tmp_path / ".env").write_text("UNRELATED=1\n")
+    for name in ("BOBI_METRICS_EXPERIMENT_JSON", "BOBI_METRICS_EXPERIMENT_DISABLED_JSON", "TYPESAFE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    # A child that already recorded the reason: no config, the marker carried.
+    monkeypatch.setenv("BOBI_INTERNAL_PROVIDER_CLEARED_ENV", "BOBI_METRICS_EXPERIMENT_JSON")
+    # Its provider runs `bobi` again; the Claude SDK merges the delta over this process's env.
+    hop = ({**os.environ, **provider_env_delta()} if brain == "claude"
+           else provider_subprocess_env(blank_inherited=True))
+    for name in set(os.environ) - set(hop):
+        monkeypatch.delenv(name)
+    for name, value in hop.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(config_module, "_UNRESTORED_PROVIDER_ENV", set())
+    load_dotenv(tmp_path)
+    assert "BOBI_METRICS_EXPERIMENT_JSON" in config_module._UNRESTORED_PROVIDER_ENV
+    assert os.environ["BOBI_INTERNAL_PROVIDER_CLEARED_ENV"] == "BOBI_METRICS_EXPERIMENT_JSON"
+
+
+def test_a_withheld_routing_config_the_child_runtime_restores_clears_the_marker(monkeypatch, tmp_path):
+    import os
+
+    from bobi import config as config_module
+    from bobi.config import load_dotenv
+
+    (tmp_path / "package").mkdir()
+    (tmp_path / ".env").write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(configured()) + "\n")
+    # Carried from a launcher whose own runtime .env had no config.
+    monkeypatch.delenv("BOBI_METRICS_EXPERIMENT_JSON", raising=False)
+    monkeypatch.setenv("BOBI_INTERNAL_PROVIDER_CLEARED_ENV", "BOBI_METRICS_EXPERIMENT_JSON")
+    monkeypatch.setattr(config_module, "_UNRESTORED_PROVIDER_ENV", set())
+    monkeypatch.setattr(config_module, "_DOTENV_LOADED", {})
+    load_dotenv(tmp_path)
+    assert os.environ["BOBI_METRICS_EXPERIMENT_JSON"] and config_module._UNRESTORED_PROVIDER_ENV == set()
+    assert "BOBI_INTERNAL_PROVIDER_CLEARED_ENV" not in os.environ
+    monkeypatch.delenv("BOBI_METRICS_EXPERIMENT_JSON")
 
 
 @pytest.mark.parametrize("policy_brain,agent_brain,routed", [

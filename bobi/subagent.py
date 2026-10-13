@@ -2421,6 +2421,15 @@ def _run_agent_entry(args: dict) -> None:
             f"(no package/agent.yaml) — refusing to run with an unverified "
             f"identity."
         )
+    # The spawner already merged the runtime .env into this environment; the
+    # same load the CLI runs records any routing config a provider launch
+    # withheld and the .env could not restore, so routing says why it is off.
+    from bobi.config import load_dotenv
+    try:
+        load_dotenv(project_root)
+    except Exception as e:  # noqa: BLE001 - the spawner tolerated this .env too
+        log.warning("Could not load runtime .env from %s (%s); routing cannot "
+                    "say why it is off.", project_root, e)
     pin_brain_from_root(project_root, os.environ)
 
     # Re-render the team's global instructions (#779) at child entry, the

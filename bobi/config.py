@@ -104,30 +104,39 @@ def write_env_file(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(f"{k}={v}" for k, v in sorted(values.items())) + "\n")
 
 
-def _restore_provider_env(env: dict[str, str]) -> None:
-    """Make sanitizer-created blanks eligible for trusted runtime restoration."""
-    for name in env.pop(_PROVIDER_CLEARED_ENV, "").split(","):
-        if name and env.get(name) == "":
+def _restore_provider_env(env: dict[str, str]) -> list[str]:
+    """Make sanitizer-created blanks eligible for trusted runtime restoration.
+
+    Returns the names the marker listed. A listed name that is absent rather
+    than blank was withheld further up and never restored, so it stays in the
+    marker: a child launched with *env* then still knows why it lacks it."""
+    withheld = [name for name in env.pop(_PROVIDER_CLEARED_ENV, "").split(",") if name]
+    carried = [name for name in withheld if name not in env]
+    for name in withheld:
+        if env.get(name) == "":
             env.pop(name)
+    if carried:
+        env[_PROVIDER_CLEARED_ENV] = ",".join(carried)
+    return withheld
 
 def load_dotenv(project_path: Path) -> None:
     """Load the selected runtime's .env into os.environ."""
     from bobi import paths
+    from bobi.metrics.router import EXPERIMENT_CONFIG_ENV
+
     values = parse_env_file(paths.env_path(project_path))
-    withheld = [name for name in os.environ.get(_PROVIDER_CLEARED_ENV, "").split(",") if name]
-    _restore_provider_env(os.environ)
+    withheld = _restore_provider_env(os.environ)
     for key, value in values.items():
         if key not in os.environ:
             os.environ[key] = value
             _DOTENV_LOADED[key] = value
     unrestored = [name for name in withheld if not os.environ.get(name)]
     _UNRESTORED_PROVIDER_ENV.update(unrestored)
-    if unrestored:
-        from bobi.metrics.router import EXPERIMENT_CONFIG_ENV
-
-        if EXPERIMENT_CONFIG_ENV in unrestored:
-            # A detached child launched from here inherits the reason routing is off.
-            os.environ[_PROVIDER_CLEARED_ENV] = EXPERIMENT_CONFIG_ENV
+    if EXPERIMENT_CONFIG_ENV in unrestored:
+        # A child launched from here inherits the reason routing is off.
+        os.environ[_PROVIDER_CLEARED_ENV] = EXPERIMENT_CONFIG_ENV
+    else:
+        os.environ.pop(_PROVIDER_CLEARED_ENV, None)
 
 
 def project_env(project_path: Path) -> dict[str, str]:

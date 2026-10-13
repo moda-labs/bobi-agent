@@ -38,17 +38,25 @@ _SECRET_TOKEN = re.compile(
 # the upper-case tail of an env-style name (`GH_TOKEN`, `DB_PASS`), so code
 # like `primary_key=True` or `next_page_token: str` and prose like "key: 5" stay.
 # The left boundary excludes `_` so a match starts only at the start of a name,
-# which keeps the scan linear on long `a_a_a...` runs.
-_SECRET_KV = re.compile(
-    r"""(?ix)(?<![A-Za-z0-9_])(
-        (?:--)?_*(?:[A-Za-z0-9]+_)*(?:(?:pg|mysql)?password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token
+# which keeps the scan linear on long `a_a_a...` runs. The key name alone is
+# public so a credential setting whose value is a key name
+# (`API_KEY_HEADER=X-API-Key`) can be scrubbed after this rule has seen it.
+_SECRET_KEY = r"""(?<![A-Za-z0-9_])(
+        (?i:(?:--)?_*(?:[A-Za-z0-9]+_)*(?:(?:pg|mysql)?password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token
           |auth[_-]?token|refresh[_-]?token|client[_-]?secret|bot[_-]?token
-          |secret[_-]?key|private[_-]?key)
-      | (?-i:_*(?:[A-Z0-9]+_)+(?:TOKEN|KEY|PASS))
-    )(?![A-Za-z0-9])
-    (["']?\s*[:=]\s*|(?<=--password)\x20+(?=[^\s-]))
-    (?:(?P<quote>"{3}|'{3}|"|')(?P<quoted>(?:[^"'\\\n]|\\.|(?!(?P=quote))["'])*)(?P=quote)
-      | (?P<bare>\S+))"""
+          |secret[_-]?key|private[_-]?key))
+      | _*(?:[A-Z0-9]+_)+(?:TOKEN|KEY|PASS)
+    )(?![A-Za-z0-9])"""
+SECRET_KEY_NAME = re.compile(_SECRET_KEY, re.VERBOSE)
+# A quoted value may hold an escaped (`\'`) or SQL-doubled (`''`) quote and
+# ends at the line; a triple-quoted one may span lines.
+_SECRET_KV = re.compile(
+    _SECRET_KEY + r"""
+    (?i:(["']?\s*[:=]\s*|(?<=--password)\x20+(?=[^\s-])))
+    (?:(?P<quote>"{3}|'{3})(?P<long>(?:[^"'\\]|\\.|(?!(?P=quote))["'])*)(?P=quote)
+      | (?P<short>["'])(?P<quoted>(?:[^"'\\\n]|\\.|(?P=short){2}|(?!(?P=short))["'])*)(?P=short)
+      | (?P<bare>\S+))""",
+    re.VERBOSE,
 )
 # A bare JSON literal after a quoted key (`{"password": null}`) is structure,
 # not a credential.
@@ -87,8 +95,8 @@ def redact_secrets(text: str) -> tuple[str, int]:
 
     def _kv(m):
         nonlocal count
-        quote = m.group("quote") or ""
-        value, rest = (m.group("quoted"), "") if quote else (m.group("bare"), "")
+        quote = m.group("quote") or m.group("short") or ""
+        value, rest = (m.group("long") or m.group("quoted"), "") if quote else (m.group("bare"), "")
         if not quote and (m.group("bare") or "").startswith(REDACTION_PLACEHOLDER):
             return m.group(0)
         if not quote and m.group(2)[:1] in "\"'":
