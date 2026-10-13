@@ -341,3 +341,42 @@ def test_communication_style_missing_file_warns_and_renders_team_content(
     text = (fake_homes / "claude" / "CLAUDE.md").read_text()
     assert "# House rules" in text
     assert "# Communication Style" not in text
+
+
+@pytest.mark.parametrize("brain_kind", ["claude", "codex"])
+@pytest.mark.parametrize("role", ["director", "engineer", "custom-analyst"])
+def test_shared_comprehension_contract_reaches_native_instructions(fake_homes, brain_kind, role):
+    """Managers and workers inherit native instructions independently of role."""
+    role_text = 'Machine handoffs require JSON with exactly the key "status".'
+    project = _project_with_package(fake_homes, role_text)
+    role_dir = project / "package" / "roles" / role
+    role_dir.mkdir(parents=True)
+    (role_dir / "ROLE.md").write_text(role_text)
+    from bobi.prompts.resolver import build_startup_prompt, resolve_agent_prompt
+
+    instructions.render_team_instructions(project, brain_kind=brain_kind)
+    native_path = instructions.instruction_targets(brain_kind)[-1]
+    first = native_path.read_text()
+    instructions.render_team_instructions(project, brain_kind=brain_kind)
+    assert native_path.read_text() == first
+    for phrase in (
+        "Communicate to make understanding and decisions easier.",
+        "Rank supporting findings by consequence",
+        "Translate technical terms, internal statuses, and identifiers",
+        "Prefer short, coherent paragraphs",
+        "give a recommendation with its reasoning and consequential tradeoffs",
+        "put material uncertainty beside the claim it limits",
+        "Distinguish observed facts from inferences",
+        "Carry earlier decisions and deferrals forward.",
+        "Role and task instructions still supply audience voice",
+    ):
+        assert first.count(phrase) == 1
+    assert first.count(role_text) == 1
+    for prompt in (
+        resolve_agent_prompt(role, project, interactive=True),
+        resolve_agent_prompt(role, project, interactive=False),
+        build_startup_prompt(role, project),
+    ):
+        assert role_text in prompt
+        assert "Communicate to make understanding" not in prompt
+        assert (first + prompt).count("Communicate to make understanding") == 1

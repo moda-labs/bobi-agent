@@ -180,6 +180,12 @@ bobi agent my-agent start
 Each role is a folder with a `ROLE.md`. The folder can hold additional
 resources the role needs.
 
+The framework's `bobi/prompts/communication_style.md` supplies a shared comprehension standard through the existing native instruction renderer for Claude and Codex managers and workers.
+It prioritizes practical meaning, evidence, uncertainty, and continuity; role/task prompts still define audience voice, artifact formats, approval markers, and machine schemas.
+Do not copy this principle into each role or require an optional context read.
+The existing operator setting `BOBI_COMMUNICATION_STYLE=off` disables it.
+Installing a team alone does not update framework instructions; use a released framework version and refresh sessions to adopt a changed principle.
+
 Principles for role prompts:
 - **Start with identity**: "You are a [role] that [does what]."
 - **Define scope**: What this role does and does NOT do.
