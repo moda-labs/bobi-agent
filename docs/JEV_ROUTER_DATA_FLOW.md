@@ -106,7 +106,7 @@ decision with an optional `reason` when routing did not decide.
    2. load + validate config ── invalid ──────────► configured model, routing_config_invalid
    3. sticky reuse (not fresh) ─ match ───────────► saved model, status "reused"
                                ├ model removed ───► control model, routing_sticky_model_removed
-                               └ no match ────────► saved session's model (else configured), routing_sticky_stale
+                               └ no match ────────► saved session's model (workflow: record's; else configured), routing_sticky_stale
    4. features + redaction
    5. call_policy(): breaker, capacity, deadline, TypeSafePolicy.decide()
    6. guard_result(): candidates, schema, version, confidence
@@ -144,8 +144,9 @@ A saved route is reused only when all of these hold:
 - its `model_selected` is still in `candidate_models`;
 - when a provider session is saved, that session ran `model_selected` (an
   operator who later relaunched with another model keeps that model). A
-  workflow skips this check: its shared session may last have run another
-  agent's step or a step-level model, and its checkpoint is the record.
+  workflow skips this check and the session's brain check: its shared session
+  may last have run another agent's step or a step-level model, and its
+  checkpoint is the record.
 
 When the saved `model_selected` was removed from `candidate_models`, the
 session runs `control_model` and records `routing_sticky_model_removed`, so a
@@ -154,13 +155,42 @@ records `routing_sticky_stale`; an error while reading the record
 records `routing_sticky_invalid`. Either way a resumed session keeps the model
 its saved provider session ran (an edit that keeps the session in scope and
 its model in the candidates never switches it mid-transcript); with no resumable session under this brain it runs its
-configured model. Reuse re-admits the saved decision with
-`policy.status = "reused"` and makes no policy call. A workflow reads only its
-own checkpoint record, never the session route file.
-The route is decided for the run's first agent: the launch `--role`, else the first `agent` the workflow's steps name.
-The record names that agent, and a record naming another agent is not reused.
-A run resumed past a gate onto another agent's step still applies the route to the first agent's steps only; the other agents run their configured models, as without the gate.
-A launch `--role` is kept in the checkpoint, so it still pins every step after a gate.
+configured model. A workflow keeps the model its checkpoint record selected,
+when the record was saved under this brain, else its configured model; it never
+takes a model from its saved provider session. Reuse re-admits the saved decision with
+`policy.status = "reused"` and makes no policy call.
+
+A workflow decides its route once, when the run starts, and only there:
+
+- The route is decided for the run's route agent: the launch `--role`, else the
+  first `agent` the workflow's steps name. The record names that agent, and a
+  record naming another agent is not reused.
+- The route applies to every step the route agent runs without a step-level
+  `model:` or a launch `--model`; every other step runs its own configured or
+  pinned model.
+- A run restored from its checkpoint (resumed past a gate, or a failed run
+  retried from its checkpoint) reads only its own checkpoint record, never the
+  session route file, and applies it to the same steps whatever step it
+  resumes on, so its steps run the models they would have run without the
+  gate. Later checkpoints carry the record unchanged, unless its model fails
+  (6.1). The run reopens exactly as it was suspended (the agent that ran last,
+  on the model it ran) and then switches to the step it actually executes, so a
+  step keeps the transcript it would have continued without the gate.
+- A run that started without a decision but with a fallback reason (for example
+  `admission_rejected`, which runs `control_model`) records `{agent, model,
+  reason}` instead. A restored run runs that model again and records the same
+  reason for its new process, as a decision record is re-admitted as `reused`.
+- A restored run without a record (the run started with no config, outside the
+  policy, with a step-level `model:` on its first prompt step, or with a launch
+  `--model`) stays unrouted: a config added while it was parked does not route it.
+- What may differ from the run without the gate is what the config changed
+  while the run was parked: routing switched off runs the route agent's
+  configured model (`routing_disabled_resumed`); a route agent the policy no
+  longer covers runs `control_model` (`routing_out_of_scope`); a removed model
+  runs `control_model` (`routing_sticky_model_removed`); any other edit keeps
+  the record's model (`routing_sticky_stale`).
+- A launch `--role` is kept in the checkpoint, so it still pins every step after
+  a gate.
 
 `save_session_id(name, "")` deletes the route with the session id. Internal
 rotation and stale-token recovery pass `preserve_route=True` and keep it.
@@ -314,6 +344,12 @@ fails:
   error is not one the control model shares (`NO_MODEL_FALLBACK_KINDS`:
   authentication, credits exhausted, turn cap), and the decision was made fresh
   rather than reused from a saved session.
+
+In a workflow, "first turn" means the route's first step: the first step of
+the route agent that runs without a step-level `model:` or launch `--model`.
+Steps of other agents that run before it (a route may jump to one first) do not
+use up the rerun, and another agent configured to the same model is not the
+policy's choice: its failure fails its own step, without a control rerun.
 
 After either rerun the saved route (the session route file, or a workflow's
 checkpoint) is rewritten to `control_model` with `fallback_reason:

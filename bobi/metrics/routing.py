@@ -169,8 +169,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             if EXPERIMENT_CONFIG_ENV in _UNRESTORED_PROVIDER_ENV:
                 # A provider launch withheld the parent's config and this runtime's .env has none.
                 return recorded_fallback("routing_config_unrestored")
-            if (not ctx.fresh and ctx.entry_point != "workflow_start"
-                    and load_session_route(ctx.session_name, root=runtime.root)):
+            if not ctx.fresh and _saved_record(ctx, runtime, sticky_record):
                 # Routing was turned off under a routed session: it resumes on its configured model.
                 return recorded_fallback("routing_disabled_resumed")
             return fallback
@@ -180,7 +179,10 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             # A policy pinned to another brain can never route this agent; say so.
             return recorded_fallback("routing_brain_mismatch")
         saved_id = load_session_id(ctx.session_name, root=runtime.root)
-        resuming = not ctx.fresh and bool(saved_id or sticky_record)
+        # A workflow resumes only its checkpoint record: its shared provider
+        # session may last have run another agent's step.
+        resuming = not ctx.fresh and bool(
+            sticky_record if ctx.entry_point == "workflow_start" else saved_id or sticky_record)
         if ctx.entry_point not in policy_config.entry_points or ctx.role not in policy_config.roles:
             from bobi.brain import session_brain_label
 
@@ -191,6 +193,11 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             return fallback
         if resuming:
             stage = "sticky"
+            if ctx.entry_point == "workflow_start" and "decision" not in sticky_record:
+                # The run started on a fallback without a decision (for example
+                # a refused admission on the control model): it resumes on it.
+                return recorded_fallback(str(sticky_record.get("reason") or "routing_sticky_stale"),
+                                         model=_resumed_model(ctx, runtime, saved_id, sticky_record))
             decision = _saved_decision(ctx, runtime, sticky_record, saved_id, fingerprint,
                                        policy_config.candidate_models)
             if decision == _MODEL_REMOVED:
@@ -199,7 +206,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             if decision is None:
                 # Never switch a resumed session's model: keep the one its transcript ran.
                 return recorded_fallback("routing_sticky_stale",
-                                         model=_resumed_model(ctx, runtime, saved_id))
+                                         model=_resumed_model(ctx, runtime, saved_id, sticky_record))
             if runtime.admit_route(ctx.session_name, decision, brain=ctx.brain,
                     role=ctx.role, run_key=ctx.run_key, workflow_name=ctx.workflow_name):
                 return RouteOutcome(decision.model_selected, decision)
@@ -275,7 +282,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         resumed = None
         if stage == "sticky":
             try:
-                resumed = _resumed_model(ctx, runtime, saved_id)
+                resumed = _resumed_model(ctx, runtime, saved_id, sticky_record)
             except Exception:
                 pass
         return recorded_fallback(reason, type(exc).__name__, model=resumed)
@@ -284,10 +291,21 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
 _DECISION_FIELDS = frozenset(field.name for field in fields(RouterDecision))
 
 
-def _resumed_model(ctx: RoutingContext, runtime: MetricsRuntime, saved_id: str) -> str | None:
-    """The model the saved session ran, when this brain can resume it; else None."""
+def _resumed_model(ctx: RoutingContext, runtime: MetricsRuntime, saved_id: str,
+                   sticky_record: dict[str, object] | None) -> str | None:
+    """The model the resumed session ran, when this brain can resume it; else None.
+
+    For a workflow that is the model its checkpoint record selected (or the
+    fallback model it recorded without a decision), which is what the route
+    agent's steps ran; the run's shared provider session may last have run
+    another agent's step or a step-level model."""
     from bobi.brain import session_brain_label
 
+    if ctx.entry_point == "workflow_start":
+        record = sticky_record or {}
+        raw = record.get("decision")
+        model = raw.get("model_selected") if isinstance(raw, dict) else record.get("model")
+        return model if record.get("brain") == session_brain_label() and isinstance(model, str) and model else None
     if not saved_id or load_session_brain(ctx.session_name, root=runtime.root) != session_brain_label():
         return None
     return load_session_model(ctx.session_name, root=runtime.root)
@@ -323,14 +341,14 @@ def _saved_decision(ctx: RoutingContext, runtime: MetricsRuntime, sticky_record:
     raw = record.get("decision")
     if isinstance(raw, dict) and raw.get("model_selected") not in (*candidates, None):
         return _MODEL_REMOVED
-    if saved_id and load_session_brain(ctx.session_name, root=runtime.root) != provenance:
+    workflow = ctx.entry_point == "workflow_start"
+    if saved_id and not workflow and load_session_brain(ctx.session_name, root=runtime.root) != provenance:
         return None
-    raw = record.get("decision")
     if not isinstance(raw, dict) or raw.get("config_fingerprint") != fingerprint:
         return None
     decision = RouterDecision(**{**{name: value for name, value in raw.items() if name in _DECISION_FIELDS},
                                  "candidate_models": tuple(raw["candidate_models"])})
-    if (saved_id and ctx.entry_point != "workflow_start"
+    if (saved_id and not workflow
             and load_session_model(ctx.session_name, root=runtime.root) != decision.model_selected):
         return None
     metadata = json.loads(decision.policy_metadata_json)

@@ -797,43 +797,58 @@ async def _run_workflow_async(
         "text": f"{role or 'Agent'} started working on {run_key}",
     })
 
-    # CLI --role always wins; fall back to workflow step's agent field
-    first_agent = role or ""
-    if not first_agent:
-        for s in workflow.steps[start_step:]:
-            if s.agent:
-                first_agent = s.agent
-                break
-    current_agent = first_agent
     first_prompt_step = _first_prompt_step()
-    first_prompt_model = _effective_step_model(first_prompt_step)
-    # The agent the run's route is decided for: the run's first agent, never
-    # the agent a resume happens to start on (a run resumed past a gate may
-    # start on another agent's step).
+    # CLI --role always wins. A run restored from its checkpoint continues as
+    # the agent that ran last, so a step naming no agent inherits it whichever
+    # step the run jumps to, as without the gate; a step naming its own agent
+    # switches to it in the step loop. A checkpoint written before the agent
+    # was recorded takes the nearest agent named before the resume point. A new
+    # run takes the first agent its steps name.
+    saved_agent = (ctx.scopes.get("_runtime", {}) or {}).get("agent")
+    first_agent = role or (saved_agent if isinstance(saved_agent, str) else "")
+    if not first_agent:
+        earlier = [s.agent for s in reversed(workflow.steps[:start_step]) if s.agent]
+        later = [s.agent for s in workflow.steps[start_step:] if s.agent]
+        first_agent = next(iter(earlier + later), "")
+    current_agent = first_agent
+    # The run's route is decided once, when the run starts, for its route
+    # agent: the launch --role, else the first agent the workflow's steps name.
+    # A run restored from its checkpoint (an await resume or a retry) reuses
+    # that decision from its checkpoint record and never decides again, so
+    # every step runs the model it would have run without the gate. A record
+    # naming another agent (the workflow or the launch role changed since) is
+    # not this run's route.
     route_agent = role or next((s.agent for s in workflow.steps if s.agent), "")
-    prior_route = (ctx.scopes.get("_runtime", {}) or {}).get("route")
-    if (fresh or not isinstance(prior_route, dict)
-            or prior_route.get("agent", route_agent) != route_agent):
-        # A record decided for another agent (the workflow or the launch role
-        # changed since) is not this run's route.
-        prior_route = None
+    restored = start_step > 0 or "_runtime" in ctx.scopes
+    route_record = (ctx.scopes.get("_runtime", {}) or {}).get("route") if restored else None
+    if not isinstance(route_record, dict) or route_record.get("agent", route_agent) != route_agent:
+        route_record = None
     routed_model = None
     # The policy's decision until its model completes the first prompt step: a
     # failure before then reruns once on the control model (candidate_failed).
     route_decision = None
-    route_record = None
-    if first_prompt_step is not None:
+
+    def _on_route(step: StepDef | None) -> bool:
+        """Whether *step* runs the route's model: the route agent's unpinned steps."""
+        return (routed_model is not None and step is not None and not launch_model
+                and not step.model and (role or step.agent or current_agent) == route_agent)
+
+    def _step_model(step: StepDef | None) -> str:
+        """The model *step* runs."""
+        return routed_model if _on_route(step) else _effective_step_model(step)
+
+    # Whether the step being run is one of the route's: only its failure is the
+    # policy's model failing, and only its completion uses up the control rerun.
+    step_on_route = False
+
+    if first_prompt_step is not None and (route_record is not None or not restored):
         from bobi.brain import normalize_brain_kind, session_brain_label
         from bobi.metrics.routing import RoutingContext, resolve_route
 
-        # Only a resume can start on another agent; its saved route is reused
-        # (the policy is not asked again), so the route's model comes from that
-        # agent's own configuration rather than from the first step's.
-        routes_first_step = route_agent == first_agent
         routing_context = RoutingContext(
             session_name, "workflow_start", normalize_brain_kind(session_brain_label()),
-            first_prompt_model if routes_first_step else resolve_model(team_cfg, role=route_agent, explicit=launch_model),
-            bool(launch_model or (routes_first_step and first_prompt_step.model)),
+            resolve_model(team_cfg, role=route_agent, explicit=launch_model),
+            bool(launch_model or (not restored and first_prompt_step.model)),
             # The decision holds for every later same-agent step, so it must see
             # the launch input, not only the first step's template.
             _context_prefix() + _build_step_prompt(first_prompt_step, ctx, session_name, first_prompt_step.name),
@@ -841,21 +856,20 @@ async def _run_workflow_async(
             workflow_name=workflow.name, step_name=first_prompt_step.name,
             existing_transcript=bool(saved_id),
         )
-        if prior_route is not None:
-            outcome = await resolve_route(routing_context, sticky_record=prior_route)
-        else:
-            outcome = await resolve_route(routing_context)
+        outcome = await resolve_route(routing_context, sticky_record=route_record)
         if outcome.decision is not None or outcome.reason is not None:
             routed_model = outcome.model
-            if routes_first_step:
-                first_prompt_model = outcome.model
         route_decision = outcome.decision
-        if outcome.decision is not None:
+        if outcome.decision is None and outcome.reason is not None and not restored:
+            # No decision, but the run follows this model; its checkpoints keep it.
+            route_record = {"brain": session_brain_label(), "agent": route_agent,
+                            "model": outcome.model, "reason": outcome.reason}
+        if outcome.decision is not None and not restored:
             route_record = {"brain": session_brain_label(), "agent": route_agent,
                             "decision": asdict(outcome.decision)}
             ctx.set_scope("_runtime", {
                 **(ctx.scopes.get("_runtime", {}) or {}),
-                **({"model": outcome.model} if routes_first_step else {}), "route": route_record,
+                "model": _step_model(first_prompt_step), "route": route_record,
             })
             run.variable_scopes = ctx.scopes
             try:
@@ -871,15 +885,15 @@ async def _run_workflow_async(
                         brain=routing_context.brain, role=routing_context.role,
                         run_key=run_key, workflow_name=workflow.name):
                     runtime.discard_route(session_name)
-                if routes_first_step:
-                    first_prompt_model = routed_model
                 route_decision = None
-                route_record = None
+                # Later checkpoints carry the route the run now follows.
+                route_record = {**route_record, "decision": asdict(corrected)}
                 ctx.set_scope("_runtime", {
                     **(ctx.scopes.get("_runtime", {}) or {}),
-                    **({"model": routed_model} if routes_first_step else {}), "route": None,
+                    "model": _step_model(first_prompt_step), "route": route_record,
                 })
                 log.warning("metrics: workflow route checkpoint unavailable")
+    first_prompt_model = _step_model(first_prompt_step)
     # Effort is exempt from the resume guard (#778): both brains accept a new
     # effort on a resumed session, so the effective dial is simply recomputed
     # for the next step - no saved-effort record, no continue-vs-fresh check.
@@ -904,7 +918,13 @@ async def _run_workflow_async(
         else first_prompt_model
     )
 
-    if saved_id and (saved_session_model or start_step > 0):
+    if restored and saved_session_model:
+        # A restored run reopens exactly as it was suspended: the agent that ran
+        # last on the model it ran. The step loop then switches to the step it
+        # actually executes (a route may jump past the next step in file
+        # order) exactly as it would have without the gate.
+        current_model = saved_session_model
+    elif saved_id and (saved_session_model or start_step > 0):
         # The model the saved session ran under: the recorded one, else (for
         # a run suspended before models were tracked) the process default it
         # must have used. A start_step=0 run with no record has nothing to
@@ -960,9 +980,12 @@ async def _run_workflow_async(
         nonlocal current_model, routed_model, route_decision, route_record
         from bobi.metrics.routing import candidate_failed, rerouted_to_control
 
-        decision, route_decision = route_decision, None
-        if routed_model is None or current_model != routed_model:
+        if not step_on_route or current_model != routed_model:
+            # Another agent's step, or a pinned model, failed: even on the
+            # same model name it is not the policy's choice failing, and the
+            # fallback stays available for the route's own first step.
             return False
+        decision, route_decision = route_decision, None
         control = candidate_failed(decision, session_name=session_name,
                                    brain=routing_context.brain, model=current_model, error=error)
         if control:
@@ -1055,6 +1078,7 @@ async def _run_workflow_async(
                 "launch_model": launch_model,
                 "launch_effort": launch_effort,
                 "launch_role": role,
+                "agent": current_agent,
                 "visits": visit_counts,
                 "route": route_record,
             })
@@ -1226,26 +1250,8 @@ async def _run_workflow_async(
             step_start = time.time()
             registry.update(session_name, phase=step.name)
 
-            if client is None:
-                # First prompt turn of this process. Open under the launch
-                # dials (computed for first_prompt_step, with the saved-id
-                # model guard already applied); the switch branch below
-                # corrects to this step's own dials exactly as it would
-                # mid-run. The context block is owed whenever the transcript
-                # does not already carry THIS dispatch's input: always on a
-                # fresh run's first prompt turn (a resumed transcript holds
-                # the previous dispatch, not this task), on any fresh
-                # transcript for a resumed run, and on a checkpoint retry -
-                # its resumed transcript holds the FAILED dispatch's brief,
-                # and the retry may carry a corrected one.
-                resumed = await _open_session()
-                context_pending = (
-                    (start_step == 0) or not resumed or adopted_retry
-                )
-
-            step_model = _effective_step_model(step)
-            if routed_model is not None and not launch_model and not step.model and (role or step.agent or current_agent) == route_agent:
-                step_model = routed_model
+            step_on_route = _on_route(step)
+            step_model = _step_model(step)
             step_effort = _effective_step_effort(step)
             # The cap is a construction-time CLI flag, so it can only change by
             # rebuilding the session - exactly like effort (#845 review). An
@@ -1265,12 +1271,30 @@ async def _run_workflow_async(
             next_agent = (
                 current_agent if role else (step.agent or current_agent)
             )
-            if (
+            switching = (
                 step_model != current_model
                 or step_effort != current_effort
                 or step_max_turns != current_max_turns
                 or next_agent != current_agent
-            ):
+            )
+            if client is None:
+                # First prompt turn of this process. The session's current
+                # dials are the launch dials, or the suspended ones for a
+                # restored run; when this step needs other dials the switch
+                # branch below opens it directly from the saved transcript,
+                # exactly as it would mid-run, so no session opens that never
+                # runs a step. The context block is owed whenever the
+                # transcript does not already carry THIS dispatch's input:
+                # always on a fresh run's first prompt turn (a resumed
+                # transcript holds the previous dispatch, not this task), on
+                # any fresh transcript for a resumed run, and on a checkpoint
+                # retry - its resumed transcript holds the FAILED dispatch's
+                # brief, and the retry may carry a corrected one.
+                context_pending = (start_step == 0) or adopted_retry
+                if not switching:
+                    resumed = await _open_session()
+                    context_pending = context_pending or not resumed
+            if switching:
                 # Continue the live session natively on the new model when
                 # the brain supports it (#642); otherwise fresh + re-inject
                 # the workflow scopes as YAML (lossy fallback). An agent
@@ -1290,7 +1314,9 @@ async def _run_workflow_async(
                 token = ""
                 if next_agent == current_agent:
                     token = continuation_token(
-                        _brain, session_id=load_session_id(session_name),
+                        _brain,
+                        session_id=(saved_id if client is None
+                                    else load_session_id(session_name)),
                         from_model=current_model, to_model=step_model,
                     )
                 log.info(
@@ -1304,10 +1330,11 @@ async def _run_workflow_async(
                     current_max_turns, step_max_turns,
                     "native resume" if token else "fresh session",
                 )
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
                 current_model = step_model
                 current_effort = step_effort
                 current_max_turns = step_max_turns
@@ -1339,7 +1366,20 @@ async def _run_workflow_async(
                         model=current_model, effort=current_effort,
                         max_turns=current_max_turns,
                     )
-                    await client.connect()
+                    try:
+                        await client.connect()
+                    except Exception as e:
+                        # The process's first session may open here; a policy
+                        # model that cannot start reruns on control, as in
+                        # _open_session.
+                        if not _route_to_control(f"{type(e).__name__}: {e}"):
+                            raise
+                        client = _make_session(
+                            resume_id=None, agent_name=current_agent,
+                            model=current_model, effort=current_effort,
+                            max_turns=current_max_turns,
+                        )
+                        await client.connect()
                     # The re-injected scopes ride this step's prompt (#1016)
                     # instead of draining a context-only turn: a fresh
                     # transcript's first turn is the step turn.
@@ -1495,7 +1535,10 @@ async def _run_workflow_async(
                     telemetry_context=telemetry_context,
                     observation=turn_observation,
                 )
-            route_decision = None
+            if step_on_route:
+                # The route's first step ran: later failures are not the
+                # first turn a control rerun may repeat.
+                route_decision = None
 
             if drain.final_text is None:
                 step_observation.finish(
