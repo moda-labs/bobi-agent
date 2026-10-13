@@ -157,6 +157,10 @@ its model in the candidates never switches it mid-transcript); with no resumable
 configured model. Reuse re-admits the saved decision with
 `policy.status = "reused"` and makes no policy call. A workflow reads only its
 own checkpoint record, never the session route file.
+The route is decided for the run's first agent: the launch `--role`, else the first `agent` the workflow's steps name.
+The record names that agent, and a record naming another agent is not reused.
+A run resumed past a gate onto another agent's step still applies the route to the first agent's steps only; the other agents run their configured models, as without the gate.
+A launch `--role` is kept in the checkpoint, so it still pins every step after a gate.
 
 `save_session_id(name, "")` deletes the route with the session id. Internal
 rotation and stale-token recovery pass `preserve_route=True` and keep it.

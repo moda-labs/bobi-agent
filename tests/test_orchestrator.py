@@ -1005,6 +1005,109 @@ class TestRunWorkflow:
         assert len(calls) == 2 and all(call["options"]["model"] == "cheap" for call in calls)
         assert runtime.close(timeout=2)
 
+    def _routed_gate_run(self, tmp_path, monkeypatch, steps, *, gated, role="",
+                         saved_session=False, legacy_record=False):
+        """Run *steps* under an engineer-only policy that picks haiku, with an
+        approval gate after the first step when *gated*; returns the model of
+        every session opened and every route admission as ``(role, outcome)``."""
+        from bobi.metrics.runtime import MetricsRuntime
+        from tests.metrics.helpers import configured, fixed_policy
+
+        root = _bind_runtime_root(tmp_path, monkeypatch)
+        paths.agent_yaml_path(root).write_text(
+            "agent: test\nentry_point: manager\n"
+            "roles:\n  reviewer:\n    model: claude-3-7-sonnet\n"
+        )
+        # The engineer has no configured model, so it runs the process default unless routed.
+        monkeypatch.setenv("BOBI_BRAIN_MODEL", "opus")
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(
+            mode="enforce", entry_points=["workflow_start"], roles=["engineer"],
+            control_model="sonnet", candidate_models=["sonnet", "haiku"])))
+        fixed_policy(monkeypatch, "haiku")
+        monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+        brain, calls, clients = _recording_brain()
+        monkeypatch.setattr("bobi.brain.get_brain", lambda: brain)
+        admissions = []
+
+        def open_runtime():
+            runtime = MetricsRuntime(tmp_path, mode="enabled")
+            admit = runtime.admit_route
+            def spy(session_name, decision, **kwargs):
+                admissions.append((kwargs["role"], decision.model_selected if decision else kwargs["fallback_reason"]))
+                return admit(session_name, decision, **kwargs)
+            monkeypatch.setattr(runtime, "admit_route", spy)
+            monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
+            return runtime
+
+        @contextmanager
+        def process():
+            # A saved session keeps the provider session id the brain reported, as in production.
+            session_patches = [] if saved_session else [
+                patch("bobi.workflow.orchestrator.load_session_id", return_value=""),
+                patch("bobi.workflow.orchestrator.save_session_id"),
+                patch("bobi.brain.turns.save_session_id")]
+            with patch("bobi.workflow.orchestrator.get_registry", return_value=MagicMock()), \
+                 patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+                 patch("bobi.workflow.orchestrator._setup_worktree", return_value=str(tmp_path)), \
+                 patch("bobi.workflow.orchestrator.log_activity"), \
+                 patch("bobi.brain.turns.log_activity"):
+                for session_patch in session_patches:
+                    session_patch.start()
+                try:
+                    yield
+                finally:
+                    for session_patch in session_patches:
+                        session_patch.stop()
+
+        if gated:
+            steps = [steps[0], StepDef(name="gate", await_event="approval"), *steps[1:]]
+        wf = Workflow(name="t", steps=steps)
+        runtime = open_runtime()
+        with process():
+            assert run_workflow(wf, task="t", repo="r", cwd=str(tmp_path), run_key="run-1", role=role)
+        assert runtime.close(timeout=2)
+        if gated:
+            [run] = WorkflowRun.list_runs(root=tmp_path)
+            assert run.status == "waiting"
+            if legacy_record:
+                # A run parked before route records named their agent.
+                del run.variable_scopes["_runtime"]["route"]["agent"]
+                run.save()
+            if saved_session:
+                from bobi.sdk import load_session_id as saved_session_id
+                assert saved_session_id(run.session_name) == "test-session-id"
+            runtime = open_runtime()
+            with process():
+                assert resume_workflow(run, wf)
+            assert runtime.close(timeout=2)
+        return [call["options"]["model"] for call in calls], admissions
+
+    @pytest.mark.parametrize("gated,saved_session,legacy_record", [
+        (False, False, False), (True, False, False), (True, True, False), (True, True, True)],
+        ids=["no-gate", "gate", "gate-saved-session", "gate-record-without-agent"])
+    def test_route_after_a_gate_stays_with_the_agent_it_was_decided_for(
+            self, tmp_path, monkeypatch, gated, saved_session, legacy_record):
+        models, admissions = self._routed_gate_run(tmp_path, monkeypatch, [
+            StepDef(name="implement", prompt="implement", agent="engineer"),
+            StepDef(name="review", prompt="review", agent="reviewer"),
+            StepDef(name="review2", prompt="review again", agent="reviewer"),
+            StepDef(name="rework", prompt="rework", agent="engineer"),
+        ], gated=gated, saved_session=saved_session, legacy_record=legacy_record)
+        # implement and rework keep the engineer's route; both reviews run the reviewer's own model.
+        assert models == ["haiku", "claude-3-7-sonnet", "haiku"]
+        assert admissions == [("engineer", "haiku")] * (2 if gated else 1)
+
+    @pytest.mark.parametrize("gated", [False, True])
+    def test_launch_role_route_holds_after_a_gate(self, tmp_path, monkeypatch, gated):
+        models, admissions = self._routed_gate_run(tmp_path, monkeypatch, [
+            StepDef(name="implement", prompt="implement"),
+            StepDef(name="rework", prompt="rework"),
+            StepDef(name="verify", prompt="verify"),
+        ], gated=gated, role="engineer")
+        # Every step runs as the launch role, so every step runs the model its route admitted.
+        assert set(models) == {"haiku"}
+        assert admissions == [("engineer", "haiku")] * (2 if gated else 1)
+
     def test_initial_route_checkpoint_failure_executes_control(self, monkeypatch):
         from dataclasses import replace
         from bobi.metrics.routing import RouteOutcome

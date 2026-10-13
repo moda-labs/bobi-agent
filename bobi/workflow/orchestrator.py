@@ -540,7 +540,7 @@ def resume_workflow(
         "text": f"Workflow {workflow.name} resumed for {run_key}",
     })
 
-    # A launch-time --model/--effort override survives suspension via the
+    # A launch-time --model/--effort/--role override survives suspension via the
     # _runtime scope; without it the resume would re-resolve to the config
     # default - for the model that would trip the mismatch guard, discard the
     # saved session, and silently change the run's model; for the effort it
@@ -550,13 +550,15 @@ def resume_workflow(
         runtime_scope = {}
     launch_model = str(runtime_scope.get("launch_model", "") or "")
     launch_effort = str(runtime_scope.get("launch_effort", "") or "")
+    # A launch --role pins every step to it, after the gate too.
+    launch_role = str(runtime_scope.get("launch_role", "") or "")
 
     outcome = asyncio.run(
         _run_workflow_async(
             workflow, f"Resuming workflow from step {step_idx}", repo, cwd,
             run_key, session_name, registry, ctx, requested_by, timeout,
-            interactive, start_step=step_idx, launch_model=launch_model,
-            launch_effort=launch_effort, run=run,
+            interactive, start_step=step_idx, role=launch_role,
+            launch_model=launch_model, launch_effort=launch_effort, run=run,
         )
     )
 
@@ -805,6 +807,16 @@ async def _run_workflow_async(
     current_agent = first_agent
     first_prompt_step = _first_prompt_step()
     first_prompt_model = _effective_step_model(first_prompt_step)
+    # The agent the run's route is decided for: the run's first agent, never
+    # the agent a resume happens to start on (a run resumed past a gate may
+    # start on another agent's step).
+    route_agent = role or next((s.agent for s in workflow.steps if s.agent), "")
+    prior_route = (ctx.scopes.get("_runtime", {}) or {}).get("route")
+    if (fresh or not isinstance(prior_route, dict)
+            or prior_route.get("agent", route_agent) != route_agent):
+        # A record decided for another agent (the workflow or the launch role
+        # changed since) is not this run's route.
+        prior_route = None
     routed_model = None
     # The policy's decision until its model completes the first prompt step: a
     # failure before then reruns once on the control model (candidate_failed).
@@ -814,30 +826,36 @@ async def _run_workflow_async(
         from bobi.brain import normalize_brain_kind, session_brain_label
         from bobi.metrics.routing import RoutingContext, resolve_route
 
-        prior_route = (ctx.scopes.get("_runtime", {}) or {}).get("route")
+        # Only a resume can start on another agent; its saved route is reused
+        # (the policy is not asked again), so the route's model comes from that
+        # agent's own configuration rather than from the first step's.
+        routes_first_step = route_agent == first_agent
         routing_context = RoutingContext(
             session_name, "workflow_start", normalize_brain_kind(session_brain_label()),
-            first_prompt_model, bool(launch_model or first_prompt_step.model),
+            first_prompt_model if routes_first_step else resolve_model(team_cfg, role=route_agent, explicit=launch_model),
+            bool(launch_model or (routes_first_step and first_prompt_step.model)),
             # The decision holds for every later same-agent step, so it must see
             # the launch input, not only the first step's template.
             _context_prefix() + _build_step_prompt(first_prompt_step, ctx, session_name, first_prompt_step.name),
-            role or current_agent, fresh, repo_path=cwd, run_key=run_key,
+            route_agent, fresh, repo_path=cwd, run_key=run_key,
             workflow_name=workflow.name, step_name=first_prompt_step.name,
             existing_transcript=bool(saved_id),
         )
-        if isinstance(prior_route, dict) and not fresh:
+        if prior_route is not None:
             outcome = await resolve_route(routing_context, sticky_record=prior_route)
         else:
             outcome = await resolve_route(routing_context)
         if outcome.decision is not None or outcome.reason is not None:
             routed_model = outcome.model
-            first_prompt_model = outcome.model
+            if routes_first_step:
+                first_prompt_model = outcome.model
         route_decision = outcome.decision
         if outcome.decision is not None:
-            route_record = {"brain": session_brain_label(), "decision": asdict(outcome.decision)}
+            route_record = {"brain": session_brain_label(), "agent": route_agent,
+                            "decision": asdict(outcome.decision)}
             ctx.set_scope("_runtime", {
                 **(ctx.scopes.get("_runtime", {}) or {}),
-                "model": outcome.model, "route": route_record,
+                **({"model": outcome.model} if routes_first_step else {}), "route": route_record,
             })
             run.variable_scopes = ctx.scopes
             try:
@@ -846,19 +864,20 @@ async def _run_workflow_async(
                 from bobi.metrics.runtime import get_runtime
 
                 runtime = get_runtime()
-                routed_model = outcome.decision.control_model or first_prompt_model
+                routed_model = outcome.decision.control_model or routing_context.configured_model
                 corrected = replace(outcome.decision, model_selected=routed_model,
                     fallback_reason="route_persistence_failed", router_reason="policy_fallback")
                 if not runtime.admit_route(session_name, corrected,
                         brain=routing_context.brain, role=routing_context.role,
                         run_key=run_key, workflow_name=workflow.name):
                     runtime.discard_route(session_name)
-                first_prompt_model = routed_model
+                if routes_first_step:
+                    first_prompt_model = routed_model
                 route_decision = None
                 route_record = None
                 ctx.set_scope("_runtime", {
                     **(ctx.scopes.get("_runtime", {}) or {}),
-                    "model": routed_model, "route": None,
+                    **({"model": routed_model} if routes_first_step else {}), "route": None,
                 })
                 log.warning("metrics: workflow route checkpoint unavailable")
     # Effort is exempt from the resume guard (#778): both brains accept a new
@@ -1035,6 +1054,7 @@ async def _run_workflow_async(
                 "model": current_model,
                 "launch_model": launch_model,
                 "launch_effort": launch_effort,
+                "launch_role": role,
                 "visits": visit_counts,
                 "route": route_record,
             })
@@ -1224,7 +1244,7 @@ async def _run_workflow_async(
                 )
 
             step_model = _effective_step_model(step)
-            if routed_model is not None and not launch_model and not step.model and (role or step.agent or current_agent) == first_agent:
+            if routed_model is not None and not launch_model and not step.model and (role or step.agent or current_agent) == route_agent:
                 step_model = routed_model
             step_effort = _effective_step_effort(step)
             # The cap is a construction-time CLI flag, so it can only change by
