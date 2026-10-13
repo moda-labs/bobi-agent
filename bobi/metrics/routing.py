@@ -169,19 +169,30 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             if EXPERIMENT_CONFIG_ENV in _UNRESTORED_PROVIDER_ENV:
                 # A provider launch withheld the parent's config and this runtime's .env has none.
                 return recorded_fallback("routing_config_unrestored")
+            if (not ctx.fresh and ctx.entry_point != "workflow_start"
+                    and load_session_route(ctx.session_name, root=runtime.root)):
+                # Routing was turned off under a routed session: it resumes on its configured model.
+                return recorded_fallback("routing_disabled_resumed")
             return fallback
         policy_config = config.policy
         fingerprint = config.fingerprint()
         if policy_config.brain not in ("auto", ctx.brain):
             # A policy pinned to another brain can never route this agent; say so.
             return recorded_fallback("routing_brain_mismatch")
-        if ctx.entry_point not in policy_config.entry_points or ctx.role not in policy_config.roles:
-            return fallback
         saved_id = load_session_id(ctx.session_name, root=runtime.root)
-        if not ctx.fresh and (saved_id or sticky_record):
+        resuming = not ctx.fresh and bool(saved_id or sticky_record)
+        if ctx.entry_point not in policy_config.entry_points or ctx.role not in policy_config.roles:
+            if resuming and _saved_record(ctx, runtime, sticky_record):
+                # A routed session the policy no longer covers runs the control model.
+                return recorded_fallback("routing_out_of_scope", model=config.control_model)
+            return fallback
+        if resuming:
             stage = "sticky"
             decision = _saved_decision(ctx, runtime, sticky_record, saved_id, fingerprint,
                                        policy_config.candidate_models)
+            if decision == _MODEL_REMOVED:
+                # The routed model was taken out of the policy; never keep running it.
+                return recorded_fallback("routing_sticky_model_removed", model=config.control_model)
             if decision is None:
                 # Never switch a resumed session's model: keep the one its transcript ran.
                 return recorded_fallback("routing_sticky_stale",
@@ -279,20 +290,36 @@ def _resumed_model(ctx: RoutingContext, runtime: MetricsRuntime, saved_id: str) 
     return load_session_model(ctx.session_name, root=runtime.root)
 
 
+# _saved_decision's answer when the saved route picked a model the policy dropped.
+_MODEL_REMOVED = "model_removed"
+
+
+def _saved_record(ctx: RoutingContext, runtime: MetricsRuntime,
+                  sticky_record: dict[str, object] | None) -> dict[str, object] | None:
+    """The saved route record; a workflow uses only its own checkpoint record."""
+    if ctx.entry_point == "workflow_start":
+        return sticky_record
+    return sticky_record or load_session_route(ctx.session_name, root=runtime.root)
+
+
 def _saved_decision(ctx: RoutingContext, runtime: MetricsRuntime, sticky_record: dict[str, object] | None,
-                    saved_id: str, fingerprint: str, candidates: tuple[str, ...]) -> RouterDecision | None:
-    """The saved route to reuse, or None when it is stale.
+                    saved_id: str, fingerprint: str,
+                    candidates: tuple[str, ...]) -> RouterDecision | str | None:
+    """The saved route to reuse, :data:`_MODEL_REMOVED`, or None when it is stale.
 
     A route is reused only when it was saved under the same brain and the same
     config fingerprint, its model is still a candidate, and a saved provider
-    session ran that model. A workflow uses only its own checkpoint record."""
+    session ran that model. A workflow checkpoint is the record of its own
+    route: its shared session may last have run another agent's step."""
     from bobi.brain import session_brain_label
 
     provenance = session_brain_label()
-    record = sticky_record if ctx.entry_point == "workflow_start" else (
-        sticky_record or load_session_route(ctx.session_name, root=runtime.root))
+    record = _saved_record(ctx, runtime, sticky_record)
     if not record or record.get("brain") != provenance:
         return None
+    raw = record.get("decision")
+    if isinstance(raw, dict) and raw.get("model_selected") not in (*candidates, None):
+        return _MODEL_REMOVED
     if saved_id and load_session_brain(ctx.session_name, root=runtime.root) != provenance:
         return None
     raw = record.get("decision")
@@ -300,9 +327,8 @@ def _saved_decision(ctx: RoutingContext, runtime: MetricsRuntime, sticky_record:
         return None
     decision = RouterDecision(**{**{name: value for name, value in raw.items() if name in _DECISION_FIELDS},
                                  "candidate_models": tuple(raw["candidate_models"])})
-    if decision.model_selected not in candidates:
-        return None
-    if saved_id and load_session_model(ctx.session_name, root=runtime.root) != decision.model_selected:
+    if (saved_id and ctx.entry_point != "workflow_start"
+            and load_session_model(ctx.session_name, root=runtime.root) != decision.model_selected):
         return None
     metadata = json.loads(decision.policy_metadata_json)
     if not isinstance(metadata, dict):

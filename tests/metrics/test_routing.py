@@ -1002,6 +1002,73 @@ def test_config_edit_never_switches_a_routed_session_model(monkeypatch, tmp_path
         assert runtime.close(timeout=2)
 
 
+@pytest.mark.parametrize("change,reason", [
+    ({"candidate_models": ["control", "other"]}, "routing_sticky_model_removed"),
+    ({"roles": ["director"]}, "routing_out_of_scope"),
+])
+def test_resumed_session_moves_to_control_when_its_route_no_longer_applies(monkeypatch, tmp_path, change, reason):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        assert asyncio.run(resolve_route(context(), runtime=runtime)).model == "cheap"
+        save_session_id("agent", "provider-session", model="cheap", root=tmp_path)
+    finally:
+        assert runtime.close(timeout=2)
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce", **change)))
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    recorded = _recorded_fallbacks(runtime, monkeypatch)
+    try:
+        resumed = asyncio.run(resolve_route(replace(context(), fresh=False, prompt=""), runtime=runtime))
+        assert resumed.model == "control" and resumed.reason == reason
+        assert recorded == [reason]
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_disabling_routing_records_why_a_routed_session_changed_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        assert asyncio.run(resolve_route(context(), runtime=runtime)).model == "cheap"
+        save_session_id("agent", "provider-session", model="cheap", root=tmp_path)
+    finally:
+        assert runtime.close(timeout=2)
+    monkeypatch.delenv("BOBI_METRICS_EXPERIMENT_JSON")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    recorded = _recorded_fallbacks(runtime, monkeypatch)
+    try:
+        resumed = asyncio.run(resolve_route(replace(context(), fresh=False, prompt=""), runtime=runtime))
+        assert resumed.model == "configured" and resumed.reason == "routing_disabled_resumed"
+        assert recorded == ["routing_disabled_resumed"]
+        fresh = asyncio.run(resolve_route(replace(context(), session_name="other"), runtime=runtime))
+        assert fresh.model == "configured" and fresh.reason is None
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_workflow_resume_reuses_its_checkpoint_route_after_another_step_ran(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(
+        mode="enforce", entry_points=["workflow_start"])))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    workflow = replace(context(), session_name="workflow-run", entry_point="workflow_start")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        routed = asyncio.run(resolve_route(workflow, runtime=runtime))
+        checkpoint = {"brain": "codex", "decision": asdict(routed.decision)}
+        # A reviewer step (or a step-level model override) ran last in the shared session.
+        save_session_id("workflow-run", "provider-session", model="reviewer-model", root=tmp_path)
+        resumed = asyncio.run(resolve_route(replace(workflow, fresh=False, prompt=""), runtime=runtime,
+                                            sticky_record=checkpoint))
+        assert resumed.model == "cheap" and resumed.decision is not None
+    finally:
+        assert runtime.close(timeout=2)
+
+
 def test_persistence_failure_never_executes_the_routed_model(monkeypatch, tmp_path):
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
     fixed_policy(monkeypatch)
@@ -1588,7 +1655,7 @@ def test_policy_brain_auto_follows_the_agent(monkeypatch, tmp_path, policy_brain
 
 
 @pytest.mark.parametrize("change", [{"policy_version": "jev-1.14.0"}, {"instructions": "Changed"},
-                                    {"candidate_models": ["control", "other"]}])
+                                    {"candidate_models": ["control", "cheap", "other"]}])
 def test_stale_sticky_route_records_why_the_session_kept_its_model(monkeypatch, tmp_path, caplog, change):
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
     fixed_policy(monkeypatch)

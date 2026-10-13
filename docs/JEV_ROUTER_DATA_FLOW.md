@@ -8,7 +8,7 @@ and the dashboard are described in `docs/FINE_GRAINED_METRICS.md`.
 
 | ID | Rule |
 |---|---|
-| D1 | The model is chosen **once per fresh brain session**, before it connects. Rotation, reconnect and recovery keep the session's model; there is no per-turn switching. |
+| D1 | The model is chosen **once per fresh brain session**, before it connects. Rotation, reconnect and recovery keep the session's model; there is no per-turn switching. Turning routing off, taking a session out of scope, or removing its routed model moves a resumed session off that model and records why (4.2); a gateway agent, or one with no configured model, then starts a fresh transcript. |
 | D2 | Routing runs only at the session, subagent and workflow-start entry points listed in section 3. |
 | D3 | Every eligible session calls the policy. In `shadow` mode the control model runs and the recommendation is recorded; in `enforce` mode the recommendation runs when it passes the guards. |
 | D4 | Eligibility is checked before the policy is called. Ineligible sessions run their configured model and produce no decision. |
@@ -105,6 +105,7 @@ decision with an optional `reason` when routing did not decide.
    1. eligibility ───────────── ineligible ───────► configured model, no decision
    2. load + validate config ── invalid ──────────► configured model, routing_config_invalid
    3. sticky reuse (not fresh) ─ match ───────────► saved model, status "reused"
+                               ├ model removed ───► control model, routing_sticky_model_removed
                                └ no match ────────► saved session's model (else configured), routing_sticky_stale
    4. features + redaction
    5. call_policy(): breaker, capacity, deadline, TypeSafePolicy.decide()
@@ -121,10 +122,10 @@ Checked in order; the first match runs the configured model.
 |---|---|---|
 | 1 | `explicit_model` (launch flag, step model, explicit argument) | Nothing; an operator's choice always wins |
 | 2 | Metrics disabled while a config is set | `routing_metrics_unavailable` |
-| 3 | No config | Nothing |
+| 3 | No config | Nothing; a resumed session with a saved route records `routing_disabled_resumed` |
 | 4 | Config invalid | `routing_config_invalid` |
 | 5 | `brain` pinned to another brain | `routing_brain_mismatch` |
-| 6 | Entry point or role outside the allowlists | Nothing |
+| 6 | Entry point or role outside the allowlists | Nothing; a resumed session with a saved route runs `control_model` and records `routing_out_of_scope` |
 | 7 | Not fresh and a saved session or checkpoint record exists | Sticky reuse (4.2) |
 | 8 | Empty prompt, or a resumed session with an existing transcript | Nothing |
 
@@ -142,12 +143,17 @@ A saved route is reused only when all of these hold:
 - its `config_fingerprint` equals the current config's;
 - its `model_selected` is still in `candidate_models`;
 - when a provider session is saved, that session ran `model_selected` (an
-  operator who later relaunched with another model keeps that model).
+  operator who later relaunched with another model keeps that model). A
+  workflow skips this check: its shared session may last have run another
+  agent's step or a step-level model, and its checkpoint is the record.
 
-Otherwise it records `routing_sticky_stale`; an error while reading the record
+When the saved `model_selected` was removed from `candidate_models`, the
+session runs `control_model` and records `routing_sticky_model_removed`, so a
+model taken out because it stopped working is never resumed. Otherwise it
+records `routing_sticky_stale`; an error while reading the record
 records `routing_sticky_invalid`. Either way a resumed session keeps the model
-its saved provider session ran (a config edit never switches a session
-mid-transcript); with no resumable session under this brain it runs its
+its saved provider session ran (an edit that keeps the session in scope and
+its model in the candidates never switches it mid-transcript); with no resumable session under this brain it runs its
 configured model. Reuse re-admits the saved decision with
 `policy.status = "reused"` and makes no policy call. A workflow reads only its
 own checkpoint record, never the session route file.
@@ -275,7 +281,8 @@ After a decision, these run `control_model` and are stored as the row's
 
 Without a decision, the session runs its configured model and the reason is
 stored in the session's `router_fallback` metadata: `routing_brain_mismatch`,
-`routing_sticky_stale`, `routing_sticky_invalid`, `routing_config_invalid`,
+`routing_sticky_stale`, `routing_sticky_model_removed`, `routing_out_of_scope`,
+`routing_disabled_resumed`, `routing_sticky_invalid`, `routing_config_invalid`,
 `routing_config_unrestored`, `routing_policy_unavailable`,
 `routing_metrics_unavailable`, `routing_unavailable`.
 `routing_config_unrestored` means a provider launch withheld the parent's
