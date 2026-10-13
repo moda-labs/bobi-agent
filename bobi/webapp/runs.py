@@ -194,9 +194,13 @@ def _workflow_rows(root: Path, *, now: float,
     # One session's usage lands on ONE row. Retries reuse their entry, but a
     # --fresh relaunch mints a second entry on the same session name; giving
     # each the session's tokens would double-count spend in a column read as
-    # a running total. list_runs is newest-first, so the newest row wins.
+    # a running total. The run started last wins; file times cannot say which
+    # that is (entries written in one filesystem tick tie, and an update
+    # rewrites an older run's entry).
     usage_claimed: set[str] = set()
-    for run in WorkflowRun.list_runs(root=root):
+    runs = sorted(WorkflowRun.list_runs(root=root),
+                  key=lambda run: _epoch(run.started_at) or 0.0, reverse=True)
+    for run in runs:
         status = _workflow_status(run, now=now)
         trigger = (run.trigger_event or {}).get("type", "")
         started = _epoch(run.started_at)

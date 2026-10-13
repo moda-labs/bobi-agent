@@ -18,6 +18,7 @@ handlers.
 from __future__ import annotations
 
 import re
+import sys
 import threading
 import time
 import uuid
@@ -33,6 +34,63 @@ DEFAULT_CHAT_TIMEOUT = 300
 COLLECTOR_STALE_US = 30_000_000
 # Characters of the prompt a turn-list row carries; the drawer reads the rest.
 LIST_MESSAGE_CHARS = 512
+# Seconds a turn listing may spend starting transcript reads; later turns list without
+# their text. A search matches that text, so it gets longer, but still a bound: it holds
+# one of the four metrics reader slots, and says how many turns it could not read.
+LIST_TRANSCRIPT_BUDGET_S = 1.0
+SEARCH_TRANSCRIPT_BUDGET_S = 5.0
+# Bytes of parsed transcript kept between reads of the metrics view, as the
+# entries' objects actually occupy (non-Latin text takes 2-4 bytes a character).
+TRANSCRIPT_CACHE_BYTES = 32 * 1024 * 1024
+# Transcript files remembered per provider session; the set is dropped when full.
+TRANSCRIPT_PATHS_MAX = 4096
+# Returned by `LocalRuntime._transcript_identity` when the budget left no time to look.
+_NOT_LOOKED_UP = ()
+
+
+def _entries_size(entries: list[dict]) -> int:
+    """Memory the entries hold: each dict and its values (keys are shared)."""
+    return sys.getsizeof(entries) + sum(
+        sys.getsizeof(entry) + sum(sys.getsizeof(value) for value in entry.values()) for entry in entries)
+
+
+class _TranscriptCache:
+    """Parsed transcript windows keyed on the file's identity (path, inode, size,
+    mtime), so a refresh or a repeated search does not parse an unchanged file
+    again, and a file that grew is read afresh. Bounded by the memory it holds.
+
+    Entries are shared, not copied: readers must not change them
+    (`_turn_conversation` copies the entries it trims)."""
+
+    def __init__(self, max_bytes: int) -> None:
+        from collections import OrderedDict
+
+        self._entries: OrderedDict[tuple, tuple[int, list[dict], str | None]] = OrderedDict()
+        self._bytes = 0
+        self._max_bytes = max_bytes
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple) -> tuple[list[dict], str | None] | None:
+        """The entries and what cut the read short (see `read_transcript_detail`)."""
+        with self._lock:
+            found = self._entries.get(key)
+            if found is None:
+                return None
+            self._entries.move_to_end(key)
+        return found[1], found[2]
+
+    def put(self, key: tuple, entries: list[dict], cut: str | None) -> None:
+        size = _entries_size(entries)
+        if size > self._max_bytes:
+            return
+        with self._lock:
+            previous = self._entries.pop(key, None)
+            if previous is not None:
+                self._bytes -= previous[0]
+            self._entries[key] = (size, entries, cut)
+            self._bytes += size
+            while self._bytes > self._max_bytes:
+                self._bytes -= self._entries.popitem(last=False)[1][0]
 
 def _clean_event_text(text: str) -> str:
     lines = text.strip().splitlines()
@@ -48,6 +106,34 @@ def _clean_event_text(text: str) -> str:
         if not in_meta and stripped:
             content_lines.append(stripped)
     return "\n".join(content_lines).strip()
+
+
+def _turn_cost_models(data: dict) -> list[str]:
+    """The models a turn's cost covers, one name per model identity.
+
+    The turn-scope usage names the models the provider billed; without it the
+    recorded calls are the best evidence. A cost row with no model is
+    unattributed only when this lists several models.
+    """
+    from bobi.costs import model_identity
+
+    billed = [item.get("model") for item in data.get("best_usage") or [] if item.get("scope") == "turn"]
+    called = [invocation.get("model_selected") or invocation.get("model_requested")
+              for invocation in data.get("invocations") or []]
+    models: dict[str, str] = {}
+    for model in [model for model in billed if model] or called:
+        if model:
+            models.setdefault(model_identity(model), model)
+    return list(models.values())
+
+
+def _turn_search_text(turn: dict) -> str:
+    """The text a turn-list search matches: the listed fields, prompt in full."""
+    conversation = turn.get("conversation") or {}
+    fields = (turn.get("semantic_title"), conversation.get("semantic_title"), conversation.get("user_message"),
+              conversation.get("prompt_snippet"), conversation.get("response_snippet"), turn.get("session_name"),
+              turn.get("role"), turn.get("session_id"), turn.get("model_selected"), turn.get("fallback_reason"))
+    return " ".join(str(value) for value in fields if value).lower()
 
 
 def _clean_user_message(raw: str) -> str:
@@ -836,6 +922,8 @@ class LocalRuntime(TeamRuntime):
 
     def __init__(self) -> None:
         self._metrics_reads = threading.BoundedSemaphore(4)
+        self._transcripts = _TranscriptCache(TRANSCRIPT_CACHE_BYTES)
+        self._transcript_paths: dict[tuple, Path] = {}
         self._routing_tests = threading.BoundedSemaphore(4)
         self._model_runs = threading.BoundedSemaphore(2)
         # Submit-then-poll job store. Carries only status and errors; the
@@ -1044,6 +1132,36 @@ class LocalRuntime(TeamRuntime):
                 "input_tokens": input_tokens, "output_tokens": output_tokens,
                 "list_price_usd": list_price}
 
+    def _transcript_identity(self, provider_id: str, brain: str | None, *, may_look: bool) -> tuple | None:
+        """The file `read_transcript_detail` reads for this session, as (path, inode,
+        size, mtime), or None when there is none. A file found once is remembered,
+        so a later request only stats it; finding one walks the transcript
+        directories, so it waits on *may_look* (else `_NOT_LOOKED_UP`)."""
+        from bobi.chat_history import find_claude_transcript, find_codex_rollout
+
+        key = (provider_id, brain)
+        path = self._transcript_paths.get(key)
+        if path is not None:
+            try:
+                stat = path.stat()
+                return str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns
+            except OSError:
+                self._transcript_paths.pop(key, None)
+        if not may_look:
+            return _NOT_LOOKED_UP
+        # The same choice of file as the reader's.
+        codex = brain in ("codex", "gateway-openai")
+        path = None if codex else find_claude_transcript(provider_id)
+        if path is None and (codex or brain in (None, "")):
+            path = find_codex_rollout(provider_id)
+        if path is None:
+            return None
+        stat = path.stat()
+        if len(self._transcript_paths) >= TRANSCRIPT_PATHS_MAX:
+            self._transcript_paths.clear()
+        self._transcript_paths[key] = path
+        return str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns
+
     def metrics(self, name: str, view: str, args: dict) -> dict:
         import json
 
@@ -1057,6 +1175,8 @@ class LocalRuntime(TeamRuntime):
             raise UnknownTeam(name)
         if not self._metrics_reads.acquire(blocking=False):
             raise MetricsQueryError("metrics readers are busy", "metrics_busy", retry_after_ms=250)
+        # Searches one page of turns; matched here, where each turn's whole prompt is still at hand.
+        search = str(args.get("q") or "").strip().lower() if view == "turns" else ""
         try:
             queries = MetricsQueries(root)
             data = {"summary": queries.summary, "turns": queries.turns, "sessions": queries.sessions,
@@ -1066,8 +1186,13 @@ class LocalRuntime(TeamRuntime):
                 from bobi.chat_history import read_transcript_detail
 
                 transcripts = {}
+                unread: set[tuple] = set()
+                cut: set[tuple] = set()
+                unsearched = 0
+                unmatched: set[str] = set()
                 turns = data["turns"] if view == "turns" else [data["turn"]]
-                transcript_deadline = time.monotonic() + 1.0
+                transcript_deadline = time.monotonic() + (
+                    SEARCH_TRANSCRIPT_BUDGET_S if search else LIST_TRANSCRIPT_BUDGET_S)
                 for turn in turns:
                     session = turn if view == "turns" else data["session"]
                     provider_id = session.get("provider_session_id")
@@ -1078,21 +1203,44 @@ class LocalRuntime(TeamRuntime):
                     # with the earlier lifecycle but reads its own time window.
                     key = (provider_id, session.get("brain"), turn["session_id"])
                     if key not in transcripts:
+                        transcripts[key] = []
                         try:
                             group = [item for item in turns if item["session_id"] == turn["session_id"]]
                             ends = [item.get("ended_at_us") or item.get("next_started_at_us") for item in group]
                             before = max(ends) + 1 if all(value is not None for value in ends) else None
                             if any(item.get("status") == "running" for item in group):
                                 before = None
-                            transcripts[key] = read_transcript_detail(provider_id, limit=len(group) * 200 + 1,
-                                brain=key[1], after_us=min(item["started_at_us"] for item in group), before_us=before
-                            ) if provider_id and time.monotonic() < transcript_deadline else []
+                            identity = self._transcript_identity(
+                                provider_id, key[1], may_look=time.monotonic() < transcript_deadline
+                            ) if provider_id else None
+                            window = (min(item["started_at_us"] for item in group), before, len(group) * 200 + 1)
+                            cached = self._transcripts.get((identity, key[1], *window)) if identity else None
+                            report: dict = {}
+                            if cached is not None:
+                                transcripts[key], report["cut"] = cached
+                            elif identity and time.monotonic() < transcript_deadline:
+                                transcripts[key] = read_transcript_detail(provider_id, limit=window[2],
+                                    brain=key[1], after_us=window[0], before_us=window[1], report=report)
+                                # A read cut by the reader's time limit may go further next time.
+                                if report["cut"] != "time":
+                                    self._transcripts.put((identity, key[1], *window), transcripts[key], report["cut"])
+                            elif identity is not None:
+                                unread.add(key)
+                            if report.get("cut"):
+                                cut.add(key)
                         except (OSError, UnicodeError):
                             transcripts[key] = []
+                            if provider_id:
+                                unread.add(key)
                     conversation = _turn_conversation(turn, transcripts[key], next_started, session=session)
                     turn["semantic_title"] = conversation["semantic_title"]
                     if view == "turns":
                         turn["conversation"] = {key: conversation[key] for key in ("status", "origin", "prompt_snippet", "response_snippet", "user_message", "semantic_title")}
+                        # Not searched: the transcript was not read in time, or the read stopped
+                        # before reaching any of this turn's prompt.
+                        unsearched += key in unread or (key in cut and not conversation["user_message"])
+                        if search and search not in _turn_search_text(turn):
+                            unmatched.add(turn["turn_id"])
                         # A list row needs a title, not the prompt: the drawer reads the whole text.
                         message = turn["conversation"]["user_message"]
                         turn["conversation"]["user_message_truncated"] = bool(message and len(message) > LIST_MESSAGE_CHARS)
@@ -1100,6 +1248,13 @@ class LocalRuntime(TeamRuntime):
                             turn["conversation"]["user_message"] = message[:LIST_MESSAGE_CHARS]
                     else:
                         data["conversation"] = conversation
+                if search:
+                    # A turn whose transcript was not read in time matched only on its other fields.
+                    data["search"] = {"loaded": len(turns), "searched": len(turns) - unsearched}
+                if unmatched:
+                    data["turns"] = [turn for turn in turns if turn["turn_id"] not in unmatched]
+                if view == "turn":
+                    data["cost_models"] = _turn_cost_models(data)
             if view == "summary":
                 try:
                     health = json.loads((root / "state/metrics/collector.state.json").read_text())

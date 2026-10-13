@@ -1425,6 +1425,119 @@ class TestMetricsView:
         expect(card.locator(".analytics-card-head .chip")).to_have_text("not routing")
         expect(card).not_to_contain_text("cheaper")
 
+    def _routine_turn_costs(self, webapp, page, rows, extra_sql=()):
+        """Open the one-call `t-routine` turn's usage tab with the given
+        turn-scope cost rows `(id, model, amount, is_estimated)`."""
+        from bobi.metrics.store import connect
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        conn = connect(webapp.install.state_dir / "metrics/metrics.db")
+        for sql in extra_sql:
+            conn.execute(sql)
+        for cost_id, model, amount, estimated in rows:
+            conn.execute("INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,model,"
+                         "amount_usd,measurement_source,is_estimated,observed_at_us) VALUES(?,'turn','s1',"
+                         "'t-routine','gateway',?,?,?,?,?)",
+                         (cost_id, model, amount, "price_snapshot" if estimated else "provider_stream",
+                          int(estimated), int(time.time() * 1_000_000)))
+        rekey(conn)
+        conn.commit()
+        conn.close()
+        page.goto(webapp.agent_url() + "/metrics")
+        page.locator(".metrics-table-panel .runs tbody tr").filter(has_text="72%").click()
+        detail = page.get_by_role("dialog", name="Turn detail")
+        detail.locator('[data-tab="technical"]').click()
+        return detail
+
+    def test_drawer_call_cost_marks_an_estimate(self, webapp, page):
+        detail = self._routine_turn_costs(webapp, page, [("c-est", "claude-haiku-4-5", 0.25, True)])
+        expect(detail.locator(".metrics-turn-totals")).to_contain_text("Turn cost~$0.250000")
+        cell = detail.locator(".panel-usage tbody tr").first.locator("td").last
+        expect(cell.locator(".token-main-val")).to_have_text("~$0.250000")
+        # The estimate is styled like every other estimate, not as recorded spend.
+        expect(cell.locator(".text-green")).to_have_count(0)
+        _metrics_capture(page, "turn-detail-estimated-call-cost")
+
+    def test_drawer_call_cost_is_not_one_model_of_a_split_turn(self, webapp, page):
+        detail = self._routine_turn_costs(webapp, page, [
+            ("c-haiku", "claude-haiku-4-5", 0.014, True), ("c-sonnet", "claude-sonnet-5-5", 0.0001, True)])
+        expect(detail.locator(".metrics-turn-totals")).to_contain_text("Turn cost~$0.014100")
+        cell = detail.locator(".panel-usage tbody tr").first.locator("td").last
+        # The call shows its own usage at list price, never one model's share of the turn.
+        expect(cell.locator(".token-main-val")).to_have_text("~$0.000100")
+        expect(cell.locator(".token-sub-val")).to_have_text("list price")
+
+    def test_drawer_does_not_attribute_an_unexplained_cost_to_a_model(self, webapp, page):
+        detail = self._routine_turn_costs(webapp, page, [("c-turn", None, 0.3, False)], extra_sql=[
+            "INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_requested,"
+            "model_selected,started_at_us,status) SELECT 'i0-sub','t-routine',1,'gateway','sonnet',"
+            "'claude-sonnet-5-5',started_at_us+1,'completed' FROM turns WHERE turn_id='t-routine'"])
+        panel = detail.locator(".panel-cost")
+        expect(panel.locator("tbody tr")).to_have_count(1)
+        expect(panel.locator("tbody tr td").nth(1)).to_have_text("unattributed")
+        expect(panel).not_to_contain_text("claude-haiku-4-5")
+
+    @pytest.mark.parametrize("extra_sql,shown", [
+        # The same model under its alias is still one model.
+        (["INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_requested,"
+          "model_selected,started_at_us,status) SELECT 'i0-alias','t-routine',1,'gateway','haiku',"
+          "'haiku',started_at_us+1,'completed' FROM turns WHERE turn_id='t-routine'"], "claude-haiku-4-5"),
+        # No recorded call: the turn's routed model is all that is known.
+        (["DELETE FROM usage_measurements WHERE turn_id='t-routine'",
+          "DELETE FROM llm_invocations WHERE turn_id='t-routine'"], "haiku"),
+    ], ids=["alias", "no-calls"])
+    def test_drawer_names_the_model_of_a_single_model_cost_row(self, webapp, page, extra_sql, shown):
+        detail = self._routine_turn_costs(webapp, page, [("c-turn", None, 0.3, False)], extra_sql=extra_sql)
+        panel = detail.locator(".panel-cost")
+        expect(panel.locator("tbody tr")).to_have_count(1)
+        expect(panel.locator("tbody tr td").nth(1)).to_have_text(shown)
+
+    def test_turn_search_matches_words_past_the_listed_prompt(self, webapp, page, monkeypatch):
+        from bobi.metrics.store import connect
+
+        started = int((time.time() - 60) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+        conn = connect(webapp.install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='e2e-worker-a' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        prompt = "Review the metrics toolbar. " + "x" * 598 + " zebracrossing"
+        assert len(prompt) == 640
+        stamp = datetime.fromtimestamp((started + 100_000) / 1_000_000, timezone.utc).isoformat()
+        _seed_transcript(webapp, monkeypatch, "worker-a",
+                         [_entry("user", prompt, stamp), _entry("assistant", "Reviewed.", stamp)])
+        # Out of time from the start: no transcript is read, or cached, until the budgets return.
+        monkeypatch.setattr("bobi.webapp.runtime.LIST_TRANSCRIPT_BUDGET_S", 0.0)
+        monkeypatch.setattr("bobi.webapp.runtime.SEARCH_TRANSCRIPT_BUDGET_S", 0.0)
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="Flat", exact=True).click()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(4)
+        search = page.get_by_role("searchbox", name="Search loaded turns")
+        coverage = page.locator(".metrics-search-coverage")
+        # Out of time, the search says how much of the page it read instead of implying no match.
+        with page.expect_response(re.compile(r"/metrics/turns\?.*q=zebracrossing")):
+            search.fill("zebracrossing")
+        expect(coverage).to_have_text("Search covered 1 of 4 loaded turns.")
+        expect(rows).to_have_count(0)
+        coverage.locator("xpath=..").screenshot(path=str(METRICS_CAPTURES / "turn-search-partial-coverage.png"))
+        monkeypatch.setattr("bobi.webapp.runtime.SEARCH_TRANSCRIPT_BUDGET_S", 5.0)
+        with page.expect_response(re.compile(r"/metrics/turns\?.*q=zebracrossing")):
+            search.fill("zebracrossing ")
+        expect(rows).to_have_count(1)
+        expect(rows).to_contain_text("Review the metrics toolbar")
+        expect(coverage).to_have_count(0)
+        _metrics_capture(page, "turn-search-full-prompt")
+        # A search is not re-run by the live refresh.
+        reads = _record_requests(page, re.compile(r"/metrics/turns\?"))
+        page.wait_for_timeout(10500)
+        assert reads == []
+        search.fill("no-such-word")
+        expect(page.locator(".runs-empty")).to_have_text("No loaded turns match this search.")
+        page.locator("#metrics-search-clear").click()
+        expect(rows).to_have_count(4)
+
 
 # --- opening a route --------------------------------------------------------
 

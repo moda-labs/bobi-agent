@@ -219,6 +219,146 @@ class TestMetrics:
         assert detail.status_code == 200
         assert detail.json()["conversation"]["user_message"].startswith("Giải thích")
 
+    def _long_prompt_transcript(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z", "x" * 626 + " zebracrossing"),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]) + "\n")
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        return transcript
+
+    def test_metrics_turn_search_says_how_many_turns_it_could_read(self, bobi_install, monkeypatch, tmp_path):
+        self._long_prompt_transcript(bobi_install, monkeypatch, tmp_path)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        client = _client()
+        assert "search" not in client.get(base + "/turns", params=self.RANGE).json()
+        full = client.get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
+        assert full["search"] == {"loaded": 4, "searched": 4}
+
+        # Out of time, s1's three turns go unread: the answer says so instead of claiming no match.
+        monkeypatch.setattr("bobi.webapp.runtime.SEARCH_TRANSCRIPT_BUDGET_S", 0.0)
+        fresh = _client()
+        cut = fresh.get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
+        assert cut["turns"] == []
+        assert cut["search"] == {"loaded": 4, "searched": 1}
+        # Fields the row already carries still match without the transcript.
+        by_model = fresh.get(base + "/turns", params={**self.RANGE, "q": "sonnet"}).json()
+        assert {turn["turn_id"] for turn in by_model["turns"]} == {"t-pro", "t-reused"}
+
+    def test_metrics_turn_search_does_not_count_a_prompt_out_of_reach(self, bobi_install, monkeypatch, tmp_path):
+        transcript = self._long_prompt_transcript(bobi_install, monkeypatch, tmp_path)
+        with transcript.open("a") as handle:
+            for _ in range(50):
+                handle.write(json.dumps({"type": "assistant", "timestamp": "1970-01-01T00:10:00Z",
+                                         "message": {"content": "y" * 100}}) + "\n")
+        # The prompt sits before the last bytes the reader reaches.
+        monkeypatch.setattr("bobi.chat_history._WINDOW_READ_BYTES", 2000)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        cut = _client().get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
+        assert cut["turns"] == []
+        assert cut["search"] == {"loaded": 4, "searched": 1}
+
+    def test_metrics_turn_listing_finds_each_transcript_once_and_within_its_budget(
+            self, bobi_install, monkeypatch, tmp_path):
+        import bobi.chat_history
+
+        self._long_prompt_transcript(bobi_install, monkeypatch, tmp_path)
+        lookups = []
+        find = bobi.chat_history.find_claude_transcript
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: lookups.append(session_id) or find(session_id))
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        client = _client()
+        client.get(base + "/turns", params=self.RANGE)
+        first = len(lookups)
+        assert set(lookups) == {"old-provider"}
+        # The found file is remembered; a refresh only checks it is still there.
+        client.get(base + "/turns", params=self.RANGE)
+        client.get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"})
+        assert len(lookups) == first
+        # Out of time, a listing does not go looking for files.
+        monkeypatch.setattr("bobi.webapp.runtime.LIST_TRANSCRIPT_BUDGET_S", 0.0)
+        assert _client().get(base + "/turns", params=self.RANGE).status_code == 200
+        assert len(lookups) == first
+
+    def test_metrics_turn_reads_reuse_an_unchanged_transcript(self, bobi_install, monkeypatch, tmp_path):
+        import bobi.chat_history
+
+        transcript = self._long_prompt_transcript(bobi_install, monkeypatch, tmp_path)
+        reads = []
+        real = bobi.chat_history.read_transcript_detail
+        monkeypatch.setattr("bobi.chat_history.read_transcript_detail",
+                            lambda *args, **kwargs: reads.append(args) or real(*args, **kwargs))
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        client = _client()
+        search = {**self.RANGE, "q": "zebracrossing"}
+        assert len(client.get(base + "/turns", params=search).json()["turns"]) == 1
+        first = len(reads)
+        assert first == 1
+        assert len(client.get(base + "/turns", params=search).json()["turns"]) == 1
+        assert len(client.get(base + "/turns", params=self.RANGE).json()["turns"]) == 4
+        assert len(reads) == first
+        # A transcript that grew is read again.
+        with transcript.open("a") as handle:
+            handle.write(json.dumps({"type": "assistant", "timestamp": "1970-01-01T00:00:01.850Z",
+                                     "message": {"content": "Also done."}}) + "\n")
+        client.get(base + "/turns", params=search)
+        assert len(reads) == first + 1
+        # A read as slow as the reader's own time limit may be cut short, so it is not kept.
+        monkeypatch.setattr("bobi.chat_history._WINDOW_READ_SECONDS", 0.0)
+        slow = _client()
+        slow.get(base + "/turns", params=search)
+        slow.get(base + "/turns", params=search)
+        assert len(reads) == first + 3
+
+    def test_metrics_turn_search_matches_the_whole_prompt(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        prompt = "x" * 626 + " zebracrossing"
+        assert len(prompt) == 640
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z", prompt),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+
+        everything = _client().get(base + "/turns", params=self.RANGE).json()
+        # An empty search is the plain listing.
+        assert _client().get(base + "/turns", params={**self.RANGE, "q": "  "}).json() == everything
+        matched = _client().get(base + "/turns", params={**self.RANGE, "q": "ZebraCrossing"}).json()
+        assert [turn["turn_id"] for turn in matched["turns"]] == ["t-routine"]
+        # The row stays bounded: only the match used the full prompt.
+        assert matched["turns"][0]["conversation"]["user_message_truncated"] is True
+        assert "zebracrossing" not in matched["turns"][0]["conversation"]["user_message"]
+        assert matched["next_cursor"] == everything["next_cursor"]
+        # The other listed fields still match, as they did in the browser.
+        by_model = _client().get(base + "/turns", params={**self.RANGE, "q": "SONNET"}).json()["turns"]
+        assert {turn["turn_id"] for turn in by_model} == {"t-pro", "t-reused"}
+        assert _client().get(base + "/turns", params={**self.RANGE, "q": "no-such-text"}).json()["turns"] == []
+
+        # Under load the listing skips transcripts it has no time for; a search reads them all.
+        monkeypatch.setattr("bobi.webapp.runtime.LIST_TRANSCRIPT_BUDGET_S", 0.0)
+        assert _client().get(base + "/turns", params=self.RANGE).json()["turns"][0]["conversation"]["user_message"] is None
+        matched = _client().get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
+        assert [turn["turn_id"] for turn in matched["turns"]] == ["t-routine"]
+
     @pytest.mark.parametrize("brain", ["claude", "codex"])
     def test_metrics_old_turn_uses_timestamp_window_before_tail_limit(self, bobi_install, monkeypatch, tmp_path, brain):
         from bobi.metrics.store import connect
@@ -2045,3 +2185,28 @@ class TestRoutingConfig:
         assert sent[0]["prompt_bytes"] == len("Refactor the billing module using billing-local-pass")
         # The agent's own credential values never leave, whatever their shape.
         assert sent[0].get("task", "") in ("", "Refactor the billing module using [redacted]")
+
+
+def test_turn_cost_models_follow_the_billed_models_by_identity():
+    from bobi.webapp.runtime import _turn_cost_models
+
+    one_call = [{"model_selected": "claude-haiku-4-5"}]
+    # A background call on another model is billed but never logged as a call.
+    assert _turn_cost_models({"invocations": one_call, "best_usage": [
+        {"scope": "turn", "model": "claude-haiku-4-5"}, {"scope": "turn", "model": "claude-opus-4-7"},
+        {"scope": "invocation", "model": "claude-sonnet-5-5"}]}) == ["claude-haiku-4-5", "claude-opus-4-7"]
+    assert _turn_cost_models({"invocations": [*one_call, {"model_selected": None, "model_requested": "haiku"}],
+                              "best_usage": []}) == ["claude-haiku-4-5"]
+    assert _turn_cost_models({"invocations": [], "best_usage": []}) == []
+
+
+def test_transcript_cache_is_bounded_by_the_memory_its_entries_use():
+    from bobi.webapp.runtime import _TranscriptCache
+
+    # Two bytes a character once the text is not Latin-1: two of these do not fit in 4 KB.
+    entries = [{"kind": "message", "role": "user", "text": "ệ" * 1000, "at": ""}]
+    cache = _TranscriptCache(4000)
+    cache.put(("a",), entries, None)
+    cache.put(("b",), entries, None)
+    assert cache.get(("a",)) is None
+    assert cache.get(("b",)) == (entries, None)

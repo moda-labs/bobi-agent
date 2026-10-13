@@ -237,11 +237,12 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     def metrics_turns(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
                       model: str = "", session_name: str = "", session_id: str = "",
                       session: str = "", routing: str = "",
-                      limit: int = Query(default=50, ge=1, le=200), cursor: str = "") -> JSONResponse:
+                      limit: int = Query(default=50, ge=1, le=200), cursor: str = "",
+                      q: str = Query(default="", max_length=200)) -> JSONResponse:
         data = rt.metrics(name, "turns", {"from": start, "to": end, "model": model,
                           "session_name": session_name, "session_id": session_id,
                           "session": session, "routing": routing,
-                          "limit": limit, "cursor": cursor})
+                          "limit": limit, "cursor": cursor, "q": q})
         return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/agents/{name}/metrics/sessions")

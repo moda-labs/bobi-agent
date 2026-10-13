@@ -304,8 +304,9 @@ def _record_us(record: dict) -> int | None:
     return int(at.timestamp() * 1_000_000) if at.tzinfo is not None else None
 
 
-def _lines_newest_first(path: Path):
-    """The file's lines from the end, within the window read budget."""
+def _lines_newest_first(path: Path, report: dict | None = None):
+    """The file's lines from the end, within the window read budget. Running out
+    of it before the file's start sets ``report["cut"]`` to "bytes" or "time"."""
     deadline = time.monotonic() + _WINDOW_READ_SECONDS
     with path.open("rb") as transcript:
         position = transcript.seek(0, os.SEEK_END)
@@ -327,10 +328,12 @@ def _lines_newest_first(path: Path):
             yield from reversed(pieces[1:-1])
         if position == 0 and partial:
             yield b"".join(reversed(partial))
+        if position > 0 and report is not None:
+            report["cut"] = "bytes" if position == floor else "time"
 
 
 def _transcript_records(path: Path, *, after_us: int | None = None,
-                        before_us: int | None = None):
+                        before_us: int | None = None, report: dict | None = None):
     """Records oldest first. With a time window, read newest first and stop at
     the first record well before the window, so a long transcript still yields
     its latest turns; callers apply the window to each record themselves."""
@@ -342,7 +345,7 @@ def _transcript_records(path: Path, *, after_us: int | None = None,
                     yield record
         return
     newest_first = []
-    for line in _lines_newest_first(path):
+    for line in _lines_newest_first(path, report):
         record = _parse_record(line)
         if record is None:
             continue
@@ -355,7 +358,7 @@ def _transcript_records(path: Path, *, after_us: int | None = None,
 
 def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
                            *, brain: str | None = None, after_us: int | None = None,
-                           before_us: int | None = None) -> list[dict]:
+                           before_us: int | None = None, report: dict | None = None) -> list[dict]:
     """The transcript as timestamped lines, tool calls included.
 
     Each entry is ``{"kind", "role", "text", "at", "tool"}``; ``at`` is the
@@ -366,7 +369,15 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
     Claude and Codex timestamps come from their own records, never inferred.
     Optional time bounds are applied before the tail limit, so old turns do
     not disappear behind a busy session's newest entries.
+
+    A caller that passes a *report* dict learns whether the read reached the
+    start of what it asked for: ``report["cut"]`` is None, or names what
+    stopped it - "bytes" or "time" (the window read budget) or "entries"
+    (*limit*). The entries returned are the same either way.
     """
+    if report is not None:
+        report["cut"] = None
+
     def in_window(entry: dict) -> bool:
         if after_us is None and before_us is None:
             return True
@@ -382,7 +393,7 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
     def _from_codex() -> list[dict]:
         return [_entry(KIND_MESSAGE, m["role"], m["text"], m["at"])
                 for m in read_codex_transcript_messages(session_id, limit, include_timestamps=True,
-                    after_us=after_us, before_us=before_us)]
+                    after_us=after_us, before_us=before_us, report=report)]
 
     if brain in ("codex", "gateway-openai"):
         return _from_codex()
@@ -394,7 +405,8 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
         return _from_codex() if brain in (None, "") else []
 
     out = deque(maxlen=limit)
-    for obj in _transcript_records(path, after_us=after_us, before_us=before_us):
+    seen = 0
+    for obj in _transcript_records(path, after_us=after_us, before_us=before_us, report=report):
         if obj.get("type") not in ("human", "user", "assistant"):
             continue
         at = str(obj.get("timestamp", "") or "")
@@ -406,7 +418,12 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
         text = _extract_text(content).strip()
         if text:
             out.append(_entry(KIND_MESSAGE, role, text, at))
-        out.extend(_tool_blocks(content, role=role, at=at))
+            seen += 1
+        tools = _tool_blocks(content, role=role, at=at)
+        out.extend(tools)
+        seen += len(tools)
+    if report is not None and seen > limit:
+        report["cut"] = "entries"
     return list(out)
 
 
@@ -462,7 +479,8 @@ def _codex_injected(text: str) -> bool:
 
 def read_codex_transcript_messages(session_id: str,
                                    limit: int = CHAT_HISTORY_LIMIT, *, include_timestamps: bool = False,
-                                   after_us: int | None = None, before_us: int | None = None) -> list[dict]:
+                                   after_us: int | None = None, before_us: int | None = None,
+                                   report: dict | None = None) -> list[dict]:
     """Replay a Codex rollout as ``{role, text}`` chat messages.
 
     Codex records a session as an NDJSON *rollout* rather than a Claude
@@ -470,14 +488,18 @@ def read_codex_transcript_messages(session_id: str,
     payload is a ``message`` with ``role`` user/assistant; developer/system
     rows, reasoning, tool calls, event bookkeeping, and Codex-injected context
     blocks (see :data:`_CODEX_INJECTED_PREFIXES`) are skipped. Mirrors
-    :func:`read_transcript_messages`'s output shape.
+    :func:`read_transcript_messages`'s output shape. *report* is as for
+    :func:`read_transcript_detail`.
     """
+    if report is not None:
+        report["cut"] = None
     path = find_codex_rollout(session_id)
     if not path:
         return []
 
     out = deque(maxlen=limit)
-    for obj in _transcript_records(path, after_us=after_us, before_us=before_us):
+    seen = 0
+    for obj in _transcript_records(path, after_us=after_us, before_us=before_us, report=report):
         if obj.get("type") != "response_item":
             continue
         if after_us is not None or before_us is not None:
@@ -501,6 +523,9 @@ def read_codex_transcript_messages(session_id: str,
             continue
         out.append({"role": "agent" if role == "assistant" else "user",
                     "text": text})
+        seen += 1
         if include_timestamps:
             out[-1]["at"] = str(obj.get("timestamp") or "")
+    if report is not None and seen > limit:
+        report["cut"] = "entries"
     return list(out)

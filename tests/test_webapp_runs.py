@@ -573,6 +573,29 @@ class TestLedgerRowContent:
         assert rows["workflow:wf-new"]["tokens"] == 1000
         assert rows["workflow:wf-old"]["tokens"] == 0
 
+    def test_usage_goes_to_the_newest_run_whatever_file_was_written_last(self, bobi_install):
+        # File times say nothing about which run is newer: two entries written
+        # within one filesystem tick tie, and an older run's entry is
+        # rewritten whenever that run is updated.
+        import os
+
+        _session(bobi_install, "wf-triage-r-42", status="completed",
+                 model_usage={"anthropic:sonnet-5": {
+                     "cost_usd": 1.0, "input_tokens": 500,
+                     "output_tokens": 500, "cached_input_tokens": 0}},
+                 total_cost_usd=1.0)
+        self._ledger(bobi_install, "wf-new", status="completed",
+                     session_name="wf-triage-r-42")
+        self._ledger(bobi_install, "wf-old", status="failed",
+                     session_name="wf-triage-r-42",
+                     started_at=_iso(NOW - 3600))
+        runs_dir = bobi_install.state_dir / "workflow" / "runs"
+        os.utime(runs_dir / "wf-new.json", (NOW - 100, NOW - 100))
+        os.utime(runs_dir / "wf-old.json", (NOW - 10, NOW - 10))
+        rows = _by_key(_rows(bobi_install))
+        assert rows["workflow:wf-new"]["tokens"] == 1000
+        assert rows["workflow:wf-old"]["tokens"] == 0
+
 
 class TestUsageSummary:
     def test_folds_terminal_jobs_completed_inside_the_window(self, bobi_install):

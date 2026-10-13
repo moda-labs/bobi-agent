@@ -1254,6 +1254,11 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
     usageMap.set(invocation.invocation_id, terminal && (!usage || (!terminal.is_estimated && usage.is_estimated)) ? terminal : usage);
   }
 
+  // One turn-scope row per model: the turn's cost is their sum, exact rows over estimates.
+  const turnCostRows = costs.filter(item => item.scope === "turn" && item.amount_usd != null);
+  const exactTurnRows = turnCostRows.filter(item => !item.is_estimated);
+  const chosenTurnRows = exactTurnRows.length ? exactTurnRows : turnCostRows;
+
   panelUsage.append(createSectionHead("", "Model Invocations & Token Breakdown", invocations.length,
       "Canonical usage only. Reasoning is included in output. Turn totals can supersede invocation usage; rows are not blindly summed."));
   if (invocations.length) {
@@ -1314,18 +1319,20 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
       cacheWriteCell.append(node("span", number(usage.cache_write_input_tokens), "bobi-tnum token-main-val"));
 
       // 8. Cost Cell
-      const terminalCost = invocations.length === 1 ? (data.cost_measurements || []).find(item => item.scope === "turn") : null;
-      const turnLevelCost = (data.cost_measurements || []).find(item => item.scope === "turn");
+      // A sole call costs what the turn costs, unless the turn's cost is split by model.
+      const terminalCost = invocations.length === 1 && chosenTurnRows.length === 1 ? chosenTurnRows[0] : null;
       const cost = (data.cost_measurements || []).filter(item => item.invocation_id === invocation.invocation_id)
         .sort((first, second) => first.is_estimated - second.is_estimated || second.observed_at_us - first.observed_at_us)[0] || terminalCost;
       const amountCell = node("div", "", "token-cell");
       if (cost?.amount_usd != null) {
-        amountCell.append(node("span", money(cost.amount_usd, 6), "bobi-tnum token-main-val text-green"));
+        amountCell.append(cost.is_estimated
+          ? node("span", "~" + money(cost.amount_usd, 6), "bobi-tnum token-main-val")
+          : node("span", money(cost.amount_usd, 6), "bobi-tnum token-main-val text-green"));
       } else {
         if (usage.list_price_usd > 0) {
           amountCell.append(node("span", "~" + money(usage.list_price_usd, 6), "bobi-tnum token-main-val"));
           amountCell.append(node("span", "list price", "token-sub-val"));
-        } else if (turnLevelCost?.amount_usd != null && invocations.length > 1) {
+        } else if (turnCostRows.length) {
           amountCell.append(node("span", "—", "bobi-tnum token-main-val"));
           amountCell.append(node("span", "billed per turn", "token-sub-val"));
         } else {
@@ -1351,12 +1358,8 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
   const totalLine = node("div", "", "metrics-turn-totals");
   pair(totalLine, "Turn input / output", `${number(totals.input_tokens)} / ${number(totals.output_tokens)}`);
   pair(totalLine, "Cache read / write", `${number(totals.cache_read_input_tokens)} / ${number(totals.cache_write_input_tokens)}`);
-  // One turn-scope row per model: the turn's cost is their sum, exact rows over estimates.
-  const turnRows = (data.cost_measurements || []).filter(item => item.scope === "turn" && item.amount_usd != null);
-  const exactRows = turnRows.filter(item => !item.is_estimated);
-  const chosenRows = exactRows.length ? exactRows : turnRows;
-  let turnCostForTotal = chosenRows.length
-    ? { amount_usd: chosenRows.reduce((sum, item) => sum + Number(item.amount_usd), 0), scope: "turn", is_estimated: !exactRows.length }
+  let turnCostForTotal = chosenTurnRows.length
+    ? { amount_usd: chosenTurnRows.reduce((sum, item) => sum + Number(item.amount_usd), 0), scope: "turn", is_estimated: !exactTurnRows.length }
     : (costs.length ? costs[0] : null);
   const listPrices = (data.best_usage || []).map(item => item.list_price_usd);
   if (!turnCostForTotal && listPrices.length && listPrices.every(value => value != null)) {
@@ -1374,9 +1377,12 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
     const costPanel = node("div", "", "panel-cost");
     costPanel.append(createSectionHead("", "Turn Invoiced / Reconciled Spend", costs.length,
       "Recorded cost for the overall turn."));
+    // A row with no model on a multi-model turn is the unexplained part of the bill: never guess its model.
+    const costModels = data.cost_models || [];
+    const unnamedCostModel = costModels.length > 1 ? "unattributed" : costModels[0] || primary.model_selected || "—";
     table(costPanel, ["Scope", "Model", "USD"], costs.map(cost => [
       cost.scope || "turn",
-      cost.model || (invocations[0]?.model_selected || "—"),
+      cost.model || unnamedCostModel,
       cost.is_estimated
         ? node("span", "~" + money(cost.amount_usd, 6), "bobi-tnum")
         : node("span", money(cost.amount_usd, 6), "bobi-tnum text-green")
@@ -1530,7 +1536,13 @@ export function mountMetrics(element, { api, name, session = "" }) {
   search.type = "search";
   search.placeholder = "Search loaded turns…";
   search.setAttribute("aria-label", "Search loaded turns");
-  search.addEventListener("input", () => { searchClear.hidden = !search.value; drawTurns(); });
+  search.maxLength = 200;
+  // The server matches the loaded page against each turn's whole prompt, which the list rows only abbreviate.
+  search.addEventListener("input", () => {
+    searchClear.hidden = !search.value;
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => { searchDebounce = null; load(); }, 300);
+  });
   const searchBox = node("div", "", "metrics-search-box search-turns-box");
   const searchIcon = icon("search");
   searchIcon.classList.add("search-icon");
@@ -1545,7 +1557,9 @@ export function mountMetrics(element, { api, name, session = "" }) {
     search.value = "";
     searchClear.hidden = true;
     search.focus();
-    drawTurns();
+    clearTimeout(searchDebounce);
+    searchDebounce = null;
+    load();
   });
   searchBox.append(searchIcon, search, searchClear);
 
@@ -1778,8 +1792,10 @@ export function mountMetrics(element, { api, name, session = "" }) {
   let pending = false;
   let queued = false;
   let queuedClear = false;
+  let queuedPage = false;
   let timer;
   let modelDebounce;
+  let searchDebounce;
   let modelRevision = 0;
   const controller = new AbortController();
   let detailController;
@@ -1789,6 +1805,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
   let activeTurnIndex = -1;
   let currentTurns = [];
+  let currentSearch = null;
   let currentDrawerTab = "overview";
   let currentTurnsView = "threads";
 
@@ -2041,11 +2058,9 @@ export function mountMetrics(element, { api, name, session = "" }) {
   }
 
   function drawTurns() {
-    const query = search.value.trim().toLowerCase();
-    const visible = currentTurns.filter(turn => !query || [turn.semantic_title, turn.conversation?.semantic_title, turn.conversation?.user_message, turn.conversation?.prompt_snippet, turn.conversation?.response_snippet, turn.session_name, turn.role, turn.session_id, turn.model_selected, turn.fallback_reason].filter(Boolean).join(" ").toLowerCase().includes(query));
     turns.replaceChildren();
 
-    const head = createSectionHead("", "Recent turns", visible.length, "Individual turns, model execution lifecycle, and token consumption");
+    const head = createSectionHead("", "Recent turns", currentTurns.length, "Individual turns, model execution lifecycle, and token consumption");
     const viewSwitch = node("div", "", "metrics-view-switch");
     const btnThreads = node("button", "By Thread", "btn bobi-btn small" + (currentTurnsView === "threads" ? " active" : ""));
     btnThreads.type = "button";
@@ -2065,14 +2080,20 @@ export function mountMetrics(element, { api, name, session = "" }) {
     head.querySelector(".sph-title-row")?.append(viewSwitch);
 
     turns.append(head);
-    turnRows(turns, visible, turn => openAtIndex(currentTurns.indexOf(turn)), name, setSessionFilter, currentTurnsView);
-    if (!visible.length) turns.append(node("p", "No recorded turns in this window.", "runs-empty"));
+    // A search that ran out of time says how much of the page it read rather than imply no match.
+    if (currentSearch && currentSearch.searched < currentSearch.loaded) {
+      turns.append(node("p", `Search covered ${currentSearch.searched} of ${currentSearch.loaded} loaded turns.`, "metrics-note metrics-search-coverage"));
+    }
+    turnRows(turns, currentTurns, turn => openAtIndex(currentTurns.indexOf(turn)), name, setSessionFilter, currentTurnsView);
+    if (!currentTurns.length) {
+      turns.append(node("p", search.value.trim() ? "No loaded turns match this search." : "No recorded turns in this window.", "runs-empty"));
+    }
   }
 
   async function load(reset = false, clearDetail = reset) {
     if (stopped) return;
     if (pending) {
-      if (reset) { queued = true; queuedClear ||= clearDetail; }
+      if (reset) { queued = true; queuedClear ||= clearDetail; } else queuedPage = true;
       return;
     }
     pending = true;
@@ -2099,6 +2120,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
     const query = new URLSearchParams(params);
     if (cursor) query.set("cursor", cursor);
+    if (search.value.trim()) query.set("q", search.value.trim());
 
     const results = await Promise.all([
       api(`${base}/summary?${params}`, { signal: controller.signal }),
@@ -2115,11 +2137,12 @@ export function mountMetrics(element, { api, name, session = "" }) {
     refreshBtn.classList.remove("is-refreshing");
     refreshBtn.setAttribute("aria-busy", "false");
 
-    if (queued) {
-      const clear = queuedClear;
+    if (queued || queuedPage) {
+      const [reset, clear] = [queued, queuedClear];
       queued = false;
       queuedClear = false;
-      if (!modelDebounce) load(true, clear);
+      queuedPage = false;
+      if (!modelDebounce) load(reset, clear);
       return;
     }
     if (revision !== modelRevision) return;
@@ -2147,6 +2170,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
       const allTurns = results[1].data.turns || [];
       const selectedTurnId = currentTurns[activeTurnIndex]?.turn_id;
       currentTurns = allTurns;
+      currentSearch = results[1].data.search || null;
       if (selectedTurnId) {
         activeTurnIndex = currentTurns.findIndex(turn => turn.turn_id === selectedTurnId);
         if (activeTurnIndex >= 0 && !drawerBackdrop.hidden) {
@@ -2177,7 +2201,8 @@ export function mountMetrics(element, { api, name, session = "" }) {
     }
 
     clearTimeout(timer);
-    timer = setTimeout(() => { if (auto.checked && !document.hidden && !cursor) load(true, false); }, 10000);
+    // A search re-reads transcripts; it reruns when the search changes, not on a timer.
+    timer = setTimeout(() => { if (auto.checked && !document.hidden && !cursor && !search.value.trim()) load(true, false); }, 10000);
   }
 
   let currentRoutingConfig = null;
@@ -2806,6 +2831,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
     routingController?.abort();
     clearTimeout(timer);
     clearTimeout(modelDebounce);
+    clearTimeout(searchDebounce);
     document.removeEventListener("keydown", handleDrawerKey);
     document.removeEventListener("keydown", handleJevModalKey);
   };

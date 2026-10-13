@@ -1037,6 +1037,10 @@
 .metrics-table-panel {
   overflow-x: auto;
 }
+.metrics-table-panel > .metrics-search-coverage {
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border-hairline);
+}
 .metrics-table {
   width: 100%;
   border-collapse: collapse;
