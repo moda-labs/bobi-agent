@@ -93,7 +93,7 @@ def redact_secrets(text: str) -> tuple[str, int]:
             return m.group(0)
         if not quote and m.group(2)[:1] in "\"'":
             # After a quoted key the value ends at the JSON/dict delimiter.
-            end = re.search(r"[,}\]]", value)
+            end = re.search(r"[,}\]](?=[,}\]\"']|$)", value)
             if end:
                 value, rest = value[:end.start()], value[end.start():]
             if value in _JSON_LITERAL:

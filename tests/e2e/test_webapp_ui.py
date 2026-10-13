@@ -540,6 +540,13 @@ class TestMetricsView:
         expect(page.locator(".metrics-tile strong").first).to_have_text("720")
         page.wait_for_timeout(300)
         assert len(summaries) == 2, summaries
+        # A view that rewrote its URL with replaceState still routes when the
+        # user navigates back to the URL it was first opened at.
+        metrics_hash = page.evaluate("location.hash")
+        page.evaluate("history.replaceState(null, '', '#/')")
+        page.evaluate(f"location.hash = {metrics_hash!r}")
+        page.wait_for_timeout(300)
+        assert len(summaries) == 3, summaries
 
     def test_metrics_navigation_filters_drilldown_and_refresh(self, webapp, page):
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))

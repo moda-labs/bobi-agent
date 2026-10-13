@@ -221,6 +221,37 @@ def test_redaction_handles_escaped_quotes_triple_quotes_and_json_delimiters(text
     assert redact_secrets(text)[0] == expected
 
 
+def test_a_long_env_secret_is_scrubbed_whole_before_shape_rules_split_it():
+    secret = "abc+" + "Z" * 44 + "/tail"
+    task, _ = prepare_task(f"deploy with {secret} now", repo_path="/repo", max_bytes=8192,
+                           secrets=env_secret_values({"DEPLOY_TOKEN": secret}))
+    assert task == "deploy with [redacted] now"
+
+
+def test_unquoted_value_after_a_quoted_key_is_redacted_whole():
+    assert redact_secrets('"password": ab,cd')[0] == '"password": [redacted]'
+
+
+def test_out_of_scope_resume_under_another_brain_keeps_the_configured_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        assert asyncio.run(resolve_route(context(), runtime=runtime)).model == "cheap"
+        save_session_id("agent", "provider-session", model="cheap", root=tmp_path)
+    finally:
+        assert runtime.close(timeout=2)
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce", roles=["director"])))
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "claude")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        resumed = asyncio.run(resolve_route(replace(context(), fresh=False, prompt=""), runtime=runtime))
+        assert resumed.model == "configured" and resumed.reason is None
+    finally:
+        assert runtime.close(timeout=2)
+
+
 def test_routed_task_never_carries_a_runtime_credential_value(monkeypatch, tmp_path):
     from bobi import paths
 

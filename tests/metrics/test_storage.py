@@ -1726,7 +1726,7 @@ def test_a_running_turn_is_not_reconciled(tmp_path):
     _seed_turn(tmp_path, provider="anthropic", brain="claude", provider_session_id="grow",
                turn_id="turn-running", estimate=None)
     conn = connect(tmp_path / "state" / "metrics" / "metrics.db")
-    conn.execute("UPDATE turns SET ended_at_us=NULL, status='running'")
+    conn.execute("UPDATE turns SET ended_at_us=NULL, status='running', started_at_us=?", (time.time_ns() // 1000,))
     conn.commit()
     conn.close()
     with pytest.raises(ReconciliationError, match="still running"):
@@ -1781,6 +1781,31 @@ def test_background_reconciliation_retries_are_bounded_and_persisted(monkeypatch
     assert _reconcile_attempts(tmp_path) == {"missing-turn": 3}
     assert reconcile_missing(tmp_path)["errors"] == 1
     assert len(calls) == 4
+
+
+def test_a_turn_recovered_by_hand_stops_counting_as_exhausted(monkeypatch, tmp_path):
+    from bobi.metrics.collector import MetricsCollectorService
+
+    _seed_turn(tmp_path, provider="gateway", brain="claude", provider_session_id="missing-session",
+               turn_id="missing-turn", estimate=None)
+
+    def unavailable(root, turn_id, **kwargs):
+        raise ReconciliationError("transcript not available")
+
+    monkeypatch.setattr("bobi.metrics.reconcile.reconcile_turn", unavailable)
+    for _ in range(3):
+        MetricsCollectorService(tmp_path, reconcile_interval=0)._cycle_locked()
+    assert _reconcile_attempts(tmp_path) == {"missing-turn": 3}
+    conn = connect(tmp_path / "state" / "metrics" / "metrics.db")
+    conn.execute("INSERT INTO usage_measurements(measurement_id,scope,turn_id,provider,model,measurement_source,"
+                 "is_estimated,token_semantics_version,input_tokens,output_tokens,observed_at_us) "
+                 "VALUES('manual','turn','missing-turn','gateway','m','claude_transcript',0,1,1,1,1)")
+    conn.commit()
+    conn.close()
+    service = MetricsCollectorService(tmp_path, reconcile_interval=0)
+    service._cycle_locked()
+    assert service.health()["reconciliation_retry_exhausted_turns"] == 0
+    assert _reconcile_attempts(tmp_path) == {}
 
 
 def test_standby_collector_preserves_retry_limit_on_takeover(monkeypatch, tmp_path):
@@ -1946,6 +1971,20 @@ def test_codex_rollout_mixing_both_usage_shapes_keeps_every_turn(tmp_path):
     assert [(record.provider_turn_id, record.usage.input_tokens) for record in records] == [("t1", 100), ("t2", 150)]
 
 
+def test_a_turn_abandoned_by_a_dead_process_is_still_reconciled(monkeypatch, tmp_path):
+    _seed_turn(tmp_path, provider="anthropic", brain="claude", provider_session_id="grow",
+               turn_id="turn-crashed", estimate=None)
+    conn = connect(tmp_path / "state" / "metrics" / "metrics.db")
+    conn.execute("UPDATE turns SET ended_at_us=NULL, status='running'")
+    conn.commit()
+    conn.close()
+    seen = []
+    monkeypatch.setattr("bobi.metrics.reconcile.reconcile_turn",
+                        lambda root, turn_id, **kwargs: seen.append(turn_id) or {"exact_measurements_recovered": 0})
+    reconcile_missing(tmp_path, terminal_only=True)
+    assert seen == ["turn-crashed"]
+
+
 def test_scheduled_reconciliation_skips_active_turns(monkeypatch, tmp_path):
     db = tmp_path / "state" / "metrics" / "metrics.db"
     conn = connect(db)
@@ -1971,7 +2010,7 @@ def test_scheduled_reconciliation_skips_active_turns(monkeypatch, tmp_path):
                 1 if turn_id == "turn-active" else 2,
                 "test",
                 1,
-                2 if turn_id == "turn-active" else 3,
+                time.time_ns() // 1000 if turn_id == "turn-active" else 3,
                 ended_at_us,
                 status,
             ),

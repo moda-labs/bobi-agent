@@ -247,6 +247,13 @@ function routeOnce() {
   routedHref = location.href;
   route();
 }
+// A view that rewrites its URL in place has not navigated; record the new URL so
+// returning to the old one later still routes.
+const replaceHistoryState = history.replaceState.bind(history);
+history.replaceState = (...args) => {
+  replaceHistoryState(...args);
+  if (routedHref !== null) routedHref = location.href;
+};
 window.addEventListener("hashchange", routeOnce);
 window.addEventListener("popstate", routeOnce);
 routeOnce();

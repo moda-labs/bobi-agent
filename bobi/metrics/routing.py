@@ -182,7 +182,10 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         saved_id = load_session_id(ctx.session_name, root=runtime.root)
         resuming = not ctx.fresh and bool(saved_id or sticky_record)
         if ctx.entry_point not in policy_config.entry_points or ctx.role not in policy_config.roles:
-            if resuming and _saved_record(ctx, runtime, sticky_record):
+            from bobi.brain import session_brain_label
+
+            record = _saved_record(ctx, runtime, sticky_record) if resuming else None
+            if record and record.get("brain") == session_brain_label():
                 # A routed session the policy no longer covers runs the control model.
                 return recorded_fallback("routing_out_of_scope", model=config.control_model)
             return fallback

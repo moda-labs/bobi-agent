@@ -431,7 +431,7 @@ class _ClaudeSession:
                     # A first turn that failed before any usage: save a zero
                     # baseline so the next resume still counts its first turn.
                     baseline_store.save("claude", result.session_id, {
-                        "model_usage": {}, "total_cost_usd": 0.0})
+                        "model_usage": {}, "total_cost_usd": float(cumulative_cost)})
                     self._baseline_saved = True
                 result.invocations = invocations
                 if getattr(self, "provider", "anthropic") == "gateway":

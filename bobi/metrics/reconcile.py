@@ -116,6 +116,11 @@ def _aggregate(records: list[ProviderUsageRecord]) -> list[ProviderUsageRecord]:
     return result
 
 
+# A turn with no end and no later turn this old is taken as abandoned by a
+# process that died, not as still running.
+ABANDONED_TURN_US = 60 * 60 * 1_000_000
+
+
 def _turn_context(conn, turn_id: str):
     row = conn.execute(
         "SELECT t.*,s.provider,s.brain,s.provider_session_id,s.session_name "
@@ -132,10 +137,14 @@ def _turn_context(conn, turn_id: str):
             "AND started_at_us>? ORDER BY started_at_us LIMIT 1",
             (row["session_id"], row["started_at_us"]),
         ).fetchone()
-        if next_turn is None:
-            # Its transcript is still growing: a recovery now would be partial.
+        if next_turn is not None:
+            upper = next_turn[0]
+        elif time.time_ns() // 1000 - int(row["started_at_us"]) < ABANDONED_TURN_US:
+            # Its transcript may still be growing: a recovery now would be partial.
             raise ReconciliationError(f"turn {turn_id} is still running; reconcile it after it ends")
-        upper = next_turn[0]
+        else:
+            # A turn whose process died never records its end.
+            upper = time.time_ns() // 1000
     return row, int(upper)
 
 
@@ -589,10 +598,13 @@ def reconcile_missing(
                 "WHERE u.turn_id=t.turn_id AND u.scope='turn' "
                 "AND u.measurement_source IN ('claude_transcript', 'codex_rollout', 'provider_reconciled')) "
                 "AND s.provider IN ('anthropic', 'openai', 'gateway') "
-                + ("AND t.ended_at_us IS NOT NULL " if terminal_only else "")
+                + ("AND (t.ended_at_us IS NOT NULL OR t.started_at_us<? OR EXISTS ("
+                   "SELECT 1 FROM turns AS later WHERE later.session_id=t.session_id "
+                   "AND later.started_at_us>t.started_at_us)) " if terminal_only else "")
                 + ("AND NOT EXISTS (SELECT 1 FROM reconcile_attempts AS r "
                    "WHERE r.turn_id=t.turn_id AND r.attempts>=3) " if track_attempts else "")
-                + "ORDER BY t.started_at_us"
+                + "ORDER BY t.started_at_us",
+                (time.time_ns() // 1000 - ABANDONED_TURN_US,) if terminal_only else (),
             )
         ]
     finally:
@@ -653,6 +665,11 @@ def _record_attempts(db_path: Path, failed: list[str], succeeded: list[str]) -> 
             )
             conn.executemany("DELETE FROM reconcile_attempts WHERE turn_id=?",
                              [(turn_id,) for turn_id in succeeded])
+            # A turn recovered another way (a manual run) is no longer owed a retry.
+            conn.execute(
+                "DELETE FROM reconcile_attempts WHERE turn_id IN (SELECT u.turn_id FROM usage_measurements u "
+                "WHERE u.scope='turn' AND u.measurement_source IN "
+                "('claude_transcript', 'codex_rollout', 'provider_reconciled'))")
         return int(conn.execute("SELECT COUNT(*) FROM reconcile_attempts WHERE attempts>=3").fetchone()[0])
     finally:
         conn.close()

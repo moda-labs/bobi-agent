@@ -1236,7 +1236,7 @@ async def test_resume_after_a_first_turn_with_no_usage_counts_the_resumed_turn(t
     from bobi import paths
 
     paths.bind_root(tmp_path)
-    failed = _claude_process(monkeypatch, [_result(is_error=True, result="boom", total_cost_usd=0.0,
+    failed = _claude_process(monkeypatch, [_result(is_error=True, result="boom", total_cost_usd=0.05,
                                                    model_usage=None)])
     [message async for message in failed.receive_response()]
 
@@ -1246,7 +1246,8 @@ async def test_resume_after_a_first_turn_with_no_usage_counts_the_resumed_turn(t
     )], resume="sess-xyz")
     resumed = [message async for message in after.receive_response()][-1]
 
-    assert resumed.total_cost_usd == pytest.approx(0.30)
+    # The failed turn's own 0.05 was already reported; the resume counts only its turn.
+    assert resumed.total_cost_usd == pytest.approx(0.25)
     assert resumed.usage[0].output_tokens == 10
 
 

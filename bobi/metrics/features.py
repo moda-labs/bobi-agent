@@ -19,11 +19,14 @@ def prepare_task(prompt: str, *, repo_path: str, max_bytes: int,
     memory = re.search(r"(?m)^## Long-Term Memory\s*$", prompt)
     if memory:
         prompt = prompt[:memory.start()]
-    # Shapes first: scrubbing an exact value that is also a key name
-    # (`BOBI_AUTH=api_key`) would otherwise hide the key the shape rule needs.
+    # Whole values first, so a shape rule never splits a long secret. A value
+    # that is a bare word (`BOBI_AUTH=api_key`) can also be a key name the shape
+    # rule needs, so it is scrubbed after the shapes.
+    words = tuple(value for value in secrets if re.fullmatch(r"[A-Za-z_]+", value))
+    prompt, scrubbed = scrub_values(prompt, tuple(value for value in secrets if value not in words))
     prompt, redactions = redact_secrets(prompt)
-    prompt, scrubbed = scrub_values(prompt, secrets)
-    redactions += scrubbed
+    prompt, late = scrub_values(prompt, words)
+    redactions += scrubbed + late
     windows_root = PureWindowsPath(repo_path)
     root = (windows_root if windows_root.is_absolute()
             else PurePosixPath(repo_path) if repo_path.startswith("/") else None)
