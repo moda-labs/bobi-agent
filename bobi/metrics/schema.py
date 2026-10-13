@@ -267,6 +267,8 @@ CREATE INDEX IF NOT EXISTS idx_turns_started ON turns(started_at_us);
 CREATE INDEX IF NOT EXISTS idx_turns_trigger ON turns(trigger_kind, trigger_id);
 CREATE INDEX IF NOT EXISTS idx_steps_run ON workflow_steps(run_key, step_index, attempt);
 CREATE INDEX IF NOT EXISTS idx_invocations_turn ON llm_invocations(turn_id, invocation_index);
+-- Reconciliation skips provider events another turn's stream already recorded.
+CREATE INDEX IF NOT EXISTS idx_invocations_provider_event ON llm_invocations(provider, provider_event_id);
 CREATE INDEX IF NOT EXISTS idx_invocations_model_time ON llm_invocations(provider, model_selected, started_at_us);
 CREATE INDEX IF NOT EXISTS idx_tools_turn ON tool_executions(turn_id, started_at_us);
 CREATE INDEX IF NOT EXISTS idx_tools_name_time ON tool_executions(tool_name, started_at_us);
@@ -288,6 +290,8 @@ CREATE INDEX IF NOT EXISTS idx_router_experiment ON router_decisions(experiment_
 CREATE INDEX IF NOT EXISTS idx_router_turn ON router_decisions(turn_id, decided_at_us);
 CREATE INDEX IF NOT EXISTS idx_router_policy_call ON router_decisions(json_extract(metadata_json, '$.policy.call_id'));
 CREATE INDEX IF NOT EXISTS idx_raw_projection ON raw_events(projection_state, projection_not_before_us, received_at_us);
+-- Reconciliation finds the process that recorded a turn without an end.
+CREATE INDEX IF NOT EXISTS idx_raw_turn_writer ON raw_events(turn_id, producer_id) WHERE event_type = 'turn.recorded';
 -- Rows still waiting for a model_key (written by hand or by an older Bobi);
 -- migrate keys them, and this keeps that lookup off a full scan.
 CREATE INDEX IF NOT EXISTS idx_invocations_unkeyed ON llm_invocations(model_selected) WHERE model_key IS NULL;

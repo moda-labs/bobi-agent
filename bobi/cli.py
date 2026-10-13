@@ -2274,6 +2274,7 @@ def metrics_status(json_output):
 @click.option("--json", "json_output", is_flag=True, help="Print JSON output.")
 def metrics_reconcile(turn_id, wait, timeout, json_output):
     """Recover exact usage from retained Claude/Codex transcripts."""
+    from bobi.metrics.providers import ProviderContractError
     from bobi.metrics.reconcile import (
         ReconciliationError,
         reconcile_missing,
@@ -2287,7 +2288,7 @@ def metrics_reconcile(turn_id, wait, timeout, json_output):
             if turn_id
             else reconcile_missing(root, wait=wait, timeout=timeout, terminal_only=True)
         )
-    except ReconciliationError as exc:
+    except (ReconciliationError, ProviderContractError) as exc:
         raise click.ClickException(str(exc)) from None
     rendered = json.dumps(result, sort_keys=True)
     if json_output:

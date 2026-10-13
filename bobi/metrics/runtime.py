@@ -324,6 +324,15 @@ class MetricsRuntime:
             if value is not None and (context.get(key) in (None, "", "unknown")):
                 context[key] = value
                 context_changed = True
+        if self.enabled and session_id not in self._provider_sessions:
+            # A resumed process continues the saved provider session; record it
+            # now, not at the first turn's end, so reconciliation can see that
+            # a dead process's turn ends where this one starts. A turn's result
+            # corrects it when the brain started fresh instead.
+            saved = _saved_provider_session(self.root, session_name)
+            if saved:
+                self._provider_sessions[session_id] = saved
+                context_changed = True
         if context_changed:
             # Admission runs before the provider client exists, so its session
             # event uses placeholders. Re-emit the enriched context before the
@@ -599,6 +608,17 @@ def _usage_payload(
         "raw_usage_json": _json(usage.raw_usage),
         "supersedes_measurement_id": None,
     }
+
+
+def _saved_provider_session(root: Path, session_name: str) -> str:
+    """The provider session id saved for *session_name*, or "" if unreadable."""
+    from bobi.sdk import load_session_id
+
+    try:
+        return load_session_id(session_name, root=root)
+    except OSError:
+        log.debug("metrics: saved session id unreadable", exc_info=True)
+        return ""
 
 
 def _emit_session(observation: TurnObservation, provider_session_id: str) -> None:

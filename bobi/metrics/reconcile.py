@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 from bobi.chat_history import find_claude_transcript, find_codex_rollout
-from bobi.metrics.collector import MetricsCollector
+from bobi.metrics.collector import MetricsCollector, producer_exited
 from bobi.metrics.events import MetricsEvent, deterministic_event_id, uuid7
 from bobi.metrics.providers import (
     ProviderContractError,
@@ -116,41 +116,128 @@ def _aggregate(records: list[ProviderUsageRecord]) -> list[ProviderUsageRecord]:
     return result
 
 
-# A turn with no end and no later turn this old is taken as abandoned by a
-# process that died, not as still running.
-ABANDONED_TURN_US = 60 * 60 * 1_000_000
+class TurnStillRunning(ReconciliationError):
+    """The turn's transcript may still grow: a recovery now would be partial."""
 
 
-def _turn_context(conn, turn_id: str):
+# The runtime producer that recorded a turn; served by the partial index
+# idx_raw_turn_writer, not a raw_events scan.
+_TURN_WRITER = (
+    "SELECT producer_id FROM raw_events WHERE event_type='turn.recorded' "
+    "AND turn_id={turn} AND producer_id LIKE 'producer-%' LIMIT 1"
+)
+_TURN_WRITER_SQL = _TURN_WRITER.format(turn="?")
+
+
+def _writer_gone(producer_id: str | None) -> bool:
+    """True once the process writing as *producer_id* exited. A turn whose
+    writer cannot be found is not taken as abandoned."""
+    return producer_id is not None and producer_exited(producer_id)
+
+
+def _writer_exited(conn, turn_id: str) -> bool:
+    """True once the runtime process that recorded the turn has exited."""
+    row = conn.execute(_TURN_WRITER_SQL, (turn_id,)).fetchone()
+    return _writer_gone(str(row[0]) if row is not None else None)
+
+
+# The provider can stamp a turn's last transcript line a little after the
+# stream that ended the turn. Nothing else widens a window past its end: a
+# later turn's start is a hard bound, since its first call can land within
+# seconds.
+_END_SLACK_US = 5_000_000
+# A turn's start is recorded before its request is sent, so no provider line
+# of the turn is stamped earlier; this margin only absorbs clock rounding, and
+# never reaches into the previous turn's window.
+_START_SLACK_US = 2_000_000
+
+_TURN_COLUMNS = "t.*,s.provider,s.brain,s.provider_session_id,s.session_name"
+
+
+def _adjacent_turn(conn, row, provider_session_id: str, *, later: bool):
+    """The nearest turn after (or before) *row* in its metrics session or its
+    provider session, which a resumed process continues under a new metrics
+    session; returns the same-session and other-session neighbours."""
+    op, order = (">", "ASC") if later else ("<", "DESC")
+    same_session = conn.execute(
+        f"SELECT {_TURN_COLUMNS} FROM turns AS t JOIN sessions AS s USING(session_id) "
+        f"WHERE t.session_id=? AND t.started_at_us{op}? "
+        f"ORDER BY t.started_at_us {order} LIMIT 1",
+        (row["session_id"], row["started_at_us"]),
+    ).fetchone()
+    other_session = conn.execute(
+        f"SELECT {_TURN_COLUMNS} FROM sessions AS s JOIN turns AS t USING(session_id) "
+        f"WHERE s.provider=? AND s.provider_session_id=? AND s.session_id<>? "
+        f"AND t.started_at_us{op}? ORDER BY t.started_at_us {order} LIMIT 1",
+        (row["provider"], provider_session_id, row["session_id"], row["started_at_us"]),
+    ).fetchone() if provider_session_id else None
+    return same_session, other_session
+
+
+def _window_end(conn, row, provider_session_id: str) -> int:
+    """The latest time a provider record can belong to the turn.
+
+    A turn ends at the next turn of its metrics session or of its provider
+    session. A turn without an end is over once its own process moved on, or
+    once the process that recorded it exited; a later turn of another process
+    does not end it while its writer still runs.
+    """
+    same_session, other_session = _adjacent_turn(conn, row, provider_session_id, later=True)
+    next_starts = [int(turn["started_at_us"]) for turn in (same_session, other_session) if turn]
+    if row["ended_at_us"] is not None:
+        return min([int(row["ended_at_us"]) + _END_SLACK_US, *next_starts])
+    if same_session is None and not _writer_exited(conn, str(row["turn_id"])):
+        raise TurnStillRunning(
+            f"turn {row['turn_id']} is still running; reconcile it after it ends"
+        )
+    # A turn whose process died never records its end; its transcript holds
+    # nothing later than now.
+    return min([time.time_ns() // 1000, *next_starts])
+
+
+def _window_start(conn, row, provider_session_id: str) -> int:
+    """The earliest time a provider record can belong to the turn.
+
+    Adjacent windows partition: the turn starts strictly after the previous
+    turn's window ends, whether or not that turn was reconciled yet."""
+    started = int(row["started_at_us"])
+    lower = started - _START_SLACK_US
+    previous = max(
+        (turn for turn in _adjacent_turn(conn, row, provider_session_id, later=False) if turn),
+        key=lambda turn: int(turn["started_at_us"]),
+        default=None,
+    )
+    if previous is None:
+        return lower
+    try:
+        previous_end = _window_end(conn, previous, provider_session_id)
+    except TurnStillRunning:
+        # Another live process on the provider session: unsupported, so take
+        # nothing from before this turn's own start.
+        previous_end = started - 1
+    return max(lower, previous_end + 1)
+
+
+def _turn_context(conn, turn_id: str, root: Path | None):
+    """The turn, its provider session id and its record window, inclusive."""
     row = conn.execute(
-        "SELECT t.*,s.provider,s.brain,s.provider_session_id,s.session_name "
-        "FROM turns AS t JOIN sessions AS s USING(session_id) "
+        f"SELECT {_TURN_COLUMNS} FROM turns AS t JOIN sessions AS s USING(session_id) "
         "WHERE t.turn_id=?",
         (turn_id,),
     ).fetchone()
     if row is None:
         raise ReconciliationError(f"turn not found: {turn_id}")
-    upper = row["ended_at_us"]
-    if upper is None:
-        next_turn = conn.execute(
-            "SELECT started_at_us FROM turns WHERE session_id=? "
-            "AND started_at_us>? ORDER BY started_at_us LIMIT 1",
-            (row["session_id"], row["started_at_us"]),
-        ).fetchone()
-        if next_turn is not None:
-            upper = next_turn[0]
-        elif time.time_ns() // 1000 - int(row["started_at_us"]) < ABANDONED_TURN_US:
-            # Its transcript may still be growing: a recovery now would be partial.
-            raise ReconciliationError(f"turn {turn_id} is still running; reconcile it after it ends")
-        else:
-            # A turn whose process died never records its end.
-            upper = time.time_ns() // 1000
-    return row, int(upper)
+    provider_session_id = str(row["provider_session_id"] or "")
+    if not provider_session_id and root is not None:
+        provider_session_id = load_session_id(str(row["session_name"]), root=root)
+    upper = _window_end(conn, row, provider_session_id)
+    return row, provider_session_id, _window_start(conn, row, provider_session_id), upper
 
 
 def _select_records(
     conn,
     row,
+    lower_us: int,
     upper_us: int,
     provider_session_id: str,
 ) -> tuple[Path, list[ProviderUsageRecord]]:
@@ -186,10 +273,21 @@ def _select_records(
         records = _parsed(source, parse_codex_rollout_records)
     records = [replace(record, usage=replace(record.usage, provider=provider)) for record in records]
 
-    lower_us = int(row["started_at_us"]) - 2_000_000
-    upper_us += 5_000_000
     provider_turn_id = str(row["provider_turn_id"] or "")
-    in_window = [record for record in records if lower_us <= record.observed_at_us <= upper_us]
+    # A record the turn's own stream recorded is its, wherever the provider
+    # stamped it: a last line can land after the next turn started.
+    own = {
+        str(item[0]) for item in conn.execute(
+            "SELECT provider_event_id FROM llm_invocations WHERE turn_id=? "
+            "AND provider_event_id IS NOT NULL",
+            (row["turn_id"],),
+        )
+    }
+    in_window = [
+        record for record in records
+        if lower_us <= record.observed_at_us <= upper_us
+        or record.usage.provider_event_id in own
+    ]
     used_elsewhere = _used_elsewhere(
         conn, provider, str(row["turn_id"]),
         {record.usage.provider_event_id for record in in_window},
@@ -229,16 +327,19 @@ def _parsed(path: Path, parse) -> list[ProviderUsageRecord]:
 
 
 def _used_elsewhere(conn, provider: str, turn_id: str, event_ids: set[str]) -> set[str]:
-    """The candidate provider events another turn already holds."""
+    """The candidate provider events another turn already holds, as a
+    measurement or as an invocation its stream recorded."""
     ids = sorted(event_id for event_id in event_ids if event_id)
     used: set[str] = set()
     for start in range(0, len(ids), 500):
         chunk = ids[start:start + 500]
-        used.update(str(item[0]) for item in conn.execute(
-            "SELECT provider_event_id FROM usage_measurements WHERE provider=? AND turn_id<>? "
-            f"AND provider_event_id IN ({','.join('?' for _ in chunk)})",
-            (provider, turn_id, *chunk),
-        ))
+        marks = ",".join("?" for _ in chunk)
+        for table in ("usage_measurements", "llm_invocations"):
+            used.update(str(item[0]) for item in conn.execute(
+                f"SELECT provider_event_id FROM {table} WHERE provider=? AND turn_id<>? "
+                f"AND provider_event_id IN ({marks})",
+                (provider, turn_id, *chunk),
+            ))
     return used
 
 
@@ -270,18 +371,15 @@ def build_reconcile_plan(
     """Build deterministic spool events without mutating SQLite."""
     conn = connect(db_path, readonly=True)
     try:
-        row, upper_us = _turn_context(conn, turn_id)
-        provider_session_id = str(row["provider_session_id"] or "")
-        if not provider_session_id and root is not None:
-            provider_session_id = load_session_id(
-                str(row["session_name"]), root=Path(root)
-            )
+        row, provider_session_id, lower_us, upper_us = _turn_context(
+            conn, turn_id, Path(root) if root is not None else None
+        )
         if not provider_session_id:
             raise ReconciliationError(
                 f"turn {row['turn_id']} has no provider session correlation"
             )
         source_path, records = _select_records(
-            conn, row, upper_us, provider_session_id
+            conn, row, lower_us, upper_us, provider_session_id
         )
         claude_format = records[0].usage.measurement_source == "claude_transcript"
         invocation_rows = conn.execute(
@@ -588,27 +686,39 @@ def reconcile_missing(
     db_path = root / "state" / "metrics" / "metrics.db"
     conn = connect(db_path, readonly=True)
     try:
-        turn_ids = [
-            str(row[0])
-            for row in conn.execute(
-                "SELECT t.turn_id FROM turns AS t "
-                "JOIN sessions AS s USING(session_id) "
-                "WHERE NOT EXISTS ("
-                "SELECT 1 FROM usage_measurements AS u "
-                "WHERE u.turn_id=t.turn_id AND u.scope='turn' "
-                "AND u.measurement_source IN ('claude_transcript', 'codex_rollout', 'provider_reconciled')) "
-                "AND s.provider IN ('anthropic', 'openai', 'gateway') "
-                + ("AND (t.ended_at_us IS NOT NULL OR t.started_at_us<? OR EXISTS ("
-                   "SELECT 1 FROM turns AS later WHERE later.session_id=t.session_id "
-                   "AND later.started_at_us>t.started_at_us)) " if terminal_only else "")
-                + ("AND NOT EXISTS (SELECT 1 FROM reconcile_attempts AS r "
-                   "WHERE r.turn_id=t.turn_id AND r.attempts>=3) " if track_attempts else "")
-                + "ORDER BY t.started_at_us",
-                (time.time_ns() // 1000 - ABANDONED_TURN_US,) if terminal_only else (),
-            )
-        ]
+        candidates = conn.execute(
+            # A turn without an end that its own process has not moved on
+            # from is over only once its writer exited (see _window_end).
+            "SELECT t.turn_id, CASE WHEN t.ended_at_us IS NULL AND NOT EXISTS ("
+            "SELECT 1 FROM turns AS later WHERE later.session_id=t.session_id "
+            "AND later.started_at_us>t.started_at_us) THEN 1 ELSE 0 END AS open_ended, "
+            f"CASE WHEN t.ended_at_us IS NULL THEN ({_TURN_WRITER.format(turn='t.turn_id')}) "
+            "END AS writer "
+            "FROM turns AS t "
+            "JOIN sessions AS s USING(session_id) "
+            "WHERE NOT EXISTS ("
+            "SELECT 1 FROM usage_measurements AS u "
+            "WHERE u.turn_id=t.turn_id AND u.scope='turn' "
+            "AND u.measurement_source IN ('claude_transcript', 'codex_rollout', 'provider_reconciled')) "
+            "AND s.provider IN ('anthropic', 'openai', 'gateway') "
+            + ("AND NOT EXISTS (SELECT 1 FROM reconcile_attempts AS r "
+               "WHERE r.turn_id=t.turn_id AND r.attempts>=3) " if track_attempts else "")
+            + "ORDER BY t.started_at_us",
+        ).fetchall()
     finally:
         conn.close()
+    # Turns still running are dropped before the budget starts, with one
+    # liveness check per writer, so any number of them cannot hold back the
+    # turns after them.
+    writers: dict[str | None, bool] = {}
+    turn_ids = []
+    for turn_id, open_ended, writer in candidates:
+        if terminal_only and open_ended:
+            if writer not in writers:
+                writers[writer] = _writer_gone(writer)
+            if not writers[writer]:
+                continue
+        turn_ids.append(str(turn_id))
     started = time.monotonic()
     results = []
     failures = []
@@ -627,6 +737,9 @@ def reconcile_missing(
                 )
             )
             succeeded.append(turn_id)
+        except TurnStillRunning as exc:
+            if not terminal_only:
+                failures.append({"turn_id": turn_id, "error": str(exc)})
         except (ReconciliationError, ProviderContractError, OSError) as exc:
             failures.append({"turn_id": turn_id, "error": str(exc)})
     exhausted = 0
@@ -641,7 +754,7 @@ def reconcile_missing(
         ),
         "errors": len(failures),
         "retry_exhausted_turns": exhausted,
-        "turns_considered": len(turn_ids),
+        "turns_considered": len(results) + len(failures),
         "turns_reconciled": len(results),
         "exact_measurements_recovered": sum(
             int(result["exact_measurements_recovered"]) for result in results

@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 
 _SEGMENT_OWNER = re.compile(r"(?:producer|reconciler)-(\d+)-")
+_PRODUCER_PID = re.compile(r"producer-(\d+)-")
 
 
 def project_all(conn: sqlite3.Connection) -> dict[str, int]:
@@ -66,6 +67,18 @@ def _retirable(segment: Path) -> bool:
         return False
     if segment.parent.name.startswith("reconciler-"):
         return True
+    return producer_exited(segment.parent.name)
+
+
+def producer_exited(producer_id: str) -> bool:
+    """True only when the runtime process that writes as *producer_id* is gone.
+
+    A reused pid reads as alive, and so does a pid this process may not
+    signal or an id that names no pid: each only delays what waits on it.
+    """
+    match = _PRODUCER_PID.match(producer_id)
+    if not match:
+        return False
     try:
         os.kill(int(match.group(1)), 0)
     except ProcessLookupError:

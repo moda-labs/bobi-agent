@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from bobi.brain.base import BrainUsage, TurnResult
+from bobi.brain.base import BrainInvocation, BrainUsage, TurnResult
 from bobi.fsutil import try_file_lock
 from bobi.metrics.collector import MetricsCollector, MetricsCollectorService
 from bobi.metrics.events import MetricsEvent
@@ -1971,21 +1971,453 @@ def test_codex_rollout_mixing_both_usage_shapes_keeps_every_turn(tmp_path):
     assert [(record.provider_turn_id, record.usage.input_tokens) for record in records] == [("t1", 100), ("t2", 150)]
 
 
-def test_a_turn_abandoned_by_a_dead_process_is_still_reconciled(monkeypatch, tmp_path):
+_MINUTE_US = 60 * 1_000_000
+
+
+def _claude_call(session_id, message_id, at_us, output_tokens=100):
+    at = datetime.fromtimestamp(at_us / 1_000_000, tz=timezone.utc)
+    return json.dumps({"isSidechain": False, "type": "assistant", "sessionId": session_id,
+                       "timestamp": at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                       "uuid": f"entry-{message_id}", "requestId": f"req-{message_id}",
+                       "message": {"id": message_id, "model": "claude-opus-4-8", "role": "assistant",
+                                   "type": "message", "content": [],
+                                   "usage": {"input_tokens": 5, "output_tokens": output_tokens,
+                                             "cache_read_input_tokens": 0,
+                                             "cache_creation_input_tokens": 0}}}) + "\n"
+
+
+def _claude_result(session_id, message_ids):
+    return TurnResult(
+        session_id=session_id,
+        usage=[BrainUsage(model="claude-opus-4-8", input_tokens=5 * len(message_ids),
+                          output_tokens=100 * len(message_ids))],
+        invocations=[BrainInvocation(provider_event_id=message_id, model="claude-opus-4-8")
+                     for message_id in message_ids],
+    )
+
+
+def _flush(runtime):
+    """Wait until the runtime's producer has written every accepted event."""
+    deadline = time.monotonic() + 5
+    while runtime._producer.events_written < runtime.events_emitted:
+        assert time.monotonic() < deadline, "producer did not flush"
+        time.sleep(0.01)
+
+
+def _dead_pid():
+    import subprocess
+    import sys
+
+    process = subprocess.Popen([sys.executable, "-c", ""])
+    process.wait()
+    return process.pid
+
+
+def _dead_runtime(monkeypatch, root):
+    """A runtime whose process has since died, as after a SIGKILL."""
+    with monkeypatch.context() as patch:
+        patch.setattr("bobi.metrics.runtime.os.getpid", _dead_pid)
+        return MetricsRuntime(root, mode="enabled")
+
+
+def _turn_usage(root):
+    conn = connect(root / "state" / "metrics" / "metrics.db", readonly=True)
+    try:
+        return {row[0]: (row[1], row[2]) for row in conn.execute(
+            "SELECT turn_id,measurement_source,output_tokens FROM best_usage WHERE scope='turn'")}
+    finally:
+        conn.close()
+
+
+def test_a_turn_running_past_an_hour_is_left_to_its_live_writer(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    started = time.time_ns() // 1000 - 61 * _MINUTE_US
+    transcript = tmp_path / "live.jsonl"
+    transcript.write_text("".join(_claude_call("live", f"msg-{index}", started + index * 1_000_000)
+                                  for index in (1, 2, 3)))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    service = MetricsCollectorService(tmp_path, reconcile_interval=0)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        turn = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
+        _flush(runtime)
+        # A fresh session's first turn has no provider session id while it runs.
+        for _ in range(3):
+            service._cycle_locked()
+        assert service.health()["reconciliation_retry_exhausted_turns"] == 0
+        save_session_id("agent", "live", root=tmp_path)
+        service._cycle_locked()
+        assert turn.turn_id not in _turn_usage(tmp_path)
+        with pytest.raises(ReconciliationError, match="still running"):
+            reconcile_turn(tmp_path, turn.turn_id)
+
+        with transcript.open("a") as handle:
+            handle.write("".join(_claude_call("live", f"msg-{index}", started + index * 1_000_000)
+                                 for index in (4, 5)))
+        turn.record_result(_claude_result("live", [f"msg-{index}" for index in range(1, 6)]))
+        turn.finish(status="completed")
+        _flush(runtime)
+        service._cycle_locked()
+    finally:
+        runtime.close()
+
+    assert _turn_usage(tmp_path)[turn.turn_id][1] == 500
+    health = service.health()
+    assert health["quarantined_events"] == 0
+    assert health["reconciliation_retry_exhausted_turns"] == 0
+    conn = connect(service.db_path, readonly=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM llm_invocations WHERE turn_id=?",
+                            (turn.turn_id,)).fetchone()[0] == 5
+    finally:
+        conn.close()
+
+
+def test_a_turn_whose_writer_died_is_reconciled_at_once(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    started = time.time_ns() // 1000 - _MINUTE_US
+    transcript = tmp_path / "crashed.jsonl"
+    transcript.write_text("".join(_claude_call("crashed", f"msg-{index}", started + index * 1_000_000)
+                                  for index in (1, 2)))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    save_session_id("agent", "crashed", root=tmp_path)
+    runtime = _dead_runtime(monkeypatch, tmp_path)
+    turn = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
+    _flush(runtime)
+    service = MetricsCollectorService(tmp_path, reconcile_interval=0)
+    service._cycle_locked()
+
+    assert _turn_usage(tmp_path)[turn.turn_id] == ("claude_transcript", 200)
+
+
+def test_a_turn_whose_writer_is_unknown_is_not_taken_as_abandoned(monkeypatch, tmp_path):
     _seed_turn(tmp_path, provider="anthropic", brain="claude", provider_session_id="grow",
-               turn_id="turn-crashed", estimate=None)
+               turn_id="turn-unowned", estimate=None)
     conn = connect(tmp_path / "state" / "metrics" / "metrics.db")
     conn.execute("UPDATE turns SET ended_at_us=NULL, status='running'")
     conn.commit()
     conn.close()
-    seen = []
-    monkeypatch.setattr("bobi.metrics.reconcile.reconcile_turn",
-                        lambda root, turn_id, **kwargs: seen.append(turn_id) or {"exact_measurements_recovered": 0})
-    reconcile_missing(tmp_path, terminal_only=True)
-    assert seen == ["turn-crashed"]
+
+    assert reconcile_missing(tmp_path, terminal_only=True)["turns_considered"] == 0
+    with pytest.raises(ReconciliationError, match="still running"):
+        reconcile_turn(tmp_path, "turn-unowned")
 
 
-def test_scheduled_reconciliation_skips_active_turns(monkeypatch, tmp_path):
+def test_a_dead_turn_stops_at_the_next_turn_of_its_resumed_provider_session(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    now = time.time_ns() // 1000
+    a_start, b_start, c_start = now - 70 * _MINUTE_US, now - 30 * _MINUTE_US, now - 5 * _MINUTE_US
+    calls = [("msg-a1", a_start + 10_000_000), ("msg-a2", a_start + 20_000_000),
+             ("msg-b1", b_start + 10_000_000),
+             ("msg-c1", c_start + 10_000_000), ("msg-c2", c_start + 20_000_000)]
+    transcript = tmp_path / "shared.jsonl"
+    transcript.write_text("".join(_claude_call("shared", message_id, at) for message_id, at in calls))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    save_session_id("agent", "shared", root=tmp_path)
+
+    # The first process dies mid-turn; a new one resumes the same provider session.
+    crashed = _dead_runtime(monkeypatch, tmp_path)
+    turn_a = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
+    _flush(crashed)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    service = MetricsCollectorService(tmp_path, reconcile_interval=0)
+    try:
+        turn_b = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=b_start)
+        turn_b.record_result(_claude_result("shared", ["msg-b1"]))
+        turn_b.finish(status="completed")
+        turn_c = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=c_start)
+        _flush(runtime)
+        service._cycle_locked()
+        assert _turn_usage(tmp_path)[turn_a.turn_id] == ("claude_transcript", 200)
+
+        with transcript.open("a") as handle:
+            handle.write(_claude_call("shared", "msg-c3", c_start + 30_000_000))
+        turn_c.record_result(_claude_result("shared", ["msg-c1", "msg-c2", "msg-c3"]))
+        turn_c.finish(status="completed")
+        _flush(runtime)
+        service._cycle_locked()
+    finally:
+        runtime.close()
+
+    usage = _turn_usage(tmp_path)
+    assert {turn: usage[turn][1] for turn in (turn_a.turn_id, turn_b.turn_id, turn_c.turn_id)} == {
+        turn_a.turn_id: 200, turn_b.turn_id: 100, turn_c.turn_id: 300}
+
+
+def test_a_dead_turn_stops_at_a_resumed_turn_that_is_still_running(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    now = time.time_ns() // 1000
+    a_start, b_start = now - 70 * _MINUTE_US, now - 5 * _MINUTE_US
+    calls = [("msg-a1", a_start + 10_000_000), ("msg-a2", a_start + 20_000_000),
+             ("msg-b1", b_start + 10_000_000)]
+    transcript = tmp_path / "shared.jsonl"
+    transcript.write_text("".join(_claude_call("shared", message_id, at) for message_id, at in calls))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    save_session_id("agent", "shared", root=tmp_path)
+
+    crashed = _dead_runtime(monkeypatch, tmp_path)
+    turn_a = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
+    _flush(crashed)
+    # The new process resumes the saved provider session; its first turn has no end yet.
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        turn_b = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=b_start)
+        _flush(runtime)
+        MetricsCollectorService(tmp_path, reconcile_interval=0)._cycle_locked()
+    finally:
+        runtime.close()
+
+    usage = _turn_usage(tmp_path)
+    assert usage[turn_a.turn_id] == ("claude_transcript", 200)
+    assert turn_b.turn_id not in usage
+
+
+def test_a_dead_turn_leaves_the_first_call_of_a_resumed_turn_to_it(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    now = time.time_ns() // 1000
+    a_start, b_start = now - 70 * _MINUTE_US, now - _MINUTE_US
+    calls = [("msg-a1", a_start + 10_000_000), ("msg-a2", a_start + 20_000_000),
+             ("msg-b1", b_start + 3_000_000)]
+    transcript = tmp_path / "shared.jsonl"
+    transcript.write_text("".join(_claude_call("shared", message_id, at) for message_id, at in calls))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    save_session_id("agent", "shared", root=tmp_path)
+    crashed = _dead_runtime(monkeypatch, tmp_path)
+    turn_a = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
+    _flush(crashed)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    service = MetricsCollectorService(tmp_path, reconcile_interval=0)
+    try:
+        turn_b = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=b_start)
+        _flush(runtime)
+        service._cycle_locked()
+        with transcript.open("a") as handle:
+            handle.write(_claude_call("shared", "msg-b2", b_start + 20_000_000))
+        turn_b.record_result(_claude_result("shared", ["msg-b1", "msg-b2"]))
+        turn_b.finish(status="completed")
+        _flush(runtime)
+        service._cycle_locked()
+    finally:
+        runtime.close()
+
+    usage = _turn_usage(tmp_path)
+    assert usage[turn_a.turn_id] == ("claude_transcript", 200)
+    assert usage[turn_b.turn_id][1] == 200
+    assert sum(output for _source, output in usage.values()) == 400
+
+
+def test_a_dead_codex_turn_keeps_its_own_snapshot_not_the_next_turns(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    def line(at_us, payload, kind="event_msg"):
+        at = datetime.fromtimestamp(at_us / 1_000_000, tz=timezone.utc)
+        return json.dumps({"timestamp": at.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                           "type": kind, "payload": payload}) + "\n"
+
+    def snapshot(at_us, input_tokens, output_tokens):
+        return line(at_us, {"type": "token_count", "info": {"total_token_usage": {
+            "input_tokens": input_tokens, "cached_input_tokens": 0, "output_tokens": output_tokens}}})
+
+    now = time.time_ns() // 1000
+    a_start, b_start = now - 70 * _MINUTE_US, now - _MINUTE_US
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text(
+        line(a_start, {"id": "thread", "cli_version": "0.144.5"}, kind="session_meta")
+        + line(a_start + 1_000_000, {"type": "task_started", "turn_id": "t1"})
+        + snapshot(a_start + 10_000_000, 1000, 100)
+        + line(b_start + 1_000_000, {"type": "task_started", "turn_id": "t2"})
+        + snapshot(b_start + 3_000_000, 1500, 150))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_codex_rollout", lambda _session_id: rollout)
+    save_session_id("agent", "thread", root=tmp_path)
+    crashed = _dead_runtime(monkeypatch, tmp_path)
+    turn_a = crashed.begin_turn("agent", provider="openai", brain="codex", started_at_us=a_start)
+    _flush(crashed)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        runtime.begin_turn("agent", provider="openai", brain="codex", started_at_us=b_start)
+        _flush(runtime)
+        MetricsCollectorService(tmp_path, reconcile_interval=0)._cycle_locked()
+    finally:
+        runtime.close()
+
+    conn = connect(tmp_path / "state" / "metrics" / "metrics.db", readonly=True)
+    try:
+        assert tuple(conn.execute(
+            "SELECT measurement_source,input_tokens,output_tokens,provider_event_id FROM best_usage "
+            "WHERE turn_id=? AND scope='turn'", (turn_a.turn_id,)).fetchone()) == ("codex_rollout", 1000, 100, "t1")
+    finally:
+        conn.close()
+
+
+def test_a_turn_leaves_the_last_call_of_an_unreconciled_previous_turn_to_it(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    now = time.time_ns() // 1000
+    a_start, b_start = now - 70 * _MINUTE_US, now - _MINUTE_US
+    # A dies with its last call stamped one second before the resumed turn B starts.
+    calls = [("msg-a1", a_start + 10_000_000), ("msg-a2", b_start - 1_000_000),
+             ("msg-b1", b_start + 10_000_000)]
+    transcript = tmp_path / "shared.jsonl"
+    transcript.write_text("".join(_claude_call("shared", message_id, at) for message_id, at in calls))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    save_session_id("agent", "shared", root=tmp_path)
+    crashed = _dead_runtime(monkeypatch, tmp_path)
+    turn_a = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
+    _flush(crashed)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        turn_b = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=b_start)
+        turn_b.finish(status="completed")
+        _flush(runtime)
+    finally:
+        runtime.close()
+    MetricsCollectorService(tmp_path, reconcile_interval=0).collect_once()
+
+    # B is reconciled first, while A has no recovery yet.
+    reconcile_turn(tmp_path, turn_b.turn_id, wait=True)
+    reconcile_turn(tmp_path, turn_a.turn_id, wait=True)
+
+    usage = _turn_usage(tmp_path)
+    assert usage[turn_b.turn_id] == ("claude_transcript", 100)
+    assert usage[turn_a.turn_id] == ("claude_transcript", 200)
+
+
+def test_a_late_transcript_line_stays_with_the_turn_whose_stream_recorded_it(monkeypatch, tmp_path):
+    transcript = tmp_path / "shared.jsonl"
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        previous_start = time.time_ns() // 1000 - 10_000_000
+        previous = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=previous_start)
+        previous.record_result(_claude_result("shared", ["msg-p1", "msg-p2"]))
+        previous.finish(status="completed")
+        next_start = time.time_ns() // 1000 + 500_000
+        following = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=next_start)
+        following.record_result(_claude_result("shared", ["msg-n1"]))
+        following.finish(status="completed")
+        _flush(runtime)
+    finally:
+        runtime.close()
+    # The previous turn's last line is stamped a second after the next turn started.
+    transcript.write_text(_claude_call("shared", "msg-p1", previous_start + 1_000_000)
+                          + _claude_call("shared", "msg-p2", next_start + 1_000_000)
+                          + _claude_call("shared", "msg-n1", next_start + 3_000_000))
+    MetricsCollectorService(tmp_path, reconcile_interval=0)._cycle_locked()
+
+    conn = connect(tmp_path / "state" / "metrics" / "metrics.db", readonly=True)
+    try:
+        transcript_rows = {row[0]: row[1] for row in conn.execute(
+            "SELECT turn_id,output_tokens FROM usage_measurements "
+            "WHERE scope='turn' AND measurement_source='claude_transcript'")}
+    finally:
+        conn.close()
+    assert transcript_rows == {previous.turn_id: 200, following.turn_id: 100}
+
+
+def test_turns_still_running_cannot_starve_a_newer_dead_turn(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        for index in range(4000):
+            runtime.begin_turn(f"stuck-{index}", provider="anthropic", brain="claude")
+        _flush(runtime)
+    finally:
+        runtime.close()
+    started = time.time_ns() // 1000
+    transcript = tmp_path / "crashed.jsonl"
+    transcript.write_text(_claude_call("crashed", "msg-1", started + 1_000_000))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    save_session_id("agent", "crashed", root=tmp_path)
+    crashed = _dead_runtime(monkeypatch, tmp_path)
+    turn = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
+    _flush(crashed)
+    MetricsCollectorService(tmp_path, reconcile_interval=0).collect_once()
+
+    result = reconcile_missing(tmp_path, terminal_only=True, track_attempts=True, budget_seconds=0.5)
+
+    assert [item["turn_id"] for item in result["results"]] == [turn.turn_id]
+
+
+def test_a_live_turn_is_not_cut_short_by_another_live_process(monkeypatch, tmp_path):
+    from bobi.sdk import save_session_id
+
+    now = time.time_ns() // 1000
+    a_start, b_start = now - 10 * _MINUTE_US, now - _MINUTE_US
+    transcript = tmp_path / "shared.jsonl"
+    transcript.write_text("".join(_claude_call("shared", f"msg-a{index}", a_start + index * 1_000_000)
+                                  for index in (1, 2, 3)))
+    monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
+    save_session_id("agent", "shared", root=tmp_path)
+    first = MetricsRuntime(tmp_path, mode="enabled")
+    second = MetricsRuntime(tmp_path, mode="enabled")
+    service = MetricsCollectorService(tmp_path, reconcile_interval=0)
+    try:
+        turn_a = first.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
+        second.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=b_start)
+        _flush(first)
+        _flush(second)
+        service._cycle_locked()
+        assert turn_a.turn_id not in _turn_usage(tmp_path)
+        with pytest.raises(ReconciliationError, match="still running"):
+            reconcile_turn(tmp_path, turn_a.turn_id)
+    finally:
+        first.close()
+        second.close()
+
+
+def test_an_upgraded_database_finds_a_turn_writer_through_an_index(tmp_path):
+    from bobi.metrics.reconcile import _TURN_WRITER_SQL
+    from bobi.metrics.schema import SCHEMA_SQL
+
+    db = tmp_path / "metrics.db"
+    previous = sqlite3.connect(db)
+    previous.executescript("\n".join(
+        line for line in SCHEMA_SQL.splitlines() if "idx_raw_turn_writer" not in line))
+    previous.execute("INSERT INTO schema_meta(key, value) VALUES('schema_version', '1')")
+    previous.commit()
+    previous.close()
+
+    conn = connect(db)
+    try:
+        migrate(conn)
+        plan = " ".join(str(row[3]) for row in conn.execute(
+            f"EXPLAIN QUERY PLAN {_TURN_WRITER_SQL}", ("turn-1",)))
+    finally:
+        conn.close()
+    assert "idx_raw_turn_writer" in plan
+
+
+def test_cli_reports_an_unsupported_codex_rollout_as_an_error(monkeypatch, tmp_path):
+    from click.testing import CliRunner
+
+    from bobi.cli import metrics
+
+    _seed_turn(tmp_path, provider="openai", brain="codex", provider_session_id="fixture",
+               turn_id="turn-codex", estimate=None)
+    rollout = _rollout(
+        tmp_path,
+        {"type": "session_meta", "payload": {"id": "fixture", "cli_version": "9.0.0"}},
+        _event({"type": "task_started", "turn_id": "t1"}),
+        _event({"type": "token_count", "info": {"total_token_usage": {"input": 13364, "cached": 8960, "output": 5}}}),
+        _event({"type": "task_complete", "turn_id": "t1"}),
+    )
+    monkeypatch.setattr("bobi.metrics.reconcile.find_codex_rollout", lambda _session_id: rollout)
+    monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
+
+    result = CliRunner().invoke(metrics, ["reconcile", "--turn-id", "turn-codex"])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "Error: " in result.output and "no usage in a known shape" in result.output
+
+
+def test_scheduled_reconciliation_skips_active_turns(tmp_path):
     db = tmp_path / "state" / "metrics" / "metrics.db"
     conn = connect(db)
     from bobi.metrics.store import migrate
@@ -2017,17 +2449,12 @@ def test_scheduled_reconciliation_skips_active_turns(monkeypatch, tmp_path):
         )
     conn.commit()
     conn.close()
-    seen = []
-    monkeypatch.setattr(
-        "bobi.metrics.reconcile.reconcile_turn",
-        lambda root, turn_id, **kwargs: seen.append(turn_id) or {
-            "exact_measurements_recovered": 0
-        },
-    )
 
     result = reconcile_missing(tmp_path, terminal_only=True)
 
-    assert seen == ["turn-complete"]
+    # The finished turn is attempted (and fails: it has no provider session);
+    # the active one is skipped without counting as a failure.
+    assert [failure["turn_id"] for failure in result["failures"]] == ["turn-complete"]
     assert result["turns_considered"] == 1
 
 
