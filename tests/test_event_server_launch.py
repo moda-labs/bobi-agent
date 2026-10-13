@@ -47,11 +47,12 @@ def _write_valid_artifact(es_dir: Path) -> None:
 
 
 def _started_health():
+    """Down for the first probe and the re-check under the spawn lock, then up."""
     calls = {"count": 0}
 
     def fake_health(*args, **kwargs):
         calls["count"] += 1
-        return None if calls["count"] == 1 else {"status": "ok"}
+        return None if calls["count"] <= 2 else {"status": "ok"}
 
     return fake_health
 
@@ -174,6 +175,127 @@ def test_launch_does_not_retire_transport_state_for_another_process(tmp_path, mo
 
     assert load_bubble_state(tmp_path) == {"bubble_id": "saved-bubble", "bubble_key": "saved-key"}
     assert not (paths.state_path(tmp_path) / "event-transport-backups").exists()
+
+
+def _install_fake_local_server(tmp_path, monkeypatch, on_spawn=None):
+    """A fake node launch whose server answers /health as soon as it is spawned."""
+    es_dir = tmp_path / "event-server"
+    _write_valid_artifact(es_dir)
+    server = {"spawns": 0}
+    monkeypatch.setattr(es, "_port_in_use", lambda port: False)
+    monkeypatch.setattr(es, "_is_installed_event_server_dir", lambda path: True)
+    monkeypatch.setattr(es, "_find_event_server_dir", lambda: es_dir)
+    monkeypatch.setattr(es, "resolve_node_runtime", lambda: ("/node20", "v20.19.2"))
+
+    def fake_popen(*args, **kwargs):
+        if on_spawn is not None:
+            on_spawn()
+        server["spawns"] += 1
+        return Mock(pid=4242, poll=Mock(return_value=None))
+
+    def fake_health(*args, **kwargs):
+        if not server["spawns"]:
+            return None
+        return {"status": "ok", "mode": "local", "process_id": 4242}
+
+    monkeypatch.setattr(es.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(es, "health", fake_health)
+    return server
+
+
+def test_new_local_server_never_listens_before_old_transport_state_is_archived(
+    tmp_path, monkeypatch,
+):
+    """Once the new server answers /health, any caller may attach and read
+    transport state, so the previous process's credentials must already be gone."""
+    from bobi.events.state import load_deployment_state, save_deployment_state
+
+    save_deployment_state(tmp_path, "worker", "old-deployment", "old-key")
+    seen_at_spawn = []
+    _install_fake_local_server(
+        tmp_path, monkeypatch,
+        on_spawn=lambda: seen_at_spawn.append(load_deployment_state(tmp_path, "worker")),
+    )
+
+    assert es.ensure_running(8080, project_path=tmp_path) == "started"
+
+    assert seen_at_spawn == [{}]
+    backups = list((paths.state_path(tmp_path) / "event-transport-backups").iterdir())
+    assert len(backups) == 1
+    assert (backups[0] / "deployments" / "worker.json").exists()
+
+
+def test_a_held_port_keeps_its_transport_state(tmp_path, monkeypatch):
+    """A live server that missed one health check still owns its credentials."""
+    from bobi.events.state import load_deployment_state, save_deployment_state
+
+    save_deployment_state(tmp_path, "worker", "live-deployment", "live-key")
+    _install_fake_local_server(tmp_path, monkeypatch)
+    monkeypatch.setattr(es, "_port_in_use", lambda port: True)
+
+    es.ensure_running(8080, project_path=tmp_path)
+
+    assert load_deployment_state(tmp_path, "worker")
+    assert not (paths.state_path(tmp_path) / "event-transport-backups").exists()
+
+
+def test_concurrent_callers_spawn_once_and_attacher_never_reads_stale_state(
+    tmp_path, monkeypatch,
+):
+    """Two sessions starting together: one spawns, the other waits and attaches.
+    The attacher must see the archived (empty) state, and the state it then
+    writes for the new server must survive the spawner finishing."""
+    import threading
+
+    from bobi.events.state import load_deployment_state, save_deployment_state
+
+    save_deployment_state(tmp_path, "a", "old-a", "old-key-a")
+    save_deployment_state(tmp_path, "b", "old-b", "old-key-b")
+    server = _install_fake_local_server(tmp_path, monkeypatch)
+    # Both callers probe /health before either spawns: the window in which
+    # each would otherwise conclude it must launch the server itself.
+    first_probe = threading.Barrier(2, timeout=5)
+    probe_lock = threading.Lock()
+    probes = {"count": 0}
+    fake_health = es.health
+
+    def racing_health(*args, **kwargs):
+        with probe_lock:
+            probes["count"] += 1
+            racing = probes["count"] <= 2
+        result = fake_health(*args, **kwargs)
+        if racing:
+            first_probe.wait()
+        return result
+
+    monkeypatch.setattr(es, "health", racing_health)
+    results: dict[str, tuple[str, dict]] = {}
+    errors: list[BaseException] = []
+
+    def session(name: str) -> None:
+        try:
+            status = es.ensure_running(8080, project_path=tmp_path)
+            seen = load_deployment_state(tmp_path, name)
+            if status == "connected":
+                save_deployment_state(tmp_path, name, f"new-{name}", f"new-key-{name}")
+            results[name] = (status, seen)
+        except BaseException as exc:  # surfaced to the main thread below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=session, args=(n,)) for n in ("a", "b")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors
+    assert server["spawns"] == 1
+    assert sorted(status for status, _ in results.values()) == ["connected", "started"]
+    assert all(seen == {} for _, seen in results.values())
+    (attacher,) = [name for name, (status, _) in results.items() if status == "connected"]
+    assert load_deployment_state(tmp_path, attacher) == {
+        "deployment_id": f"new-{attacher}", "api_key": f"new-key-{attacher}",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1123,3 +1245,15 @@ class TestDependencyTreeProblemTriage:
         guard that silently stops guarding if npm changes its output."""
         assert es._fatal_tree_problems({"weird": True})
         assert es._fatal_tree_problems([{"not": "a string"}])
+
+
+def test_transport_lock_wait_is_bounded_when_another_holder_is_stuck(tmp_path):
+    from bobi.fsutil import file_lock
+
+    lock = paths.state_dir(tmp_path) / "event-transport.lock"
+    with file_lock(lock):
+        with pytest.raises(es._SpawnLockTimeout):
+            with es._transport_lock(tmp_path, timeout=0.2):
+                pass
+    with es._transport_lock(tmp_path, timeout=0.2):
+        pass
