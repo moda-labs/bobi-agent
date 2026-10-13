@@ -19,8 +19,10 @@ def prepare_task(prompt: str, *, repo_path: str, max_bytes: int,
     memory = re.search(r"(?m)^## Long-Term Memory\s*$", prompt)
     if memory:
         prompt = prompt[:memory.start()]
-    prompt, scrubbed = scrub_values(prompt, secrets)
+    # Shapes first: scrubbing an exact value that is also a key name
+    # (`BOBI_AUTH=api_key`) would otherwise hide the key the shape rule needs.
     prompt, redactions = redact_secrets(prompt)
+    prompt, scrubbed = scrub_values(prompt, secrets)
     redactions += scrubbed
     windows_root = PureWindowsPath(repo_path)
     root = (windows_root if windows_root.is_absolute()

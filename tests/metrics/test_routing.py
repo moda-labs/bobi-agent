@@ -154,6 +154,10 @@ def test_redaction_leaves_words_that_merely_contain_sk_dash():
     ("_PASSWORD=hunter2", "hunter2"),
     ("__API_KEY=abcdef", "abcdef"),
     ("secret_key = 'django-local'", "django-local"),
+    ("PGPASSWORD=hunter2 psql", "hunter2"),
+    ("Authorization: Basic dXNlcjpodW50ZXIy", "dXNlcjpodW50ZXIy"),
+    ("mysql --password hunter2 db", "hunter2"),
+    ("mysql --password=hunter2 db", "hunter2"),
 ])
 def test_redaction_catches_common_secret_shapes(text, leaked):
     redacted, count = redact_secrets(text)
@@ -164,7 +168,8 @@ def test_redaction_catches_common_secret_shapes(text, leaked):
 def test_redaction_keeps_ordinary_token_prose():
     for text in ("max token: 500", "the token count is 12", "postgres://db/prod", "key: 5",
                  "the keyboard and compass are in the passport case", "id = Column(primary_key=True)",
-                 "rows.sort(sort_key=lambda row: row.id)", "next_page_token: str", "first_pass: done"):
+                 "rows.sort(sort_key=lambda row: row.id)", "next_page_token: str", "first_pass: done",
+                 "the password is strong", "reset your password --help", "a basic understanding of auth"):
         assert redact_secrets(text) == (text, 0)
 
 
@@ -193,6 +198,27 @@ def test_task_scrubs_exact_secret_values_from_the_environment():
     task, count = prepare_task("run the deploy with hunter2 then whsec-local on claude",
                                repo_path="/repo", max_bytes=8192, secrets=env_secret_values(env))
     assert task == "run the deploy with [redacted] then [redacted] on claude" and count == 2
+
+
+def test_keyword_valued_credential_setting_does_not_disable_shape_redaction():
+    env = {"BOBI_AUTH": "api_key"}
+    task, _ = prepare_task('set api_key=fakefake1234 and {"api_key": "fakefake5678"}',
+                           repo_path="/repo", max_bytes=8192, secrets=env_secret_values(env))
+    assert "fakefake1234" not in task and "fakefake5678" not in task
+
+
+@pytest.mark.parametrize("text,expected", [
+    ('PASSWORD="hun\\"ter2"', 'PASSWORD="[redacted]"'),
+    ('password = """hunter2"""', 'password = """[redacted]"""'),
+    ("password = '''hunter2'''", "password = '''[redacted]'''"),
+    ('{"password": null}', '{"password": null}'),
+    ('{"api_key": true, "n": 1}', '{"api_key": true, "n": 1}'),
+    ('{"password": hunter2, "n": 1}', '{"password": [redacted], "n": 1}'),
+    ("DB_PASSWORD=abc,def", "DB_PASSWORD=[redacted]"),
+    ('{"password": ' + "x" * 60, '{"password": [redacted]'),
+])
+def test_redaction_handles_escaped_quotes_triple_quotes_and_json_delimiters(text, expected):
+    assert redact_secrets(text)[0] == expected
 
 
 def test_routed_task_never_carries_a_runtime_credential_value(monkeypatch, tmp_path):

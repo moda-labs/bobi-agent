@@ -25,6 +25,7 @@ _SECRET_TOKEN = re.compile(
       | AIza[0-9A-Za-z_-]{20,}              # google api key
       | eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+  # jwt
       | (?i:bearer)\s+[A-Za-z0-9._-]{8,}    # bearer token (space form)
+      | (?i:authorization:\s*basic)\s+[A-Za-z0-9+/=]{8,}  # basic auth header
       | [A-Za-z0-9_-]{40,}                  # generic long opaque token
     )""",
     re.VERBOSE | re.DOTALL,
@@ -40,14 +41,18 @@ _SECRET_TOKEN = re.compile(
 # which keeps the scan linear on long `a_a_a...` runs.
 _SECRET_KV = re.compile(
     r"""(?ix)(?<![A-Za-z0-9_])(
-        _*(?:[A-Za-z0-9]+_)*(?:password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token
+        (?:--)?_*(?:[A-Za-z0-9]+_)*(?:(?:pg|mysql)?password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token
           |auth[_-]?token|refresh[_-]?token|client[_-]?secret|bot[_-]?token
           |secret[_-]?key|private[_-]?key)
       | (?-i:_*(?:[A-Z0-9]+_)+(?:TOKEN|KEY|PASS))
     )(?![A-Za-z0-9])
-    (["']?\s*[:=]\s*)
-    (?:"([^"\n]*)"|'([^'\n]*)'|(\S+))"""
+    (["']?\s*[:=]\s*|(?<=--password)\x20+(?=[^\s-]))
+    (?:(?P<quote>"{3}|'{3}|"|')(?P<quoted>(?:[^"'\\\n]|\\.|(?!(?P=quote))["'])*)(?P=quote)
+      | (?P<bare>\S+))"""
 )
+# A bare JSON literal after a quoted key (`{"password": null}`) is structure,
+# not a credential.
+_JSON_LITERAL = frozenset({"null", "true", "false"})
 
 # `scheme://user:password@host` — the userinfo of a connection string. The
 # bounded scheme and its left boundary keep the scan linear on dotted text.
@@ -82,12 +87,21 @@ def redact_secrets(text: str) -> tuple[str, int]:
 
     def _kv(m):
         nonlocal count
-        quote = '"' if m.group(3) is not None else "'" if m.group(4) is not None else ""
-        value = next((group for group in m.group(3, 4, 5) if group is not None), "")
+        quote = m.group("quote") or ""
+        value, rest = (m.group("quoted"), "") if quote else (m.group("bare"), "")
+        if not quote and (m.group("bare") or "").startswith(REDACTION_PLACEHOLDER):
+            return m.group(0)
+        if not quote and m.group(2)[:1] in "\"'":
+            # After a quoted key the value ends at the JSON/dict delimiter.
+            end = re.search(r"[,}\]]", value)
+            if end:
+                value, rest = value[:end.start()], value[end.start():]
+            if value in _JSON_LITERAL:
+                return m.group(0)
         if not value or value == REDACTION_PLACEHOLDER:
             return m.group(0)
         count += 1
-        return f"{m.group(1)}{m.group(2)}{quote}{REDACTION_PLACEHOLDER}{quote}"
+        return f"{m.group(1)}{m.group(2)}{quote}{REDACTION_PLACEHOLDER}{quote}{rest}"
 
     text = _SECRET_KV.sub(_kv, text)
 

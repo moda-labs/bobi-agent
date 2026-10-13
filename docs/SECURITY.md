@@ -59,8 +59,8 @@ The config lives in `BOBI_METRICS_EXPERIMENT_JSON` (short form only; see
   entry point, workflow/step names and prompt size.
 - Redaction is best-effort, not a data-loss-prevention guarantee. Memory blocks
   are removed; the exact values of the runtime's credential-named variables,
-  known token shapes, secret `name=value` / `"name": "value"` pairs and URL
-  userinfo are scrubbed; external absolute paths are replaced. Do not opt into prompt egress for restricted workloads without
+  known token shapes, secret `name=value` / `"name": "value"` pairs, `--password`
+  flags, Basic auth headers and URL userinfo are scrubbed; external absolute paths are replaced. Do not opt into prompt egress for restricted workloads without
   reviewing the destination and account-specific processing/retention terms.
 - Shadow mode still calls the policy (and sends the task excerpt when egress is
   `redacted`) even though the control model executes; shadow is not an offline
