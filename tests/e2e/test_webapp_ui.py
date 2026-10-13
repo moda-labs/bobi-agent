@@ -573,6 +573,9 @@ class TestMetricsView:
         detail.locator('[data-tab="technical"]').click()
         expect(detail).to_contain_text("suggest: haiku")
         expect(detail).to_contain_text("claude-haiku-4-5")
+        # No recorded cost: the list price shows once, marked, not as an invoice.
+        expect(detail.locator(".panel-cost")).to_have_count(0)
+        expect(detail.locator(".metrics-turn-totals")).to_contain_text("~$0.000100")
         detail.screenshot(path=str(METRICS_CAPTURES / "turn-detail-tables.png"))
         page.locator(".detail-nav-tabs [data-tab=technical]").click()
         expect(page.locator(".panel-routing")).to_be_hidden()

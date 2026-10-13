@@ -1369,15 +1369,17 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
   panelUsage.append(totalLine);
 
   technical.append(panelUsage);
-  if (costs.length || turnCostForTotal) {
+  // Only recorded cost rows belong here; a list-price total is already marked "~" above.
+  if (costs.length) {
     const costPanel = node("div", "", "panel-cost");
-    const displayCosts = costs.length ? costs : [turnCostForTotal];
-    costPanel.append(createSectionHead("", "Turn Invoiced / Reconciled Spend", displayCosts.length,
+    costPanel.append(createSectionHead("", "Turn Invoiced / Reconciled Spend", costs.length,
       "Recorded cost for the overall turn."));
-    table(costPanel, ["Scope", "Model", "USD"], displayCosts.map(cost => [
+    table(costPanel, ["Scope", "Model", "USD"], costs.map(cost => [
       cost.scope || "turn",
       cost.model || (invocations[0]?.model_selected || "—"),
-      node("span", money(cost.amount_usd, 6), "bobi-tnum text-green")
+      cost.is_estimated
+        ? node("span", "~" + money(cost.amount_usd, 6), "bobi-tnum")
+        : node("span", money(cost.amount_usd, 6), "bobi-tnum text-green")
     ]));
     technical.append(costPanel);
   }
