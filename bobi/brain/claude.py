@@ -145,9 +145,11 @@ class _ClaudeSession:
         resume = getattr(options, "resume", None)
         self._cumulative_usage_ready = not resume
         saved = baseline_store.load("claude", resume) if resume else None
+        self._baseline_saved = bool(resume)
         saved_usage = _model_usage_snapshot((saved or {}).get("model_usage"))
         saved_cost = (saved or {}).get("total_cost_usd")
-        if saved_usage and isinstance(saved_cost, (int, float)):
+        # An empty usage map is the zero baseline a fresh session saves first.
+        if isinstance((saved or {}).get("model_usage"), dict) and isinstance(saved_cost, (int, float)):
             self._model_usage_baseline = saved_usage
             self._total_cost_baseline = float(saved_cost)
             self._cumulative_usage_ready = True
@@ -424,6 +426,13 @@ class _ClaudeSession:
                         "model_usage": usage_snapshot,
                         "total_cost_usd": float(cumulative_cost),
                     })
+                    self._baseline_saved = True
+                elif not getattr(self, "_baseline_saved", True) and result.session_id:
+                    # A first turn that failed before any usage: save a zero
+                    # baseline so the next resume still counts its first turn.
+                    baseline_store.save("claude", result.session_id, {
+                        "model_usage": {}, "total_cost_usd": 0.0})
+                    self._baseline_saved = True
                 result.invocations = invocations
                 if getattr(self, "provider", "anthropic") == "gateway":
                     _align_result_usage_models(result)

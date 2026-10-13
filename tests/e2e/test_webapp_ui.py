@@ -593,6 +593,8 @@ class TestMetricsView:
         conn.execute("INSERT INTO llm_invocations(invocation_id,turn_id,invocation_index,provider,model_requested,model_selected,started_at_us,status) VALUES('i0-step2','turn_01a117cb-7aec-7d84-a959-e912efb493f6',1,'anthropic','claude-haiku','claude-haiku-4-5-20251001',?,'completed')", (started + 400000,))
         conn.execute("INSERT INTO usage_measurements(measurement_id,scope,turn_id,invocation_id,provider,model,measurement_source,is_estimated,input_tokens,output_tokens,cache_read_input_tokens,observed_at_us,token_semantics_version) VALUES('u-inv-2','invocation','turn_01a117cb-7aec-7d84-a959-e912efb493f6','i0-step2','anthropic','claude-haiku-4-5-20251001','provider_stream',0,79032,1,76193,?,1)", (started + 400000,))
         conn.execute("INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) VALUES('cost-turn','turn','ses_dabfcc7634bd07e444b889b44d0da7297c8611305855adf63eab16ad41eda7c5','turn_01a117cb-7aec-7d84-a959-e912efb493f6','anthropic','claude-haiku-4-5-20251001',0.261109,'provider_stream',0,?)", (started + 800000,))
+        # A multi-model turn keeps one turn-scope cost row per model.
+        conn.execute("INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) VALUES('cost-turn-opus','turn','ses_dabfcc7634bd07e444b889b44d0da7297c8611305855adf63eab16ad41eda7c5','turn_01a117cb-7aec-7d84-a959-e912efb493f6','anthropic','claude-opus-4-7',0.03,'provider_stream',0,?)", (started + 800000,))
         rekey(conn)
         conn.commit()
         conn.close()
@@ -648,6 +650,7 @@ class TestMetricsView:
         # Switch to technical telemetry tab
         detail.locator('[data-tab="technical"]').click()
         expect(detail.locator(".panel-usage")).to_be_visible()
+        expect(detail.locator(".metrics-turn-totals")).to_contain_text("$0.291109")
         detail.locator(".panel-usage th").last.scroll_into_view_if_needed()
         detail.screenshot(path=f"{artifact_dir}/verified_curator_technical.png")
 

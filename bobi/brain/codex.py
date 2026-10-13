@@ -293,7 +293,7 @@ class _CodexSession:
         self._pending: str | None = None
         saved = baseline_store.load("codex", resume) if resume else None
         self._usage_baseline: dict[str, Any] = saved or {}
-        self._usage_baseline_ready = not resume or bool(saved)
+        self._usage_baseline_ready = not resume or saved is not None
         # Effective MCP servers (rendered into config.toml at make_session).
         # Codex has no live status introspection, so the preflight probe reaches
         # each server directly through get_mcp_status below (#428 Stage 4).
@@ -374,7 +374,12 @@ class _CodexSession:
         async for ev in self._runner(argv, self._cwd, prompt):
             etype = ev.get("type")
             if etype == "thread.started":
+                fresh = self._thread_id is None
                 self._thread_id = ev.get("thread_id") or self._thread_id
+                if fresh and self._thread_id:
+                    # A zero baseline, so a first turn that fails before any
+                    # usage still lets the next resume count its first turn.
+                    baseline_store.save("codex", self._thread_id, {})
             elif etype in ("item.started", "item.completed"):
                 item = ev.get("item") or {}
                 item_type = str(item.get("type") or "")

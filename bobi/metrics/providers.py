@@ -214,6 +214,9 @@ def claude_usage(
     )
 
 
+_CODEX_USAGE_KEYS = frozenset({"input_tokens", "cached_input_tokens", "output_tokens"})
+
+
 def codex_usage(
     raw_usage: dict[str, Any],
     *,
@@ -363,6 +366,12 @@ def parse_codex_rollout_records(
                     info = payload.get("info") or {}
                     usage = info.get("total_token_usage")
                     observed_at_us = _timestamp_us(event.get("timestamp"))
+                    if isinstance(usage, dict) and not _CODEX_USAGE_KEYS & usage.keys():
+                        # A renamed shape would otherwise read as all-null usage
+                        # and outrank the turn's streamed counts.
+                        raise ProviderContractError(
+                            f"codex rollout has no usage in a known shape (cli {cli_version or 'unknown'})"
+                        )
                     if isinstance(usage, dict) and observed_at_us is not None:
                         ordinal = event.get("ordinal")
                         ordinal = ordinal if isinstance(ordinal, int) else -1

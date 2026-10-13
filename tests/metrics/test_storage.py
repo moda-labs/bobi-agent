@@ -1838,6 +1838,18 @@ def test_codex_rollout_with_a_completed_turn_but_no_known_usage_shape_is_rejecte
         parse_codex_rollout_records(completed)
 
 
+def test_codex_snapshot_with_no_known_usage_key_is_rejected(tmp_path):
+    rollout = _rollout(
+        tmp_path,
+        {"type": "session_meta", "payload": {"id": "fixture", "cli_version": "9.0.0"}},
+        _event({"type": "task_started", "turn_id": "t1"}),
+        _event({"type": "token_count", "info": {"total_token_usage": {"input": 13364, "cached": 8960, "output": 5}}}),
+        _event({"type": "task_complete", "turn_id": "t1"}),
+    )
+    with pytest.raises(ProviderContractError, match="no usage in a known shape"):
+        parse_codex_rollout_records(rollout)
+
+
 def test_codex_rollout_mixing_both_usage_shapes_keeps_every_turn(tmp_path):
     def snapshot(total):
         return _event({"type": "token_count", "info": {"total_token_usage": {"input_tokens": total, "output_tokens": 1}}})

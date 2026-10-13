@@ -245,10 +245,17 @@ by an earlier version is tightened on the next open.
 - Claude's `total_cost_usd` / `modelUsage` and Codex's turn usage count the
   whole provider session, including turns from before a resume in a new
   process. Each turn reports the difference from the previous turn's totals,
-  which are saved per session under `state/usage_baselines/`. A resumed session
-  with no saved totals (started before they were kept, or idle for more than 30
-  days, after which the file is pruned) reports no usage for its first turn
-  rather than the whole session again.
+  which are saved per session under `state/usage_baselines/`. A fresh session
+  saves zero totals as soon as its id is known, so a first turn that fails
+  before any usage still leaves a baseline. A file is pruned only after 30 idle
+  days and when no saved session id refers to it; a failed write removes the
+  older file. A resumed session with no saved totals (started before they were
+  kept, or whose write failed) reports no usage for its first turn rather than
+  the whole session again.
+- A multi-model Claude turn is split by the per-model `costUSD` values only
+  when they add up to `total_cost_usd`. Otherwise the turn keeps one cost row
+  with no model, so a model-filtered summary does not count it: the
+  unexplained part of the bill is never assigned to a model by guesswork.
 - Exact usage can coexist with uncovered turns elsewhere. Report both local
   turn evidence and global collector/reconciliation debt.
 

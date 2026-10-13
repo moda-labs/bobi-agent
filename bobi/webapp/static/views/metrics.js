@@ -1350,13 +1350,20 @@ export function renderTurnMetrics(container, data, section = "overview", row = {
   const totalLine = node("div", "", "metrics-turn-totals");
   pair(totalLine, "Turn input / output", `${number(totals.input_tokens)} / ${number(totals.output_tokens)}`);
   pair(totalLine, "Cache read / write", `${number(totals.cache_read_input_tokens)} / ${number(totals.cache_write_input_tokens)}`);
-  let turnCostForTotal = (data.cost_measurements || []).find(item => item.scope === "turn") || (costs.length ? costs[0] : null);
+  // One turn-scope row per model: the turn's cost is their sum, exact rows over estimates.
+  const turnRows = (data.cost_measurements || []).filter(item => item.scope === "turn" && item.amount_usd != null);
+  const exactRows = turnRows.filter(item => !item.is_estimated);
+  const chosenRows = exactRows.length ? exactRows : turnRows;
+  let turnCostForTotal = chosenRows.length
+    ? { amount_usd: chosenRows.reduce((sum, item) => sum + Number(item.amount_usd), 0), scope: "turn", is_estimated: !exactRows.length }
+    : (costs.length ? costs[0] : null);
   const listPrices = (data.best_usage || []).map(item => item.list_price_usd);
   if (!turnCostForTotal && listPrices.length && listPrices.every(value => value != null)) {
     turnCostForTotal = { amount_usd: listPrices.reduce((sum, value) => sum + value, 0), scope: "turn", measurement_source: "list price" };
   }
   if (turnCostForTotal?.amount_usd != null) {
-    pair(totalLine, "Turn cost", money(turnCostForTotal.amount_usd, 6));
+    const approximate = turnCostForTotal.is_estimated || turnCostForTotal.measurement_source === "list price";
+    pair(totalLine, "Turn cost", (approximate ? "~" : "") + money(turnCostForTotal.amount_usd, 6));
   }
   panelUsage.append(totalLine);
 

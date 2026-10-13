@@ -228,6 +228,28 @@ async def test_resume_in_a_new_process_reports_only_the_new_turn(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_resume_after_a_first_turn_with_no_usage_counts_the_resumed_turn(tmp_path):
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    failed = _CodexSession(cwd="/w", instructions="", runner=_runner_of([
+        {"type": "thread.started", "thread_id": "th-failed"},
+        {"type": "turn.failed", "error": {"message": "boom"}},
+    ]))
+    await failed.query("first")
+    await _drain(failed)
+
+    after = _CodexSession(cwd="/w", instructions="", resume="th-failed",
+                          runner=_runner_of([{"type": "turn.completed", "usage": {
+                              "input_tokens": 140, "cached_input_tokens": 0, "output_tokens": 13,
+                          }}]))
+    await after.query("second")
+    resumed = (await _drain(after))[-1]
+
+    assert resumed.usage[0].input_tokens == 140
+
+
+@pytest.mark.asyncio
 async def test_usage_limit_failure_is_classified_as_exhausted_credits():
     events = [
         {"type": "thread.started", "thread_id": "th-limit"},

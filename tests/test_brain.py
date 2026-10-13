@@ -1232,6 +1232,25 @@ async def test_resume_without_a_saved_baseline_reports_no_usage(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_resume_after_a_first_turn_with_no_usage_counts_the_resumed_turn(tmp_path, monkeypatch):
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    failed = _claude_process(monkeypatch, [_result(is_error=True, result="boom", total_cost_usd=0.0,
+                                                   model_usage=None)])
+    [message async for message in failed.receive_response()]
+
+    after = _claude_process(monkeypatch, [_result(
+        total_cost_usd=0.30,
+        model_usage={"claude-opus-5": {"inputTokens": 100, "outputTokens": 10}},
+    )], resume="sess-xyz")
+    resumed = [message async for message in after.receive_response()][-1]
+
+    assert resumed.total_cost_usd == pytest.approx(0.30)
+    assert resumed.usage[0].output_tokens == 10
+
+
+@pytest.mark.asyncio
 async def test_receive_response_preserves_structured_auth_failure():
     """Claude's assistant error field is the stable auth classifier."""
     text = "Not logged in - Please run /login"
