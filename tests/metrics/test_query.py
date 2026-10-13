@@ -964,8 +964,8 @@ def test_metrics_reconcile_invokes_one_turn(monkeypatch, tmp_path):
     monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
     monkeypatch.setattr(
         "bobi.metrics.reconcile.reconcile_turn",
-        lambda root, turn_id, wait, timeout: calls.append(
-            (root, turn_id, wait, timeout)
+        lambda root, turn_id, wait, timeout, force: calls.append(
+            (root, turn_id, wait, timeout, force)
         ) or {
             "status": "done",
             "exact_measurements_recovered": 1,
@@ -979,7 +979,7 @@ def test_metrics_reconcile_invokes_one_turn(monkeypatch, tmp_path):
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == [(tmp_path, "turn-1", True, 60.0)]
+    assert calls == [(tmp_path, "turn-1", True, 60.0, False)]
     assert json.loads(result.output)["turn_id"] == "turn-1"
 
 

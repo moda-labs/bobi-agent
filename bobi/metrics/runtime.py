@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 
 from bobi.costs import model_identity
 from bobi.metrics.events import MetricsEvent, deterministic_metric_id, uuid7
-from bobi.metrics.producer import MetricsProducer
+from bobi.metrics.producer import MetricsProducer, process_start_token
 from bobi.metrics.policy import policy_health
 from bobi.metrics.router import RouterDecision, projection_fields
 
@@ -65,7 +65,11 @@ class MetricsRuntime:
         self.root = Path(root).resolve()
         self.mode = resolve_mode() if mode is None else mode
         self.pid = os.getpid()
-        self.producer_id = f"producer-{self.pid}-{uuid7()}"
+        # The process start value lets a reader tell this process from a
+        # later one that reuses its pid (see producer_exited).
+        start = process_start_token(self.pid)
+        self.producer_id = f"producer-{self.pid}-{uuid7()}" + (
+            f"-{start}" if start is not None else "")
         self._sequence = itertools.count()
         self._session_ids: dict[str, str] = {}
         self._turn_indexes: dict[str, int] = {}

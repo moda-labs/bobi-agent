@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import functools
 import os
 import queue
+import struct
+import sys
 import threading
 import time
 from pathlib import Path
@@ -11,6 +16,59 @@ from pathlib import Path
 from bobi.fsutil import atomic_write_json
 from bobi.metrics.events import MetricsEvent
 from bobi.metrics.spool import SpoolWriter
+
+
+def process_start_token(pid: int) -> int | None:
+    """A value that names one process among all that have held *pid*, or None
+    when it cannot be read (no such process, or an unsupported platform).
+
+    Linux: the start in clock ticks after boot, field 22 of
+    ``/proc/<pid>/stat``. macOS: ``kp_proc.p_starttime`` from
+    ``sysctl(KERN_PROC_PID)``, in microseconds. Each is fixed when the process
+    starts and is compared only with itself, never with a wall clock.
+    """
+    if sys.platform.startswith("linux"):
+        return _proc_start_ticks(pid)
+    if sys.platform == "darwin":
+        return _darwin_start_us(pid)
+    return None
+
+
+def _proc_start_ticks(pid: int, proc: Path = Path("/proc")) -> int | None:
+    try:
+        stat = (proc / str(pid) / "stat").read_text()
+        # The command name is in parentheses and may itself hold spaces or
+        # parentheses; the fields after the last one start at field 3.
+        return int(stat[stat.rindex(")") + 2:].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+_KINFO_PROC_SIZE = 648
+
+
+def _darwin_start_us(pid: int) -> int | None:
+    """The ``struct timeval`` at the start of ``struct kinfo_proc``."""
+    try:
+        sysctl = _libc().sysctl
+        mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+        buffer = ctypes.create_string_buffer(_KINFO_PROC_SIZE)
+        size = ctypes.c_size_t(_KINFO_PROC_SIZE)
+        if sysctl(mib, 4, buffer, ctypes.byref(size), None, ctypes.c_size_t(0)) != 0:
+            return None
+    except (OSError, AttributeError):
+        return None
+    if size.value != _KINFO_PROC_SIZE:
+        return None  # no such process, or a layout this code does not know
+    seconds, microseconds = struct.unpack_from("=qi", buffer, 0)
+    if seconds <= 0 or not 0 <= microseconds < 1_000_000:
+        return None
+    return seconds * 1_000_000 + microseconds
+
+
+@functools.lru_cache(maxsize=1)
+def _libc() -> ctypes.CDLL:
+    return ctypes.CDLL(ctypes.util.find_library("c") or "libc.dylib", use_errno=True)
 
 
 class MetricsProducer:

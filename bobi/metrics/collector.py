@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from bobi.fsutil import atomic_write_json, try_file_lock
+from bobi.metrics.producer import process_start_token
 from bobi.metrics.projection import project_pending
 from bobi.metrics.spool import SpoolCorruptionError, iter_frames
 from bobi.metrics.store import (
@@ -26,7 +27,10 @@ log = logging.getLogger(__name__)
 
 
 _SEGMENT_OWNER = re.compile(r"(?:producer|reconciler)-(\d+)-")
-_PRODUCER_PID = re.compile(r"producer-(\d+)-")
+# producer-<pid>-<uuid7>-<process start value>; older ids end at the UUID.
+_PRODUCER_ID = re.compile(
+    r"producer-(\d+)-(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-(\d+)$)?"
+)
 
 
 def project_all(conn: sqlite3.Connection) -> dict[str, int]:
@@ -42,20 +46,19 @@ def project_all(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 # A fully imported segment is retired only once it has been quiet this long.
-# Producer liveness is a pid check, so every writer of a spool must share this
-# process's pid namespace; the quiet period covers a writer between appends.
+# A reconciler segment has no other end marker; for a producer segment it is a
+# margin on top of writer_finished.
 _RETIRE_AFTER_SECONDS = 5 * 60
 # A background reconciliation pass stops after this long and resumes next cycle,
 # so spool import never waits long behind it.
 RECONCILE_BUDGET_SECONDS = 5.0
 
 
-def _retirable(segment: Path) -> bool:
-    """True for a fully imported segment nothing will append to again.
+def _retirable(conn: sqlite3.Connection, spool_root: Path, segment: Path) -> bool:
+    """True for an imported segment nothing will append to again.
 
     A reconciler writes and closes its segment within one call, so age alone
-    decides. A producer must also have exited; a reused pid reads as alive,
-    which only delays retirement.
+    decides; a producer segment also needs writer_finished.
     """
     match = _SEGMENT_OWNER.match(segment.parent.name)
     if not match:
@@ -67,25 +70,95 @@ def _retirable(segment: Path) -> bool:
         return False
     if segment.parent.name.startswith("reconciler-"):
         return True
-    return producer_exited(segment.parent.name)
+    return writer_finished(conn, spool_root, segment.parent.name)
+
+
+def writer_finished(
+    conn: sqlite3.Connection,
+    spool_root: Path,
+    producer_id: str,
+    *,
+    assume_exited: bool = False,
+) -> bool:
+    """True once the runtime writer *producer_id* is gone and every complete
+    frame it spooled is imported.
+
+    This is the one test that a writer is done, for spool retirement, for the
+    background reconciliation pass and for a manual reconcile.
+    ``assume_exited`` skips only the liveness half, for an operator who knows
+    the process is gone. Liveness is read before the spool: a writer seen gone
+    appends nothing after, so a spool with no complete frame past its cursor
+    then holds all of its events, and an incomplete last frame is a torn
+    write that will never be finished.
+    """
+    if not (assume_exited or producer_exited(producer_id)):
+        return False
+    return not _has_unimported_frames(conn, spool_root / producer_id)
+
+
+def _has_unimported_frames(conn: sqlite3.Connection, directory: Path) -> bool:
+    """True when a segment in *directory* has a complete frame past its cursor.
+
+    A directory that is gone was retired after a full import. A segment that
+    cannot be read counts as unimported, so a writer is never taken as done
+    on a guess; a corrupt frame never imports, so it does not hold the writer.
+    """
+    try:
+        segments = sorted(directory.glob("*.telemetry"))
+    except OSError:
+        return True
+    for segment in segments:
+        try:
+            size = segment.stat().st_size
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        start = cursor_offset(conn, segment)
+        if start >= size:
+            continue
+        try:
+            if next(iter(iter_frames(segment, start)), None) is not None:
+                return True
+        except (FileNotFoundError, SpoolCorruptionError):
+            # A corrupt frame stops the collector at its cursor for good, and
+            # is reported in corrupt_segments; it and what follows will
+            # never import.
+            continue
+        except OSError:
+            return True
+    return False
 
 
 def producer_exited(producer_id: str) -> bool:
     """True only when the runtime process that writes as *producer_id* is gone.
 
-    A reused pid reads as alive, and so does a pid this process may not
-    signal or an id that names no pid: each only delays what waits on it.
+    It is gone when no process holds its pid, or when the process holding the
+    pid has another start value than the one the producer recorded in its id
+    (see process_start_token), which is what a pid reused after a container
+    restart looks like. Both values come from the same kernel field, so a
+    wall-clock step changes neither. An id without a start value (written
+    before it was recorded, or where it could not be read) is checked by pid
+    alone: a reused pid then reads as alive, and so does a pid this process
+    may not signal or an id that names no pid; each only delays what waits on
+    it, and a manual reconcile can be forced.
+
+    Every writer of a spool must share this process's pid namespace.
     """
-    match = _PRODUCER_PID.match(producer_id)
+    match = _PRODUCER_ID.match(producer_id)
     if not match:
         return False
+    pid = int(match.group(1))
     try:
-        os.kill(int(match.group(1)), 0)
+        os.kill(pid, 0)
     except ProcessLookupError:
         return True
     except OSError:
+        pass
+    if match.group(2) is None:
         return False
-    return False
+    current = process_start_token(pid)
+    return current is not None and current != int(match.group(2))
 
 
 def _retire_segment(conn: sqlite3.Connection, segment: Path) -> dict[str, int]:
@@ -336,7 +409,7 @@ class MetricsCollectorService:
                     continue
                 start = cursors.get(str(segment), 0)
                 if start >= size:
-                    if _retirable(segment):
+                    if _retirable(conn, self.spool_root, segment):
                         self._retire(conn, segment)
                     continue
                 try:
@@ -353,7 +426,7 @@ class MetricsCollectorService:
                     continue
                 totals["staged"] = int(totals["staged"]) + stage.staged
                 totals["conflicts"] = int(totals["conflicts"]) + stage.conflicts
-                if _retirable(segment):
+                if _retirable(conn, self.spool_root, segment):
                     # A dead writer's incomplete last frame will never be
                     # finished: count its bytes and retire the segment.
                     torn = size - cursor_offset(conn, segment)

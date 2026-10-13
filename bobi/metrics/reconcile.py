@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 from bobi.chat_history import find_claude_transcript, find_codex_rollout
-from bobi.metrics.collector import MetricsCollector, producer_exited
+from bobi.metrics.collector import MetricsCollector, writer_finished
 from bobi.metrics.events import MetricsEvent, deterministic_event_id, uuid7
 from bobi.metrics.providers import (
     ProviderContractError,
@@ -129,16 +129,26 @@ _TURN_WRITER = (
 _TURN_WRITER_SQL = _TURN_WRITER.format(turn="?")
 
 
-def _writer_gone(producer_id: str | None) -> bool:
-    """True once the process writing as *producer_id* exited. A turn whose
-    writer cannot be found is not taken as abandoned."""
-    return producer_id is not None and producer_exited(producer_id)
+def _writer_done(conn, spool_root: Path, writer: str | None, *, force: bool = False) -> bool:
+    """True once the turn's writer is gone and all it spooled is imported
+    (see writer_finished). A turn whose writer cannot be found is not taken
+    as abandoned unless *force* says so; *force* never skips the import."""
+    if writer is None:
+        return force
+    return writer_finished(conn, spool_root, writer, assume_exited=force)
 
 
-def _writer_exited(conn, turn_id: str) -> bool:
-    """True once the runtime process that recorded the turn has exited."""
+def _require_writer_done(conn, spool_root: Path, turn_id: str, *, force: bool) -> None:
     row = conn.execute(_TURN_WRITER_SQL, (turn_id,)).fetchone()
-    return _writer_gone(str(row[0]) if row is not None else None)
+    writer = str(row[0]) if row is not None else None
+    if _writer_done(conn, spool_root, writer, force=force):
+        return
+    if force:
+        raise TurnStillRunning(
+            f"turn {turn_id} has spooled events that are not imported yet; "
+            "reconcile it once the collector has imported them"
+        )
+    raise TurnStillRunning(f"turn {turn_id} is still running; reconcile it after it ends")
 
 
 # The provider can stamp a turn's last transcript line a little after the
@@ -174,28 +184,28 @@ def _adjacent_turn(conn, row, provider_session_id: str, *, later: bool):
     return same_session, other_session
 
 
-def _window_end(conn, row, provider_session_id: str) -> int:
+def _window_end(conn, row, provider_session_id: str, spool_root: Path, *,
+                force: bool = False) -> int:
     """The latest time a provider record can belong to the turn.
 
     A turn ends at the next turn of its metrics session or of its provider
     session. A turn without an end is over once its own process moved on, or
-    once the process that recorded it exited; a later turn of another process
-    does not end it while its writer still runs.
+    once the process that recorded it is done (writer_finished); a later turn
+    of another process does not end it while its writer still runs. *force*
+    takes the writer as gone.
     """
     same_session, other_session = _adjacent_turn(conn, row, provider_session_id, later=True)
     next_starts = [int(turn["started_at_us"]) for turn in (same_session, other_session) if turn]
     if row["ended_at_us"] is not None:
         return min([int(row["ended_at_us"]) + _END_SLACK_US, *next_starts])
-    if same_session is None and not _writer_exited(conn, str(row["turn_id"])):
-        raise TurnStillRunning(
-            f"turn {row['turn_id']} is still running; reconcile it after it ends"
-        )
+    if same_session is None:
+        _require_writer_done(conn, spool_root, str(row["turn_id"]), force=force)
     # A turn whose process died never records its end; its transcript holds
     # nothing later than now.
     return min([time.time_ns() // 1000, *next_starts])
 
 
-def _window_start(conn, row, provider_session_id: str) -> int:
+def _window_start(conn, row, provider_session_id: str, spool_root: Path) -> int:
     """The earliest time a provider record can belong to the turn.
 
     Adjacent windows partition: the turn starts strictly after the previous
@@ -210,7 +220,7 @@ def _window_start(conn, row, provider_session_id: str) -> int:
     if previous is None:
         return lower
     try:
-        previous_end = _window_end(conn, previous, provider_session_id)
+        previous_end = _window_end(conn, previous, provider_session_id, spool_root)
     except TurnStillRunning:
         # Another live process on the provider session: unsupported, so take
         # nothing from before this turn's own start.
@@ -218,7 +228,8 @@ def _window_start(conn, row, provider_session_id: str) -> int:
     return max(lower, previous_end + 1)
 
 
-def _turn_context(conn, turn_id: str, root: Path | None):
+def _turn_context(conn, turn_id: str, root: Path | None, spool_root: Path, *,
+                  force: bool = False):
     """The turn, its provider session id and its record window, inclusive."""
     row = conn.execute(
         f"SELECT {_TURN_COLUMNS} FROM turns AS t JOIN sessions AS s USING(session_id) "
@@ -230,8 +241,8 @@ def _turn_context(conn, turn_id: str, root: Path | None):
     provider_session_id = str(row["provider_session_id"] or "")
     if not provider_session_id and root is not None:
         provider_session_id = load_session_id(str(row["session_name"]), root=root)
-    upper = _window_end(conn, row, provider_session_id)
-    return row, provider_session_id, _window_start(conn, row, provider_session_id), upper
+    upper = _window_end(conn, row, provider_session_id, spool_root, force=force)
+    return row, provider_session_id, _window_start(conn, row, provider_session_id, spool_root), upper
 
 
 def _select_records(
@@ -367,12 +378,17 @@ def build_reconcile_plan(
     turn_id: str,
     *,
     root: Path | str | None = None,
+    force: bool = False,
 ) -> ReconcilePlan:
-    """Build deterministic spool events without mutating SQLite."""
+    """Build deterministic spool events without mutating SQLite.
+
+    *force* takes the writer of a turn without an end as gone; its spool must
+    still be imported."""
     conn = connect(db_path, readonly=True)
     try:
         row, provider_session_id, lower_us, upper_us = _turn_context(
-            conn, turn_id, Path(root) if root is not None else None
+            conn, turn_id, Path(root) if root is not None else None,
+            _spool_root(db_path), force=force,
         )
         if not provider_session_id:
             raise ReconciliationError(
@@ -585,6 +601,10 @@ def build_reconcile_plan(
     )
 
 
+def _spool_root(db_path: Path | str) -> Path:
+    return Path(db_path).parent / "spool"
+
+
 def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -614,13 +634,19 @@ def reconcile_turn(
     wait: bool = False,
     timeout: float = 60.0,
     collect: bool = True,
+    force: bool = False,
 ) -> dict[str, object]:
-    """Append exact recovery events and optionally wait for projection."""
+    """Append exact recovery events and optionally wait for projection.
+
+    *force* reconciles a turn without an end whose writer still looks alive,
+    for an operator who knows its process is gone. On a turn that is really
+    running it records a partial turn that collides with the writer's own
+    events, so it is never implied by naming the turn."""
     root = Path(root).resolve()
     metrics_root = root / "state" / "metrics"
     db_path = metrics_root / "metrics.db"
     started = time.monotonic()
-    plan = build_reconcile_plan(db_path, turn_id, root=root)
+    plan = build_reconcile_plan(db_path, turn_id, root=root, force=force)
     before = _measurement_ids(db_path, plan.measurement_ids)
     segment = (
         metrics_root
@@ -653,6 +679,7 @@ def reconcile_turn(
         "turns_repaired": int(bool(after - before)),
         "errors": 0,
         "turn_id": turn_id,
+        "forced": force,
         "provider": plan.provider,
         "measurement_source": (
             next(event.payload["measurement_source"] for event in plan.events if event.event_type == "usage.recorded")
@@ -688,7 +715,7 @@ def reconcile_missing(
     try:
         candidates = conn.execute(
             # A turn without an end that its own process has not moved on
-            # from is over only once its writer exited (see _window_end).
+            # from is over only once its writer is done (see _window_end).
             "SELECT t.turn_id, CASE WHEN t.ended_at_us IS NULL AND NOT EXISTS ("
             "SELECT 1 FROM turns AS later WHERE later.session_id=t.session_id "
             "AND later.started_at_us>t.started_at_us) THEN 1 ELSE 0 END AS open_ended, "
@@ -705,20 +732,21 @@ def reconcile_missing(
                "WHERE r.turn_id=t.turn_id AND r.attempts>=3) " if track_attempts else "")
             + "ORDER BY t.started_at_us",
         ).fetchall()
+        # Turns still running are dropped before the budget starts, with one
+        # writer_finished check per writer, so any number of them cannot hold
+        # back the turns after them.
+        spool_root = _spool_root(db_path)
+        writers: dict[str | None, bool] = {}
+        turn_ids = []
+        for turn_id, open_ended, writer in candidates:
+            if terminal_only and open_ended:
+                if writer not in writers:
+                    writers[writer] = _writer_done(conn, spool_root, writer)
+                if not writers[writer]:
+                    continue
+            turn_ids.append(str(turn_id))
     finally:
         conn.close()
-    # Turns still running are dropped before the budget starts, with one
-    # liveness check per writer, so any number of them cannot hold back the
-    # turns after them.
-    writers: dict[str | None, bool] = {}
-    turn_ids = []
-    for turn_id, open_ended, writer in candidates:
-        if terminal_only and open_ended:
-            if writer not in writers:
-                writers[writer] = _writer_gone(writer)
-            if not writers[writer]:
-                continue
-        turn_ids.append(str(turn_id))
     started = time.monotonic()
     results = []
     failures = []

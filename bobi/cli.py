@@ -2271,23 +2271,37 @@ def metrics_status(json_output):
 @click.option("--turn-id", default="", help="Reconcile one Bobi turn ID.")
 @click.option("--wait", is_flag=True, help="Wait for collector projection.")
 @click.option("--timeout", default=60.0, type=float, show_default=True)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="With --turn-id: take the turn's process as gone even if it looks alive. "
+    "Only for a process you know has exited; on a running turn this records a partial turn.",
+)
 @click.option("--json", "json_output", is_flag=True, help="Print JSON output.")
-def metrics_reconcile(turn_id, wait, timeout, json_output):
+def metrics_reconcile(turn_id, wait, timeout, force, json_output):
     """Recover exact usage from retained Claude/Codex transcripts."""
     from bobi.metrics.providers import ProviderContractError
     from bobi.metrics.reconcile import (
         ReconciliationError,
+        TurnStillRunning,
         reconcile_missing,
         reconcile_turn,
     )
 
+    if force and not turn_id:
+        raise click.UsageError("--force needs --turn-id")
     root = _detect_project_root()
     try:
         result = (
-            reconcile_turn(root, turn_id, wait=wait, timeout=timeout)
+            reconcile_turn(root, turn_id, wait=wait, timeout=timeout, force=force)
             if turn_id
             else reconcile_missing(root, wait=wait, timeout=timeout, terminal_only=True)
         )
+    except TurnStillRunning as exc:
+        hint = "" if force else (
+            " If its process is known to have exited, rerun with --force."
+        )
+        raise click.ClickException(f"{exc}.{hint}") from None
     except (ReconciliationError, ProviderContractError) as exc:
         raise click.ClickException(str(exc)) from None
     rendered = json.dumps(result, sort_keys=True)
