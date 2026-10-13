@@ -33,7 +33,7 @@ from bobi.metrics.router import (
 from bobi.metrics.routing import RoutingContext, resolve_route
 from bobi.metrics.runtime import MetricsRuntime
 from bobi.metrics.store import connect
-from bobi.redact import REDACTION_PLACEHOLDER, env_secret_values, redact_secrets
+from bobi.redact import REDACTION_PLACEHOLDER, env_secret_values, redact_secrets, scrub_values
 from bobi.sdk import load_session_route, save_session_id, save_session_route
 from bobi.session import Session
 from bobi.setup.actions import redact_secrets as setup_redact
@@ -230,6 +230,250 @@ def test_credential_setting_named_like_a_key_does_not_hide_the_key_from_shape_re
     task, _ = prepare_task(text, repo_path="/repo", max_bytes=8192, secrets=env_secret_values(env))
     assert secret not in task and REDACTION_PLACEHOLDER in task
     assert next(iter(env.values())) not in task
+
+
+def test_a_dotted_key_name_setting_does_not_hide_the_key_from_shape_redaction():
+    env = {"KEY_FIELD": "db.password"}
+    task, _ = prepare_task("db.password=fakefake1234", repo_path="/repo", max_bytes=8192,
+                           secrets=env_secret_values(env))
+    assert task == "[redacted]=[redacted]"
+
+
+def _key_names():
+    """Key names the shape rule recognizes, joined to a prefix by each
+    separator a key-name setting may use."""
+    keywords = ["password", "pgpassword", "passwd", "secret", "api_key", "api-key", "apikey",
+                "access_token", "auth-token", "refresh_token", "client_secret", "bot-token",
+                "secret_key", "private_key"]
+    cased = [form for word in keywords for form in (word, word.upper(), word.title())]
+    upper_tails = ["GH_TOKEN", "X9_KEY", "DB_PASS", "SVC2_GH_TOKEN"]
+    names = set()
+    for prefix in ("db", "Db2", "svc9", "a1b"):
+        for separator in (".", "-", "_"):
+            for key in cased + upper_tails:
+                names.add(f"{prefix}{separator}{key}")
+    names.update(cased + upper_tails)
+    return sorted(name for name in names if redact_secrets(f"{name}=fakefake1234")[1])
+
+
+@pytest.mark.parametrize("template", ["{name}=fakefake1234", "{name}: fakefake1234",
+                                      '{{"{name}": "fakefake1234"}}', "set {name} = 'fakefake1234' now"])
+def test_a_key_name_setting_never_redacts_less_than_no_setting(template):
+    leaks = []
+    for name in _key_names():
+        text = template.format(name=name)
+        plain, plain_count = prepare_task(text, repo_path="/repo", max_bytes=8192)
+        task, count = prepare_task(text, repo_path="/repo", max_bytes=8192,
+                                   secrets=env_secret_values({"KEY_FIELD": name}))
+        if ("fakefake1234" not in plain and "fakefake1234" in task) or count < plain_count:
+            leaks.append((name, plain, task))
+        elif len(name) >= 6 and name in task:
+            leaks.append((name, plain, task))
+    assert not leaks, leaks[:5]
+
+
+def _credential_values():
+    """Credential values mixing key words with spaces, quotes, `=`, `:` and
+    non-ASCII text, each alone and joined to a key name."""
+    pieces = ["my super secret phrase 42", "pass word secret", 'quo"te secret9', "it's my apikey",
+              "K9x!pwd=Lm2Qa", "token: Zq81 secret", "clé secrète password", "pässwört secret",
+              "secret\tTab9x", "api_key=Hx72 tail", "db.password", "Xy: api-key"]
+    return pieces + [f"{piece} {key}" for piece in pieces for key in ("api_key", "db.password")]
+
+
+@pytest.mark.parametrize("template", ["SMTP_PASSWORD={value}", "SMTP_PASSWORD: {value}",
+                                      '{{"SMTP_PASSWORD": "{value}"}}', "login with {value} now",
+                                      "SMTP_PASSWORD='{value}'"])
+def test_an_env_credential_value_never_survives_in_whole_or_in_part(template):
+    leaks = []
+    for value in _credential_values():
+        task, _ = prepare_task(template.format(value=value), repo_path="/repo", max_bytes=8192,
+                               secrets=env_secret_values({"SMTP_PASSWORD": value}))
+        survivors = [piece for piece in [value, *value.split()] if len(piece) >= 4 and piece in task]
+        if survivors:
+            leaks.append((value, task))
+    assert not leaks, leaks[:5]
+
+
+def _fuzzed_credentials(count=400):
+    """Deterministic credential values: key words and random runs joined by
+    separators, symbols, spaces, quotes and non-ASCII text."""
+    import random
+
+    rng = random.Random(20261013)
+    words = ["pwd", "password", "secret", "api_key", "token", "db.password", "X-API-Key", "Bearer"]
+    joiners = ["", ".", "-", "_", ":", "/", "@", ";", "&", "!", "=", " ", '"', "'", "\u00e9", "$", "+"]
+    alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    values = set(_credential_values())
+    while len(values) < count:
+        parts = [rng.choice(words) if rng.random() < 0.4
+                 else "".join(rng.choice(alphabet) for _ in range(rng.randint(3, 10)))
+                 for _ in range(rng.randint(2, 4))]
+        value = parts[0]
+        for part in parts[1:]:
+            value += rng.choice(joiners) + part
+        values.add(value)
+    return sorted(value for value in values
+                  if env_secret_values({"SMTP_PASSWORD": value}) == (value,))
+
+
+_FUZZ_CONTEXTS = [
+    "postgres://u:{v}@h/db", "postgres://{v}:x@h/db", "https://{v}@h/x",
+    "Authorization: Bearer {v}", "Authorization: Basic {v}", "Bearer x{v}",
+    '{{"password": "{v}"}}', "password={v}", "SMTP_PASSWORD: {v}", "x='{v}'",
+    "abc" + "Q" * 36 + "{v}", "{v}" + "Z" * 36, "pre{v}post", "login with {v} now", "{v}={v}",
+    # One occurrence consumed as a value, a later one the key of a credential.
+    "api_key={v}; {v}: fakefake1234", "x" * 36 + "{v} and {v}: fakefake1234",
+    "password={v} then {v}=fakefake1234",
+]
+
+
+def _surviving_pieces(value, context, task):
+    """Pieces (whitespace-separated, or letter/digit runs) of 4+ characters of
+    *value* left in *task* that the surrounding context did not supply."""
+    import re as _re
+
+    frame = context.replace("{v}", " ")
+    pieces = {value, *value.split(), *_re.findall(r"[A-Za-z0-9]{4,}", value)}
+    return sorted(piece for piece in pieces
+                  if len(piece) >= 4 and piece in task and piece not in frame)
+
+
+def _redacted_less(text, task, value):
+    """Letter/digit runs of *text* that redacting without the value, or
+    scrubbing the value before the shape rules, removes but *task* keeps."""
+    import re as _re
+
+    references = [prepare_task(text, repo_path="/repo", max_bytes=8192)[0],
+                  redact_secrets(scrub_values(text, (value,))[0])[0]]
+    return sorted({piece for piece in _re.findall(r"[A-Za-z0-9]{4,}", text)
+                   if piece in task and any(piece not in reference for reference in references)})
+
+
+@pytest.mark.parametrize("context", _FUZZ_CONTEXTS)
+def test_no_piece_of_an_env_credential_survives_in_any_context(context):
+    leaks = []
+    for value in _fuzzed_credentials():
+        text = context.format(v=value)
+        task, _ = prepare_task(text, repo_path="/repo", max_bytes=8192,
+                               secrets=env_secret_values({"SMTP_PASSWORD": value}))
+        survivors = _surviving_pieces(value, context, task) + _redacted_less(text, task, value)
+        if survivors:
+            leaks.append((value, task, survivors))
+    assert not leaks, (len(leaks), leaks[:5])
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("api_key=X-API-Key; X-API-Key: fakefake1234", "api_key=[redacted] [redacted]: [redacted]"),
+    ("x" * 36 + "X-API-Key and X-API-Key: fakefake1234", "[redacted] and [redacted]: [redacted]"),
+])
+def test_each_occurrence_of_a_key_named_credential_keeps_its_own_role(text, expected):
+    task, _ = prepare_task(text, repo_path="/repo", max_bytes=8192,
+                           secrets=env_secret_values({"API_KEY_HEADER": "X-API-Key"}))
+    assert task == expected
+
+
+def _scrub_first_then_redact(text, env):
+    """The earlier pipeline: credential values scrubbed before the shape rules,
+    except a bare word or a dash/underscore key name, scrubbed after them."""
+    import re as _re
+
+    from bobi.redact import _SECRET_KEY
+
+    key_name = _re.compile(_SECRET_KEY, _re.VERBOSE)
+    secrets = env_secret_values(env)
+    names = [value for value in secrets
+             if _re.fullmatch(r"[A-Za-z_]+", value)
+             or (_re.fullmatch(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", value) and key_name.search(value))]
+    words = tuple(value for value in secrets if any(value in name for name in names))
+    text, _ = scrub_values(text, tuple(value for value in secrets if value not in words))
+    text, _ = redact_secrets(text)
+    return scrub_values(text, words)[0]
+
+
+_COMPARISON_VALUES = [
+    {"API_KEY_HEADER": "Authorization"}, {"API_KEY_HEADER": "Proxy-Authorization"},
+    {"POSTGRES_PASSWORD": "password"}, {"API_KEY_HEADER": "X-API-Key"}, {"AUTH_SCHEME": "api-key"},
+    {"KEY_FIELD": "db.password"}, {"DB_PASSWORD_FIELD": "db2_password"}, {"AUTH_SCHEME": "Bearer"},
+    {"DB_PASSWORD": "K9x!pwd=Lm2Qa"}, {"SMTP_PASSWORD": "my super secret phrase 42"},
+    {"DB_PASSWORD": "pwd@mM0Lm7exG"}, {"APP_TOKEN": "GCJbW56eC;pwd&Ce65WbJCG"},
+    {"APP_SECRET": "fakefake1234"}, {"DB_PASS": "hunter2xyz"}, {"DEPLOY_TOKEN": "abc+" + "Z" * 44 + "/tail"},
+]
+_COMPARISON_CONTEXTS = [
+    "Authorization: Basic dXNlcjpwYXNzd29yZA==", "Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA==",
+    "Authorization: Bearer abcdefgh12345", "--password zzsecretval99", "psql --password zzsecretval99 -h db",
+    "postgres://u:{v}@h/db", "postgres://{v}:zzsecretval99@h/db", '{{"{v}": "zzsecretval99"}}',
+    '{{"password": "{v}"}}', "{v}=zzsecretval99", "{v}: zzsecretval99", "x='{v}'", 'PASSWORD="{v}"',
+    'password = """{v}\nline2 zzsecretval99"""', "login with {v} now", "api_key={v}; {v}: zzsecretval99",
+    "{v} and {v}: zzsecretval99", "Authorization: {v}", "{v}: Basic dXNlcjpwYXNzd29yZA==",
+    "{v}: Bearer abcdefgh12345", "--{v} zzsecretval99", "Q" * 36 + "{v}", "{v}" + "Z" * 36,
+]
+
+
+def _comparison_leaks(env, text):
+    """Letter/digit runs of 4+ the output keeps although the earlier pipeline
+    or redaction without the environment removes them, plus pieces of the
+    credential values themselves."""
+    import re as _re
+
+    task, _ = prepare_task(text, repo_path="/repo", max_bytes=8192, secrets=env_secret_values(env))
+    references = [_scrub_first_then_redact(text, env), redact_secrets(text)[0]]
+    runs = set(_re.findall(r"[A-Za-z0-9]{4,}", text))
+    kept = {run for run in runs if run in task and any(run not in reference for reference in references)}
+    for value in env_secret_values(env):
+        frame = text.replace(value, " ")
+        kept |= {piece for piece in {value, *value.split(), *_re.findall(r"[A-Za-z0-9]{4,}", value)}
+                 if len(piece) >= 4 and piece in task and piece not in frame}
+    return sorted(kept)
+
+
+def test_no_run_survives_that_scrub_first_or_env_free_redaction_removes():
+    cases = [(env, context.format(v=next(iter(env.values()))))
+             for env in _COMPARISON_VALUES for context in _COMPARISON_CONTEXTS]
+    cases += [({"SMTP_PASSWORD": value}, context.format(v=value))
+              for value in _fuzzed_credentials() for context in _FUZZ_CONTEXTS]
+    assert len(cases) >= 345
+    leaks = [(env, text, kept) for env, text in cases if (kept := _comparison_leaks(env, text))]
+    assert not leaks, (len(leaks), leaks[:5])
+
+
+def test_a_json_value_ending_in_an_earlier_redaction_is_redacted_without_a_stray_bracket():
+    text = "DB_PASS'=dXNlcjpwYXNz\",ghp_" + "a" * 22
+    assert redact_secrets(text) == ("DB_PASS'=[redacted]", 2)
+
+
+@pytest.mark.parametrize("values", [(), tuple(f"fakevalue{index:03d}" for index in range(50))])
+def test_redaction_memory_stays_proportional_to_the_input(values):
+    import tracemalloc
+
+    # Prose with a credential every ~800 characters: memory follows the
+    # number of redactions, never a per-character map of the whole text.
+    prose = "The quick brown fox reviewed the deploy plan and wrote a long note about it. " * 10
+    line = prose + "password=hunter2xyz then fakevalue007 and ghp_" + "a" * 22 + "\n"
+    text = line * (3_000_000 // len(line))
+    tracemalloc.start()
+    try:
+        from bobi.redact import redact_with_values
+
+        redacted, _ = redact_with_values(text, values)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert "hunter2xyz" not in redacted
+    assert peak < 8 * len(text), peak
+
+
+def test_a_bare_word_credential_setting_keeps_the_bearer_rule():
+    task, _ = prepare_task("Authorization: Bearer fakefake1234abcd", repo_path="/repo", max_bytes=8192,
+                           secrets=env_secret_values({"AUTH_SCHEME": "Bearer"}))
+    assert "fakefake1234abcd" not in task and "Bearer" not in task
+
+
+def test_a_spaced_passphrase_with_a_key_word_is_scrubbed_whole():
+    env = {"SMTP_PASSWORD": "my super secret phrase 42"}
+    task, _ = prepare_task("SMTP_PASSWORD=my super secret phrase 42", repo_path="/repo",
+                           max_bytes=8192, secrets=env_secret_values(env))
+    assert task == "SMTP_PASSWORD=[redacted]"
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -1130,6 +1374,38 @@ def test_workflow_resume_reuses_its_checkpoint_route_after_another_step_ran(monk
         assert runtime.close(timeout=2)
 
 
+def test_workflow_resume_never_takes_its_model_from_the_shared_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(
+        mode="enforce", entry_points=["workflow_start"])))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    workflow = replace(context(), session_name="workflow-run", entry_point="workflow_start")
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        routed = asyncio.run(resolve_route(workflow, runtime=runtime))
+        checkpoint = {"brain": "codex", "decision": asdict(routed.decision)}
+        # Another agent's step ran last in the run's shared provider session.
+        save_session_id("workflow-run", "provider-session", model="reviewer-model", root=tmp_path)
+        resumed = replace(workflow, fresh=False, prompt="")
+        # Without its checkpoint record a resume has no route, whatever the session ran.
+        outcome = asyncio.run(resolve_route(resumed, runtime=runtime))
+        assert (outcome.model, outcome.decision, outcome.reason) == ("configured", None, None)
+        # A config edit leaves the record stale; the route agent keeps the model the record chose.
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(
+            mode="enforce", entry_points=["workflow_start"], instructions="Edited.")))
+        stale = asyncio.run(resolve_route(resumed, runtime=runtime, sticky_record=checkpoint))
+        assert (stale.model, stale.decision, stale.reason) == ("cheap", None, "routing_sticky_stale")
+        foreign = asyncio.run(resolve_route(resumed, runtime=runtime,
+                                            sticky_record={**checkpoint, "brain": "claude"}))
+        assert (foreign.model, foreign.reason) == ("configured", "routing_sticky_stale")
+        # Routing switched off under a routed run returns it to its configured model.
+        monkeypatch.delenv("BOBI_METRICS_EXPERIMENT_JSON")
+        disabled = asyncio.run(resolve_route(resumed, runtime=runtime, sticky_record=checkpoint))
+        assert (disabled.model, disabled.reason) == ("configured", "routing_disabled_resumed")
+    finally:
+        assert runtime.close(timeout=2)
+
+
 def test_persistence_failure_never_executes_the_routed_model(monkeypatch, tmp_path):
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="enforce")))
     fixed_policy(monkeypatch)
@@ -1705,13 +1981,12 @@ def test_routing_withheld_from_a_launcher_and_not_restored_is_recorded_by_its_ch
         assert runtime.close(timeout=2)
 
 
-@pytest.mark.parametrize("brain", ["claude", "codex"])
-def test_an_unrestored_routing_config_stays_recorded_across_a_second_provider_hop(monkeypatch, tmp_path, brain):
+def test_an_unrestored_routing_config_stays_recorded_across_a_second_provider_hop(monkeypatch, tmp_path):
     import os
 
     from bobi import config as config_module
     from bobi.config import load_dotenv
-    from bobi.metrics.router import provider_env_delta
+    from bobi.metrics.router import provider_env
 
     (tmp_path / "package").mkdir()
     (tmp_path / ".env").write_text("UNRELATED=1\n")
@@ -1719,9 +1994,8 @@ def test_an_unrestored_routing_config_stays_recorded_across_a_second_provider_ho
         monkeypatch.delenv(name, raising=False)
     # A child that already recorded the reason: no config, the marker carried.
     monkeypatch.setenv("BOBI_INTERNAL_PROVIDER_CLEARED_ENV", "BOBI_METRICS_EXPERIMENT_JSON")
-    # Its provider runs `bobi` again; the Claude SDK merges the delta over this process's env.
-    hop = ({**os.environ, **provider_env_delta()} if brain == "claude"
-           else provider_subprocess_env(blank_inherited=True))
+    # Its provider (Codex directly, Claude through the SDK merge) runs `bobi` again.
+    hop = provider_env()
     for name in set(os.environ) - set(hop):
         monkeypatch.delenv(name)
     for name, value in hop.items():

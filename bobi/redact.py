@@ -1,5 +1,7 @@
 """Shared secret redaction for setup and opt-in policy egress."""
 
+from array import array
+from bisect import bisect_right
 import re
 
 # Full-token secret patterns for REDACTING freeform chat input before it
@@ -38,16 +40,13 @@ _SECRET_TOKEN = re.compile(
 # the upper-case tail of an env-style name (`GH_TOKEN`, `DB_PASS`), so code
 # like `primary_key=True` or `next_page_token: str` and prose like "key: 5" stay.
 # The left boundary excludes `_` so a match starts only at the start of a name,
-# which keeps the scan linear on long `a_a_a...` runs. The key name alone is
-# public so a credential setting whose value is a key name
-# (`API_KEY_HEADER=X-API-Key`) can be scrubbed after this rule has seen it.
+# which keeps the scan linear on long `a_a_a...` runs.
 _SECRET_KEY = r"""(?<![A-Za-z0-9_])(
         (?i:(?:--)?_*(?:[A-Za-z0-9]+_)*(?:(?:pg|mysql)?password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token
           |auth[_-]?token|refresh[_-]?token|client[_-]?secret|bot[_-]?token
           |secret[_-]?key|private[_-]?key))
       | _*(?:[A-Z0-9]+_)+(?:TOKEN|KEY|PASS)
     )(?![A-Za-z0-9])"""
-SECRET_KEY_NAME = re.compile(_SECRET_KEY, re.VERBOSE)
 # A quoted value may hold an escaped (`\'`) or SQL-doubled (`''`) quote and
 # ends at the line; a triple-quoted one may span lines.
 _SECRET_KV = re.compile(
@@ -80,46 +79,136 @@ _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 _NUMERIC_SECRET_SEGMENTS = frozenset({"PASS", "PASSWORD", "PASSWD", "PWD", "SECRET", "PIN"})
 
 
+def _kv_value_span(m: re.Match[str]) -> tuple[int, int] | None:
+    """The span of the credential value in a key/value match, or None when the
+    match is structure (a JSON literal, an empty or already-redacted value)."""
+    if m.group("quote"):
+        start, end = m.span("long")
+    elif m.group("short"):
+        start, end = m.span("quoted")
+    else:
+        start, end = m.span("bare")
+        if m.group("bare").startswith(REDACTION_PLACEHOLDER):
+            return None
+        if m.group(2)[:1] in "\"'":
+            # After a quoted key the value ends at the JSON/dict delimiter.
+            delimiter = re.search(r"[,}\]](?=[,}\]\"']|$)", m.group("bare"))
+            if delimiter:
+                end = start + delimiter.start()
+            if m.string[start:end] in _JSON_LITERAL:
+                return None
+    value = m.string[start:end]
+    if not value or value == REDACTION_PLACEHOLDER:
+        return None
+    return start, end
+
+
+def _userinfo_span(m: re.Match[str]) -> tuple[int, int]:
+    return m.end(1), m.end() - 1
+
+
+# Applied in order, each to the text the earlier ones produced.
+_RULES = (
+    (_SECRET_TOKEN, lambda m: m.span()),
+    (_SECRET_KV, _kv_value_span),
+    (_URL_USERINFO, _userinfo_span),
+)
+
+
+def secret_spans(text: str) -> tuple[list[tuple[int, int]], int]:
+    """The spans of *text* that :func:`redact_secrets` replaces, and how many
+    redactions that makes. Each rule runs on the text the earlier rules left;
+    its spans are mapped back onto *text*, so a span that covers an earlier
+    redaction covers the original characters behind it."""
+    spans: list[tuple[int, int]] = []
+    count = 0
+    for pattern, span_of in _RULES:
+        working, to_original = _apply(text, spans)
+        found = [span for span in map(span_of, pattern.finditer(working)) if span]
+        count += len(found)
+        spans += [to_original(a, b) for a, b in found]
+    return _merge(spans), count
+
+
+def _merge(spans) -> list[tuple[int, int]]:
+    """Sort *spans* and join the ones that overlap (not the ones that only touch)."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _apply(text: str, spans):
+    """*text* with each merged span replaced by the placeholder, and a function
+    mapping a span of the result back to the span of *text* it stands for.
+
+    The map keeps one entry per kept or replaced segment, in compact arrays, so
+    its size follows the number of redactions, not the length of *text*."""
+    parts: list[str] = []
+    # Per segment: its start in the result, its original start and end, and
+    # whether it is a placeholder (which stands for its whole original span).
+    offsets, starts, ends = array("q"), array("q"), array("q")
+    placeholders = bytearray()
+    position = written = 0
+
+    def segment(start: int, end: int, placeholder: bool) -> None:
+        offsets.append(written)
+        starts.append(start)
+        ends.append(end)
+        placeholders.append(placeholder)
+
+    for start, end in _merge(spans):
+        if start > position:
+            segment(position, start, False)
+            parts.append(text[position:start])
+            written += start - position
+        segment(start, end, True)
+        parts.append(REDACTION_PLACEHOLDER)
+        written += len(REDACTION_PLACEHOLDER)
+        position = end
+    segment(position, len(text), False)
+    parts.append(text[position:])
+
+    def to_original(a: int, b: int) -> tuple[int, int]:
+        first = bisect_right(offsets, a) - 1
+        last = bisect_right(offsets, b - 1) - 1
+        orig_start = starts[first] if placeholders[first] else starts[first] + a - offsets[first]
+        orig_end = ends[last] if placeholders[last] else starts[last] + b - offsets[last]
+        return orig_start, orig_end
+
+    return "".join(parts), to_original
+
+
 def redact_secrets(text: str) -> tuple[str, int]:
     """Strip secret-shaped substrings from `text`, returning
     (redacted_text, count). Idempotent — re-running on redacted text is a
     no-op (the placeholder has no secret shape)."""
-    count = 0
+    spans, count = secret_spans(text)
+    return _apply(text, spans)[0], count
 
-    def _tok(_m):
-        nonlocal count
-        count += 1
-        return REDACTION_PLACEHOLDER
 
-    text = _SECRET_TOKEN.sub(_tok, text)
+def redact_with_values(text: str, values) -> tuple[str, int]:
+    """Redact *text* and every exact occurrence of *values* together.
 
-    def _kv(m):
-        nonlocal count
-        quote = m.group("quote") or m.group("short") or ""
-        value, rest = (m.group("long") or m.group("quoted"), "") if quote else (m.group("bare"), "")
-        if not quote and (m.group("bare") or "").startswith(REDACTION_PLACEHOLDER):
-            return m.group(0)
-        if not quote and m.group(2)[:1] in "\"'":
-            # After a quoted key the value ends at the JSON/dict delimiter.
-            end = re.search(r"[,}\]](?=[,}\]\"']|$)", value)
-            if end:
-                value, rest = value[:end.start()], value[end.start():]
-            if value in _JSON_LITERAL:
-                return m.group(0)
-        if not value or value == REDACTION_PLACEHOLDER:
-            return m.group(0)
-        count += 1
-        return f"{m.group(1)}{m.group(2)}{quote}{REDACTION_PLACEHOLDER}{quote}{rest}"
-
-    text = _SECRET_KV.sub(_kv, text)
-
-    def _userinfo(m):
-        nonlocal count
-        count += 1
-        return f"{m.group(1)}{REDACTION_PLACEHOLDER}@"
-
-    text = _URL_USERINFO.sub(_userinfo, text)
-    return text, count
+    The union of three span sets, overlapping spans becoming one placeholder:
+    what the shape rules redact in the original text (exactly as without
+    *values*), every occurrence of a value, and what the shape rules redact
+    once the values are scrubbed (`postgres://[redacted]:x@h` is userinfo).
+    Nothing that any of these removes survives."""
+    occurrences: list[tuple[int, int]] = []
+    for value in {value for value in values if value and value not in REDACTION_PLACEHOLDER}:
+        start = text.find(value)
+        while start != -1:
+            occurrences.append((start, start + len(value)))
+            start = text.find(value, start + 1)
+    spans, count = secret_spans(text)
+    scrubbed, to_original = _apply(text, occurrences)
+    after_scrub, _ = secret_spans(scrubbed)
+    spans += occurrences + [to_original(a, b) for a, b in after_scrub]
+    return _apply(text, spans)[0], count + len(occurrences)
 
 
 def env_secret_values(env) -> tuple[str, ...]:

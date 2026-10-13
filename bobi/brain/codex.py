@@ -192,13 +192,12 @@ async def _spawn_codex(
     ``codex exec`` blocks reading a piped-but-open stdin (Phase-0 gotcha).
     Non-JSON lines (banners) are skipped.
     """
-    from bobi.env import agent_spawn_env
-    from bobi.metrics.router import provider_subprocess_env
+    from bobi.metrics.router import provider_env
 
     proc = await asyncio.create_subprocess_exec(
         *argv,
         cwd=cwd,
-        env=provider_subprocess_env(agent_spawn_env()),
+        env=provider_env(),
         stdin=asyncio.subprocess.PIPE if stdin_text is not None
         else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,

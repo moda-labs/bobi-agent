@@ -423,7 +423,8 @@ async def test_spawn_codex_scrubs_metrics_routing_secrets(monkeypatch, tmp_path)
         "import json, os\n"
         "names = ['BOBI_METRICS_EXPERIMENT_JSON', 'TYPESAFE_API_KEY']\n"
         "print(json.dumps({'type': 'env', 'present': "
-        "[name for name in names if name in os.environ]}), flush=True)\n"
+        "[name for name in names if name in os.environ], "
+        "'marker': os.environ.get('BOBI_INTERNAL_PROVIDER_CLEARED_ENV', '')}), flush=True)\n"
     )
 
     events = [
@@ -432,7 +433,27 @@ async def test_spawn_codex_scrubs_metrics_routing_secrets(monkeypatch, tmp_path)
         )
     ]
 
-    assert events == [{"type": "env", "present": []}]
+    # Absent, and named so a `bobi` child restores them or records why not.
+    assert events == [{"type": "env", "present": [],
+                       "marker": "BOBI_METRICS_EXPERIMENT_JSON,TYPESAFE_API_KEY"}]
+
+
+@pytest.mark.asyncio
+async def test_spawn_codex_puts_user_bin_dirs_on_path(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "user-bin"
+    monkeypatch.setenv("XDG_BIN_HOME", str(bin_dir))
+    script = (
+        "import json, os\n"
+        "print(json.dumps({'type': 'env', 'path': os.environ['PATH'].split(os.pathsep)}), flush=True)\n"
+    )
+
+    events = [
+        event async for event in _spawn_codex(
+            [sys.executable, "-c", script], str(tmp_path)
+        )
+    ]
+
+    assert str(bin_dir) in events[0]["path"]
 
 
 @pytest.mark.asyncio

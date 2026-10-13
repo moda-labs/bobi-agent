@@ -101,6 +101,18 @@ def provider_env_delta(overrides: Mapping[str, str] | None = None) -> dict[str, 
     return delta
 
 
+def provider_env(overrides: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The full environment for a provider CLI that takes one whole (Codex):
+    this process's environment with :func:`provider_env_delta` applied, so both
+    brains carry the same marker, held or inherited, that lets a ``bobi`` CLI
+    child restore the routing variables or record why it could not. The
+    variables the delta blanks are left out entirely, which a child treats the
+    same way as blank."""
+    delta = provider_env_delta(overrides)
+    env = {**os.environ, **delta}
+    return {name: value for name, value in env.items() if value or delta.get(name) != ""}
+
+
 @dataclass(frozen=True)
 class ExperimentConfig:
     """A validated short JEV config: one policy routing between candidate models."""
