@@ -207,11 +207,16 @@ function versionAtLeast(value: unknown, minimum: readonly number[]): boolean {
 	return true;
 }
 
-async function metricsDrilldownUnsupported(
+/**
+ * The heartbeat's supervisor version when it is too old (or missing/malformed)
+ * to serve fine-grained metrics; null when it is new enough or the instance is
+ * unknown (the command path reports an unknown instance itself).
+ */
+async function supervisorTooOldForMetrics(
 	store: FleetStorage,
 	fleet: string,
 	instance: string,
-): Promise<string | null> {
+): Promise<{ version: string } | null> {
 	const record = await store.getInstance(fleet, instance);
 	if (!record) return null;
 	const supervisor = record.snapshot.supervisor;
@@ -219,9 +224,19 @@ async function metricsDrilldownUnsupported(
 		? (supervisor as Record<string, unknown>).version
 		: undefined;
 	if (versionAtLeast(version, METRICS_DRILLDOWN_MIN_SUPERVISOR)) return null;
+	return { version: typeof version === "string" ? version : "unknown" };
+}
+
+async function metricsDrilldownUnsupported(
+	store: FleetStorage,
+	fleet: string,
+	instance: string,
+): Promise<string | null> {
+	const tooOld = await supervisorTooOldForMetrics(store, fleet, instance);
+	if (!tooOld) return null;
 	return (
 		`Fine-grained metrics are unavailable on ${fleet}/${instance}: supervisor ` +
-		`version ${typeof version === "string" ? version : "unknown"}; version 0.4.0 or newer is required.`
+		`version ${tooOld.version}; version 0.4.0 or newer is required.`
 	);
 }
 
@@ -478,8 +493,8 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 				"command to each matching instance. The job, token and cost totals are never " +
 				"filtered: session_id, run_key, model, experiment_id, variant_id and group_by " +
 				"apply only to each instance's `fine_grained` block. When an instance cannot " +
-				"serve that block (metrics off or busy, or a range over 31 days), it is absent " +
-				"and `fine_grained_unavailable.code` says why.",
+				"serve that block (metrics off or busy, a range over 31 days, or a supervisor " +
+				"older than 0.4.0), it is absent and `fine_grained_unavailable.code` says why.",
 			inputSchema: z.object({
 				days: usageDaysArg,
 				fleet: usageFleetArg,
@@ -500,6 +515,9 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 		async ({ days, fleet: fleetFilter, session_id, run_key, model, experiment_id, variant_id, group_by }) => {
 			const endAtMs = Date.now();
 			const windowSeconds = days * 24 * 60 * 60;
+			const filtered = Boolean(
+				session_id || run_key || model || experiment_id || variant_id || group_by?.length,
+			);
 			const status = await buildFleetStatus(store, endAtMs, windows());
 			const targets = status.instances.filter((entry) => {
 				const deployment = entry.deployment as { fleet?: string; instance?: string };
@@ -566,13 +584,21 @@ export function createFleetMcpServer(store: FleetStorage, env: McpEnv, publish: 
 									: String(outcome.view.error ?? "supervisor returned no usable usage payload"),
 						};
 					}
+					// A pre-0.4.0 supervisor ignores every filter and returns the bare
+					// legacy fold, so a filtered question would read as answered.
+					const tooOld =
+						filtered && !usage.fine_grained
+							? await supervisorTooOldForMetrics(store, fleet, instance)
+							: null;
 					return {
 						ok: true as const,
 						fleet,
 						instance,
 						usage: roundedUsage(usage),
 						fine_grained: usage.fine_grained,
-						fine_grained_unavailable: usage.fine_grained_unavailable,
+						fine_grained_unavailable: tooOld
+							? { code: "supervisor_too_old" }
+							: usage.fine_grained_unavailable,
 					};
 				}),
 			);

@@ -266,7 +266,8 @@ fine-grained layer cannot serve the request (`metrics_not_ready`,
 `metrics_busy` from the query or from a full or stopping executor,
 `query_too_slow`, or a range over 31 days), `usage` still answers `done` with
 the legacy fold alone, omits the fine-grained keys, and adds
-`fine_grained_unavailable: {"code": ...}` naming the refusal. The legacy totals
+`fine_grained_unavailable: {"code": ...}` naming the refusal (clients add
+`supervisor_too_old` for a supervisor older than `0.4.0`; see below). The legacy totals
 are never filtered, so a caller that passed filters must read this field. When
 the executor is full or stopping, the legacy fold uses the session registry
 only (no metrics read) and the code is `metrics_busy`. Malformed arguments still fail with
@@ -305,7 +306,14 @@ two seconds for running reads before allowing supervisor shutdown to continue.
 Operator clients and MCP preflight the heartbeat's `supervisor.version` before
 issuing a drill-down and reject old, missing, or malformed versions without
 recording a command. The legacy `usage` summary remains available to older
-supervisors and does not require this preflight.
+supervisors. An unfiltered summary needs no preflight. A filtered one (any of
+the fine-grained arguments above, including `group_by`) is still sent, because
+an older supervisor ignores the filters and returns its unfiltered legacy fold;
+when the heartbeat's version is old, missing, or malformed, MCP's
+`bobi_usage_summary` adds `fine_grained_unavailable: {"code":
+"supervisor_too_old"}` to that instance's entry, and `bobi admin
+metrics_summary` adds it beside the returned `usage` fold (or on the envelope
+when the command has not resolved yet).
 
 Session turns use opaque, filter-bound keyset cursors. A cursor is valid only
 with the same filters and page size, and inserts ahead of its last row do not

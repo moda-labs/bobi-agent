@@ -720,6 +720,40 @@ describe("/mcp write tools", () => {
 		expect(entry.fine_grained_unavailable).toEqual({ code: "invalid_range" });
 	});
 
+	it("bobi_usage_summary marks a filtered answer from a pre-0.4.0 supervisor as unfiltered", async () => {
+		const fleetName = `old-sup-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+		const { bubble, fleet, instance } = await liveInstance("old-sup", fleetName);
+		const key = `fleet_instance:${encodeURIComponent(fleet)}:${encodeURIComponent(instance)}`;
+		const raw = await env.EVENTS.get(key);
+		expect(raw).toBeTruthy();
+		const record = JSON.parse(raw!);
+		record.snapshot.supervisor.version = "0.3.0";
+		await env.EVENTS.put(key, JSON.stringify(record));
+
+		const inFlight = callTool("bobi_usage_summary", { days: 1, fleet, model: "haiku" });
+		const recorded = await awaitRecordedCommand(fleet, instance);
+		// An old supervisor answers with the bare legacy fold and ignores the filter.
+		await publishSigned("fleet/command_result", bubble, {
+			deployment: { fleet, instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: {
+				usage: {
+					jobs: { total: 2, completed: 2, failed: 0, closed: 0 },
+					tokens: { input: 10, cached_input: 0, output: 5, total: 15 },
+					cost_usd: 0.1,
+					estimated_cost_usd: 0,
+				},
+			},
+		});
+
+		const body = JSON.parse(await toolText(await inFlight));
+		const [entry] = body.fleets[0].instances;
+		expect(entry.jobs.total).toBe(2);
+		expect(entry.fine_grained).toBeUndefined();
+		expect(entry.fine_grained_unavailable).toEqual({ code: "supervisor_too_old" });
+	});
+
 	it("bobi_usage_summary returns partial data when one instance is unavailable", async () => {
 		const fleetName = `partial-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 		const live = await liveInstance("live", fleetName);
