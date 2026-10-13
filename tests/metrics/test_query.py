@@ -1325,9 +1325,9 @@ def _insert_once(conn, statement):
     conn.execute(sql.replace("INSERT INTO", "INSERT OR IGNORE INTO", 1), params)
 
 
-def _seed_history(root, *, old_turns, recent_turns, now):
+def _seed_history(root, *, old_turns, recent_turns, now, estimated_costs=False):
     """Turns of four calls each: `old_turns` a week back, `recent_turns` in the
-    last hour."""
+    last hour; with `estimated_costs`, each turn has an estimate-only cost row."""
     conn = connect(root / "state" / "metrics" / "metrics.db")
     migrate(conn)
     conn.execute("INSERT OR IGNORE INTO sessions(session_id,session_name,brain,provider,"
@@ -1348,6 +1348,11 @@ def _seed_history(root, *, old_turns, recent_turns, now):
                                       inv=f"{turn_id}-{k}", turn=turn_id, at=at + k))
         _insert_once(conn, _usage(f"u-{turn_id}", "turn", "claude-opus-5-5[1m]", 300, 30,
                                   turn=turn_id, at=at + 9))
+        if estimated_costs:
+            conn.execute("INSERT OR IGNORE INTO cost_measurements(cost_measurement_id,scope,session_id,"
+                         "turn_id,provider,model,amount_usd,measurement_source,is_estimated,observed_at_us) "
+                         "VALUES(?,'turn','h',?,'anthropic','claude-opus-5-5',0.01,'calibrated_estimator',1,?)",
+                         (f"c-{turn_id}", turn_id, at + 9))
         conn.execute(
             "INSERT OR IGNORE INTO router_decisions(router_decision_id,turn_id,router_name,"
             "router_version,candidate_models_json,model_selected,router_latency_ms,"
@@ -1382,26 +1387,28 @@ def _vm_steps(monkeypatch, run):
     return ticks[0]
 
 
-def test_summary_of_the_last_hour_does_not_grow_with_older_history(tmp_path, monkeypatch):
+@pytest.mark.parametrize("estimated_costs", [False, True], ids=["reported", "estimated"])
+def test_summary_of_the_last_hour_does_not_grow_with_older_history(tmp_path, monkeypatch, estimated_costs):
     now = time.time()
     args = {"window_seconds": 3600, "end_at": now, "include_dashboard": True}
-    _seed_history(tmp_path, old_turns=200, recent_turns=5, now=now)
+    _seed_history(tmp_path, old_turns=200, recent_turns=5, now=now, estimated_costs=estimated_costs)
     queries = MetricsQueries(tmp_path, deadline_seconds=60)
     small = _vm_steps(monkeypatch, lambda: queries.summary(dict(args)))
-    _seed_history(tmp_path, old_turns=1000, recent_turns=5, now=now)
+    _seed_history(tmp_path, old_turns=1000, recent_turns=5, now=now, estimated_costs=estimated_costs)
     large = _vm_steps(monkeypatch, lambda: queries.summary(dict(args)))
 
     assert queries.summary(dict(args))["totals"]["input_tokens"] == 5 * (300 + 100)
     assert large <= small * 1.5 + 5, (small, large)
 
 
-def test_turn_list_of_the_last_hour_does_not_grow_with_older_history(tmp_path, monkeypatch):
+@pytest.mark.parametrize("estimated_costs", [False, True], ids=["reported", "estimated"])
+def test_turn_list_of_the_last_hour_does_not_grow_with_older_history(tmp_path, monkeypatch, estimated_costs):
     now = time.time()
     args = {"window_seconds": 3600, "end_at": now, "limit": 50}
-    _seed_history(tmp_path, old_turns=200, recent_turns=5, now=now)
+    _seed_history(tmp_path, old_turns=200, recent_turns=5, now=now, estimated_costs=estimated_costs)
     queries = MetricsQueries(tmp_path, deadline_seconds=60)
     small = _vm_steps(monkeypatch, lambda: queries.turns(dict(args)))
-    _seed_history(tmp_path, old_turns=1000, recent_turns=5, now=now)
+    _seed_history(tmp_path, old_turns=1000, recent_turns=5, now=now, estimated_costs=estimated_costs)
     large = _vm_steps(monkeypatch, lambda: queries.turns(dict(args)))
 
     assert len(queries.turns(dict(args))["turns"]) == 5

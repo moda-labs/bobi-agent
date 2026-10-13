@@ -6,6 +6,7 @@ and rollup functions for the named cost-attribution CLI command.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -86,6 +87,7 @@ _CLAUDE_ALIASES = {
 }
 
 
+@functools.lru_cache(maxsize=1024)
 def normalize_model(provider: str, model: str) -> tuple[str, str]:
     """Resolve a recorded model id to the ``(provider, model)`` price-table key.
 
@@ -147,6 +149,7 @@ def model_prices(model: str, provider: str = "gateway") -> tuple[float, float, f
     return _lookup_prices(provider, model)
 
 
+@functools.lru_cache(maxsize=1024)
 def _price_key(provider: str, model: str) -> str | None:
     """The price-table key for a recorded model, tolerating a date or
     ``-latest`` suffix. A gateway can front Anthropic or OpenAI, so it tries

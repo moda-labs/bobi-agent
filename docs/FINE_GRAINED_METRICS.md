@@ -429,7 +429,12 @@ size (512 KiB), and execution time. Saturation returns `metrics_busy` (retry);
 a query that misses its one-second deadline returns `query_too_slow` (do not
 retry; narrow the range or filters); missing storage returns `metrics_not_ready`.
 A query's cost follows the turns in its range, not the size of the history:
-`best_usage` picks each turn's best rows through the turn index. Session pagination uses
+`best_usage` picks each turn's best rows through the turn index. The
+dashboard summary over the widest preset is the heaviest query: on a laptop it
+takes about 0.7 s for 11,000 routed turns in the range (four calls each), and
+its cost grows with the turns in range. An agent running more than about
+15,000 turns a month should expect `query_too_slow` on "All (up to 31d)" and
+use the 7-day preset instead. Session pagination uses
 filter-bound cursors. Protect the fleet operator token: `bobi admin` refuses an
 `--url` that is neither `https` nor a loopback address, since every request
 carries it.

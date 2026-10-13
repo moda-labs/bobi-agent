@@ -173,12 +173,13 @@ def _exact_turn_cost_exists(alias: str) -> str:
 
 
 def _effective_cost(alias: str) -> str:
+    # `IS` matches NULL to NULL like the old COALESCE form but stays sargable,
+    # so idx_cost_turn / idx_cost_invocation serve the lookup instead of a scan.
     return (
         f"({alias}.is_estimated=0 OR NOT EXISTS (SELECT 1 FROM cost_measurements exact "
-        f"WHERE exact.scope={alias}.scope "
-        f"AND COALESCE(exact.session_id,'')=COALESCE({alias}.session_id,'') "
-        f"AND COALESCE(exact.turn_id,'')=COALESCE({alias}.turn_id,'') "
-        f"AND COALESCE(exact.invocation_id,'')=COALESCE({alias}.invocation_id,'') "
+        f"WHERE exact.turn_id IS {alias}.turn_id AND exact.scope={alias}.scope "
+        f"AND exact.invocation_id IS {alias}.invocation_id "
+        f"AND exact.session_id IS {alias}.session_id "
         "AND exact.is_estimated=0))"
     )
 
@@ -730,6 +731,8 @@ class MetricsQueries:
             # parent and child scopes in one aggregate.
             chosen_usage = _chosen_usage()
             groups: list[dict[str, object]] = []
+            buckets: list[sqlite3.Row] | None = None
+            bucket_us = 3_600_000_000 if end - start <= 2 * 86_400_000_000 else 86_400_000_000
             if group_by:
                 dimensions = [
                     (name, group_columns[name], f"group_{index}")
@@ -801,23 +804,32 @@ class MetricsQueries:
                     group.pop("turn_granularity_turns")
                     groups.append(group)
             else:
-                usage = conn.execute(
-                    "WITH chosen AS (SELECT b.* FROM best_usage b JOIN turns t ON t.turn_id=b.turn_id JOIN sessions s ON s.session_id=t.session_id "
+                # The dashboard's buckets ride the same statement: the usage choice
+                # is the expensive part, so it is materialized and run once.
+                bucket_rows = (
+                    " UNION ALL SELECT 1 AS row_kind,(turn_started_at_us / ?) * ? AS started_at_us," +
+                    ",".join(_strict_sum(column) for column in TOKEN_COLUMNS) +
+                    ",NULL,NULL,NULL,NULL,MAX(is_estimated) AS is_estimated FROM chosen GROUP BY 2"
+                ) if dashboard else ""
+                selected = conn.execute(
+                    "WITH chosen AS MATERIALIZED (SELECT b.*,t.started_at_us AS turn_started_at_us FROM turns t JOIN sessions s ON s.session_id=t.session_id CROSS JOIN best_usage b ON b.turn_id=t.turn_id "
                     f"WHERE {where} AND ({chosen_usage})) "
-                    "SELECT " + ",".join(_strict_sum(column) for column in TOKEN_COLUMNS) +
+                    "SELECT 0 AS row_kind,NULL AS started_at_us," + ",".join(_strict_sum(column) for column in TOKEN_COLUMNS) +
                     ",COUNT(DISTINCT turn_id) AS turns,"
                     "(SELECT COUNT(*) FROM ("
                     "SELECT invocation_id FROM chosen WHERE scope='invocation' "
-                    "UNION SELECT i.invocation_id FROM chosen fallback "
-                    "JOIN llm_invocations i ON fallback.scope='turn' "
-                    "AND i.turn_id=fallback.turn_id)) "
+                    "UNION SELECT i.invocation_id FROM llm_invocations i "
+                    "WHERE i.turn_id IN (SELECT turn_id FROM chosen WHERE scope='turn'))) "
                     "AS invocations,"
                     "COUNT(DISTINCT CASE WHEN scope='invocation' THEN turn_id END) "
                     "AS invocation_granularity_turns,"
                     "COUNT(DISTINCT CASE WHEN scope='turn' THEN turn_id END) "
-                    "AS turn_granularity_turns FROM chosen",
-                    tuple(params),
-                ).fetchone()
+                    "AS turn_granularity_turns,NULL AS is_estimated FROM chosen" + bucket_rows,
+                    (*params, *((bucket_us, bucket_us) if dashboard else ())),
+                ).fetchall()
+                usage = next(row for row in selected if row["row_kind"] == 0)
+                buckets = sorted((row for row in selected if row["row_kind"] == 1),
+                                 key=lambda row: row["started_at_us"])
             totals = {column: usage[column] for column in TOKEN_COLUMNS}
             totals.update({"turns": int(usage["turns"] or 0), "invocations": int(usage["invocations"] or 0)})
             non_usage_filters = list(filters)
@@ -891,15 +903,15 @@ class MetricsQueries:
                 "coverage": coverage,
             }
             if dashboard:
-                bucket_us = 3_600_000_000 if end - start <= 2 * 86_400_000_000 else 86_400_000_000
-                buckets = conn.execute(
-                    "SELECT (t.started_at_us / ?) * ? AS started_at_us," +
-                    ",".join(_strict_sum(column) for column in TOKEN_COLUMNS) +
-                    ",MAX(b.is_estimated) AS is_estimated FROM best_usage b "
-                    "JOIN turns t ON t.turn_id=b.turn_id JOIN sessions s ON s.session_id=t.session_id "
-                    f"WHERE {where} AND ({chosen_usage}) GROUP BY 1 ORDER BY 1",
-                    (bucket_us, bucket_us, *params),
-                ).fetchall()
+                if buckets is None:
+                    buckets = conn.execute(
+                        "SELECT (t.started_at_us / ?) * ? AS started_at_us," +
+                        ",".join(_strict_sum(column) for column in TOKEN_COLUMNS) +
+                        ",MAX(b.is_estimated) AS is_estimated FROM best_usage b "
+                        "JOIN turns t ON t.turn_id=b.turn_id JOIN sessions s ON s.session_id=t.session_id "
+                        f"WHERE {where} AND ({chosen_usage}) GROUP BY 1 ORDER BY 1",
+                        (bucket_us, bucket_us, *params),
+                    ).fetchall()
                 decision_where = where
                 routing = conn.execute(
                     f"SELECT COUNT(*) AS turns,COUNT(CASE WHEN {_ROUTED_TURN} THEN 1 END) AS routed_turns,"
@@ -944,7 +956,8 @@ class MetricsQueries:
                 _enforce_row_count(list(buckets), list(models))
                 payload.update(
                     range={"from_us": start, "to_us": end, "bucket_seconds": bucket_us // 1_000_000},
-                    buckets=[_row(row) for row in buckets],
+                    buckets=[{key: row[key] for key in ("started_at_us", *TOKEN_COLUMNS, "is_estimated")}
+                             for row in buckets],
                     routing={
                         **(_row(routing) or {}),
                         "models": [_row(row) for row in models],

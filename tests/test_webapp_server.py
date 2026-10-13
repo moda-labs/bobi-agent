@@ -170,6 +170,31 @@ class TestMetrics:
         assert sessions.status_code == 200
         assert {session["session_id"] for session in sessions.json()["sessions"]} == {"s1", "s2"}
 
+    def test_metrics_turn_list_carries_a_short_prompt_and_long_text_fits(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        prompt = "Giải thích nhật ký ghi trước. " * 1000
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z", prompt),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Xong.")]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        turns = _client().get(base + "/turns", params=self.RANGE).json()["turns"]
+        routine = next(turn for turn in turns if turn["turn_id"] == "t-routine")
+        assert len(routine["conversation"]["user_message"]) <= 512
+        assert routine["conversation"]["user_message_truncated"] is True
+        detail = _client().get(base + "/turns/t-routine")
+        assert detail.status_code == 200
+        assert detail.json()["conversation"]["user_message"].startswith("Giải thích")
+
     @pytest.mark.parametrize("brain", ["claude", "codex"])
     def test_metrics_old_turn_uses_timestamp_window_before_tail_limit(self, bobi_install, monkeypatch, tmp_path, brain):
         from bobi.metrics.store import connect
@@ -1892,7 +1917,7 @@ class TestRoutingConfig:
                     nested = {"child": nested}
                 raw["extra"] = nested
             if fault == "expanded":
-                raw["extra"] = "é" * 30000
+                raw["extra"] = "é" * 300000
             return httpx.Response(200, content=json.dumps(raw, ensure_ascii=False).encode())
         monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
             lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))

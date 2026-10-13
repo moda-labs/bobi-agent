@@ -31,6 +31,8 @@ from bobi.chat_history import read_chat, read_transcript_messages
 DEFAULT_CHAT_TIMEOUT = 300
 # Collector health older than this is not live (it is rewritten every second).
 COLLECTOR_STALE_US = 30_000_000
+# Characters of the prompt a turn-list row carries; the drawer reads the rest.
+LIST_MESSAGE_CHARS = 512
 
 def _clean_event_text(text: str) -> str:
     lines = text.strip().splitlines()
@@ -965,7 +967,7 @@ class LocalRuntime(TeamRuntime):
                 "model_version": result.model_version, "pinned_version": policy_config.version}
         from bobi.metrics.query import MAX_RESPONSE_BYTES
 
-        if len(json.dumps(data, ensure_ascii=True).encode()) > MAX_RESPONSE_BYTES:
+        if len(json.dumps(data, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
             raise MetricsQueryError("JEV simulation returned an oversized response", "policy_invalid_response")
         return data
 
@@ -1089,6 +1091,11 @@ class LocalRuntime(TeamRuntime):
                     turn["semantic_title"] = conversation["semantic_title"]
                     if view == "turns":
                         turn["conversation"] = {key: conversation[key] for key in ("status", "origin", "prompt_snippet", "response_snippet", "user_message", "semantic_title")}
+                        # A list row needs a title, not the prompt: the drawer reads the whole text.
+                        message = turn["conversation"]["user_message"]
+                        turn["conversation"]["user_message_truncated"] = bool(message and len(message) > LIST_MESSAGE_CHARS)
+                        if turn["conversation"]["user_message_truncated"]:
+                            turn["conversation"]["user_message"] = message[:LIST_MESSAGE_CHARS]
                     else:
                         data["conversation"] = conversation
             if view == "summary":
@@ -1110,7 +1117,8 @@ class LocalRuntime(TeamRuntime):
                 )
             from bobi.metrics.query import MAX_RESPONSE_BYTES
 
-            if len(json.dumps(data, ensure_ascii=True).encode()) > MAX_RESPONSE_BYTES:
+            # Measured as sent: the JSON response is UTF-8, not ASCII-escaped.
+            if len(json.dumps(data, ensure_ascii=False).encode()) > MAX_RESPONSE_BYTES:
                 raise MetricsQueryError("response exceeds 512 KiB; narrow the query", "query_too_large")
             return data
         finally:
