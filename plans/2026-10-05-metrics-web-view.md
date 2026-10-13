@@ -28,3 +28,19 @@ policy confidence/privacy, sticky call counts, WAL snapshots, auth/Host guards,
 busy/unavailable responses, filter changes during reads, navigation cancellation,
 and preserved transcript/composer behavior. Screenshots were reviewed locally;
 QA assets are untracked. Live Slack, providers, and volumes were not accessed.
+
+### 2026-10-13 amendment
+
+Later work on the same branch changed three statements above; the current
+contract is `docs/FINE_GRAINED_METRICS.md`.
+
+- The view now invokes models on request: `POST .../metrics/test-run` runs one
+  sandbox prompt on a candidate model, and the JEV modal's Test Routing calls
+  the saved TypeSafe policy with bounded, redacted text.
+- The view changes routing: `POST .../metrics/jev-config` writes the short JEV
+  policy to the agent's `run/.env` (mode `0600`), and disabling keeps it as
+  `BOBI_METRICS_EXPERIMENT_DISABLED_JSON`.
+- The runs table falls back to metrics usage for runs without a ledger total, so
+  the runs interface is no longer unchanged.
+- The verification counts above are from 2026-10-05; the pull request records
+  the current suite results.

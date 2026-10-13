@@ -42,6 +42,16 @@ CLI credential handoff and sticky reuse in an isolated synthetic cohort.
 Operator-confirmed retention approval precedes this check. Synthetic acceptance
 does not prove production treatment sampling or the operational rollout gates.
 
+### 2026-10-13 amendment
+
+The control/treatment experiment framework was removed before this work
+shipped: there is no HMAC arm assignment, SRM check or intent-to-treat
+analysis, and only the unused schema columns remain. The checked items below
+that preserve or separate HMAC arm assignment are superseded. Routing takes the
+short JEV config, runs in `shadow` or `enforce` mode, and is described in
+`docs/JEV_ROUTER_DATA_FLOW.md` and `docs/FINE_GRAINED_METRICS.md`; the
+2026-09-24 plan's status header records the same removal.
+
 ### 2026-10-01 acceptance amendment
 
 - The operator-approved gateway replaces the initial subscription-only bootstrap.
