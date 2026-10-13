@@ -179,6 +179,10 @@ def _submit_command(
             return view
         try:
             polled = http.get(result_url, headers=headers, timeout=remaining)
+        except httpx.TimeoutException:
+            # The request timeout is the time left, so the deadline has passed
+            # mid-poll: the command is unresolved, not failed.
+            return view
         except httpx.RequestError as exc:
             raise AdminClientError(f"admin poll failed: {exc}") from None
         if polled.status_code == 200:

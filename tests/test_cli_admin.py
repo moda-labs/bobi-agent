@@ -3,6 +3,7 @@ a wait that ran out of time apart without parsing the printed envelope."""
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 from bobi.cli import main
@@ -83,3 +84,72 @@ def test_help_states_the_exit_codes():
     assert "Exit codes: 0 success" in text
     assert "1 the command failed" in text
     assert "2 --wait timed out" in text
+
+
+def _fake_unresolved_worker(monkeypatch, poll_failure):
+    """A command that never resolves: every poll reports `pending` after a
+    fixed latency, until the poll that `poll_failure` decides to fail."""
+    import httpx
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr("bobi.admin_client.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        "bobi.admin_client.time.sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    request = httpx.Request("GET", "http://127.0.0.1:8787")
+
+    class Response:
+        text = ""
+
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def json(self):
+            return {"command_id": "c1", "status": "pending"}
+
+    def post(_url, **kwargs):
+        return Response(202)
+
+    def get(_url, **kwargs):
+        failure = poll_failure(clock["now"], kwargs["timeout"], request)
+        if failure is not None:
+            raise failure
+        clock["now"] += 0.1
+        return Response(200)
+
+    monkeypatch.setattr("bobi.admin_client.http.post", post)
+    monkeypatch.setattr("bobi.admin_client.http.get", get)
+    return clock
+
+
+def test_wait_whose_deadline_falls_inside_a_poll_exits_two_with_the_envelope(monkeypatch):
+    import httpx
+
+    def time_out_at_the_deadline(now, timeout, request):
+        # 0.1 s polls 0.25 s apart start at 0, 0.35, 0.70 and 1.05 s, so a
+        # 1.1 s deadline lands inside the fourth, where httpx gives up.
+        if timeout < 0.1:
+            clock["now"] = now + timeout
+            return httpx.ReadTimeout("timed out", request=request)
+        return None
+
+    clock = _fake_unresolved_worker(monkeypatch, time_out_at_the_deadline)
+    result = CliRunner().invoke(main, [*_BASE_ARGS, "--wait", "--timeout", "1.1", "--json"])
+
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.output) == {"command_id": "c1", "status": "pending"}
+    assert clock["now"] == pytest.approx(101.1)
+
+
+def test_wait_whose_poll_fails_before_the_deadline_exits_one(monkeypatch):
+    import httpx
+
+    def connection_refused(_now, _timeout, request):
+        return httpx.ConnectError("connection refused", request=request)
+
+    _fake_unresolved_worker(monkeypatch, connection_refused)
+    result = CliRunner().invoke(main, [*_BASE_ARGS, "--wait", "--timeout", "1.0", "--json"])
+
+    assert result.exit_code == 1
+    assert "admin poll failed: connection refused" in result.output
