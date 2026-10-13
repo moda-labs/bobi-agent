@@ -2357,7 +2357,7 @@ table.runs { width: 100%; border-collapse: collapse; }
   [data-el="aboutWrap"] .popover { width: auto; }
   .pop-card { max-height: min(62vh, 520px); }
   .runs-controls { flex-direction: column; align-items: stretch; }
-  .runs-search-field { width: 100%; }
+  .runs-search-field { width: 100%; flex: 0 0 auto; }
   .tabs { overflow-x: auto; }
   .runs { min-width: 940px; }
   .runs-pager { position: sticky; left: 0; }

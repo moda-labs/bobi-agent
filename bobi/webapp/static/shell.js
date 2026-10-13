@@ -240,6 +240,13 @@ async function mountSetupEntry(el, routeInfo = {}) {
   }
 }
 
-window.addEventListener("hashchange", route);
-window.addEventListener("popstate", route);
-route();
+// A hash navigation fires both popstate and hashchange; mount the view once.
+let routedHref = null;
+function routeOnce() {
+  if (location.href === routedHref) return;
+  routedHref = location.href;
+  route();
+}
+window.addEventListener("hashchange", routeOnce);
+window.addEventListener("popstate", routeOnce);
+routeOnce();

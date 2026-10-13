@@ -1074,7 +1074,9 @@ class LocalRuntime(TeamRuntime):
                     if not isinstance(provider_id, str) or not safe_name(provider_id):
                         provider_id = None
                     next_started = turn.get("next_started_at_us") if view == "turns" else data["next_started_at_us"]
-                    key = (provider_id, session.get("brain"))
+                    # Per lifecycle: a resumed session shares its provider transcript
+                    # with the earlier lifecycle but reads its own time window.
+                    key = (provider_id, session.get("brain"), turn["session_id"])
                     if key not in transcripts:
                         try:
                             group = [item for item in turns if item["session_id"] == turn["session_id"]]

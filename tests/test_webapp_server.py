@@ -170,6 +170,30 @@ class TestMetrics:
         assert sessions.status_code == 200
         assert {session["session_id"] for session in sessions.json()["sessions"]} == {"s1", "s2"}
 
+    def test_metrics_resumed_lifecycle_reads_its_own_part_of_a_shared_transcript(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='shared'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        transcript = tmp_path / "shared.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [
+            ("user", "1970-01-01T00:00:01.100Z", "First lifecycle question"),
+            ("assistant", "1970-01-01T00:00:01.800Z", "First answer"),
+            ("user", "1970-01-01T00:00:04.100Z", "Resumed lifecycle question"),
+            ("assistant", "1970-01-01T00:00:04.800Z", "Resumed answer"),
+        ]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "shared" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        turns = {turn["turn_id"]: turn for turn in _client().get(base + "/turns", params=self.RANGE).json()["turns"]}
+        assert turns["t-routine"]["conversation"]["prompt_snippet"] == "First lifecycle question"
+        assert turns["t-unknown"]["conversation"]["prompt_snippet"] == "Resumed lifecycle question"
+
     def test_metrics_turn_list_carries_a_short_prompt_and_long_text_fits(self, bobi_install, monkeypatch, tmp_path):
         from bobi.metrics.store import connect
 

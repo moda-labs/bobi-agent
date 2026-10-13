@@ -525,6 +525,22 @@ class TestMetricsView:
         expect(page.locator(".metrics-session-chip")).to_contain_text("Session: s2")
         _metrics_capture(page, "lifecycle-picker")
 
+    def test_metrics_view_mounts_once_per_navigation(self, webapp, page):
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        summaries = []
+        page.on("request", lambda request: summaries.append(request.url)
+                if "/metrics/summary" in request.url else None)
+        _agent(page, webapp)
+        page.get_by_role("link", name="metrics & routing", exact=True).click()
+        expect(page.locator(".metrics-tile strong").first).to_have_text("720")
+        page.wait_for_timeout(300)
+        assert len(summaries) == 1, summaries
+        page.go_back()
+        page.go_forward()
+        expect(page.locator(".metrics-tile strong").first).to_have_text("720")
+        page.wait_for_timeout(300)
+        assert len(summaries) == 2, summaries
+
     def test_metrics_navigation_filters_drilldown_and_refresh(self, webapp, page):
         seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
         errors = []
@@ -696,6 +712,14 @@ class TestMetricsView:
         expect(page.locator(".modal-backdrop")).not_to_have_class("modal-backdrop open")
         row.locator(".metrics-jump-link").click()
         page.wait_for_url(re.compile(r"/metrics\?session=worker-a$"))
+
+    @pytest.mark.parametrize("width", [390, 700])
+    def test_runs_search_stays_one_line_on_narrow_screens(self, webapp, page, width):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.goto(webapp.agent_url())
+        field = page.locator(".runs-search-field")
+        expect(field).to_be_visible()
+        assert field.bounding_box()["height"] <= 40
 
     @pytest.mark.parametrize("width", [1440, 1100, 700])
     def test_shared_layout_and_compact_metrics_contract(self, webapp, page, width):
@@ -1343,12 +1367,19 @@ class TestMetricsView:
                      "amount_usd,measurement_source,is_estimated,observed_at_us) VALUES('c-est','turn','s1',"
                      "'t-routine','gateway','claude-haiku-4-5',0.25,'price_snapshot',1,?)",
                      (int(time.time() * 1_000_000),))
+        conn.execute("INSERT INTO cost_measurements(cost_measurement_id,scope,session_id,turn_id,provider,model,"
+                     "amount_usd,measurement_source,is_estimated,observed_at_us) VALUES('c-est-2','turn','s2',"
+                     "'t-unknown','gateway','claude-haiku-4-5',0.04,'calibrated_estimator',1,?)",
+                     (int(time.time() * 1_000_000),))
         rekey(conn)
         conn.commit()
         conn.close()
         page.goto(webapp.agent_url() + "/metrics")
         tile = page.locator(".metrics-tile.tile-cost")
-        expect(tile.locator("strong")).to_have_text("~$0.2500")
+        expect(tile.locator("strong")).to_have_text("~$0.2900")
+        # A session header summing stored estimates is an estimate too.
+        # A session whose only cost is a stored estimate is an estimate in its header too.
+        expect(page.locator(".mth-cost").filter(has_text="0.0400")).to_have_text("~$0.0400")
         expect(tile.locator(".tile-sub")).to_have_text("List-price estimate, no provider cost")
 
         conn = connect(webapp.install.state_dir / "metrics/metrics.db")
@@ -1361,7 +1392,7 @@ class TestMetricsView:
         conn.close()
         page.locator("#metrics-refresh").click()
         # A bill and an estimate both count; neither hides the other.
-        expect(tile.locator("strong")).to_have_text("$1.5000 + ~$0.2500")
+        expect(tile.locator("strong")).to_have_text("$1.5000 + ~$0.2900")
         expect(tile.locator(".tile-sub")).to_have_text("Provider cost + list-price estimate")
 
     @pytest.mark.parametrize("change,shown", [

@@ -748,7 +748,8 @@ function groupTurnsIntoThreads(turns) {
     if (cost != null) {
       thread.totalCostUsd += cost;
       thread.hasCost = true;
-      thread.approximateCost ||= recorded == null;
+      // Anything but provider-reported dollars is an estimate.
+      thread.approximateCost ||= turn.costs?.reported_cost_usd == null;
     }
   });
 
