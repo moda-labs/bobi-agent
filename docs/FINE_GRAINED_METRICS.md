@@ -190,7 +190,9 @@ per segment and error type. A fully imported segment that has been quiet for
 five minutes is deleted, with its directory once empty, when its writer is
 done: a reconciler segment always, a producer segment once that process has
 exited. The retired producer's drop and writer-error counts stay in collector
-health.
+health. An exited producer's incomplete last frame (a short write before it
+died) is dropped with the segment and counted in `torn_tail_bytes`, so it never
+holds `import_lag_ms` up.
 
 SQLite connections enable WAL, foreign keys, a busy timeout, and automatic
 checkpointing. Readers are read-only and query-only. Metrics failures must not

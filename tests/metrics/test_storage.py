@@ -669,6 +669,31 @@ def test_quiet_imported_segments_of_exited_writers_are_retired(tmp_path):
         conn.close()
 
 
+def test_a_dead_writers_torn_tail_is_counted_and_retired(tmp_path):
+    import subprocess
+    import sys
+
+    dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    service = MetricsCollectorService(tmp_path)
+    torn = service.spool_root / f"producer-{dead}-x" / "1.telemetry"
+    with SpoolWriter(torn) as writer:
+        writer.append(_session_event("p", 1, "s1"))
+    whole = torn.read_bytes()
+    with torn.open("ab") as handle:
+        handle.write(whole[: len(whole) // 2])  # a short write, then the writer died
+    _age(torn, 60 * 60)
+
+    result = service.collect_once()
+    service._refresh_health(result)
+
+    assert not torn.parent.exists()
+    health = service.health()
+    assert health["torn_tail_bytes"] == len(whole) // 2
+    assert health["import_lag_ms"] == 0.0
+    assert health["uncommitted_spool_bytes"] == 0
+
+
 def test_a_conflict_stays_in_collector_health(tmp_path):
     service = MetricsCollectorService(tmp_path)
     original = _session_event("producer-1-a", 1, "s1")

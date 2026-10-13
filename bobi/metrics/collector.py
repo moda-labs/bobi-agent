@@ -249,12 +249,14 @@ class MetricsCollectorService:
     _LASTING_COUNTERS = (
         "conflicting_events", "last_conflict_at_us",
         "retired_producer_events_dropped", "retired_producer_writer_errors",
+        "torn_tail_bytes",
     )
 
     def _load_lasting_counters(self) -> dict[str, int | None]:
         lasting: dict[str, int | None] = {
             "conflicting_events": 0, "last_conflict_at_us": None,
             "retired_producer_events_dropped": 0, "retired_producer_writer_errors": 0,
+            "torn_tail_bytes": 0,
         }
         try:
             saved = json.loads(self.health_path.read_text())
@@ -338,6 +340,14 @@ class MetricsCollectorService:
                     continue
                 totals["staged"] = int(totals["staged"]) + stage.staged
                 totals["conflicts"] = int(totals["conflicts"]) + stage.conflicts
+                if _retirable(segment):
+                    # A dead writer's incomplete last frame will never be
+                    # finished: count its bytes and retire the segment.
+                    torn = size - cursor_offset(conn, segment)
+                    if torn > 0:
+                        log.warning("metrics: dropped %d torn bytes at the end of %s", torn, segment)
+                        self._lasting["torn_tail_bytes"] = int(self._lasting["torn_tail_bytes"] or 0) + torn
+                    self._retire(conn, segment)
                 if stage.conflicts:
                     self._lasting["conflicting_events"] = (
                         int(self._lasting["conflicting_events"] or 0) + stage.conflicts)
