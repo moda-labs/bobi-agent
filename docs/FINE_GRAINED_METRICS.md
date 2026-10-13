@@ -188,8 +188,8 @@ skipped for that cycle without stopping the others; health reports
 `status=degraded` with the error type in `last_error`, and the log warns once
 per segment and error type. A fully imported segment that has been quiet for
 five minutes is deleted, with its directory once empty, when its writer is
-done: a reconciler segment always, a producer segment once that process has
-exited. The retired producer's drop and writer-error counts stay in collector
+done: a reconciler segment always, a producer segment once its writer is done
+as defined under recovery below. The retired producer's drop and writer-error counts stay in collector
 health. An exited producer's incomplete last frame (a short write before it
 died) is dropped with the segment and counted in `torn_tail_bytes`, so it never
 holds `import_lag_ms` up.
@@ -405,7 +405,7 @@ no-store`, and filter-bound keyset cursors. Reads use short SQLite read-only WAL
 snapshots, a one-second query deadline, 200-row/512-KiB bounds, and at most four
 concurrent local readers. Invalid queries return 400/422; unknown records 404;
 busy/unavailable storage 503 with `Retry-After`. The view refreshes every ten
-seconds on the latest page, pauses in hidden tabs, and cancels reads on navigation. One toolbar owns the time range, lifecycle picker/chip, provider filter, loaded-page search, refresh, and auto-refresh toggle. **All (up to 31d)** respects the existing query bound; it is not an all-history aggregation. Loaded-page search runs on the server (`q` on the turns route), so it matches each turn's full prompt although list rows carry only its first 512 characters. It updates 300 ms after typing and is not repeated by the live refresh. A search reads transcripts for up to 5 s and reuses transcripts that have not changed; when time runs out, the response's `search` field (`{"loaded", "searched"}`) and the page ("Search covered N of M loaded turns.") say how many turns had their prompt checked. Dashboard, agent, and metrics surfaces share a 1360px container with 32px desktop and 18px mobile gutters.
+seconds on the latest page, pauses in hidden tabs and refreshes once when the tab is shown again (a search refused as busy is retried then too), and cancels reads on navigation. One toolbar owns the time range, lifecycle picker/chip, provider filter, loaded-page search, refresh, and auto-refresh toggle. **All (up to 31d)** respects the existing query bound; it is not an all-history aggregation. Loaded-page search runs on the server (`q` on the turns route), so it matches the operator's text of every prompt the turn received, in full: the user message, a workflow's launch input and step instruction, and an event's content lines. It does not match text bobi adds around them (the agent bootstrap, event metadata, workflow headers). List rows carry only the first 512 characters of the cleaned message; the search still covers the full text. It updates 300 ms after typing and is re-run by the live refresh over a fresh window, so new matching turns appear; a refresh re-parses only transcripts that changed since the last read. A search refused because all metrics readers are busy is retried after about a second. The response's `turns` holds the matches and `unmatched_turns` the rest of the loaded page, so the turn drawer's position and Earlier/Later follow the whole session thread, as without a search. A search reads transcripts for up to 5 s and reuses transcripts that have not changed; when time runs out, the response's `search` field (`{"loaded", "searched"}`) and the page ("Search covered N of M loaded turns.") say how many turns had their prompt checked. Dashboard, agent, and metrics surfaces share a 1360px container with 32px desktop and 18px mobile gutters.
 It does not run migrations, checkpoints, models, or routing policies.
 The JEV header falls back to **JEV: Disabled** when its configuration cannot be read within 2.5 seconds; the editor reports the unavailable configuration instead of treating a failed read as a successful load.
 
@@ -520,12 +520,43 @@ starts; a turn's result corrects it if the brain started fresh.
 
 A turn still running is refused, because its transcript is still growing. A
 turn with no end is over once its own process started another turn, or once
-the process that recorded it has exited, a pid check like spool retirement's.
-A reused pid delays this, possibly until the turn is reconciled by hand, and a
-turn whose writer is unknown is not reconciled until it ends. A pass drops
-these turns before its budget starts, with one indexed query and one liveness
-check per writer, so turns that never qualify cannot hold back later ones. While the writer of a turn without an end is alive, a later
-turn of another process on the same provider session does not end it.
+the writer that recorded it is done. One definition of done serves the
+background pass, the manual command and spool retirement:
+
+- The writer is gone: no process holds its pid, or the process holding it has
+  another start value than the one the writer recorded in its producer id
+  (`producer-<pid>-<uuid7>-<start>`). After a container restart the old pid
+  number is normally in use again; the start value tells the new process
+  apart. It is the start in clock ticks after boot (field 22 of
+  `/proc/<pid>/stat`) on Linux and `p_starttime` from `sysctl(KERN_PROC_PID)`
+  on macOS, read the same way at both ends and never compared with a wall
+  clock, so a clock step cannot make a live writer read as gone. An id without
+  a start value (written by an older version, or on a platform where it cannot
+  be read) is checked by pid alone, and a reused pid then reads as alive. The
+  collector and every writer of its spool must share one pid namespace, as
+  processes of one container do.
+- Then, read after liveness, every complete frame in its spool is imported. A
+  writer seen gone appends nothing more, so its events are all in the database;
+  an incomplete last frame is a torn write and does not count, and neither
+  does a corrupt frame, which stops the collector at that point for good and
+  is reported in `corrupt_segments`. A writer that
+  ends its turn and exits between the collector's import and the pass waits
+  for the next import instead of having its calls claimed by the reconciler.
+
+A turn whose writer is unknown is not reconciled until it ends. A pass drops
+turns whose writer is not done before its budget starts, with one indexed
+query and one check per writer, so turns that never qualify cannot hold back
+later ones. While the writer of a turn without an end is alive, a later turn of
+another process on the same provider session does not end it.
+
+`metrics reconcile --turn-id` applies the same definition and refuses a turn
+whose writer looks alive. Naming the turn is not enough to override it, because
+reconciling a turn that is really running records a partial turn whose
+recovered calls collide with the ones its writer records when the turn ends.
+For a writer known to be gone that still reads as alive (an id without a
+start value whose pid is in use again), pass
+`--force`: it skips the liveness half only, still waits for the writer's
+spool to be imported, and the JSON result reports `"forced": true`.
 Limitation: two processes running turns on one provider session at the same
 time are not supported, because a finished turn's window still ends at the
 other process's next turn. Launch refuses a second active run on one session
