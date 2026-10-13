@@ -258,6 +258,11 @@ by an earlier version is tightened on the next open.
   when they add up to `total_cost_usd`. Otherwise the turn keeps one cost row
   with no model, so a model-filtered summary does not count it: the
   unexplained part of the bill is never assigned to a model by guesswork.
+  The web drawer labels that row `unattributed`; a cost row with no model on
+  a single-model turn shows that model.
+- A turn more than 16 MiB from the end of its transcript has no prompt in the
+  metrics view; a search counts it as not searched, and the page reports
+  "Search covered N of M loaded turns."
 - Exact usage can coexist with uncovered turns elsewhere. Report both local
   turn evidence and global collector/reconciliation debt.
 
@@ -400,7 +405,7 @@ no-store`, and filter-bound keyset cursors. Reads use short SQLite read-only WAL
 snapshots, a one-second query deadline, 200-row/512-KiB bounds, and at most four
 concurrent local readers. Invalid queries return 400/422; unknown records 404;
 busy/unavailable storage 503 with `Retry-After`. The view refreshes every ten
-seconds on the latest page, pauses in hidden tabs, and cancels reads on navigation. One toolbar owns the time range, lifecycle picker/chip, provider filter, loaded-page search, refresh, and auto-refresh toggle. **All (up to 31d)** respects the existing query bound; it is not an all-history aggregation. Dashboard, agent, and metrics surfaces share a 1360px container with 32px desktop and 18px mobile gutters.
+seconds on the latest page, pauses in hidden tabs, and cancels reads on navigation. One toolbar owns the time range, lifecycle picker/chip, provider filter, loaded-page search, refresh, and auto-refresh toggle. **All (up to 31d)** respects the existing query bound; it is not an all-history aggregation. Loaded-page search runs on the server (`q` on the turns route), so it matches each turn's full prompt although list rows carry only its first 512 characters. It updates 300 ms after typing and is not repeated by the live refresh. A search reads transcripts for up to 5 s and reuses transcripts that have not changed; when time runs out, the response's `search` field (`{"loaded", "searched"}`) and the page ("Search covered N of M loaded turns.") say how many turns had their prompt checked. Dashboard, agent, and metrics surfaces share a 1360px container with 32px desktop and 18px mobile gutters.
 It does not run migrations, checkpoints, models, or routing policies.
 The JEV header falls back to **JEV: Disabled** when its configuration cannot be read within 2.5 seconds; the editor reports the unavailable configuration instead of treating a failed read as a successful load.
 
@@ -495,10 +500,36 @@ still running is not.
 Background reconciliation makes at most three failed attempts per turn, keeps
 the counts in the `reconcile_attempts` table, and reports only the number of
 exhausted turns in collector health. A pass stops after five seconds and the
-next pass continues; each transcript is parsed once per pass. A turn still
-running is refused, because its transcript is still growing; a turn with no
-end, no later turn and a start more than an hour ago is taken as abandoned by a
-process that died, and is reconciled. Rerunning a
+next pass continues; each transcript is parsed once per pass.
+
+A turn's provider records are those between its start and its end, plus five
+seconds for a transcript line stamped after the stream that ended the turn.
+The next turn of its metrics session, or of its provider session, is a hard
+bound with no slack: a resumed process continues the provider session under a
+new metrics session, and its first call can land within seconds of its start.
+Adjacent windows do not overlap: a turn's window starts right after the
+previous turn's window ends, whether or not that turn was reconciled. A turn's
+start is recorded before its request is sent, so no line of the turn is
+stamped earlier; a two-second margin before the start absorbs clock rounding
+and never reaches into the previous turn's window. A record whose message or
+turn id the turn's own stream recorded belongs to that turn wherever it is
+stamped, and never to another turn: a last line can land after the next turn
+started.
+A resumed process records the saved provider session id when its first turn
+starts; a turn's result corrects it if the brain started fresh.
+
+A turn still running is refused, because its transcript is still growing. A
+turn with no end is over once its own process started another turn, or once
+the process that recorded it has exited, a pid check like spool retirement's.
+A reused pid delays this, possibly until the turn is reconciled by hand, and a
+turn whose writer is unknown is not reconciled until it ends. A pass drops
+these turns before its budget starts, with one indexed query and one liveness
+check per writer, so turns that never qualify cannot hold back later ones. While the writer of a turn without an end is alive, a later
+turn of another process on the same provider session does not end it.
+Limitation: two processes running turns on one provider session at the same
+time are not supported, because a finished turn's window still ends at the
+other process's next turn. Launch refuses a second active run on one session
+name, which is what normally keeps a provider session to one process. Rerunning a
 recovery after the transcript grew adds the new calls: every run writes as its
 own producer, and the turn row's event is named by its content. Restore missing
 transcripts before manually reconciling; manual recovery is not retry-limited.
