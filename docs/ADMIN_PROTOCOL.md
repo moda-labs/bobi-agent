@@ -212,7 +212,7 @@ an incident.
 | `spend` | — | `{"spend": {...}}` |
 | `usage` | `{"window_seconds"?: number, "end_at"?: epoch}` or `{"from", "to"}` (ISO); window defaults to 24 hours. Optional fine-grained filters below | `{"usage": {"window", "jobs", "tokens", "cost_usd", "estimated_cost_usd"}}` |
 | `usage_session` | `{"session_id": string, "cursor"?, "limit"?, "include_turns"?}` | `{"usage_session": {"session", "turns", "next_cursor", "coverage"}}` |
-| `usage_turn` | `{"turn_id": string}` | `{"usage_turn": {"turn", "workflow_steps", "invocations", "tool_executions", "usage_measurements", "cost_measurements", "router_decisions", "coverage"}}` |
+| `usage_turn` | `{"turn_id": string, "include_policy"?: bool, "include_breakdown"?: bool}`; `include_policy` adds each decision's allowlisted policy metadata, `include_breakdown` adds the session, the chosen and per-invocation usage, and the turn totals | `{"usage_turn": {"turn", "workflow_steps", "invocations", "tool_executions", "usage_measurements", "cost_measurements", "router_decisions", "coverage"}}` |
 | `session_log` | — | `{"sessions": [...], "counts": {...}, "truncated": bool}` |
 | `runs` | `{"status", "query", "offset", "limit"}` (all optional) | `{"runs": [...], "counts": {...}, "total", "offset", "limit", "query", "truncated"}` |
 | `overview` | — | `{"overview": {...}}` |
