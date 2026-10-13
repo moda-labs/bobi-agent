@@ -472,7 +472,13 @@ def agent(ctx, name):
               help="Print the complete JSON envelope.")
 def admin_command(metrics_command, url, fleet, instance, token, raw_args,
                   wait, timeout, json_output):
-    """Query one deployed instance through the authenticated Admin API."""
+    """Query one deployed instance through the authenticated Admin API.
+
+    \b
+    Exit codes: 0 success (or submitted, without --wait);
+    1 the command failed (status "error") or the request was rejected;
+    2 --wait timed out before the command resolved.
+    """
     from bobi.admin_client import AdminClientError, run_admin_command
 
     try:
@@ -498,6 +504,11 @@ def admin_command(metrics_command, url, fleet, instance, token, raw_args,
         click.echo(json.dumps(result, sort_keys=True))
     else:
         click.echo(json.dumps(result, indent=2, sort_keys=True))
+    status = result.get("status")
+    if status == "error":
+        raise SystemExit(1)
+    if wait and status != "done":
+        raise SystemExit(2)
 
 
 def _active_service_manager(agent: str | None = None) -> str | None:
@@ -2274,7 +2285,7 @@ def metrics_reconcile(turn_id, wait, timeout, json_output):
         result = (
             reconcile_turn(root, turn_id, wait=wait, timeout=timeout)
             if turn_id
-            else reconcile_missing(root, wait=wait, timeout=timeout)
+            else reconcile_missing(root, wait=wait, timeout=timeout, terminal_only=True)
         )
     except ReconciliationError as exc:
         raise click.ClickException(str(exc)) from None

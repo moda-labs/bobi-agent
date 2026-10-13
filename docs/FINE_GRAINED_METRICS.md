@@ -445,6 +445,11 @@ carries it.
 bobi admin metrics_turn --url "$BOBI_ADMIN_URL" --fleet "$BOBI_FLEET"   --instance "$BOBI_INSTANCE" --args '{"turn_id":"<turn-id>"}' --wait --json
 ```
 
+`bobi admin` prints the result envelope and exits `0` on success (or once the
+command is submitted, without `--wait`), `1` when the command finished with
+`status: "error"` or the request was rejected, and `2` when `--wait` reached
+`--timeout` before the command resolved.
+
 The deployment wrapper retains `scripts/metrics_summary.py` for a human-readable
 comparison of recent engineer turns. Run from that wrapper repository:
 

@@ -72,6 +72,24 @@ def main(argv: list[str] | None = None) -> int:
     return run(_resolve_run_root(), argv)
 
 
+_SCALAR_TYPES = (str, int, float, bool, type(None))
+
+
+def _heartbeat_metrics(health: dict) -> dict:
+    """Bound the collector health a heartbeat carries.
+
+    Every heartbeat lands in the Worker's KV, so the block keeps scalar fields
+    and the ``query_executor`` object only. Per-turn maps (reconciliation
+    attempts keyed by turn id) grow for the life of the metrics DB and stay in
+    the collector's own state file.
+    """
+    return {
+        key: value for key, value in health.items()
+        if isinstance(value, _SCALAR_TYPES)
+        or (key == "query_executor" and isinstance(value, dict))
+    }
+
+
 def _sweep_if_os_service(root: Path) -> bool:
     """Under the OS service only, stop a directly started manager before the
     child spawns, or the child exits on AlreadyRunning and the service
@@ -122,16 +140,19 @@ def run(root: Path, argv: list[str]) -> int:
 
         metrics_mode = resolve_mode()
         if metrics_mode in ENABLED_MODES:
-            metrics_collector = MetricsCollectorService(root)
-            metrics_collector.start()
+            collector = MetricsCollectorService(root)
+            collector.start()
+            metrics_collector = collector
 
             def metrics_health_fn():
-                return {"mode": metrics_mode, **metrics_collector.health()}
+                return {"mode": metrics_mode,
+                        **_heartbeat_metrics(collector.health())}
         else:
             metrics_health_fn = lambda: {
                 "mode": "disabled", "status": "disabled", "db_ready": False
             }
     except Exception:
+        metrics_collector = None
         log.warning("supervisor: metrics collector failed to start", exc_info=True)
         metrics_health_fn = lambda: {
             "mode": "unknown", "status": "degraded", "db_ready": False
@@ -161,7 +182,8 @@ def run(root: Path, argv: list[str]) -> int:
                            lifecycle_fn=telemetry.lifecycle)
     supervisor = Supervisor(start_args, config, project_root=root,
                             observer=CompositeObserver([telemetry, alerter]),
-                            announce_fn=alerter.announce_fallback)
+                            announce_fn=alerter.announce_fallback,
+                            collector_owner=metrics_collector is not None)
 
     # The inbound half (#9): listen for operator admin commands on this
     # deployment's admin topic and run them against the supervisor. Its own

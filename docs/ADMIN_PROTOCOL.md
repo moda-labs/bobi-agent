@@ -439,6 +439,11 @@ not the same field. There is no `"healthy"` or `"dead"` status value — switch 
 subscriptions and monitors), which is what makes a "configured but not running"
 gap visible to a consumer that never reads the team's config.
 
+`metrics` carries scalar collector fields plus the `query_executor` object.
+Per-turn state (reconciliation attempts keyed by turn id) stays in
+`metrics.db` and never rides the heartbeat, so the block stays bounded in
+Worker KV.
+
 `load_grace` is an additive block (see [Load grace](#load-grace)): it
 is `null` unless a liveness verdict was deferred this poll, in which case it
 carries `{active, since, spell_s, deferred, load1, ncpu, busy_descendants,
