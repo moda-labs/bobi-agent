@@ -72,9 +72,12 @@ def iter_frames(path: Path | str, start_offset: int = 0) -> Iterator[FrameRecord
             digest = hashlib.sha256(payload).digest()
             if digest != expected_digest:
                 raise SpoolCorruptionError(f"frame checksum mismatch at offset {offset}")
+            # A checksum-valid frame this build cannot read as an event (an
+            # unknown top-level field from a newer build raises TypeError) is
+            # as unimportable as a damaged one.
             try:
                 event = MetricsEvent.from_bytes(payload)
-            except ValueError as exc:
+            except (ValueError, TypeError) as exc:
                 raise SpoolCorruptionError(
                     f"invalid frame payload at offset {offset}"
                 ) from exc

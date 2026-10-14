@@ -2298,19 +2298,19 @@ def metrics_reconcile(turn_id, wait, timeout, force, json_output):
             else reconcile_missing(root, wait=wait, timeout=timeout, terminal_only=True)
         )
     except TurnStillRunning as exc:
-        hint = "" if force else (
-            " If its process is known to have exited, rerun with --force."
-        )
+        hint = f" {exc.hint}" if exc.hint and not force else ""
         raise click.ClickException(f"{exc}.{hint}") from None
-    except (ReconciliationError, ProviderContractError) as exc:
+    except (ReconciliationError, ProviderContractError, OSError) as exc:
         raise click.ClickException(str(exc)) from None
     rendered = json.dumps(result, sort_keys=True)
     if json_output:
         click.echo(rendered)
     else:
+        waiting = int(result.get("turns_waiting") or 0)
         click.echo(
             f"{result['status']}: recovered "
             f"{result.get('exact_measurements_recovered', 0)} exact measurement(s)"
+            + (f"; {waiting} turn(s) still waiting for their events" if waiting else "")
         )
 
 

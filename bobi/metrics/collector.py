@@ -114,20 +114,69 @@ def _has_unimported_frames(conn: sqlite3.Connection, directory: Path) -> bool:
             continue
         except OSError:
             return True
-        start = cursor_offset(conn, segment)
-        if start >= size:
-            continue
-        try:
-            if next(iter(iter_frames(segment, start)), None) is not None:
-                return True
-        except (FileNotFoundError, SpoolCorruptionError):
-            # A corrupt frame stops the collector at its cursor for good, and
-            # is reported in corrupt_segments; it and what follows will
-            # never import.
-            continue
-        except OSError:
+        if _frame_unimported(conn, segment, size):
             return True
     return False
+
+
+def _frame_unimported(conn: sqlite3.Connection, segment: Path, limit: int) -> bool:
+    """True when *segment* has a complete frame past its cursor that starts
+    before byte *limit*. A segment that cannot be read counts as unimported."""
+    start = cursor_offset(conn, segment)
+    if start >= limit:
+        return False
+    try:
+        frame = next(iter(iter_frames(segment, start)), None)
+    except (FileNotFoundError, SpoolCorruptionError):
+        # A corrupt or unreadable frame stops the collector at its cursor for
+        # good, and is reported in corrupt_segments; it and what follows will
+        # never import.
+        return False
+    except OSError:
+        return True
+    return frame is not None and frame.offset < limit
+
+
+def _runtime_segments(spool_root: Path) -> list[Path]:
+    """Every runtime writer's segment, without listing reconciler directories.
+
+    What a reconciler wrote never bounds another turn's window, and a pass
+    adds one reconciler directory per turn it recovers."""
+    # os.scandir, not Path.iterdir: this runs before every turn a pass may
+    # decide, and the reconciler directories it skips grow with the pass.
+    segments: list[Path] = []
+    try:
+        with os.scandir(spool_root) as entries:
+            directories = [entry.path for entry in entries
+                           if not entry.name.startswith("reconciler-") and entry.is_dir()]
+    except OSError:
+        return []
+    for directory in directories:
+        try:
+            with os.scandir(directory) as entries:
+                segments.extend(Path(entry.path) for entry in entries
+                                if entry.name.endswith(".telemetry"))
+        except OSError:
+            continue
+    return sorted(segments)
+
+
+def spool_sizes(spool_root: Path) -> dict[Path, int]:
+    """The current size of every runtime writer's segment (see
+    _runtime_segments)."""
+    sizes: dict[Path, int] = {}
+    for segment in _runtime_segments(spool_root):
+        try:
+            sizes[segment] = segment.stat().st_size
+        except OSError:
+            continue
+    return sizes
+
+
+def imported_through(conn: sqlite3.Connection, sizes: dict[Path, int]) -> bool:
+    """True once every complete frame that started before the recorded size
+    of its segment (see spool_sizes) is imported."""
+    return not any(_frame_unimported(conn, segment, size) for segment, size in sizes.items())
 
 
 def producer_exited(producer_id: str) -> bool:
@@ -328,6 +377,7 @@ class MetricsCollectorService:
             "last_reconciliation_at_us": None,
             "reconciliation_errors": 0,
             "reconciliation_retry_exhausted_turns": 0,
+            "reconciliation_waiting_turns": 0,
             "uncovered_turns": 0,
             **self._lasting,
         }
@@ -387,29 +437,38 @@ class MetricsCollectorService:
             "corrupt_segments": 0,
         }
 
-    def _collect_once_locked(self) -> dict[str, int | str]:
+    def _collect_once_locked(self, *, maintenance: bool = True) -> dict[str, int | str]:
         """One cycle: one connection, one migrate, then only the segments with
         bytes past their cursor. A segment that fails, for any reason, is
-        counted and skipped so it cannot stop the ones after it."""
+        counted and skipped so it cannot stop the ones after it.
+
+        Without *maintenance* it only imports runtime writers' segments and
+        projects: no migrate, no retirement and no reconciler segments, for
+        the imports a reconciliation makes before it decides a turn. The next
+        maintenance cycle imports what reconcilers wrote.
+        """
         totals: dict[str, int | str] = {
             **self._empty_result("active"), "conflicts": 0, "failed_segments": 0,
         }
         conn = connect(self.db_path)
         try:
-            migrate(conn)
+            if maintenance:
+                migrate(conn)
             cursors = {
                 str(row["segment_path"]): int(row["committed_offset"])
                 for row in conn.execute(
                     "SELECT segment_path, committed_offset FROM spool_cursors")
             }
-            for segment in sorted(self.spool_root.glob("*/*.telemetry")):
+            segments = (sorted(self.spool_root.glob("*/*.telemetry")) if maintenance
+                        else _runtime_segments(self.spool_root))
+            for segment in segments:
                 try:
                     size = segment.stat().st_size
                 except OSError:
                     continue
                 start = cursors.get(str(segment), 0)
                 if start >= size:
-                    if _retirable(conn, self.spool_root, segment):
+                    if maintenance and _retirable(conn, self.spool_root, segment):
                         self._retire(conn, segment)
                     continue
                 try:
@@ -426,7 +485,7 @@ class MetricsCollectorService:
                     continue
                 totals["staged"] = int(totals["staged"]) + stage.staged
                 totals["conflicts"] = int(totals["conflicts"]) + stage.conflicts
-                if _retirable(conn, self.spool_root, segment):
+                if maintenance and _retirable(conn, self.spool_root, segment):
                     # A dead writer's incomplete last frame will never be
                     # finished: count its bytes and retire the segment.
                     torn = size - cursor_offset(conn, segment)
@@ -443,6 +502,42 @@ class MetricsCollectorService:
         finally:
             conn.close()
         return totals
+
+    def import_locked(self) -> dict[str, int | str]:
+        """Import and project what is spooled, nothing else (no migrate, no
+        retirement), while the caller holds the collector lock: what a
+        reconciliation decides from must be imported first."""
+        return self._collect_once_locked(maintenance=False)
+
+    def import_and_save_locked(self) -> dict[str, int | str]:
+        """import_locked for a caller that took the collector lock outside
+        the collector's own loop (a manual reconcile with no collector
+        running). The lasting counters are read under the lock, so they
+        include what the last collector saved, and what this import adds to
+        them (a conflicting event) is merged into the saved health state, so
+        the next collector reads it back on start."""
+        self._lasting = self._load_lasting_counters()
+        before = dict(self._lasting)
+        result = self.import_locked()
+        if self._lasting != before:
+            self._save_lasting()
+        return result
+
+    def _save_lasting(self) -> None:
+        """Merge the lasting counters into the saved health state; every
+        other field stays as the last collector published it."""
+        try:
+            saved = json.loads(self.health_path.read_text())
+        except (OSError, ValueError):
+            saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
+        saved.update(self._lasting)
+        try:
+            atomic_write_json(self.health_path, saved, indent=None, sort_keys=True)
+        except OSError:
+            log.warning("metrics: could not save collector counters to %s",
+                        self.health_path, exc_info=True)
 
     def _take_over(self) -> None:
         """Become the active collector: state the previous one saved wins over
@@ -515,12 +610,19 @@ class MetricsCollectorService:
 
         errors = int(self.health()["reconciliation_errors"])
         try:
+            # Imports wait while the pass holds the lock, so the pass imports
+            # before each turn: a turn is never decided without the rows
+            # (the next turn's start among them) that were already spooled.
             reconciliation = reconcile_missing(
                 self.root, collect=False, terminal_only=True,
                 track_attempts=True, budget_seconds=RECONCILE_BUDGET_SECONDS,
+                import_spool=self.import_locked,
             )
             errors += int(reconciliation["errors"])
-            self._set_health(reconciliation_retry_exhausted_turns=reconciliation.get("retry_exhausted_turns", 0))
+            self._set_health(
+                reconciliation_retry_exhausted_turns=reconciliation.get("retry_exhausted_turns", 0),
+                reconciliation_waiting_turns=reconciliation.get("turns_waiting", 0),
+            )
         except Exception:
             log.debug("metrics: scheduled reconciliation failed", exc_info=True)
             errors += 1

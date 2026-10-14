@@ -9,10 +9,17 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from bobi.chat_history import find_claude_transcript, find_codex_rollout
-from bobi.metrics.collector import MetricsCollector, writer_finished
+from bobi.fsutil import try_file_lock
+from bobi.metrics.collector import (
+    MetricsCollector,
+    MetricsCollectorService,
+    imported_through,
+    spool_sizes,
+    writer_finished,
+)
 from bobi.metrics.events import MetricsEvent, deterministic_event_id, uuid7
 from bobi.metrics.providers import (
     ProviderContractError,
@@ -117,7 +124,154 @@ def _aggregate(records: list[ProviderUsageRecord]) -> list[ProviderUsageRecord]:
 
 
 class TurnStillRunning(ReconciliationError):
-    """The turn's transcript may still grow: a recovery now would be partial."""
+    """Evidence about the turn may still be on its way: its transcript may
+    grow, or rows that bound or describe it are not imported or projected yet.
+    A recovery now could be partial or take another turn's calls. *hint* says
+    what an operator can do about it."""
+
+    def __init__(self, message: str, *, hint: str = "") -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
+# How long a manual reconcile waits for a running collector to import what
+# was spooled before it started; a background pass holds imports for at most
+# its budget.
+_IMPORT_WAIT_SECONDS = 15.0
+
+
+def _await_import(root: Path, db_path: Path, sizes: dict[Path, int] | None = None) -> None:
+    """Return once every frame runtime writers spooled before this call (or
+    up to *sizes*, see spool_sizes) is imported, so no turn is decided while a
+    row that bounds it (the next turn's start) is still in the spool.
+
+    With no collector running, this takes the collector lock and runs the
+    collector's own import; while a collector holds the lock, it waits for
+    that collector, up to _IMPORT_WAIT_SECONDS."""
+    if sizes is None:
+        sizes = spool_sizes(_spool_root(db_path))
+    if not sizes or not db_path.exists():
+        return
+    deadline = time.monotonic() + _IMPORT_WAIT_SECONDS
+    service = MetricsCollectorService(root)
+    while True:
+        conn = connect(db_path, readonly=True)
+        try:
+            if imported_through(conn, sizes):
+                return
+        finally:
+            conn.close()
+        with try_file_lock(service.collector.lock_path) as acquired:
+            if acquired:
+                service.import_and_save_locked()
+                return
+        if time.monotonic() >= deadline:
+            raise TurnStillRunning(
+                "the running collector has not imported the spooled metrics events "
+                f"within {_IMPORT_WAIT_SECONDS:.0f}s; reconcile once it has"
+            )
+        time.sleep(0.05)
+
+
+# A turn's start is stamped just before its producer queues it for the spool;
+# this bounds that lag, so a row stamped this long before an import is in it.
+_SPOOL_LAG_US = 2_000_000
+
+
+def _imported() -> None:
+    """The import_spool of a caller whose _ImportGate already ran."""
+
+
+class _ImportGate:
+    """What reconcile_missing runs before each turn, so the turn is decided
+    from imported rows without importing (or listing the spool) per turn.
+
+    - A window that ends (at a known next turn's start, or five seconds after
+      the turn's end) well before the last import started is decided by rows
+      that import held: a turn starting in it was spooled before.
+    - A turn without an end whose writer was seen gone before the last import
+      started (*confirmed*) has nothing of its own stamped after that import;
+      a next turn the import did not see started after it. Its window ends at
+      that import instead of "now", so no import is needed either.
+    - Any other turn gets a fresh import, run only when a runtime writer's
+      segment changed since the last one.
+    """
+
+    def __init__(self, root: Path, db_path: Path, import_spool: Callable[[], object] | None) -> None:
+        self.root = root
+        self.db_path = db_path
+        self.import_spool = import_spool
+        self.imported_at_us = 0
+        self.sizes: dict[Path, int] | None = None
+        self.confirmed: set[str] = set()
+        # One read-only connection for the run; with no open transaction each
+        # query sees what the imports since committed.
+        self._conn = None
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def sync(self) -> None:
+        started = time.time_ns() // 1000
+        sizes = spool_sizes(_spool_root(self.db_path))
+        if sizes != self.sizes:
+            if self.import_spool is not None:
+                self.import_spool()
+            else:
+                _await_import(self.root, self.db_path, sizes)
+            self.sizes = sizes
+        self.imported_at_us = started
+
+    def before(self, turn_id: str) -> int | None:
+        """Make the turn decidable; returns the time that stands in for "now"
+        in its window, or None for the current time."""
+        if self._conn is None:
+            self._conn = connect(self.db_path, readonly=True)
+        if _window_settled(self._conn, turn_id, self.imported_at_us - _SPOOL_LAG_US):
+            return None
+        if turn_id in self.confirmed:
+            return self.imported_at_us
+        self.sync()
+        return None
+
+
+def _window_settled(conn, turn_id: str, horizon_us: int) -> bool:
+    """True when the turn's window ends no later than *horizon_us* whatever
+    else is spooled: at a known next turn's start, or at its end plus slack."""
+    row = conn.execute(
+        f"SELECT {_TURN_COLUMNS} FROM turns AS t JOIN sessions AS s USING(session_id) "
+        "WHERE t.turn_id=?",
+        (turn_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    ends = [int(turn["started_at_us"]) for turn in _adjacent_turn(
+        conn, row, str(row["provider_session_id"] or ""), later=True) if turn]
+    if row["ended_at_us"] is not None:
+        ends.append(int(row["ended_at_us"]) + _END_SLACK_US)
+    return bool(ends) and min(ends) <= horizon_us
+
+
+def _require_projected(conn, turn_id: str) -> None:
+    """Refuse a turn whose own events are imported but not projected: its
+    calls usually wait for their workflow step's row, written when the step
+    ends. Recovering it now would record its calls a second time, without
+    their step, and leave its tool rows without a parent. An event that never
+    finds its parent is quarantined after ORPHAN_TTL_US, which ends the wait."""
+    waiting, reason = conn.execute(
+        "SELECT COUNT(*), MIN(projection_error) FROM raw_events "
+        "WHERE projection_state='pending' AND turn_id=?",
+        (turn_id,),
+    ).fetchone()
+    if waiting:
+        raise TurnStillRunning(
+            f"turn {turn_id} has {waiting} event(s) waiting to be projected "
+            f"({reason or 'not projected yet'}); reconcile it once they project",
+            hint="Rerun with --force to reconcile it now; its own calls then lose "
+            "their workflow step and tool rows.",
+        )
 
 
 # The runtime producer that recorded a turn; served by the partial index
@@ -148,7 +302,10 @@ def _require_writer_done(conn, spool_root: Path, turn_id: str, *, force: bool) -
             f"turn {turn_id} has spooled events that are not imported yet; "
             "reconcile it once the collector has imported them"
         )
-    raise TurnStillRunning(f"turn {turn_id} is still running; reconcile it after it ends")
+    raise TurnStillRunning(
+        f"turn {turn_id} is still running; reconcile it after it ends",
+        hint="If its process is known to have exited, rerun with --force.",
+    )
 
 
 # The provider can stamp a turn's last transcript line a little after the
@@ -185,14 +342,15 @@ def _adjacent_turn(conn, row, provider_session_id: str, *, later: bool):
 
 
 def _window_end(conn, row, provider_session_id: str, spool_root: Path, *,
-                force: bool = False) -> int:
+                force: bool = False, now_us: int | None = None) -> int:
     """The latest time a provider record can belong to the turn.
 
     A turn ends at the next turn of its metrics session or of its provider
     session. A turn without an end is over once its own process moved on, or
     once the process that recorded it is done (writer_finished); a later turn
     of another process does not end it while its writer still runs. *force*
-    takes the writer as gone.
+    takes the writer as gone. *now_us* stands in for the current time (see
+    _ImportGate).
     """
     same_session, other_session = _adjacent_turn(conn, row, provider_session_id, later=True)
     next_starts = [int(turn["started_at_us"]) for turn in (same_session, other_session) if turn]
@@ -202,10 +360,11 @@ def _window_end(conn, row, provider_session_id: str, spool_root: Path, *,
         _require_writer_done(conn, spool_root, str(row["turn_id"]), force=force)
     # A turn whose process died never records its end; its transcript holds
     # nothing later than now.
-    return min([time.time_ns() // 1000, *next_starts])
+    return min([time.time_ns() // 1000 if now_us is None else now_us, *next_starts])
 
 
-def _window_start(conn, row, provider_session_id: str, spool_root: Path) -> int:
+def _window_start(conn, row, provider_session_id: str, spool_root: Path, *,
+                  now_us: int | None = None) -> int:
     """The earliest time a provider record can belong to the turn.
 
     Adjacent windows partition: the turn starts strictly after the previous
@@ -220,7 +379,7 @@ def _window_start(conn, row, provider_session_id: str, spool_root: Path) -> int:
     if previous is None:
         return lower
     try:
-        previous_end = _window_end(conn, previous, provider_session_id, spool_root)
+        previous_end = _window_end(conn, previous, provider_session_id, spool_root, now_us=now_us)
     except TurnStillRunning:
         # Another live process on the provider session: unsupported, so take
         # nothing from before this turn's own start.
@@ -229,7 +388,7 @@ def _window_start(conn, row, provider_session_id: str, spool_root: Path) -> int:
 
 
 def _turn_context(conn, turn_id: str, root: Path | None, spool_root: Path, *,
-                  force: bool = False):
+                  force: bool = False, now_us: int | None = None):
     """The turn, its provider session id and its record window, inclusive."""
     row = conn.execute(
         f"SELECT {_TURN_COLUMNS} FROM turns AS t JOIN sessions AS s USING(session_id) "
@@ -241,8 +400,9 @@ def _turn_context(conn, turn_id: str, root: Path | None, spool_root: Path, *,
     provider_session_id = str(row["provider_session_id"] or "")
     if not provider_session_id and root is not None:
         provider_session_id = load_session_id(str(row["session_name"]), root=root)
-    upper = _window_end(conn, row, provider_session_id, spool_root, force=force)
-    return row, provider_session_id, _window_start(conn, row, provider_session_id, spool_root), upper
+    upper = _window_end(conn, row, provider_session_id, spool_root, force=force, now_us=now_us)
+    lower = _window_start(conn, row, provider_session_id, spool_root, now_us=now_us)
+    return row, provider_session_id, lower, upper
 
 
 def _select_records(
@@ -379,17 +539,21 @@ def build_reconcile_plan(
     *,
     root: Path | str | None = None,
     force: bool = False,
+    now_us: int | None = None,
 ) -> ReconcilePlan:
     """Build deterministic spool events without mutating SQLite.
 
-    *force* takes the writer of a turn without an end as gone; its spool must
-    still be imported."""
+    *force* takes the writer of a turn without an end as gone, and reconciles
+    a turn whose own events still wait to be projected; the writer's spool
+    must still be imported."""
     conn = connect(db_path, readonly=True)
     try:
         row, provider_session_id, lower_us, upper_us = _turn_context(
             conn, turn_id, Path(root) if root is not None else None,
-            _spool_root(db_path), force=force,
+            _spool_root(db_path), force=force, now_us=now_us,
         )
+        if not force:
+            _require_projected(conn, turn_id)
         if not provider_session_id:
             raise ReconciliationError(
                 f"turn {row['turn_id']} has no provider session correlation"
@@ -635,18 +799,30 @@ def reconcile_turn(
     timeout: float = 60.0,
     collect: bool = True,
     force: bool = False,
+    import_spool: Callable[[], object] | None = None,
+    now_us: int | None = None,
 ) -> dict[str, object]:
     """Append exact recovery events and optionally wait for projection.
 
     *force* reconciles a turn without an end whose writer still looks alive,
     for an operator who knows its process is gone. On a turn that is really
     running it records a partial turn that collides with the writer's own
-    events, so it is never implied by naming the turn."""
+    events, so it is never implied by naming the turn.
+
+    The turn is decided only from rows imported after this call starts: the
+    caller holding the collector lock passes *import_spool*; anyone else
+    imports or waits for the running collector (see _await_import). A record a later turn
+    wrote to the transcript by then comes from a request that turn sent after
+    spooling its start, so that start bounds this turn's window."""
     root = Path(root).resolve()
     metrics_root = root / "state" / "metrics"
     db_path = metrics_root / "metrics.db"
     started = time.monotonic()
-    plan = build_reconcile_plan(db_path, turn_id, root=root, force=force)
+    if import_spool is not None:
+        import_spool()
+    else:
+        _await_import(root, db_path)
+    plan = build_reconcile_plan(db_path, turn_id, root=root, force=force, now_us=now_us)
     before = _measurement_ids(db_path, plan.measurement_ids)
     segment = (
         metrics_root
@@ -702,15 +878,26 @@ def reconcile_missing(
     terminal_only: bool = False,
     track_attempts: bool = False,
     budget_seconds: float | None = None,
+    import_spool: Callable[[], object] | None = None,
 ) -> dict[str, object]:
     """Reconcile turns that currently have no exact turn measurement.
 
     ``track_attempts`` is the background pass, run by the collector that owns
     the database: failures are counted per turn in ``reconcile_attempts``, a
     turn with three is no longer a candidate, and success clears the count.
-    ``budget_seconds`` ends a pass early; the next pass continues from there."""
+    ``budget_seconds`` ends a pass early; the next pass continues from there.
+    ``import_spool`` is the import of a caller holding the collector lock;
+    without it the run imports or waits as reconcile_turn does. It runs once
+    before the candidates are read, then before a turn only when that turn's
+    window may end at a row the last import did not see (see _ImportGate).
+    With ``terminal_only``, a turn whose evidence is still on its way is
+    skipped without counting an attempt, and counted in ``turns_waiting``."""
     root = Path(root).resolve()
     db_path = root / "state" / "metrics" / "metrics.db"
+    # The candidates are read from the database: a turn still in the spool
+    # would not be one.
+    gate = _ImportGate(root, db_path, import_spool)
+    gate.sync()
     conn = connect(db_path, readonly=True)
     try:
         candidates = conn.execute(
@@ -744,32 +931,44 @@ def reconcile_missing(
                     writers[writer] = _writer_done(conn, spool_root, writer)
                 if not writers[writer]:
                     continue
+                gate.confirmed.add(str(turn_id))
             turn_ids.append(str(turn_id))
     finally:
         conn.close()
+    # After the liveness checks, so the confirmed writers were gone before it.
+    gate.sync()
     started = time.monotonic()
     results = []
     failures = []
+    waiting = 0
     succeeded: list[str] = []
-    for turn_id in turn_ids:
-        if budget_seconds is not None and time.monotonic() - started >= budget_seconds:
-            break
-        try:
-            results.append(
-                reconcile_turn(
-                    root,
-                    turn_id,
-                    wait=wait,
-                    timeout=timeout,
-                    collect=collect,
+    try:
+        for turn_id in turn_ids:
+            if budget_seconds is not None and time.monotonic() - started >= budget_seconds:
+                break
+            try:
+                now_us = gate.before(turn_id)
+                results.append(
+                    reconcile_turn(
+                        root,
+                        turn_id,
+                        wait=wait,
+                        timeout=timeout,
+                        collect=collect,
+                        import_spool=_imported,
+                        now_us=now_us,
+                    )
                 )
-            )
-            succeeded.append(turn_id)
-        except TurnStillRunning as exc:
-            if not terminal_only:
+                succeeded.append(turn_id)
+            except TurnStillRunning as exc:
+                if terminal_only:
+                    waiting += 1
+                else:
+                    failures.append({"turn_id": turn_id, "error": str(exc)})
+            except (ReconciliationError, ProviderContractError, OSError) as exc:
                 failures.append({"turn_id": turn_id, "error": str(exc)})
-        except (ReconciliationError, ProviderContractError, OSError) as exc:
-            failures.append({"turn_id": turn_id, "error": str(exc)})
+    finally:
+        gate.close()
     exhausted = 0
     if track_attempts:
         exhausted = _record_attempts(db_path, [item["turn_id"] for item in failures], succeeded)
@@ -782,6 +981,7 @@ def reconcile_missing(
         ),
         "errors": len(failures),
         "retry_exhausted_turns": exhausted,
+        "turns_waiting": waiting,
         "turns_considered": len(results) + len(failures),
         "turns_reconciled": len(results),
         "exact_measurements_recovered": sum(
