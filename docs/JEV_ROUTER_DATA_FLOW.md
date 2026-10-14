@@ -52,7 +52,7 @@ key supplied as `TYPESAFE_API_KEY` in the same `.env` or the environment.
 | `criteria` | one generic line per candidate | Must cover exactly the candidates |
 | `prompt_egress` | `none` | `none` (features only) or `redacted` (also the redacted task text) |
 | `roles` | `director`, `engineer` | Allowlist of roles that are routed |
-| `entry_points` | all four | Subset of `subagent_phase`, `subagent_persistent`, `subagent_supervised`, `workflow_start` |
+| `entry_points` | all four | Subset of `subagent_phase`, `subagent_persistent`, `subagent_supervised`, `workflow_start`. A name no caller produces (such as the retired `session_start`) is ignored rather than fatal; a policy left with none is rejected |
 | `brain` | `auto` | `auto` follows the agent's brain; `claude` or `codex` pins it |
 | `min_confidence` | `0.85` | `[0, 1]` |
 | `deadline_ms` | `3000` | `50`-`3000`, covers capacity wait and the HTTP call |
@@ -74,8 +74,12 @@ key fields plus any setting or label that differs from its default. Setting the
 mode to `off` empties `BOBI_METRICS_EXPERIMENT_JSON` and keeps the config in
 `BOBI_METRICS_EXPERIMENT_DISABLED_JSON` (a real key, so any `.env` rewrite such
 as a setup credential save keeps it) for re-enabling; routing never reads that
-key. Deleting removes both. A saved config applies when
-the agent restarts.
+key. Deleting removes both. Routing, the editor and Test Routing read the config
+from one source: `run/.env` whenever it names the config (set, emptied or kept
+disabled), otherwise the process environment, which a deployment may set
+directly. Routing reads it at each session start, so a saved config applies to
+every new session without a restart; a running session keeps its model until it
+ends, and the persistent director until the agent restarts.
 
 The **config fingerprint** is a SHA-256 of the minimal form without
 `endpoint`. Any other change (mode, candidates, instructions, criteria, roles,
@@ -411,7 +415,7 @@ finding a stale route.
 
 | Surface | Purpose |
 |---|---|
-| `GET/POST/DELETE /api/agents/{name}/metrics/jev-config` | Read, save (short form, `run/.env` at mode 0600) or remove the config. Returns `config_error` for an unreadable or rejected config and `config_warnings` for candidates the agent's brain cannot run. A config supplied by the process environment rather than `.env` refuses edits with `config_environment_override`. |
+| `GET/POST/DELETE /api/agents/{name}/metrics/jev-config` | Read, save (short form, `run/.env` at mode 0600) or remove the config. Returns `config_error` for an unreadable or rejected config and `config_warnings` for candidates the agent's brain cannot run. A config supplied only by the process environment is shown; saving writes `run/.env`, which then takes precedence. Unknown entry points in a saved config are listed in `ignored_entry_points` and dropped by the next save. |
 | `POST /api/agents/{name}/metrics/test-route` | Sandbox: one TypeSafe call with the saved config, showing features, outgoing payload, raw answer and the guarded effective model. Writes nothing. |
 | `POST /api/agents/{name}/metrics/test-run` | Runs one prompt on a candidate model through the agent's native Claude brain with no tools, no MCP and no settings. Not recorded in metrics. |
 | `state/jev_routing_fallback.log` | One JSON line per no-decision fallback, rejected admission or failed routed model |

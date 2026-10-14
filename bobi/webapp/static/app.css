@@ -401,6 +401,7 @@
 .jev-candidate-tag { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 8px; border: 1px solid var(--border-card); border-radius: var(--radius-sm); background: var(--surface-card); font-size: 12px; }
 .jev-candidate-tag code { min-width: 0; overflow-wrap: anywhere; }
 .jev-config-error { margin: 0 0 16px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--status-failed) 40%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--status-failed) 6%, transparent); font-size: 12.5px; line-height: 1.5; color: var(--text-primary); }
+.jev-config-missing { margin: 6px 0 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--warn) 8%, transparent); font-size: 12.5px; line-height: 1.5; color: var(--text-primary); }
 .jev-candidate-role { padding: 0 5px; border-radius: 3px; background: var(--accent-soft); color: var(--accent); font-family: var(--font-mono); font-size: 10.5px; }
 #jev-pane-guide .jev-form-group > .jev-form-hint { margin: 6px 0 0; }
 .jev-candidate-remove { display: grid; place-items: center; flex: none; width: 24px; height: 24px; padding: 4px; border: 0; }

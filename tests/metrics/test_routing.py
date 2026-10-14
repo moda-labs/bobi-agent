@@ -61,6 +61,13 @@ def test_a_policy_cannot_name_a_bare_session_start_entry_point():
         ExperimentConfig.from_mapping({**concise_config(), "entry_points": ["session_start"]})
 
 
+def test_a_saved_policy_naming_the_retired_session_start_entry_point_still_loads():
+    # Configs saved before it was retired list it among the defaults. No caller
+    # produces it, so the policy loads without it rather than switching off.
+    raw = {**concise_config(), "entry_points": ["subagent_persistent", "session_start", "workflow_start"]}
+    assert ExperimentConfig.from_mapping(raw).policy.entry_points == ("subagent_persistent", "workflow_start")
+
+
 def test_minimal_jev_config_has_stable_defaults_and_fingerprint():
     raw = {key: concise_config()[key] for key in ("control_model", "candidate_models", "instructions")}
     config = ExperimentConfig.from_mapping(raw)
@@ -505,6 +512,30 @@ def test_a_long_env_secret_is_scrubbed_whole_before_shape_rules_split_it():
 
 def test_unquoted_value_after_a_quoted_key_is_redacted_whole():
     assert redact_secrets('"password": ab,cd')[0] == '"password": [redacted]'
+
+
+def test_a_saved_routing_config_reaches_the_next_session_without_a_restart(monkeypatch, tmp_path):
+    # The process started with one config in its environment; the editor then
+    # saves to run/.env. Each new session routes by what is saved now.
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(mode="shadow")))
+    fixed_policy(monkeypatch)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    env_file = tmp_path / ".env"
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(configured(mode="enforce")) + "\n")
+        assert asyncio.run(resolve_route(context(), runtime=runtime)).model == "cheap"
+        # Switched off in the editor: the key is emptied and the policy kept aside.
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=\nBOBI_METRICS_EXPERIMENT_DISABLED_JSON="
+                            + json.dumps(configured(mode="enforce")) + "\n")
+        assert asyncio.run(resolve_route(replace(context(), session_name="next"), runtime=runtime)).model == "configured"
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_a_policy_drops_entry_points_no_caller_produces():
+    raw = {**concise_config(), "entry_points": ["subagent_phase", "subagent_phse"]}
+    assert ExperimentConfig.from_mapping(raw).policy.entry_points == ("subagent_phase",)
 
 
 def test_out_of_scope_resume_under_another_brain_keeps_the_configured_model(monkeypatch, tmp_path):

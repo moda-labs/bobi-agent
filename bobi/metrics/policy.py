@@ -85,8 +85,11 @@ class PolicyConfig:
         if (isinstance(confidence, bool) or not isinstance(confidence, (int, float))
                 or not math.isfinite(confidence) or not 0 <= confidence <= 1):
             raise ValueError("invalid policy min_confidence")
-        entry_points = strings("entry_points")
-        if set(entry_points) - set(ENTRY_POINTS):
+        # A name no caller produces (one retired since the config was saved, or
+        # a typo) can never route anything; it is dropped, not fatal, and the
+        # editor names it. Only a policy left with none fails.
+        entry_points = tuple(name for name in strings("entry_points") if name in ENTRY_POINTS)
+        if not entry_points:
             raise ValueError("unsupported policy entry_points")
         options = {"instructions": raw.get("instructions"), "criteria": raw.get("criteria")}
         if "endpoint" in raw:

@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 import json
 import logging
-import os
 import re
 import time
 
@@ -13,7 +12,7 @@ from bobi.metrics.events import uuid7
 from bobi.metrics.features import build_features
 from bobi.metrics.policies.typesafe import TypeSafePolicy
 from bobi.metrics.policy import PolicyRequest, call_policy, policy_breaker
-from bobi.metrics.router import EXPERIMENT_CONFIG_ENV, RouterDecision, load_experiment
+from bobi.metrics.router import EXPERIMENT_CONFIG_ENV, RouterDecision, load_experiment, routing_config_source
 from bobi.metrics.runtime import MetricsRuntime, current_runtime, get_runtime
 from bobi.sdk import load_session_brain, load_session_id, load_session_model, load_session_route, save_session_route
 
@@ -163,13 +162,14 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         runtime = runtime or get_runtime()
         if ctx.explicit_model:
             return fallback
+        source = routing_config_source(runtime.root)
         if not runtime.enabled:
-            if os.environ.get(EXPERIMENT_CONFIG_ENV):
+            if source.get(EXPERIMENT_CONFIG_ENV):
                 stage = "metrics"
                 raise RuntimeError("routing requires available telemetry")
             return fallback
         stage = "config"
-        config = load_experiment()
+        config = load_experiment(source)
         if config is None:
             from bobi.config import _UNRESTORED_PROVIDER_ENV
 

@@ -226,6 +226,25 @@ class RouterDecision:
     policy_metadata_json: str = "{}"
 
 
+def routing_config_source(root=None) -> Mapping[str, str]:
+    """Where the routing config is read, by routing, the editor and its test.
+
+    The runtime's run/.env, which the editor writes, whenever it names the
+    config (set, emptied, or kept disabled); otherwise this process's
+    environment, which a deployment may set directly. Read at each use, so a
+    saved change reaches every new session without a restart."""
+    from bobi import paths
+    from bobi.config import parse_env_file
+
+    try:
+        saved = parse_env_file(paths.env_path(root))
+    except (OSError, RuntimeError, UnicodeError):
+        saved = {}
+    if EXPERIMENT_CONFIG_ENV in saved or DISABLED_EXPERIMENT_CONFIG_ENV in saved:
+        return saved
+    return os.environ
+
+
 def load_experiment(env: Mapping[str, str] | None = None) -> ExperimentConfig | None:
     values = os.environ if env is None else env
     encoded = str(values.get(EXPERIMENT_CONFIG_ENV, "")).strip()

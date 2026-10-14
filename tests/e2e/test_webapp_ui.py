@@ -192,6 +192,61 @@ class TestMetricsView:
         dialog.get_by_role("tab", name="Configure").click()
         expect(dialog.locator("#jev-config-mode")).to_have_value(mode)
 
+    def test_jev_overview_shows_the_saved_policy_or_says_none_is_saved(self, webapp, page):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        seed_dashboard(webapp.install.repo_path, int((time.time() - 60) * 1_000_000))
+        env_file = paths.env_path(webapp.install.repo_path)
+        page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        page.set_viewport_size({"width": 1440, "height": 1000})
+
+        def overview(button_name):
+            page.goto(webapp.agent_url() + "/metrics")
+            page.reload()
+            page.get_by_role("button", name=button_name).click()
+            return page.get_by_role("dialog", name="JEV Routing Configuration")
+
+        # Nothing saved: a notice and a copyable template built from the
+        # agent's own models, which is a valid policy once saved.
+        from bobi.metrics.router import ExperimentConfig
+
+        env_file.write_text("UNRELATED_SETTING=1\n")
+        dialog = overview("JEV: Disabled")
+        expect(dialog.get_by_role("status").filter(has_text="No routing policy is saved in run/.env yet")).to_be_visible()
+        expect(dialog.get_by_text("Template JEV Policy Configuration")).to_be_visible()
+        dialog.get_by_role("button", name="Copy JSON").click()
+        expect(dialog.get_by_role("button", name="copied")).to_be_visible()
+        template = json.loads(page.evaluate("navigator.clipboard.readText()"))
+        assert ExperimentConfig.from_mapping(template).control_model == template["control_model"]
+
+        # Saved but invalid: the error is named in the modal, and the saved text,
+        # which may hold anything, is not echoed.
+        broken = {**concise_config(), "min_confidence": 7}
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + shlex.quote(json.dumps(broken)) + "\n")
+        dialog = overview("JEV: Disabled")
+        expect(dialog.get_by_role("alert")).to_contain_text("min_confidence")
+        expect(dialog.get_by_text("The saved policy is not shown while it is invalid.", exact=False)).to_be_visible()
+        expect(dialog.get_by_text("No routing policy is saved")).to_have_count(0)
+        expect(dialog.locator(".jev-code-preview")).not_to_contain_text('"min_confidence": 7')
+
+        # Saved and valid: shown, and Copy JSON copies exactly that text.
+        valid = concise_config()
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" + shlex.quote(json.dumps(valid)) + "\n")
+        dialog = overview("JEV: Disabled")
+        dialog.get_by_role("button", name="Copy JSON").click()
+        expect(dialog.get_by_role("button", name="copied")).to_be_visible()
+        assert page.evaluate("navigator.clipboard.readText()") == dialog.locator(".jev-code-preview").text_content()
+        assert json.loads(page.evaluate("navigator.clipboard.readText()")) == valid
+
+        # A policy saved before the retired session_start entry point went away still runs.
+        legacy = {**concise_config(), "entry_points": ["subagent_persistent", "session_start", "workflow_start"]}
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + shlex.quote(json.dumps(legacy)) + "\n")
+        dialog = overview("JEV: Enforce")
+        expect(dialog.locator("#jev-input-enabled")).to_be_checked()
+        expect(dialog.get_by_role("alert")).to_have_count(0)
+        expect(dialog.get_by_role("status").filter(has_text="Ignored entry points no caller uses: session_start")).to_be_visible()
+
     def test_metrics_maintenance_collapses_without_reclassifying_real_user(self, webapp, page, monkeypatch):
         from bobi.metrics.store import connect
         from bobi.prompts.resolver import build_startup_prompt
@@ -1164,7 +1219,7 @@ class TestMetricsView:
         assert payload["candidate_models"] == ["haiku", "sonnet"]
         assert payload["roles"] == ["director", "engineer"] and payload["instructions"] == instructions.input_value()
         assert payload["prompt_egress"] == "redacted" and payload["brain"] == "auto"
-        assert payload["restart_required"] and payload["applies_on"] == "agent_restart"
+        assert payload["restart_required"] is False and payload["applies_on"] == "new_sessions"
         expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("restart", re.I))
         assert not [item for item in requests if item[0] == "POST" and item[1].endswith("/restart")]
         assert "UNRELATED_SETTING=preserved" in env_file.read_text()

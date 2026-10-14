@@ -1106,13 +1106,17 @@ def _agent_brain(root: Path) -> tuple[str, bool]:
     return normalize_brain_kind(kind), gateway
 
 
-def _saved_experiment(root, env: dict):
-    """The policy the sandbox tests: the active one, or the one a disabled policy keeps."""
+def _saved_experiment(root):
+    """The policy the sandbox tests: the active one, or the one a disabled policy keeps.
+
+    Read from the same source routing uses."""
     import json
 
-    from bobi.metrics.router import DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, ExperimentConfig
+    from bobi.metrics.router import (DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, ExperimentConfig,
+                                     routing_config_source)
 
-    raw = env.get(EXPERIMENT_CONFIG_ENV, "").strip() or env.get(DISABLED_EXPERIMENT_CONFIG_ENV, "").strip()
+    saved = routing_config_source(root)
+    raw = saved.get(EXPERIMENT_CONFIG_ENV, "").strip() or saved.get(DISABLED_EXPERIMENT_CONFIG_ENV, "").strip()
     if not raw:
         raise ValueError("configure a JEV policy before simulating routing")
     return ExperimentConfig.from_mapping(json.loads(raw))
@@ -1209,7 +1213,7 @@ class LocalRuntime(TeamRuntime):
             if context.get("brain", "claude") not in ("claude", "codex"):
                 raise ValueError("unsupported sandbox brain")
             env = project_env(root)
-            config = _saved_experiment(root, env)
+            config = _saved_experiment(root)
             policy_config = config.policy
             if not isinstance(role, str) or role not in policy_config.roles:
                 raise ValueError("unsupported sandbox role")
@@ -1299,7 +1303,6 @@ class LocalRuntime(TeamRuntime):
         import tempfile
 
         from bobi.brain import AssistantText, StreamDelta, TurnResult, get_brain
-        from bobi.config import project_env
         from bobi.costs import estimate_cost
         from bobi.env import child_agent_env
         from bobi.metrics.query import MetricsQueryError
@@ -1312,8 +1315,7 @@ class LocalRuntime(TeamRuntime):
             prompt, model = payload.get("prompt"), payload.get("model")
             if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > 65536:
                 raise ValueError("prompt must contain 1 to 65536 UTF-8 bytes")
-            env = project_env(root)
-            policy_config = _saved_experiment(root, env).policy
+            policy_config = _saved_experiment(root).policy
             if model not in policy_config.candidate_models:
                 raise ValueError("model must be one of the policy's candidates")
             engine, gateway = _agent_brain(root)
@@ -1527,7 +1529,7 @@ class LocalRuntime(TeamRuntime):
         from bobi.metrics.policies.typesafe import DEFAULT_ENDPOINT
         from bobi.metrics.policy import POLICY_CREDENTIAL_ENV, POLICY_NAME
         from bobi.metrics.router import (DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, SHORT_DEFAULTS,
-                                         ExperimentConfig, load_experiment)
+                                         ExperimentConfig, load_experiment, routing_config_source)
         from bobi.prompts.resolver import discover_roles
         from bobi.chat_history import safe_name
         from bobi.costs import native_models
@@ -1551,12 +1553,14 @@ class LocalRuntime(TeamRuntime):
         if "engineer" not in available_roles:
             available_roles.append("engineer")
 
-        raw_key = EXPERIMENT_CONFIG_ENV if env.get(EXPERIMENT_CONFIG_ENV, "").strip() else DISABLED_EXPERIMENT_CONFIG_ENV
-        raw_val = env.get(raw_key, "").strip()
+        # The same source routing reads, so the page shows what runs.
+        saved = routing_config_source(root)
+        raw_key = EXPERIMENT_CONFIG_ENV if saved.get(EXPERIMENT_CONFIG_ENV, "").strip() else DISABLED_EXPERIMENT_CONFIG_ENV
+        raw_val = saved.get(raw_key, "").strip()
 
         config_error = ""
         try:
-            configured = load_experiment(env)
+            configured = load_experiment(saved)
         except (ValueError, TypeError) as exc:
             configured = None
             config_error = str(exc)
@@ -1573,10 +1577,19 @@ class LocalRuntime(TeamRuntime):
                 "native_models": native_models(agent_brain),
             }
 
+        def ignored_entry_points(config: ExperimentConfig) -> list[str]:
+            try:
+                listed = json.loads(raw_val).get("entry_points") or []
+            except (ValueError, AttributeError):
+                return []
+            return [name for name in listed if isinstance(name, str) and name.strip() not in config.policy.entry_points]
+
         def policy_fields(config: ExperimentConfig) -> dict:
             policy = config.policy
             options = json.loads(policy.options_json)
             return {
+                # Listed in the saved policy but produced by no caller; the next save drops them.
+                "ignored_entry_points": ignored_entry_points(config),
                 "experiment_id": config.experiment_id,
                 "control_model": config.control_model,
                 "policy_name": policy.name,
@@ -1592,8 +1605,8 @@ class LocalRuntime(TeamRuntime):
                 "brain": policy.brain,
                 "prompt_egress": policy.prompt_egress,
                 "instructions": options["instructions"],
-                "applies_on": "agent_restart",
-                "restart_required": True,
+                "applies_on": "new_sessions",
+                "restart_required": False,
                 "config_path": str(env_file),
                 **model_fields(list(policy.candidate_models), policy.brain),
             }
@@ -1607,6 +1620,7 @@ class LocalRuntime(TeamRuntime):
             return {
                 "enabled": True,
                 "raw_json": formatted_json,
+                "config_saved": True,
                 "cohort": configured.cohort or "",
                 "mode": configured.policy.mode,
                 **policy_fields(configured),
@@ -1630,6 +1644,7 @@ class LocalRuntime(TeamRuntime):
             return {
                 "enabled": False,
                 "raw_json": json.dumps(parsed, indent=2),
+                "config_saved": True,
                 "cohort": experiment.cohort or "production-opt-in",
                 "mode": "off",
                 "configured_mode": experiment.policy.mode,
@@ -1637,9 +1652,12 @@ class LocalRuntime(TeamRuntime):
                 **policy_fields(experiment),
             }
         # Nothing usable saved: no invented models. The editor asks for candidates.
+        # A saved value that does not validate is never echoed, since it may
+        # hold anything; config_saved tells the page it exists.
         return {
             "enabled": False,
             "raw_json": "",
+            "config_saved": bool(raw_val),
             "experiment_id": "",
             "cohort": "production-opt-in",
             "control_model": "",
@@ -1659,8 +1677,8 @@ class LocalRuntime(TeamRuntime):
             # A new policy sends no task text until the operator opts in.
             "prompt_egress": SHORT_DEFAULTS["prompt_egress"],
             "instructions": "",
-            "applies_on": "agent_restart",
-            "restart_required": True,
+            "applies_on": "new_sessions",
+            "restart_required": False,
             "config_path": str(env_file),
             "config_error": config_error,
             **model_fields([], "auto"),
@@ -1668,9 +1686,7 @@ class LocalRuntime(TeamRuntime):
 
     def update_routing_config(self, name: str, payload: dict) -> dict:
         import json
-        import os
 
-        from bobi.config import _DOTENV_LOADED
         from bobi.fsutil import atomic_write_text, file_lock
         from bobi.metrics.query import MetricsQueryError
         from bobi.metrics.router import (DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, ExperimentConfig,
@@ -1727,8 +1743,6 @@ class LocalRuntime(TeamRuntime):
                     raise ValueError("min_confidence must be between 0 and 1")
         except (ValueError, TypeError, UnicodeError) as exc:
             raise MetricsQueryError(f"invalid JEV configuration: {exc}", "invalid_jev_config") from None
-        if EXPERIMENT_CONFIG_ENV in os.environ and _DOTENV_LOADED.get(EXPERIMENT_CONFIG_ENV) != os.environ[EXPERIMENT_CONFIG_ENV]:
-            raise MetricsQueryError("JEV configuration is controlled by the process environment", "config_environment_override")
         try:
             with file_lock(env_file):
                 text = env_file.read_text() if env_file.exists() else ""

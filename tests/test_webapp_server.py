@@ -1797,8 +1797,27 @@ class TestRoutingConfig:
         response = _client().get(f"/api/agents/{bobi_install.agent_name}/{route}")
         assert response.status_code == 200
         assert response.json()["enabled"] is False and response.json()["mode"] == "off"
+        assert (response.json()["config_saved"], response.json()["raw_json"]) == (False, "")
         assert response.headers["cache-control"] == "no-store"
         assert _client().get(f"/api/agents/missing-agent/{route}").status_code == 404
+
+    def test_jev_config_reads_the_saved_policy_not_the_value_the_process_started_with(self, bobi_install, monkeypatch):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        # A service-launched runtime carries the policy in its own environment,
+        # frozen at start; the editor saves to run/.env, which is what it must show.
+        started = {**concise_config(), "control_model": "haiku"}
+        saved = {**concise_config(), "control_model": "sonnet"}
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(started))
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(saved) + "\n")
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        assert config["control_model"] == "sonnet"
+        assert json.loads(config["raw_json"])["control_model"] == "sonnet"
+        # Test Routing tests the same saved policy.
+        from bobi.webapp.runtime import _saved_experiment
+
+        assert _saved_experiment(bobi_install.repo_path).control_model == "sonnet"
 
     def test_jev_config_offers_native_models_and_names_unusable_policy(self, bobi_install):
         from bobi import paths
@@ -1818,9 +1837,18 @@ class TestRoutingConfig:
         config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
         # A saved policy that fails validation is named instead of silently shown as defaults.
         assert config["enabled"] is False and "min_confidence" in config["config_error"]
+        # It exists, but is never echoed while invalid.
+        assert (config["config_saved"], config["raw_json"]) == (True, "")
         paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON={not json\n")
         config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
         assert config["config_error"] == "BOBI_METRICS_EXPERIMENT_DISABLED_JSON is not valid JSON"
+        assert (config["config_saved"], config["raw_json"]) == (True, "")
+        legacy = {**concise_config(), "entry_points": ["subagent_persistent", "session_start", "workflow_start"]}
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(legacy) + "\n")
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        assert config["enabled"] is True and not config.get("config_error")
+        assert config["entry_points"] == ["subagent_persistent", "workflow_start"]
+        assert config["ignored_entry_points"] == ["session_start"]
 
     def test_jev_config_does_not_hide_runtime_failure(self, bobi_install, monkeypatch):
         def unavailable(env):
@@ -1885,7 +1913,7 @@ class TestRoutingConfig:
         assert saved.headers["cache-control"] == "no-store"
         assert saved.json()["enabled"] is True
         assert saved.json()["instructions"] == payload["instructions"]
-        assert saved.json()["restart_required"] is True and saved.json()["applies_on"] == "agent_restart"
+        assert saved.json()["restart_required"] is False and saved.json()["applies_on"] == "new_sessions"
         assert env_file.stat().st_mode & 0o777 == 0o600
         assert env_file.read_text().startswith("# keep this comment\nOTHER_TOKEN=synthetic-private\n")
         assert "synthetic-private" not in saved.text
@@ -2208,16 +2236,22 @@ class TestRoutingConfig:
         assert response.status_code == 500 and response.json()["code"] == "config_write_failed"
         assert env_file.read_text() == "OTHER_TOKEN=synthetic-private\n"
 
-    def test_jev_config_process_override_rejects_false_success(self, bobi_install, monkeypatch):
+    def test_jev_config_from_the_process_environment_is_shown_and_a_save_takes_over(self, bobi_install, monkeypatch):
         from bobi import paths
+        from tests.metrics.test_routing import concise_config
 
         env_file = paths.env_path(bobi_install.repo_path)
         env_file.write_text("OTHER_TOKEN=synthetic-private\n")
-        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "{}")
+        # A deployment that sets the config in the environment only.
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps({**concise_config(), "control_model": "haiku"}))
         url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        assert _client().get(url).json()["control_model"] == "haiku"
+        # Saving writes run/.env, which then decides.
         response = _client().post(url, json={"mode": "off"})
-        assert response.status_code == 409 and response.json()["code"] == "config_environment_override"
-        assert env_file.read_text() == "OTHER_TOKEN=synthetic-private\n"
+        assert response.status_code == 200, response.text
+        assert "BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" in env_file.read_text()
+        config = _client().get(url).json()
+        assert config["enabled"] is False and config["control_model"] == "haiku"
 
     def test_jev_concurrent_edits_keep_both_changes(self, bobi_install):
         from concurrent.futures import ThreadPoolExecutor

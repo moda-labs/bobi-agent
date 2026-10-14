@@ -2344,6 +2344,16 @@ export function mountMetrics(element, { api, name, session = "" }) {
     // Production routes only the policy's roles, so the sandbox offers only those.
     const scopedRoles = cfg.roles?.length ? cfg.roles : ["director", "engineer"];
     const testEntries = cfg.entry_points?.length ? [...cfg.entry_points] : ["subagent_phase"];
+    // The saved policy, or a starting template built from the agent's own models.
+    const templateModels = (cfg.native_models || []).slice(0, 2);
+    const policyJson = cfg.raw_json || JSON.stringify({
+      mode: "shadow",
+      control_model: templateModels[0] || "<a model this agent runs>",
+      candidate_models: templateModels.length ? templateModels : ["<model>", "<model>"],
+      roles: cfg.roles?.length ? cfg.roles : ["engineer", "director"],
+      prompt_egress: "none",
+      instructions: "<when to pick which model>",
+    }, null, 2);
     const EGRESS_TEXT = {
       redacted: "Redacted task text (secrets and paths removed)",
       none: "Metadata only (size, role, entry point)",
@@ -2368,6 +2378,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
           </div>
 
           ${cfg.config_error ? `<p class="jev-config-error" role="alert"><strong>Saved policy is not active:</strong> ${escapeHtml(cfg.config_error)}. Fix it in Configure and save, or reset it.</p>` : ""}
+          ${cfg.ignored_entry_points?.length ? `<p class="jev-config-missing" role="status">Ignored entry points no caller uses: ${escapeHtml(cfg.ignored_entry_points.join(", "))}. Saving drops them.</p>` : ""}
           ${(cfg.config_warnings || []).map(warning => `<p class="jev-config-error" role="alert"><strong>Cannot route this agent:</strong> ${escapeHtml(warning)}.</p>`).join("")}
           <!-- Policy Summary Card -->
           <div class="jev-summary-card">
@@ -2408,18 +2419,21 @@ export function mountMetrics(element, { api, name, session = "" }) {
           <!-- Raw JSON Inspector / Preview -->
           <div class="jev-form-group">
             <div class="jev-code-head">
-              <label class="jev-field-label">Active JEV Policy Configuration (<code>BOBI_METRICS_EXPERIMENT_JSON</code>)</label>
+              <label class="jev-field-label">${cfg.raw_json ? (cfg.enabled ? "Active" : "Saved") : "Template"} JEV Policy Configuration (<code>BOBI_METRICS_EXPERIMENT_JSON</code>)</label>
               <div class="jev-code-head-actions">
                 <button type="button" class="btn bobi-btn quiet jev-btn-jump-to-guide">Edit configuration →</button>
                 <button type="button" class="btn bobi-btn quiet jev-btn-copy-json" title="Copy raw JSON configuration">Copy JSON</button>
               </div>
             </div>
-            <pre class="jev-code-preview"><code>${escapeHtml(cfg.raw_json || '{\n  "note": "No BOBI_METRICS_EXPERIMENT_JSON found in run/.env"\n}')}</code></pre>
+            ${cfg.raw_json ? "" : cfg.config_saved
+              ? `<p class="jev-form-hint">The saved policy is not shown while it is invalid. Below is a template to start from.</p>`
+              : `<p class="jev-config-missing" role="status">No routing policy is saved in run/.env yet. Below is a template; set one up in Configure.</p>`}
+            <pre class="jev-code-preview"><code>${escapeHtml(policyJson)}</code></pre>
             <p class="jev-form-hint">Use the config editor to update this policy. Existing advanced policy fields are preserved when saving.</p>
           </div>
 
           <div class="jev-restart-notice">
-            <span><strong>Note on applying changes:</strong> Persistent sessions (such as the active <code>director</code>) keep their model throughout execution. After saving, restart the agent to re-initialize active sessions under the new policy.</span>
+            <span><strong>Note on applying changes:</strong> A saved policy applies to every new session at once, with no restart. A session already running keeps its model until it ends; the persistent <code>director</code> picks up the change when the agent restarts.</span>
           </div>
         </div>
 
@@ -2759,8 +2773,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
     const copyBtn = form.querySelector(".jev-btn-copy-json");
     if (copyBtn) {
       copyBtn.addEventListener("click", async () => {
-        const textToCopy = cfg.raw_json || "";
-        if (!textToCopy) return;
+        const textToCopy = policyJson;
         try {
           await navigator.clipboard.writeText(textToCopy);
           copyBtn.textContent = "copied";
@@ -2833,7 +2846,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
         const status = jevModalBody.querySelector(".jev-save-msg");
         status.className = "jev-save-msg text-green";
         status.textContent = (method === "DELETE" ? "Configuration deleted; JEV disabled." : "Saved. Policy is available to Sandbox.")
-          + (response.data.restart_required !== false ? " Restart agent to apply to production; existing sessions retain their model." : " Configuration applied.");
+          + (response.data.restart_required !== false ? " Restart agent to apply to production; existing sessions retain their model." : " New sessions use it now; running sessions keep their model.");
       } catch (error) {
         if (stopped) return;
         saveMsg.textContent = error.message || "Network error updating configuration.";
