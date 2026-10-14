@@ -314,6 +314,10 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   control model, so they are not routed and carry no saving. `routing` counts
   them as `fallback_turns` and `shadow_turns`; with no routed turn the card
   names both counts instead of the savings figures.
+- In a workflow run, which is one metrics session for all its agents and
+  steps, only the route's turns carry its routing decision or fallback. Turns
+  of other agents and steps pinned to their own model record neither, so they
+  never count as routed, shadow or fallback turns.
 - The routing card prices each routed turn's canonical tokens at list price
   three ways: on the model that ran, on the cheapest candidate in that
   decision's `candidate_models` (**always cheapest**), and on the most expensive
@@ -404,8 +408,8 @@ These use the app's existing token and loopback Host guard, `Cache-Control:
 no-store`, and filter-bound keyset cursors. Reads use short SQLite read-only WAL
 snapshots, a one-second query deadline, 200-row/512-KiB bounds, and at most four
 concurrent local readers. Invalid queries return 400/422; unknown records 404;
-busy/unavailable storage 503 with `Retry-After`. The view refreshes every ten
-seconds on the latest page, pauses in hidden tabs and refreshes once when the tab is shown again (a search refused as busy is retried then too), and cancels reads on navigation. One toolbar owns the time range, lifecycle picker/chip, provider filter, loaded-page search, refresh, and auto-refresh toggle. **All (up to 31d)** respects the existing query bound; it is not an all-history aggregation. Loaded-page search runs on the server (`q` on the turns route), so it matches the operator's text of every prompt the turn received, in full: the user message, a workflow's launch input and step instruction, and an event's content lines. It does not match text bobi adds around them (the agent bootstrap, event metadata, workflow headers). List rows carry only the first 512 characters of the cleaned message; the search still covers the full text. It updates 300 ms after typing and is re-run by the live refresh over a fresh window, so new matching turns appear; a refresh re-parses only transcripts that changed since the last read. A search refused because all metrics readers are busy is retried after about a second. The response's `turns` holds the matches and `unmatched_turns` the rest of the loaded page, so the turn drawer's position and Earlier/Later follow the whole session thread, as without a search. A search reads transcripts for up to 5 s and reuses transcripts that have not changed; when time runs out, the response's `search` field (`{"loaded", "searched"}`) and the page ("Search covered N of M loaded turns.") say how many turns had their prompt checked. Dashboard, agent, and metrics surfaces share a 1360px container with 32px desktop and 18px mobile gutters.
+busy/unavailable storage 503 with `Retry-After`. While Live is on the view refreshes every ten
+seconds: the latest page moves its window forward and an older page is re-read in place. It pauses in hidden tabs and refreshes once when the tab is shown again (a search refused as busy is retried then too), and cancels reads on navigation. A refused or failed read changes nothing on screen: the window, the page and its pager stay those of the last successful read. One toolbar owns the time range, lifecycle picker/chip, provider filter, loaded-page search, refresh, and auto-refresh toggle. **All (up to 31d)** respects the existing query bound; it is not an all-history aggregation. Loaded-page search runs on the server (`q` on the turns route) and matches the operator's text of every prompt the turn received, in full: a message as sent, a workflow's launch input and step instruction, and a delivered event's text. Bobi's own text is recognised only in the exact form bobi writes it, and is left out of the search, the row title and the Slack origin: the agent instructions a fresh Codex thread carries before its first message (cut by the turn's recorded `prompt_bytes`, or, on older rows, the base prompt through the agent prompt's closing notice), an agent's startup brief, a workflow's background and step headers, and an event's `Event:` line and the indented metadata and notes after its text (from its `conversation:` line on, or its trailing `key: value` lines when it has none). A prompt that does not match one of these forms exactly is searched and titled whole. The Slack origin link comes only from a delivered event's `conversation:` line. List rows carry only the first 512 characters of the cleaned message; the search still covers the full text. It updates 300 ms after typing and is re-run by the live refresh over a fresh window, so new matching turns appear; a refresh re-parses only transcripts that changed since the last read. A search refused because all metrics readers are busy is retried after about a second. The response's `turns` holds the matches and `unmatched_turns` the rest of the loaded page, so the turn drawer's position and Earlier/Later follow the whole session thread, as without a search. A search reads transcripts for up to 5 s and reuses transcripts that have not changed; when time runs out, the response's `search` field (`{"loaded", "searched"}`) and the page ("Search covered N of M loaded turns.") say how many turns had their prompt checked. Dashboard, agent, and metrics surfaces share a 1360px container with 32px desktop and 18px mobile gutters.
 It does not run migrations, checkpoints, models, or routing policies.
 The JEV header falls back to **JEV: Disabled** when its configuration cannot be read within 2.5 seconds; the editor reports the unavailable configuration instead of treating a failed read as a successful load.
 
@@ -500,7 +504,11 @@ still running is not.
 Background reconciliation makes at most three failed attempts per turn, keeps
 the counts in the `reconcile_attempts` table, and reports only the number of
 exhausted turns in collector health. A pass stops after five seconds and the
-next pass continues; each transcript is parsed once per pass.
+next pass continues; each transcript is parsed once per pass. A frame that
+passes its checksum but is not an event this build can read (a field from a
+newer build, say) counts as corrupt, for the import and for the reconciler
+alike: the segment is reported in `corrupt_segments`, and the rest of the pass
+and the manual command go on.
 
 A turn's provider records are those between its start and its end, plus five
 seconds for a transcript line stamped after the stream that ended the turn.
@@ -549,14 +557,51 @@ query and one check per writer, so turns that never qualify cannot hold back
 later ones. While the writer of a turn without an end is alive, a later turn of
 another process on the same provider session does not end it.
 
-`metrics reconcile --turn-id` applies the same definition and refuses a turn
-whose writer looks alive. Naming the turn is not enough to override it, because
+A turn is decided only from evidence that is no longer on its way:
+
+- Imported before the decision. Imports wait while a pass runs, and a turn
+  spools its start within milliseconds of stamping it, before it sends its
+  first request. A pass imports once before it reads its candidates and again
+  after it has checked which writers are gone, and then decides each turn
+  against that import:
+  - A window that ended (at a known next turn's start, or five seconds after
+    the turn's end) more than two seconds before the import is decided by
+    rows the import held.
+  - A turn without an end whose writer was already gone ends at that import
+    instead of "now": nothing of its own is stamped later, and a next turn
+    the import did not see started after it.
+  - Any other turn (one that ended or was followed within seconds) gets a
+    fresh import first, run only when a runtime writer's segment changed.
+
+  So a next turn spooled while the pass ran never lends its calls to a dead
+  turn. Reconciler segments are left to the next regular import. A manual
+  reconcile decides the same way; with no collector running it takes the
+  collector lock and runs the collector's import itself, and while a collector
+  holds the lock (in the middle of a pass, say) it waits up to 15 seconds for
+  that collector to import what was spooled before the command started, then
+  fails with an error that says so.
+- Projected. A turn whose own events are imported but still wait to be
+  projected is skipped: a workflow step's calls wait for the step's row, which
+  is written only when the step ends, possibly after a second turn of the same
+  step (a handoff-repair retry, for one). Recovering the turn earlier would
+  record its calls again without their step and leave its tool rows without a
+  parent. The wait is bounded by the orphan TTL (24 hours): an event whose
+  parent never arrives is then quarantined (`quarantined_events`), and the next
+  pass reconciles the turn.
+
+A skipped turn does not count as a failed attempt. Collector health reports
+the turns the last pass skipped this way as `reconciliation_waiting_turns`.
+
+`metrics reconcile --turn-id` applies the same definitions and refuses a turn
+whose writer looks alive or whose own events still wait to be projected. Naming the turn is not enough to override it, because
 reconciling a turn that is really running records a partial turn whose
 recovered calls collide with the ones its writer records when the turn ends.
 For a writer known to be gone that still reads as alive (an id without a
 start value whose pid is in use again), pass
-`--force`: it skips the liveness half only, still waits for the writer's
-spool to be imported, and the JSON result reports `"forced": true`.
+`--force`: it skips the liveness half and the wait for projection, still
+waits for the writer's spool to be imported, and the JSON result reports
+`"forced": true`. Forcing a turn whose calls wait for their step records them
+again without their step, so it is for a step that will never end.
 Limitation: two processes running turns on one provider session at the same
 time are not supported, because a finished turn's window still ends at the
 other process's next turn. Launch refuses a second active run on one session
