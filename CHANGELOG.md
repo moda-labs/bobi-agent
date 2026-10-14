@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.61.0 - 2026-10-13
+
+Minor release: the shared communication guidance every session loads is
+rewritten around comprehension. Agent replies will read differently after
+this upgrade.
+
+### Changed
+
+- **Shared communication guidance prioritizes comprehension (#1121, #1120).**
+  `bobi/prompts/communication_style.md` replaces its overlapping formatting
+  rules with guidance on understandable answers, recommendations bounded by
+  the evidence, and carrying prior decisions forward. The duplicate rules are
+  removed from `bobi/prompts/base.md`. Manager and worker sessions load it
+  through the existing native instruction renderer; the operator opt-out and
+  the role-specific schemas are unchanged.
+
 ## 0.60.1 - 2026-10-10
 
 Patch release: 0.60.0 crash-loops a containerized manager after a machine
