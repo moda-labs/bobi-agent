@@ -17,7 +17,10 @@ from bobi.workflow.schema import (
 from bobi.workflow.orchestrator import (
     _execute_notify_step,
     run_workflow,
+    resume_workflow,
+    make_session_name,
 )
+from bobi.workflow.state import WorkflowRun
 from bobi.workflow.variables import VariableContext
 from bobi.slack import format_slack_message, post_slack_message
 
@@ -534,8 +537,6 @@ class TestIssueLifecycleNotifySteps:
         step = wf.step_by_name("notify_start")
         assert step is not None, "notify_start step must exist"
         assert step.notify == "slack"
-        assert "input.run_key" in step.message
-        assert "input.task" in step.message
 
     def test_has_notify_complete_step(self):
         wf_path = Path(__file__).parent.parent / "agents" / "eng-team" / "workflows" / "issue-lifecycle.yaml"
@@ -546,7 +547,6 @@ class TestIssueLifecycleNotifySteps:
         step = wf.step_by_name("notify_complete")
         assert step is not None, "notify_complete step must exist"
         assert step.notify == "slack"
-        assert "input.run_key" in step.message
 
     def test_notify_start_after_pickup_before_route(self):
         wf_path = Path(__file__).parent.parent / "agents" / "eng-team" / "workflows" / "issue-lifecycle.yaml"
@@ -569,3 +569,103 @@ class TestIssueLifecycleNotifySteps:
         notify_idx = wf.step_index("notify_complete")
         assert notify_idx == len(wf.steps) - 1, \
             "notify_complete must be the last step"
+
+
+@pytest.fixture
+def issue_notice_runtime(tmp_path, monkeypatch):
+    """Real notify executor/Slack serialization, with an isolated HTTP sink."""
+    TestExecuteNotifyStep()._setup_config(tmp_path, monkeypatch)
+    monkeypatch.setattr("bobi.workflow.orchestrator._find_project_root", lambda: tmp_path)
+    monkeypatch.setattr("bobi.workflow.orchestrator._emit_lifecycle_event", lambda *a, **kw: True)
+    monkeypatch.setattr("bobi.slack.post_slack_message", post_slack_message)
+    posts = []
+
+    def capture(request):
+        assert str(request.url) == "https://slack.com/api/chat.postMessage"
+        posts.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    with httpx.Client(transport=httpx.MockTransport(capture)) as client:
+        monkeypatch.setattr(pooled, "_client", client)
+        yield tmp_path, posts
+
+
+def shipped_issue_workflow():
+    return load_workflow(
+        Path(__file__).parents[1] / "agents/eng-team/workflows/issue-lifecycle.yaml"
+    )
+
+
+def old_issue_scopes(run_key):
+    # Stored before the upgrade: pickup has no issue number, title or summary.
+    return {
+        "input": {"task": "RELAUNCH: /tmp/private-plan; Slack CSECRET; run internal command",
+                  "repo": "example/project", "run_key": run_key},
+        "requested_by": {"channel": "C123", "thread_ts": "171.42"},
+        "pickup": {"complexity": "small", "needs_spec": False},
+        "_flat": {"complexity": "small", "needs_spec": False},
+        "pr": {"pr_url": "https://github.com/example/project/pull/42"},
+    }
+
+
+@pytest.mark.parametrize("run_key", ["412", "adhoc-d081eea8"])
+def test_shipped_issue_notices_keep_internal_brief_out_of_slack(issue_notice_runtime, run_key):
+    _, posts = issue_notice_runtime
+    workflow = shipped_issue_workflow()
+    ctx = VariableContext()
+    ctx.scopes = old_issue_scopes(run_key)
+    for name in ("notify_start", "notify_complete"):
+        outcome = _execute_notify_step(workflow.step_by_name(name), ctx, run_key, workflow.name)
+        assert outcome.delivered
+
+    assert [(p["channel"], p["thread_ts"], p["text"]) for p in posts] == [
+        ("C123", "171.42", "Working on this issue."),
+        ("C123", "171.42", "PR https://github.com/example/project/pull/42 opened."),
+    ]
+
+
+@pytest.mark.parametrize("entry", ["approval", "retry_start", "retry_complete"])
+def test_old_issue_runs_resume_without_new_handoff_fields(issue_notice_runtime, monkeypatch, entry):
+    root, posts = issue_notice_runtime
+    workflow = shipped_issue_workflow()
+    run_key = "adhoc-d081eea8"
+    session_name = make_session_name(workflow.name, "example/project", run_key)
+    session_dir = paths.sessions_dir(root) / session_name
+    session_dir.mkdir(parents=True)
+    for step, data in {"implement": "status: done\n",
+                       "pr": "pr_url: https://github.com/example/project/pull/42\n",
+                       "qa": "qa_status: not_applicable\n"}.items():
+        (session_dir / f"handoff-{step}.yaml").write_text(data)
+    run = WorkflowRun.create(workflow.name, {"data": {"run_key": run_key}})
+    run.repo, run.cwd, run.run_key = "example/project", str(root), run_key
+    run.session_name = session_name
+    run.variable_scopes = old_issue_scopes(run_key)
+    run.checkpoint_fingerprint = workflow.steps_fingerprint()
+    if entry == "approval":
+        run.status, run.await_event = "waiting", "approval"
+        run.suspended_at_step = workflow.step_index("approval_route")
+    else:
+        run.status = "failed"
+        run.checkpoint_step = workflow.step_index(
+            "notify_start" if entry == "retry_start" else "notify_complete"
+        )
+    run.save()
+    monkeypatch.setattr("bobi.workflow.orchestrator.get_registry", lambda: MagicMock())
+    monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
+    monkeypatch.setattr("bobi.workflow.orchestrator.load_session_id", lambda *a: "")
+    monkeypatch.setattr("bobi.workflow.orchestrator.save_session_id", lambda *a: None)
+    monkeypatch.setattr("bobi.brain.turns.save_session_id", lambda *a: None)
+    if entry == "approval":
+        success = resume_workflow(WorkflowRun.load(run.run_id), workflow,
+                                  event={"data": {"verdict": "approve"}})
+    else:
+        success = run_workflow(workflow, task=run.variable_scopes["input"]["task"],
+                               repo=run.repo, cwd=run.cwd, run_key=run_key,
+                               requested_by=run.variable_scopes["requested_by"], interactive=False)
+    assert success
+    assert WorkflowRun.load(run.run_id).status == "completed"
+    expected = (["Working on this issue."] if entry == "retry_start" else []) + [
+        "PR https://github.com/example/project/pull/42 opened."
+    ]
+    assert [p["text"] for p in posts] == expected
+    assert all((p["channel"], p["thread_ts"]) == ("C123", "171.42") for p in posts)
