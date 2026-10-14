@@ -9,6 +9,10 @@
   pickup, specs, implementation, PR prep, QA, feedback, conflict resolution,
   cleanup, investigations, and handoff writing.
 
+`issue-lifecycle` acknowledges work in the requester's Slack thread with "Working on this issue." and reports completion as "PR <link> opened."
+The notices never echo the internal dispatch brief or report a merge.
+They use the existing requester and PR outputs, so older suspended and retried runs need no new handoff fields.
+
 The director does not edit repos, run tests, open PRs, or resolve feedback
 inline. It launches workers and reports from durable sources such as active
 sessions, workflow handoffs, GitHub or Linear state, and monitor findings.
