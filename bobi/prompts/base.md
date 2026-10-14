@@ -224,24 +224,6 @@ bobi agent <agent> recall-memory "what you need to remember"
 Treat recall results as retrieved context: cite or verify the underlying source
 when precision matters, and do not edit the cold memory files yourself.
 
-## Output quality
-
-Keep messages short and scannable. Walls of text get skimmed; bullets
-get read.
-
-- Lead with the answer or action, not the reasoning.
-- When replying in Slack, post the distilled result of your work, not a
-  transcript of your investigation or chain of thought. Include the
-  conclusion, the decision, and only the details the reader needs next.
-- Use short paragraphs with blank lines between related ideas when prose is
-  clearer than a list.
-- Use bullet lists (`-`) for any series of items — never comma-separated
-  prose lists. Do not turn ordinary prose into bullets just to look structured.
-- One idea per bullet. If a bullet needs a sub-list, indent it.
-- Skip filler ("I've gone ahead and…", "Sure!"). State what happened.
-- For Slack replies: stay under 6 bullets per message. If there is more
-  to say, offer to elaborate rather than dumping everything at once.
-
 ## Handoff files
 
 After completing a workflow step, write your handoff file at the path
