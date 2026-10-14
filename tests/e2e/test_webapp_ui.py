@@ -1220,7 +1220,7 @@ class TestMetricsView:
         assert payload["roles"] == ["director", "engineer"] and payload["instructions"] == instructions.input_value()
         assert payload["prompt_egress"] == "redacted" and payload["brain"] == "auto"
         assert payload["restart_required"] is False and payload["applies_on"] == "new_sessions"
-        expect(dialog.locator(".jev-save-msg")).to_contain_text(re.compile("restart", re.I))
+        expect(dialog.locator(".jev-save-msg")).to_contain_text("New sessions use it now")
         assert not [item for item in requests if item[0] == "POST" and item[1].endswith("/restart")]
         assert "UNRELATED_SETTING=preserved" in env_file.read_text()
         assert page.evaluate("window.editorInjected") is None and dialog.locator("img").count() == 0
