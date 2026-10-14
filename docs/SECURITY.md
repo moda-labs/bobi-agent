@@ -62,6 +62,15 @@ The config lives in `BOBI_METRICS_EXPERIMENT_JSON` (short form only; see
   known token shapes, secret `name=value` / `"name": "value"` pairs, `--password`
   flags, Basic auth headers and URL userinfo are scrubbed; external absolute paths are replaced. Do not opt into prompt egress for restricted workloads without
   reviewing the destination and account-specific processing/retention terms.
+- The shared redactor (`bobi/redact.py`, also behind `redact_secrets` for
+  `bobi feedback`, setup chat and error details) never keeps a letter or digit
+  that the redactor it replaced removes; quote characters around a redacted
+  value may remain. Those old rules run unchanged as a floor. With credential
+  values, it also removes what the rules remove after scrubbing all values at
+  once and each value on its own, so one value equal to a key name or URL
+  scheme cannot hide another's context. `tests/metrics/test_redaction_differential.py`
+  checks this per character against a verbatim copy of the old redactor on a
+  generated corpus (100,000 strings by default, `BOBI_REDACTION_CORPUS` to change).
 - Shadow mode still calls the policy (and sends the task excerpt when egress is
   `redacted`) even though the control model executes; shadow is not an offline
   or no-egress mode. A disabled policy (mode off in the editor) sends nothing.

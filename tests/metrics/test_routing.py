@@ -173,8 +173,9 @@ def test_redaction_keeps_ordinary_token_prose():
         assert redact_secrets(text) == (text, 0)
 
 
-@pytest.mark.parametrize("text", ["a." * 100_000, "a_" * 50_000 + "=x", "x://" + "a:" * 50_000],
-                         ids=["dotted", "underscored", "userinfo"])
+@pytest.mark.parametrize("text", ["a." * 100_000, "a_" * 50_000 + "=x", "x://" + "a:" * 50_000,
+                                  "pwd='a'" * 100_000, '"password": "x", ' * 50_000],
+                         ids=["dotted", "underscored", "userinfo", "glued-quoted", "json-pairs"])
 def test_redaction_stays_linear_on_adversarial_text(text):
     started = time.monotonic()
     redact_secrets(text)

@@ -21,7 +21,7 @@ _SECRET_TOKEN = re.compile(
       | ghp_[A-Za-z0-9]{20,}                # github PAT
       | github_pat_[A-Za-z0-9_]{20,}
       | (?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}  # anthropic (before generic sk-)
-      | (?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}      # openai-style, not "task-..."
+      | (?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}      # openai-style; "task-impl-x" stays
       | venn_[A-Za-z0-9]{8,}                # venn
       | AKIA[0-9A-Z]{16}                    # aws access key id
       | AIza[0-9A-Za-z_-]{20,}              # google api key
@@ -60,6 +60,7 @@ _SECRET_KV = re.compile(
 # A bare JSON literal after a quoted key (`{"password": null}`) is structure,
 # not a credential.
 _JSON_LITERAL = frozenset({"null", "true", "false"})
+_NON_SPACE_RUN = re.compile(r"\S*")
 
 # `scheme://user:password@host` — the userinfo of a connection string. The
 # bounded scheme and its left boundary keep the scan linear on dotted text.
@@ -79,55 +80,142 @@ _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 _NUMERIC_SECRET_SEGMENTS = frozenset({"PASS", "PASSWORD", "PASSWD", "PWD", "SECRET", "PIN"})
 
 
-def _kv_value_span(m: re.Match[str]) -> tuple[int, int] | None:
-    """The span of the credential value in a key/value match, or None when the
-    match is structure (a JSON literal, an empty or already-redacted value)."""
-    if m.group("quote"):
-        start, end = m.span("long")
-    elif m.group("short"):
-        start, end = m.span("quoted")
-    else:
-        start, end = m.span("bare")
-        if m.group("bare").startswith(REDACTION_PLACEHOLDER):
+def _kv_value_spans():
+    """A span function for one scan of the key/value rule: the span of the
+    credential value in a match, or None when the match is structure (a JSON
+    literal, an empty or already-redacted value).
+
+    After an unquoted key the value covers at least the whole run of non-space
+    characters after the separator, quotes and an earlier redaction included,
+    so a token rule that already matched the start of the value never leaves
+    the rest of the run (`[redacted]&password=x`, `'x':tail`) in clear. Matches
+    come in order, so the last run measured is reused for every key inside it
+    and the scan stays linear on glued pairs."""
+    run = [0, 0]
+
+    def span_of(m: re.Match[str]) -> tuple[int, int] | None:
+        quoted_key = m.group(2)[:1] in "\"'"
+        if not quoted_key:
+            value_start = m.end(2)
+            if not run[0] <= value_start < run[1]:
+                run[:] = value_start, _NON_SPACE_RUN.match(m.string, value_start).end()
+            if run[1] > m.end():
+                return value_start, run[1]
+        if m.group("quote"):
+            start, end = m.span("long")
+        elif m.group("short"):
+            start, end = m.span("quoted")
+        else:
+            start, end = m.span("bare")
+            if quoted_key:
+                # After a quoted key the value ends at the JSON/dict delimiter.
+                delimiter = re.search(r"[,}\]](?=[,}\]\"']|$)", m.group("bare"))
+                if delimiter:
+                    end = start + delimiter.start()
+                if m.string[start:end] in _JSON_LITERAL:
+                    return None
+        value = m.string[start:end]
+        if not value or value == REDACTION_PLACEHOLDER:
             return None
-        if m.group(2)[:1] in "\"'":
-            # After a quoted key the value ends at the JSON/dict delimiter.
-            delimiter = re.search(r"[,}\]](?=[,}\]\"']|$)", m.group("bare"))
-            if delimiter:
-                end = start + delimiter.start()
-            if m.string[start:end] in _JSON_LITERAL:
-                return None
-    value = m.string[start:end]
-    if not value or value == REDACTION_PLACEHOLDER:
-        return None
-    return start, end
+        return start, end
+
+    return span_of
 
 
 def _userinfo_span(m: re.Match[str]) -> tuple[int, int]:
     return m.end(1), m.end() - 1
 
 
-# Applied in order, each to the text the earlier ones produced.
+# Applied in order, each to the text the earlier ones produced; each pattern
+# comes with a factory for the span function of one scan.
 _RULES = (
-    (_SECRET_TOKEN, lambda m: m.span()),
-    (_SECRET_KV, _kv_value_span),
-    (_URL_USERINFO, _userinfo_span),
+    (_SECRET_TOKEN, lambda: re.Match.span),
+    (_SECRET_KV, _kv_value_spans),
+    (_URL_USERINFO, lambda: _userinfo_span),
 )
+
+# The redactor the rules above replaced, unchanged, kept as a floor: its spans
+# join every result, so no text keeps a letter or digit it removed (quote
+# characters around a redacted value may remain). Its `sk-` shape also matches
+# inside a word, so `task-` followed by 20+ letters or digits becomes
+# `ta[redacted]`, as it always did; a hyphenated name does not. The rules above
+# split some matches it takes whole: an `sk-` key inside a word, a Basic
+# header made of other tokens, a quoted value that runs into the next key.
+_FLOOR_TOKEN = re.compile(
+    r"""(
+        -----BEGIN[A-Z ]*PRIVATE\ KEY-----.*?-----END[A-Z ]*PRIVATE\ KEY-----
+      | xox[abprs]-[A-Za-z0-9-]{10,}
+      | xapp-[A-Za-z0-9-]{10,}
+      | lin_api_[A-Za-z0-9]{10,}
+      | ghp_[A-Za-z0-9]{20,}
+      | github_pat_[A-Za-z0-9_]{20,}
+      | sk-ant-[A-Za-z0-9_-]{20,}
+      | sk-[A-Za-z0-9]{20,}
+      | venn_[A-Za-z0-9]{8,}
+      | AKIA[0-9A-Z]{16}
+      | AIza[0-9A-Za-z_-]{20,}
+      | eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+
+      | (?i:bearer)\s+[A-Za-z0-9._-]{8,}
+      | [A-Za-z0-9_-]{40,}
+    )""",
+    re.VERBOSE | re.DOTALL,
+)
+_FLOOR_KV = re.compile(
+    r"(?i)\b(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token"
+    r"|auth[_-]?token|refresh[_-]?token|client[_-]?secret|bot[_-]?token)"
+    r"\b(\s*[:=]\s*)(\S+)"
+)
+_FLOOR_RULES = (
+    (_FLOOR_TOKEN, lambda: re.Match.span),
+    (_FLOOR_KV, lambda: lambda m: None if m.group(3) == REDACTION_PLACEHOLDER else m.span(3)),
+)
+
+
+def _scan(text: str, rules) -> tuple[list[tuple[int, int]], int]:
+    """Run *rules* in order, each on the text the earlier ones left; their
+    spans are mapped back onto *text*, so a span that covers an earlier
+    redaction covers the original characters behind it."""
+    spans: list[tuple[int, int]] = []
+    count = 0
+    for pattern, span_function in rules:
+        working, to_original = _apply(text, spans)
+        found = [span for span in map(span_function(), pattern.finditer(working)) if span]
+        count += len(found)
+        spans += [to_original(a, b) for a, b in found]
+    return _merge(spans), count
 
 
 def secret_spans(text: str) -> tuple[list[tuple[int, int]], int]:
     """The spans of *text* that :func:`redact_secrets` replaces, and how many
-    redactions that makes. Each rule runs on the text the earlier rules left;
-    its spans are mapped back onto *text*, so a span that covers an earlier
-    redaction covers the original characters behind it."""
-    spans: list[tuple[int, int]] = []
-    count = 0
-    for pattern, span_of in _RULES:
-        working, to_original = _apply(text, spans)
-        found = [span for span in map(span_of, pattern.finditer(working)) if span]
-        count += len(found)
-        spans += [to_original(a, b) for a, b in found]
-    return _merge(spans), count
+    redactions that makes: the rules' spans joined with the floor's. A floor
+    span joins (and counts) only when it adds a character other than a quote,
+    so a quoted value keeps its quotes (`password = '[redacted]'`)."""
+    spans, count = _scan(text, _RULES)
+    starts = [start for start, _ in spans]
+    extra = []
+    for start, end in _scan(text, _FLOOR_RULES)[0]:
+        if _adds_more_than_quotes(text, spans, starts, start, end):
+            extra.append((start, end))
+    return _merge(spans + extra), count + len(extra)
+
+
+def _adds_more_than_quotes(text: str, spans, starts, start: int, end: int) -> bool:
+    """Whether [start, end) holds a character outside the merged *spans*
+    (whose starts are *starts*) that is not a quote."""
+    index = bisect_right(starts, start) - 1
+    if index < 0 or spans[index][1] <= start:
+        index += 1
+    position = start
+    while position < end:
+        if index < len(spans) and spans[index][0] <= position:
+            position = spans[index][1]
+            index += 1
+            continue
+        gap_end = min(end, spans[index][0]) if index < len(spans) else end
+        if text[position:gap_end].strip("\"'"):
+            return True
+        position = gap_end
+    return False
 
 
 def _merge(spans) -> list[tuple[int, int]]:
@@ -193,22 +281,37 @@ def redact_secrets(text: str) -> tuple[str, int]:
 def redact_with_values(text: str, values) -> tuple[str, int]:
     """Redact *text* and every exact occurrence of *values* together.
 
-    The union of three span sets, overlapping spans becoming one placeholder:
+    The union of these span sets, overlapping spans becoming one placeholder:
     what the shape rules redact in the original text (exactly as without
     *values*), every occurrence of a value, and what the shape rules redact
-    once the values are scrubbed (`postgres://[redacted]:x@h` is userinfo).
-    Nothing that any of these removes survives."""
-    occurrences: list[tuple[int, int]] = []
+    once the values are scrubbed (`postgres://[redacted]:x@h` is userinfo),
+    all of them at once and, when more than one occurs, each on its own. A
+    value equal to a key name or scheme then never hides the context a rule
+    needs for another value's neighbour. Nothing any of these removes
+    survives."""
+    spans, count = secret_spans_with_values(text, values)
+    return _apply(text, spans)[0], count
+
+
+def secret_spans_with_values(text: str, values) -> tuple[list[tuple[int, int]], int]:
+    """The spans of *text* that :func:`redact_with_values` replaces, and how
+    many redactions that makes."""
+    by_value: list[list[tuple[int, int]]] = []
     for value in {value for value in values if value and value not in REDACTION_PLACEHOLDER}:
+        found = []
         start = text.find(value)
         while start != -1:
-            occurrences.append((start, start + len(value)))
+            found.append((start, start + len(value)))
             start = text.find(value, start + 1)
+        if found:
+            by_value.append(found)
     spans, count = secret_spans(text)
-    scrubbed, to_original = _apply(text, occurrences)
-    after_scrub, _ = secret_spans(scrubbed)
-    spans += occurrences + [to_original(a, b) for a, b in after_scrub]
-    return _apply(text, spans)[0], count + len(occurrences)
+    occurrences = [span for found in by_value for span in found]
+    scrubs = [occurrences] + (by_value if len(by_value) > 1 else [])
+    for scrubbed_spans in scrubs:
+        scrubbed, to_original = _apply(text, scrubbed_spans)
+        spans += [to_original(a, b) for a, b in secret_spans(scrubbed)[0]]
+    return _merge(spans + occurrences), count + len(occurrences)
 
 
 def env_secret_values(env) -> tuple[str, ...]:
