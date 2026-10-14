@@ -257,6 +257,9 @@ def _render(text, spans):
     return "".join(out) + text[position:]
 
 
+# The full generated corpus takes longer than the unit suite's per-test
+# timeout on shared CI runners.
+@pytest.mark.timeout(120)
 def test_redaction_never_keeps_what_the_merge_base_removes():
     started = time.monotonic()
     failures: dict[str, list] = {}

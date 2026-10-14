@@ -2837,6 +2837,9 @@ def _backlog_of_dead_writers(monkeypatch, root, *, writers, turns, ended):
     MetricsCollectorService(root).collect_once()
 
 
+# Building a backlog at outage scale takes longer than the unit suite's
+# per-test timeout on shared CI runners.
+@pytest.mark.timeout(300)
 @pytest.mark.parametrize(("ended", "turns", "writers"), [
     (True, 1500, 200), (False, 1500, 200), (False, 3000, 10)])
 def test_reconciling_a_large_backlog_costs_little_more_than_the_recovery_itself(
