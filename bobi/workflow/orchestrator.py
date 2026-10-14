@@ -40,6 +40,35 @@ log = logging.getLogger(__name__)
 
 MAX_HANDOFF_RETRIES = 2
 
+# The text a workflow puts around a step's instruction. Module-level so the web
+# view can recognise exactly these blocks in a transcript (bobi/webapp/runtime.py).
+# A fresh transcript's first step prompt opens with the background block: the
+# header line, a blank line, the run's scopes as fenced YAML, a blank line.
+# Every step prompt then carries the step header line and a blank line.
+WORKFLOW_BACKGROUND_HEADER = (
+    "Workflow `{workflow}` background for run `{run_key}` — the launch input "
+    "and prior handoffs. The step instruction below is what you do now; if it "
+    "restates the task, do it."
+)
+WORKFLOW_BACKGROUND_FENCE = ("```yaml\n", "\n```")
+WORKFLOW_STEP_HEADER = (
+    "Workflow `{workflow}` steps: {steps} — you are on [{step}]. Do only this "
+    "step's instruction; routing may skip or repeat steps."
+)
+WORKFLOW_BLOCK_GAP = "\n\n"
+
+
+def workflow_background_block(workflow: str, run_key: str, context_yaml: str) -> str:
+    """The run's background block, as it opens a fresh transcript's first step prompt."""
+    fence_open, fence_close = WORKFLOW_BACKGROUND_FENCE
+    return (WORKFLOW_BACKGROUND_HEADER.format(workflow=workflow, run_key=run_key) + WORKFLOW_BLOCK_GAP
+            + fence_open + context_yaml + fence_close + WORKFLOW_BLOCK_GAP)
+
+
+def workflow_step_header(workflow: str, steps: str, step: str) -> str:
+    """The header that frames each step prompt with the workflow's current step."""
+    return WORKFLOW_STEP_HEADER.format(workflow=workflow, steps=steps, step=step) + WORKFLOW_BLOCK_GAP
+
 # What one ``_run_workflow_async`` pass ended as. SUSPENDED is dormant, not
 # terminal: the run parked on an await step and a fresh waiting record owns it,
 # so a caller must not emit a terminal workflow event or stamp the record
@@ -712,11 +741,7 @@ async def _run_workflow_async(
             f"[{candidate.name}]" if candidate is step else candidate.name
             for candidate in workflow.steps
         )
-        return (
-            f"Workflow `{workflow.name}` steps: {steps} — you are on "
-            f"[{step.name}]. Do only this step's instruction; routing may "
-            "skip or repeat steps.\n\n"
-        )
+        return workflow_step_header(workflow.name, steps, step.name)
 
     def _context_prefix() -> str:
         """The run's background as a labelled block before a step prompt.
@@ -732,14 +757,7 @@ async def _run_workflow_async(
             if name != "_runtime"
         }
         context_yaml = yaml.safe_dump(scopes, sort_keys=True).strip()
-        return (
-            f"Workflow `{workflow.name}` background for run `{run_key}` — "
-            "the launch input and prior handoffs. The step instruction below "
-            "is what you do now; if it restates the task, do it.\n\n"
-            "```yaml\n"
-            f"{context_yaml}\n"
-            "```\n\n"
-        )
+        return workflow_background_block(workflow.name, run_key, context_yaml)
 
     def _make_session(resume_id=None, agent_name="", model="", effort="", *,
                       max_turns):
@@ -801,15 +819,14 @@ async def _run_workflow_async(
     # CLI --role always wins. A run restored from its checkpoint continues as
     # the agent that ran last, so a step naming no agent inherits it whichever
     # step the run jumps to, as without the gate; a step naming its own agent
-    # switches to it in the step loop. A checkpoint written before the agent
-    # was recorded takes the nearest agent named before the resume point. A new
-    # run takes the first agent its steps name.
+    # switches to it in the step loop. A new run, and a checkpoint written
+    # before the last agent was recorded, take the first agent named from the
+    # start step on: the rule that checkpoint was written under, so a run
+    # parked before an upgrade resumes as it would have before it.
     saved_agent = (ctx.scopes.get("_runtime", {}) or {}).get("agent")
     first_agent = role or (saved_agent if isinstance(saved_agent, str) else "")
     if not first_agent:
-        earlier = [s.agent for s in reversed(workflow.steps[:start_step]) if s.agent]
-        later = [s.agent for s in workflow.steps[start_step:] if s.agent]
-        first_agent = next(iter(earlier + later), "")
+        first_agent = next((s.agent for s in workflow.steps[start_step:] if s.agent), "")
     current_agent = first_agent
     # The run's route is decided once, when the run starts, for its route
     # agent: the launch --role, else the first agent the workflow's steps name.
@@ -824,9 +841,12 @@ async def _run_workflow_async(
     if not isinstance(route_record, dict) or route_record.get("agent", route_agent) != route_agent:
         route_record = None
     routed_model = None
-    # The policy's decision until its model completes the first prompt step: a
-    # failure before then reruns once on the control model (candidate_failed).
+    # The policy's decision until the route's first step has run: a failure of
+    # that step reruns once on the control model (candidate_failed). Whether it
+    # has run is kept in the checkpoint, so a gate never re-arms the fallback
+    # nor takes it away; a checkpoint written before it was kept counts as run.
     route_decision = None
+    route_ran = bool((ctx.scopes.get("_runtime", {}) or {}).get("route_ran", restored))
 
     def _on_route(step: StepDef | None) -> bool:
         """Whether *step* runs the route's model: the route agent's unpinned steps."""
@@ -841,7 +861,9 @@ async def _run_workflow_async(
     # policy's model failing, and only its completion uses up the control rerun.
     step_on_route = False
 
-    if first_prompt_step is not None and (route_record is not None or not restored):
+    # A restored run applies its record whatever step it resumes on: a route
+    # step may jump back to a prompt step before the resume point.
+    if route_record is not None if restored else first_prompt_step is not None:
         from bobi.brain import normalize_brain_kind, session_brain_label
         from bobi.metrics.routing import RoutingContext, resolve_route
 
@@ -850,16 +872,19 @@ async def _run_workflow_async(
             resolve_model(team_cfg, role=route_agent, explicit=launch_model),
             bool(launch_model or (not restored and first_prompt_step.model)),
             # The decision holds for every later same-agent step, so it must see
-            # the launch input, not only the first step's template.
-            _context_prefix() + _build_step_prompt(first_prompt_step, ctx, session_name, first_prompt_step.name),
+            # the launch input, not only the first step's template. A restored
+            # run reuses its record and sends nothing to the policy.
+            _context_prefix() + (_build_step_prompt(first_prompt_step, ctx, session_name, first_prompt_step.name)
+                                 if first_prompt_step is not None else ""),
             route_agent, fresh, repo_path=cwd, run_key=run_key,
-            workflow_name=workflow.name, step_name=first_prompt_step.name,
+            workflow_name=workflow.name,
+            step_name=first_prompt_step.name if first_prompt_step is not None else "",
             existing_transcript=bool(saved_id),
         )
         outcome = await resolve_route(routing_context, sticky_record=route_record)
         if outcome.decision is not None or outcome.reason is not None:
             routed_model = outcome.model
-        route_decision = outcome.decision
+        route_decision = None if route_ran else outcome.decision
         if outcome.decision is None and outcome.reason is not None and not restored:
             # No decision, but the run follows this model; its checkpoints keep it.
             route_record = {"brain": session_brain_label(), "agent": route_agent,
@@ -1081,6 +1106,7 @@ async def _run_workflow_async(
                 "agent": current_agent,
                 "visits": visit_counts,
                 "route": route_record,
+                "route_ran": route_ran,
             })
             run.checkpoint_step = next_idx
             run.checkpoint_fingerprint = workflow.steps_fingerprint()
@@ -1401,10 +1427,13 @@ async def _run_workflow_async(
                 "workflow_step_id": step_observation.workflow_step_id,
                 "trigger_kind": "workflow_step",
                 "trigger_id": step.name,
+                # The run is one metrics session for all its agents and steps:
+                # only the route's steps record its decision.
+                "routed": step_on_route,
             }
 
-            prompt = _build_step_prompt(step, ctx, session_name, step.name)
-            prompt = _step_header(step) + prompt
+            step_prompt = _step_header(step) + _build_step_prompt(step, ctx, session_name, step.name)
+            prompt = step_prompt
             if context_pending:
                 prompt = _context_prefix() + prompt
                 context_pending = False
@@ -1507,7 +1536,7 @@ async def _run_workflow_async(
 
             if (drain.final_text is None
                     and may_rerun_on_control(route_decision, error_kind=drain.error_kind,
-                                             tools_ran=drain.tools_ran)
+                                             tools_ran=drain.tools_ran, rebuilds_context=True)
                     and _route_to_control(drain.error)):
                 # The policy's model failed the first prompt step: rerun the
                 # step once on the control model in a fresh session.
@@ -1520,6 +1549,8 @@ async def _run_workflow_async(
                     effort=current_effort, max_turns=current_max_turns,
                 )
                 await client.connect()
+                # A fresh transcript: it gets the run's background like any other.
+                prompt = _context_prefix() + step_prompt
                 telemetry_context["prompt_bytes"] = prompt_bytes(prompt)
                 turn_observation = observe_turn(
                     session_name,
@@ -1538,7 +1569,7 @@ async def _run_workflow_async(
             if step_on_route:
                 # The route's first step ran: later failures are not the
                 # first turn a control rerun may repeat.
-                route_decision = None
+                route_decision, route_ran = None, True
 
             if drain.final_text is None:
                 step_observation.finish(

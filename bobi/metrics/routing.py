@@ -44,16 +44,23 @@ def log_routing_incident(record: dict[str, object], root=None) -> None:
         log.debug("metrics: routing fallback log unavailable (%s)", type(exc).__name__)
 
 
-def may_rerun_on_control(decision: RouterDecision | None, *, error_kind: str, tools_ran: bool) -> bool:
+def may_rerun_on_control(decision: RouterDecision | None, *, error_kind: str, tools_ran: bool,
+                         rebuilds_context: bool = False) -> bool:
     """Whether a failed first turn may run again on the control model.
 
     Only when nothing happened that a rerun would repeat or could not fix: no
     tool ran (a rerun would repeat its side effects, a push or a post), the
     error is not one the control model shares (authentication, credits, turn
     cap), and the decision was made fresh for this session; a route reused
-    from a saved session belongs to a transcript a fresh session would lose."""
+    from a saved session belongs to a transcript a fresh session would lose.
+    ``rebuilds_context`` lifts that last condition for a caller whose rerun
+    resends everything the saved transcript was given (a workflow's
+    background block) and that passes the decision only until its route's
+    first turn has run, whichever process runs it."""
     if decision is None or tools_ran or error_kind in NO_MODEL_FALLBACK_KINDS:
         return False
+    if rebuilds_context:
+        return True
     try:
         metadata = json.loads(decision.policy_metadata_json or "{}")
     except (TypeError, ValueError):

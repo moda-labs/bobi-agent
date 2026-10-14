@@ -124,6 +124,11 @@ def _project_admitted_router_decision(
     conn: sqlite3.Connection,
     turn_payload: dict[str, object],
 ) -> None:
+    # A turn its writer marked as outside the session's route (a workflow
+    # step of another agent or pinned to its own model) has no decision.
+    # Turns from builds that did not mark it keep the session's route.
+    if turn_payload.get("routed") is False:
+        return
     session = conn.execute(
         "SELECT metadata_json FROM sessions WHERE session_id=?",
         (turn_payload.get("session_id"),),

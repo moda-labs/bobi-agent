@@ -171,11 +171,17 @@ A workflow decides its route once, when the run starts, and only there:
 - A run restored from its checkpoint (resumed past a gate, or a failed run
   retried from its checkpoint) reads only its own checkpoint record, never the
   session route file, and applies it to the same steps whatever step it
-  resumes on, so its steps run the models they would have run without the
-  gate. Later checkpoints carry the record unchanged, unless its model fails
-  (6.1). The run reopens exactly as it was suspended (the agent that ran last,
-  on the model it ran) and then switches to the step it actually executes, so a
-  step keeps the transcript it would have continued without the gate.
+  resumes on, including when no prompt step follows the resume point in file
+  order and a route step jumps back to an earlier one (a reject loop), so its
+  steps run the models they would have run without the gate. Later
+  checkpoints carry the record unchanged, unless its model fails (6.1). The
+  run reopens exactly as it was suspended (the agent that ran last, on the
+  model it ran) and then switches to the step it actually executes, so a step
+  keeps the transcript it would have continued without the gate.
+- A checkpoint written by an older build records no last agent. It resumes
+  under that build's rule: the launch `--role`, else the first agent named
+  from the resume point on in file order. A run parked before the upgrade
+  therefore resumes as it would have before it.
 - A run that started without a decision but with a fallback reason (for example
   `admission_rejected`, which runs `control_model`) records `{agent, model,
   reason}` instead. A restored run runs that model again and records the same
@@ -264,8 +270,19 @@ cost; malformed answers record neither.
 
 ## 5. Decision record
 
-One `router_decisions` row is projected per turn of a routed session from the
-session's admission metadata (`session.recorded.metadata_json.router_assignment`).
+One `router_decisions` row is projected per routed turn from the session's
+admission metadata (`session.recorded.metadata_json.router_assignment`). Every
+turn of a routed session is routed, except in a workflow: a run is one metrics
+session for all its agents and steps, and only the route's steps (4.2) record
+the decision. Another agent's turns and a step pinned by a step-level `model:`
+or a launch `--model` record no row, so `model_selected` is always the model
+the turn ran and only route turns count as routed (`routed_turns`) or are
+priced for savings. The writer marks each turn as routed or not
+(`turn.recorded.routed`, not a stored column); projection recovers a lost
+decision event from the admission metadata only for a turn not marked
+unrouted, and a session's `router_fallback` (section 6) counts in
+`fallback_turns` and the turn list only on turns not marked unrouted, so
+turns written by older builds keep both.
 The schema is unchanged; assignment columns from older builds stay readable.
 
 | Column | Value |
@@ -350,6 +367,21 @@ the route agent that runs without a step-level `model:` or launch `--model`.
 Steps of other agents that run before it (a route may jump to one first) do not
 use up the rerun, and another agent configured to the same model is not the
 policy's choice: its failure fails its own step, without a control rerun.
+
+The rule is the same with or without a gate. Whether the route's first step has
+run is kept in the checkpoint (`_runtime.route_ran`), so:
+
+- a run restored before that step has run keeps both fallbacks for it, though
+  its decision is re-admitted as `reused` (a workflow's `reused` decision does
+  not block the rerun, unlike a session's);
+- a run restored after it has none: a later failure of the policy's model,
+  including one that cannot start, fails the step as it would without the
+  gate;
+- a checkpoint written by an older build counts the step as run.
+
+The rerun opens a fresh transcript, so its prompt carries the run's background
+block (launch input and scopes) like any fresh workflow transcript, even when
+the failed attempt continued an earlier step's transcript.
 
 After either rerun the saved route (the session route file, or a workflow's
 checkpoint) is rewritten to `control_model` with `fallback_reason:

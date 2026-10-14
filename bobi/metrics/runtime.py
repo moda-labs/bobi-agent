@@ -299,6 +299,7 @@ class MetricsRuntime:
         model_requested: str = "",
         prompt_bytes: int | None = None,
         started_at_us: int | None = None,
+        routed: bool = True,
     ) -> "TurnObservation":
         started = started_at_us or time.time_ns() // 1000
         session_id = self.session_id(session_name)
@@ -363,6 +364,7 @@ class MetricsRuntime:
             model_requested=model_requested,
             prompt_bytes=prompt_bytes,
             started_at_us=started,
+            routed=routed,
         )
         observation.start()
         return observation
@@ -441,6 +443,9 @@ class TurnObservation:
     results: list["TurnResult"] = field(default_factory=list)
     router_decision_id: str | None = None
     router_decision: RouterDecision | None = None
+    # Whether this turn runs the session's routed model. A workflow run is one
+    # session for all its agents and steps; only the route's turns are routed.
+    routed: bool = True
     _finished: bool = False
 
     def start(self) -> None:
@@ -451,7 +456,7 @@ class TurnObservation:
             )
         context = self.runtime._session_contexts[self.session_id]
         assignment = json.loads(str(context.get("metadata_json", "{}"))).get("router_assignment")
-        if isinstance(assignment, dict) and assignment.get("experiment_id"):
+        if self.routed and isinstance(assignment, dict) and assignment.get("experiment_id"):
             self.router_decision_id = _stable_id("route", self.turn_id, assignment["experiment_id"])
         _emit_turn_row(self, status="running", ended_at_us=None, error_kind="")
         if self.router_decision_id:
@@ -687,6 +692,9 @@ def _emit_turn_row(
             "status": status,
             "error_kind": error_kind or None,
             "provider_turn_id": provider_turn_id or None,
+            # Not a turns column: it tells projection not to give a turn that
+            # ran outside its session's route that route's decision.
+            "routed": observation.routed,
         },
         session_id=observation.session_id,
         turn_id=observation.turn_id,

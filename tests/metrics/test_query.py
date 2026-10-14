@@ -145,6 +145,77 @@ def test_dashboard_routing_counts_only_enforced_picks(tmp_path, change, counted)
     assert savings["saved_usd"] == 0
 
 
+@pytest.mark.parametrize("routed,marked,decision_event,decisions", [
+    # A session's turns carry its route, from the writer's own decision event...
+    (True, True, True, 1),
+    # ...or, when that event is lost, from the session's admitted route.
+    (True, True, False, 1),
+    # A turn from a build that did not mark whether it was routed keeps that recovery.
+    (True, False, False, 1),
+    # A turn its writer ran outside the session's route has no decision.
+    (False, True, False, 0),
+], ids=["session-turn", "decision-event-lost", "older-build-turn", "turn-outside-route"])
+def test_projection_gives_a_session_route_only_to_its_routed_turns(tmp_path, monkeypatch, routed, marked,
+                                                                    decision_event, decisions):
+    from bobi.metrics.collector import MetricsCollectorService
+    from bobi.metrics.runtime import MetricsRuntime
+    from tests.metrics.helpers import decision
+
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    emit = runtime.emit
+
+    def writer(event_type, payload, **kwargs):
+        if event_type == "router_decision.recorded" and not decision_event:
+            return True
+        if event_type == "turn.recorded" and not marked:
+            payload = {key: value for key, value in payload.items() if key != "routed"}
+        return emit(event_type, payload, **kwargs)
+
+    monkeypatch.setattr(runtime, "emit", writer)
+    assert runtime.admit_route("agent", decision(), brain="codex", role="engineer")
+    runtime.begin_turn("agent", provider="openai", model_requested="model-control",
+                       routed=routed).finish(status="completed")
+    assert runtime.close(timeout=2)
+    MetricsCollectorService(tmp_path).collect_once()
+    conn = connect(tmp_path / "state/metrics/metrics.db", readonly=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 1
+        rows = conn.execute("SELECT model_selected FROM router_decisions").fetchall()
+    finally:
+        conn.close()
+    assert [row[0] for row in rows] == ["model-control"] * decisions
+
+
+@pytest.mark.parametrize("routed,marked,fallbacks", [
+    (True, True, 1),  # a session's turn runs its routing fallback
+    (True, False, 1),  # a turn from a build that did not mark it keeps the session's fallback
+    (False, True, 0),  # a turn its writer ran outside the session's route fell back from nothing
+], ids=["session-turn", "older-build-turn", "turn-outside-route"])
+def test_session_fallback_counts_only_on_turns_it_applied_to(tmp_path, monkeypatch, routed, marked, fallbacks):
+    from bobi.metrics.collector import MetricsCollectorService
+    from bobi.metrics.runtime import MetricsRuntime
+
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    emit = runtime.emit
+
+    def writer(event_type, payload, **kwargs):
+        if event_type == "turn.recorded" and not marked:
+            payload = {key: value for key, value in payload.items() if key != "routed"}
+        return emit(event_type, payload, **kwargs)
+
+    monkeypatch.setattr(runtime, "emit", writer)
+    assert runtime.admit_route("agent", None, brain="codex", role="engineer",
+                               fallback_reason="routing_sticky_stale")
+    runtime.begin_turn("agent", provider="openai", model_requested="model-control",
+                       routed=routed).finish(status="completed")
+    assert runtime.close(timeout=2)
+    MetricsCollectorService(tmp_path).collect_once()
+    queries = MetricsQueries(tmp_path)
+    assert queries.summary({"include_dashboard": True})["routing"]["fallback_turns"] == fallbacks
+    [turn] = queries.turns({})["turns"]
+    assert turn["session_fallback_reason"] == ("routing_sticky_stale" if fallbacks else None)
+
+
 @pytest.mark.parametrize("model", ["SONNET", "sOnNeT", "  sonnet  ", "CLAUDE-SONNET-5"])
 def test_dashboard_model_substring_matches_selected_requested_and_totals(tmp_path, model):
     seed_dashboard(tmp_path, 1_000_000)
@@ -358,6 +429,12 @@ def metrics_root(tmp_path):
     conn.commit()
     conn.close()
     return root
+
+
+def test_turn_list_rows_carry_the_size_of_the_prompt_as_sent(metrics_root):
+    rows = MetricsQueries(metrics_root).turns({"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z"})["turns"]
+    assert [(row["turn_id"], row["prompt_bytes"]) for row in rows] == [("t1", 12)]
+    assert "prompt_sha256" not in rows[0]
 
 
 def test_turn_returns_exact_dimensions_and_no_private_metadata(metrics_root):

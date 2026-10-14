@@ -409,6 +409,17 @@ def _price_dict(model: str | None) -> dict[str, float] | None:
 # and fallback turns ran the control model, so the router saved nothing there.
 _ROUTED_TURN = "json_extract(d.metadata_json,'$.policy.mode')='enforce' AND d.fallback_reason IS NULL"
 
+# The session's no-decision routing fallback, on the turns it applied to. A
+# workflow run is one session for all its agents and steps, and its writer
+# marks the turns outside the route (``turn.recorded.routed`` false, kept only
+# in the raw event); those ran their own model and fell back from nothing.
+# Turns of other sessions and of builds that did not mark them keep it.
+_SESSION_FALLBACK = (
+    "CASE WHEN NOT EXISTS (SELECT 1 FROM raw_events outside WHERE outside.event_type='turn.recorded' "
+    "AND outside.turn_id=t.turn_id AND json_extract(outside.payload_json,'$.routed')=0) "
+    "THEN json_extract(s.metadata_json,'$.router_fallback.fallback_reason') END"
+)
+
 
 def _pick_costs(pick: dict[str, Any] | None) -> dict[str, object]:
     """Spend of the turns routed to one candidate, routed and on the set's strongest pick."""
@@ -919,7 +930,7 @@ class MetricsQueries:
                     "AND d.fallback_reason IS NULL THEN 1 END) AS shadow_turns,"
                     "COUNT(DISTINCT json_extract(d.metadata_json,'$.policy.call_id')) AS policy_calls,"
                     "SUM(CASE WHEN d.fallback_reason IS NOT NULL OR "
-                    "json_extract(s.metadata_json,'$.router_fallback.fallback_reason') IS NOT NULL "
+                    f"{_SESSION_FALLBACK} IS NOT NULL "
                     "THEN 1 ELSE 0 END) AS fallback_turns,"
                     "AVG(d.router_latency_ms) AS mean_router_latency_ms "
                     "FROM turns t JOIN sessions s ON s.session_id=t.session_id "
@@ -1022,11 +1033,11 @@ class MetricsQueries:
         def build(conn: sqlite3.Connection) -> dict[str, object]:
             selected = conn.execute(
                 "SELECT t.turn_id,t.session_id,t.turn_index,t.started_at_us,t.ended_at_us,t.status,t.wall_duration_ms,"
-                "t.trigger_kind,t.trigger_id,s.session_name,s.provider_session_id,s.brain,s.role,"
+                "t.trigger_kind,t.trigger_id,t.prompt_bytes,s.session_name,s.provider_session_id,s.brain,s.role,"
                 "s.started_at_us AS session_started_at_us,"
                 "(SELECT MIN(next.started_at_us) FROM turns next WHERE next.session_id=t.session_id "
                 "AND next.started_at_us>t.started_at_us) AS next_started_at_us," + ROUTING_PUBLIC_SQL + ","
-                "json_extract(s.metadata_json,'$.router_fallback.fallback_reason') AS session_fallback_reason,"
+                + _SESSION_FALLBACK + " AS session_fallback_reason,"
                 "CASE WHEN json_extract(d.metadata_json,'$.policy.call_id') IS NOT NULL THEN EXISTS ("
                 "SELECT 1 FROM router_decisions prior JOIN turns previous ON previous.turn_id=prior.turn_id "
                 "WHERE json_extract(prior.metadata_json,'$.policy.call_id')="
