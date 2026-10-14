@@ -32,6 +32,43 @@ def _client():
 def _first_workflow_prompt(monkeypatch, task: str, instruction: str) -> str:
     """The first prompt a real workflow run sends its brain, so a search test follows the
     orchestrator's own templates rather than a copy of them."""
+    return _first_workflow_call(monkeypatch, task, instruction)[1]
+
+
+def _codex_fresh_thread_prompt(system_prompt, message: str) -> str:
+    """What the real Codex session sends for *message* on a fresh thread: the agent
+    instructions it was made with, then the message."""
+    import asyncio
+
+    from bobi.brain.codex import _CodexSession, _instructions
+
+    sent = []
+
+    async def runner(argv, cwd, prompt):
+        sent.append(prompt)
+        return
+        yield
+
+    session = _CodexSession(cwd=".", instructions=_instructions(system_prompt), runner=runner)
+
+    async def turn():
+        await session.query(message)
+        async for _ in session.receive_response():
+            pass
+
+    asyncio.run(turn())
+    return sent[0]
+
+
+def _event(**event) -> str:
+    """An event as the event bus delivers it to an agent."""
+    from bobi.events.client import format_event_for_manager
+
+    return format_event_for_manager(event)
+
+
+def _first_workflow_call(monkeypatch, task: str, instruction: str) -> tuple[dict, str]:
+    """The system prompt and first prompt of a real workflow run's first session."""
     from unittest.mock import MagicMock, patch
 
     from bobi.workflow.orchestrator import run_workflow
@@ -39,7 +76,7 @@ def _first_workflow_prompt(monkeypatch, task: str, instruction: str) -> str:
     from tests.test_orchestrator import _recording_brain
 
     monkeypatch.setenv("BOBI_BRAIN", "claude")
-    brain, _, clients = _recording_brain()
+    brain, calls, clients = _recording_brain()
     workflow = Workflow(name="deploy", steps=[StepDef(name="implement", prompt=instruction),
                                               StepDef(name="review", prompt="Review it.")])
     with patch("bobi.brain.get_brain", lambda kind=None: brain), \
@@ -52,7 +89,7 @@ def _first_workflow_prompt(monkeypatch, task: str, instruction: str) -> str:
             patch("bobi.workflow.orchestrator.log_activity"), \
             patch("bobi.brain.turns.log_activity"):
         assert run_workflow(workflow, task=task, repo="r", cwd="/tmp", run_key="1") is True
-    return clients[0].queries[0]
+    return calls[0]["system_prompt"], clients[0].queries[0]
 
 
 class TestMetrics:
@@ -62,13 +99,17 @@ class TestMetrics:
         seed_dashboard(bobi_install.repo_path, 1_000_000)
         health = bobi_install.state_dir / "metrics/collector.state.json"
         health.write_text(json.dumps({"status": "running", "db_ready": True,
-                                     "reconciliation_errors": 1, "last_error": "private-task"}))
+                                     "reconciliation_errors": 1, "reconciliation_waiting_turns": 2,
+                                     "reconciliation_retry_exhausted_turns": 3,
+                                     "last_error": "private-task"}))
         base = f"/api/agents/{bobi_install.agent_name}/metrics"
         summary = _client().get(base + "/summary", params=self.RANGE)
         assert summary.status_code == 200
         assert summary.headers["cache-control"] == "no-store"
         assert summary.json()["totals"]["input_tokens"] == 720
         assert summary.json()["collector"]["reconciliation_errors"] == 1
+        assert summary.json()["collector"]["reconciliation_waiting_turns"] == 2
+        assert summary.json()["collector"]["reconciliation_retry_exhausted_turns"] == 3
         assert "private-task" not in summary.text
         summary_s1 = _client().get(base + "/summary", params={**self.RANGE, "session_id": "s1"})
         assert summary_s1.status_code == 200
@@ -399,62 +440,369 @@ class TestMetrics:
         assert [turn["turn_id"] for turn in far["turns"]] == ["t-routine"]
         assert far["search"] == {"loaded": 4, "searched": 4}
 
-    # A bootstrap prompt carrying a Slack event, as the manager receives it. The workflow
-    # prompt (`"workflow"` below) is captured from a real run of the orchestrator.
-    EVENT_PROMPT = (
-        "You are an agent in a bobi deployment. How you receive events: one at a time.\n"
-        "Event: slack/message\nconversation: slack:T1:channel:C1:thread:1.2\nchannel_name: ops-room\n"
-        "please check zebraevent logs")
+    SLACK_EVENT = {"source": "slack", "type": "message", "text": "please check zebraevent logs\nsecond line here",
+                   "conversation": "slack:T1:channel:C1:thread:1.2",
+                   "fields": {"channel": "C1", "channel_type": "im", "ts": "123.456", "user_id": "U1",
+                              "channel_name": "ops-room"}}
+    GITHUB_EVENT = {"source": "github", "type": "github.issues", "text": "Issue opened: flaky zebratest",
+                    "fields": {"repo": "acme/api", "state": "open", "number": 42}}
 
-    @pytest.mark.parametrize("prompt,word,found", [
+    def _prompt(self, monkeypatch, bobi_install, shape):
+        """One prompt of *shape*, each built by the code that writes it for real."""
+        from bobi.prompts.resolver import build_startup_prompt
+
+        if shape == "workflow":
+            return _first_workflow_prompt(monkeypatch, "rotate the zebracredential on staging", "Implement the change.")
+        if shape == "forwarded-event":
+            return _first_workflow_prompt(
+                monkeypatch, "Event: github/push\nrepo: acme/api\nplease deploy zebraforward", "Deploy it.")
+        if shape == "codex-workflow":
+            # A fresh Codex thread carries the agent instructions, base prompt included, before the step.
+            return _codex_fresh_thread_prompt(*_first_workflow_call(
+                monkeypatch, "rotate the zebracredential on staging", "Implement the change."))
+        if shape == "codex-direct":
+            system_prompt, _ = _first_workflow_call(monkeypatch, "anything", "Implement the change.")
+            return _codex_fresh_thread_prompt(system_prompt, "Please rotate the zebrakey on staging")
+        if shape == "startup":
+            return build_startup_prompt("director", bobi_install.repo_path)
+        if shape == "codex-startup":
+            return _codex_fresh_thread_prompt(
+                {"append": "You are a director agent working on an adhoc task."},
+                build_startup_prompt("director", bobi_install.repo_path))
+        if shape == "slack-event":
+            return _event(**self.SLACK_EVENT)
+        if shape == "github-event":
+            return _event(**self.GITHUB_EVENT)
+        if shape == "metadata-like-text":
+            return _event(**{**self.SLACK_EVENT, "text": "action: restart the zebraworker"})
+        if shape == "quoted-step-header":
+            header = _first_workflow_prompt(monkeypatch, "anything", "Implement the change.").split("\n\n")[-2]
+            assert header.startswith("Workflow `deploy` steps: ")
+            return _event(**{**self.SLACK_EVENT, "text": header + "\n\nImplement the change."})
+        if shape == "event-batch":
+            # Two events in one delivery, as the drain loop joins them, one annotated.
+            return "\n\n".join([_event(**self.SLACK_EVENT), _event(**self.GITHUB_EVENT)
+                                + "\n  [AUTO-DISPATCHED: workflow launched — no action needed]"])
+        raise AssertionError(shape)
+
+    def _one_prompt_turn(self, bobi_install, monkeypatch, tmp_path, prompt, *, brain="claude", prompt_size=None):
+        """Turn t-routine of the seeded dashboard received *prompt*, in a *brain* transcript, with
+        *prompt_size* recorded as the size of the message delivered; returns the metrics URL."""
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider',brain=? WHERE session_id='s1'", (brain,))
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.execute("UPDATE turns SET prompt_bytes=? WHERE turn_id='t-routine'", (prompt_size,))
+        conn.commit()
+        conn.close()
+        entries = [("user", "1970-01-01T00:00:01.100Z", prompt), ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]
+        if brain == "codex":
+            rows = [{"type": "response_item", "timestamp": at, "payload": {"type": "message", "role": role,
+                     "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}]}}
+                    for role, at, text in entries]
+        else:
+            rows = [{"type": role, "timestamp": at, "message": {"content": text}} for role, at, text in entries]
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(map(json.dumps, rows)))
+        found = lambda session_id: transcript if session_id == "old-provider" else None  # noqa: E731
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript", found)
+        monkeypatch.setattr("bobi.chat_history.find_codex_rollout", found)
+        return f"/api/agents/{bobi_install.agent_name}/metrics"
+
+    @pytest.mark.parametrize("shape,word,found", [
         # A workflow turn's title is its step instruction; the launch task is still searched.
         ("workflow", "zebracredential", True),
         ("workflow", "implement the change", True),
-        # An event's title stops at its metadata; the lines after it are still searched.
-        (EVENT_PROMPT, "zebraevent", True),
         # Text bobi wraps around the operator's input is not.
         ("workflow", "repeat steps", False),
         ("workflow", "background for run", False),
         ("workflow", "yaml", False),
-        (EVENT_PROMPT, "bobi deployment", False),
-        (EVENT_PROMPT, "channel_name", False),
-        (EVENT_PROMPT, "slack/message", False),
         # A workflow whose task forwards an event is still a workflow prompt: its task is kept whole.
         ("forwarded-event", "acme/api", True),
         ("forwarded-event", "zebraforward", True),
         ("forwarded-event", "repeat steps", False),
         ("forwarded-event", "background for run", False),
-    ], ids=["workflow-task", "workflow-instruction", "after-event-metadata", "step-header", "background-header",
-            "yaml-fence", "bootstrap", "event-metadata", "event-line", "forwarded-task-metadata",
-            "forwarded-task-content", "forwarded-step-header", "forwarded-background-header"])
+        # A fresh Codex thread: the agent instructions before the message are bobi's.
+        ("codex-workflow", "zebracredential", True),
+        ("codex-workflow", "implement the change", True),
+        ("codex-workflow", "stable slack identity", False),
+        ("codex-workflow", "jobtack", False),
+        ("codex-workflow", "can you check the deploy", False),
+        ("codex-workflow", "ask for guidance", False),
+        ("codex-workflow", "repeat steps", False),
+        ("codex-direct", "zebrakey", True),
+        ("codex-direct", "jobtack", False),
+        ("codex-direct", "you are an agent working on issue", False),
+        # An agent's startup brief is bobi's from end to end.
+        ("startup", "can you check the deploy", False),
+        ("startup", "jobtack", False),
+        ("startup", "available workflows", False),
+        ("codex-startup", "can you check the deploy", False),
+        ("codex-startup", "stable slack identity", False),
+        # An event: its text is searched, its delivery line and metadata are not.
+        ("slack-event", "zebraevent", True),
+        ("slack-event", "second line here", True),
+        ("slack-event", "slack/message", False),
+        ("slack-event", "channel_type", False),
+        ("slack-event", "123.456", False),
+        ("slack-event", "ops-room", False),
+        ("slack-event", "slack:t1", False),
+        ("github-event", "zebratest", True),
+        ("github-event", "state: open", False),
+        ("github-event", "number: 42", False),
+        ("github-event", "acme/api", False),
+        # A message that starts like metadata is still the message.
+        ("metadata-like-text", "restart the zebraworker", True),
+        ("quoted-step-header", "repeat steps", True),
+        ("quoted-step-header", "channel_type", False),
+        ("event-batch", "zebraevent", True),
+        ("event-batch", "zebratest", True),
+        ("event-batch", "auto-dispatched", False),
+        ("event-batch", "state: open", False),
+        ("event-batch", "channel_type", False),
+    ])
     def test_metrics_turn_search_matches_operator_text_not_framework_text(
-            self, bobi_install, monkeypatch, tmp_path, prompt, word, found):
-        from bobi.metrics.store import connect
-
-        if prompt == "workflow":
-            prompt = _first_workflow_prompt(monkeypatch, "rotate the zebracredential on staging",
-                                            "Implement the change.")
-            assert "zebracredential" in prompt and "repeat steps" in prompt and "```yaml" in prompt
-        elif prompt == "forwarded-event":
-            prompt = _first_workflow_prompt(
-                monkeypatch, "Event: github/push\nrepo: acme/api\nplease deploy zebraforward", "Deploy it.")
-            assert "Event: github/push" in prompt and "repeat steps" in prompt
-
-        seed_dashboard(bobi_install.repo_path, 1_000_000)
-        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
-        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
-        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
-        conn.commit()
-        conn.close()
-        transcript = tmp_path / "old-provider.jsonl"
-        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
-                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z", prompt),
-                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]))
-        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
-                            lambda session_id: transcript if session_id == "old-provider" else None)
-        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+            self, bobi_install, monkeypatch, tmp_path, shape, word, found):
+        prompt = self._prompt(monkeypatch, bobi_install, shape)
+        # The word is in what the agent received: a miss means it was left out on purpose.
+        assert word in prompt.lower()
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
         listed = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()
         assert [turn["turn_id"] for turn in listed["turns"]] == (["t-routine"] if found else [])
+
+    @pytest.mark.parametrize("shape,title,origin", [
+        ("workflow", "Implement the change.", {"source": "user"}),
+        ("forwarded-event", "Deploy it.", {"source": "user"}),
+        ("codex-workflow", "Implement the change.", {"source": "user"}),
+        ("codex-direct", "Please rotate the zebrakey on staging", {"source": "user"}),
+        ("startup", "Agent Startup & Initialization", {"source": "user"}),
+        ("codex-startup", "Agent Startup & Initialization", {"source": "user"}),
+        ("slack-event", "please check zebraevent logs second line here",
+         {"source": "slack", "channel_id": "C1", "channel_name": "ops-room", "thread_id": "1.2", "url": "https://app.slack.com/client/T1/C1/thread/C1-1.2"}),
+        ("github-event", "Issue opened: flaky zebratest", {"source": "user"}),
+        ("metadata-like-text", "action: restart the zebraworker",
+         {"source": "slack", "channel_id": "C1", "channel_name": "ops-room", "thread_id": "1.2", "url": "https://app.slack.com/client/T1/C1/thread/C1-1.2"}),
+        ("event-batch", "please check zebraevent logs second line here Issue opened: flaky zebratest",
+         {"source": "slack", "channel_id": "C1", "channel_name": "ops-room", "thread_id": "1.2", "url": "https://app.slack.com/client/T1/C1/thread/C1-1.2"}),
+    ])
+    def test_metrics_turn_title_and_origin_come_from_the_operator_part(
+            self, bobi_install, monkeypatch, tmp_path, shape, title, origin):
+        prompt = self._prompt(monkeypatch, bobi_install, shape)
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        listed = next(turn for turn in _client().get(base + "/turns", params=self.RANGE).json()["turns"]
+                      if turn["turn_id"] == "t-routine")
+        drawer = _client().get(base + "/turns/t-routine").json()
+        assert listed["semantic_title"] == drawer["conversation"]["semantic_title"] == title
+        assert listed["conversation"]["origin"] == drawer["conversation"]["origin"] == origin
+
+    def test_metrics_slack_event_quoting_a_step_header_is_titled_by_its_own_text(
+            self, bobi_install, monkeypatch, tmp_path):
+        prompt = self._prompt(monkeypatch, bobi_install, "quoted-step-header")
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        header = prompt.splitlines()[1].strip()
+        assert drawer["user_message"] == header + "\n\nImplement the change."
+        assert drawer["origin"]["source"] == "slack"
+
+    def test_metrics_prompt_structure_that_is_not_exact_is_read_whole(self, monkeypatch, bobi_install):
+        from bobi.prompts import BASE_PATH
+        from bobi.webapp.runtime import _read_prompt
+
+        workflow = self._prompt(monkeypatch, bobi_install, "workflow")
+        for raw in (
+            # The base prompt without the notice that closes an agent prompt.
+            BASE_PATH.read_text() + "\n\nPlease rotate the zebrakey",
+            # A workflow background block that is never closed.
+            workflow[:workflow.index("```\n\n")],
+            # An event whose text is not where the event bus puts it.
+            "Event: slack/message\nunindented text\n  conversation: slack:T1:channel:C1:thread:1.2",
+        ):
+            read = _read_prompt(raw)
+            assert (read.search, read.body, read.conversation) == (raw, raw, None)
+
+    def _session_instructions(self, bobi_install, monkeypatch, kind):
+        """The system prompt a session of *kind* is made with, captured from the real launch code."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from bobi.prompts.resolver import build_startup_prompt
+        from bobi.session import Session
+        from bobi.subagent import run_persistent_agent, run_phase_blocking
+
+        if kind == "workflow":
+            return _first_workflow_call(monkeypatch, "anything", "Implement the change.")[0]
+        made = []
+
+        class Recorded:
+            def __init__(self, **kwargs):
+                made.append(kwargs)
+
+            def start(self, **_):
+                return False
+
+            def stop(self):
+                pass
+
+        if kind == "rotated-with-memory":
+            (bobi_install.state_dir / "long_term_memory.md").write_text(
+                "## Facts\n- deploys go out on Tuesdays\n\n## Decisions\n- keep the zebra board\n")
+        with patch("bobi.session.Session", Recorded), patch("bobi.subagent._emit_session_started"), \
+                patch("bobi.subagent._emit_session_finished"):
+            if kind == "phase":
+                run_phase_blocking("42", "implement", str(bobi_install.repo_path), role="director")
+            else:
+                run_persistent_agent(cwd=str(bobi_install.repo_path), name="manager", role="director",
+                                     task=build_startup_prompt("director", bobi_install.repo_path))
+        system_prompt = made[0]["system_prompt"]
+        if kind == "rotated-with-memory":
+            # A context-cap rotation rebuilds the instructions, reloading long-term memory.
+            system_prompt = Session._rebuild_system_prompt(SimpleNamespace(_system_prompt=system_prompt,
+                                                                           name="manager"))
+            assert "deploys go out on Tuesdays" in system_prompt["append"]
+        return system_prompt
+
+    @pytest.mark.parametrize("kind", ["adhoc", "rotated-with-memory", "phase", "workflow"])
+    @pytest.mark.parametrize("message", ["event", "batch", "crlf-non-ascii"])
+    def test_metrics_fresh_codex_thread_is_read_from_the_message_it_delivered(
+            self, bobi_install, monkeypatch, tmp_path, kind, message):
+        from bobi.metrics.runtime import prompt_bytes
+
+        slack = {**self.SLACK_EVENT, "conversation": "slack:T0952RZRZ0X:channel:C0REAL:thread:999.111"}
+        if message == "crlf-non-ascii":
+            slack["text"] = "Kiểm tra nhật ký zebraevent\r\nsecond line here 🚀"
+        delivered = _event(**slack)
+        if message == "batch":
+            delivered = "\n\n".join([_event(**self.GITHUB_EVENT), delivered])
+        prompt = _codex_fresh_thread_prompt(self._session_instructions(bobi_install, monkeypatch, kind), delivered)
+        assert prompt.endswith("\n\n" + delivered) and len(prompt) > len(delivered) + 2
+        # The session records the size of the message it delivered (`Session._observe_message`).
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt, brain="codex",
+                                     prompt_size=prompt_bytes(delivered))
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        listed = next(turn for turn in _client().get(base + "/turns", params=self.RANGE).json()["turns"]
+                      if turn["turn_id"] == "t-routine")
+        origin = {"source": "slack", "channel_id": "C0REAL", "channel_name": "ops-room", "thread_id": "999.111",
+                  "url": "https://app.slack.com/client/T0952RZRZ0X/C0REAL/thread/C0REAL-999.111"}
+        assert drawer["origin"] == listed["conversation"]["origin"] == origin
+        assert drawer["user_message"].endswith(slack["text"])
+        assert listed["semantic_title"] == drawer["semantic_title"]
+        for word, found in [("zebraevent", True), ("second line here", True), ("working on", False),
+                            ("channel_type", False)]:
+            hits = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()["turns"]
+            assert [turn["turn_id"] for turn in hits] == (["t-routine"] if found else []), word
+
+    @pytest.mark.parametrize("kind", ["adhoc", "workflow"])
+    @pytest.mark.parametrize("ending", ["\n", "  ", " \n"])
+    @pytest.mark.parametrize("message", ["event", "plain"])
+    def test_metrics_fresh_codex_thread_message_ending_in_whitespace(
+            self, bobi_install, monkeypatch, tmp_path, kind, ending, message):
+        from bobi.metrics.runtime import prompt_bytes
+
+        # The rollout reader strips the prompt, so the message ends without the whitespace it was sent with.
+        slack = {**self.SLACK_EVENT, "conversation": "slack:T0952RZRZ0X:channel:C0REAL:thread:999.111"}
+        delivered = (_event(**slack) if message == "event" else "Please rotate the zebraevent key") + ending
+        prompt = _codex_fresh_thread_prompt(self._session_instructions(bobi_install, monkeypatch, kind), delivered)
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt, brain="codex",
+                                     prompt_size=prompt_bytes(delivered))
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        assert drawer["origin"]["source"] == ("slack" if message == "event" else "user")
+        assert drawer["user_message"] == (slack["text"] if message == "event" else delivered.strip())
+        for word, found in [("zebraevent", True), ("working on", False)]:
+            hits = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()["turns"]
+            assert [turn["turn_id"] for turn in hits] == (["t-routine"] if found else []), word
+
+    @pytest.mark.parametrize("recorded", [None, "short", "off-separator", "mid-character", "claude"])
+    def test_metrics_message_size_that_does_not_prove_the_cut_is_not_used(
+            self, bobi_install, monkeypatch, tmp_path, recorded):
+        from bobi.metrics.runtime import prompt_bytes
+
+        delivered = _event(**{**self.SLACK_EVENT, "text": "Kiểm tra zebraevent"})
+        prompt = "Instructions say zebrainstruction.\n\n" + delivered
+        size = {None: None, "short": prompt_bytes(delivered) - 1, # Larger than the message by more than the separator: the cut would fall in the instructions.
+                "off-separator": prompt_bytes(delivered) + 3,
+                "mid-character": prompt_bytes(delivered) - len("Kiểm tra zebraevent".encode()) + 2,
+                "claude": prompt_bytes(delivered)}[recorded]
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt,
+                                     brain="claude" if recorded == "claude" else "codex", prompt_size=size)
+        # Read whole, as without the size: the instructions stay searchable and nothing is linked.
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        assert drawer["origin"] == {"source": "user"}
+        assert drawer["user_message"] == prompt.strip()
+        hits = _client().get(base + "/turns", params={**self.RANGE, "q": "zebrainstruction"}).json()["turns"]
+        assert [turn["turn_id"] for turn in hits] == ["t-routine"]
+
+    @pytest.mark.parametrize("prompt", [
+        "Check the inbox retry logic for the okapibug",
+        "Process the inbox for incoming events",
+        "Compaction required for the session",
+        "No new events to process",
+        "You are an agent in a bobi deployment. Explain the okapibug",
+    ])
+    def test_metrics_operator_message_shaped_like_upkeep_is_still_the_message(
+            self, bobi_install, monkeypatch, tmp_path, prompt):
+        from bobi.metrics.store import connect
+
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE turns SET trigger_kind='inbox' WHERE turn_id='t-routine'")
+        conn.commit()
+        conn.close()
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        assert drawer["semantic_title"] == drawer["user_message"] == prompt
+        word = prompt.split()[-1].lower()
+        listed = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()
+        assert [turn["turn_id"] for turn in listed["turns"]] == ["t-routine"]
+
+    def test_metrics_sleep_cycle_task_is_upkeep(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.monitors.sleep_cycle import build_sleep_cycle_task
+        from bobi.prompts import SLEEP_CYCLE_PATH
+
+        prompt = build_sleep_cycle_task(SLEEP_CYCLE_PATH.read_text(), "user: hello zebradelta", "", {})
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        assert drawer["semantic_title"] == "Sleep Cycle & Memory Compaction"
+        assert _client().get(base + "/turns", params={**self.RANGE, "q": "zebradelta"}).json()["turns"] == []
+
+    HOSTILE_CHARS = 256 * 1024
+
+    def _hostile_prompt(self, shape):
+        from bobi.prompts import BASE_PATH
+
+        if shape == "repeated-background":
+            # One Slack message repeating the workflow background opening, never closed.
+            unit = "Workflow `a` background for run `b` x\n\n```yaml\n"
+            text = unit * (self.HOSTILE_CHARS // len(unit)) + "Workflow `a` steps: s\n\nhello"
+            return _event(**{**self.SLACK_EVENT, "text": text})
+        if shape == "many-events":
+            unit = "Event: slack/message\n  hi\n"
+            return BASE_PATH.read_text() + "\n\n" + unit * (self.HOSTILE_CHARS // len(unit))
+        if shape == "many-blocks":
+            return "\n\n".join([_event(**self.SLACK_EVENT)] * (self.HOSTILE_CHARS // 200))
+        raise AssertionError(shape)
+
+    @pytest.mark.parametrize("shape", ["repeated-background", "many-events", "many-blocks"])
+    def test_metrics_prompt_reading_is_linear(self, shape):
+        from bobi.webapp.runtime import _turn_conversation
+
+        prompt = self._hostile_prompt(shape)
+        assert len(prompt) >= self.HOSTILE_CHARS
+        turn = {"started_at_us": 1_000_000, "ended_at_us": 2_000_000, "trigger_kind": "slack"}
+        entries = [{"kind": "message", "role": "user", "text": prompt, "at": "1970-01-01T00:00:01.1Z"}]
+        _turn_conversation(turn, entries, full_message=True)
+        started = time.perf_counter()
+        _turn_conversation(turn, entries, full_message=True)
+        assert time.perf_counter() - started < 0.1
+
+    def test_metrics_reads_stay_fast_beside_a_hostile_prompt(self, bobi_install, monkeypatch, tmp_path):
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, self._hostile_prompt("repeated-background"))
+        client = _client()
+        for path, params in [("/turns", self.RANGE), ("/turns", {**self.RANGE, "q": "hello"}), ("/turns/t-routine", {})]:
+            client.get(base + path, params=params)
+            started = time.perf_counter()
+            assert client.get(base + path, params=params).status_code == 200
+            assert time.perf_counter() - started < 1.0, path
 
     @pytest.mark.parametrize("brain", ["claude", "codex"])
     def test_metrics_old_turn_uses_timestamp_window_before_tail_limit(self, bobi_install, monkeypatch, tmp_path, brain):
@@ -1914,11 +2262,10 @@ class TestRoutingConfig:
         assert json.loads(other.policy.options_json)["instructions"] == concise_config()["instructions"]
 
     @pytest.mark.parametrize("trigger,prompt,title", [
-        ("startup", "You are a bobi director.\n# Bobi Agent\nHow you receive events", "Agent Startup & Initialization"),
         ("inbox", "You are the **sleep cycle** for this agent team. Internal transcript delta", "Sleep Cycle & Memory Compaction"),
-        ("inbox", "Compaction required: reduce the session context.", "Sleep Cycle & Memory Compaction"),
-        ("inbox", "No new events. Wait for delivery.", "Idle Standby (No new events)"),
-        ("inbox", "Process pending inbox messages.", "Inbox Event Processing"),
+        # Upkeep is recognised by what bobi writes, never by how an operator's message starts.
+        ("inbox", "Compaction required: reduce the session context.", "Compaction required: reduce the session context."),
+        ("inbox", "Process pending inbox messages.", "Process pending inbox messages."),
         ("direct", "Fix sleep cycle regression", "Fix sleep cycle regression"),
         ("chat", "Process inbox", "Process inbox"),
         ("user", "Explain the # Bobi Agent header", "Explain the # Bobi Agent header"),
@@ -1941,22 +2288,28 @@ class TestRoutingConfig:
         turn = {"started_at_us": 1_000_000, "ended_at_us": 2_000_000, "trigger_kind": "inbox"}
         entries = [{"kind": "message", "role": "user", "text": text, "at": "1970-01-01T00:00:01.1Z"} for text in (
             "You are the **sleep cycle** for this agent team. Internal machinery",
-            "Event: slack/message\nFix sleep cycle regression\nconversation: slack:T123:channel:C123:thread:1791360056.16")]
+            _event(source="slack", type="message", text="Fix sleep cycle regression",
+                   conversation="slack:T123:channel:C123:thread:1791360056.16"))]
         session = {"role": "curator", "session_name": "curator-1"}
         data = _turn_conversation(turn, entries, session=session)
         assert data["semantic_title"] == "Fix sleep cycle regression"
         assert data["user_message"] == "Fix sleep cycle regression"
         assert data["origin"]["source"] == "slack"
         assert _turn_conversation(turn, [], session=session)["semantic_title"] == "Sleep Cycle & Memory Compaction"
+        from bobi.monitors.sleep_cycle import build_sleep_cycle_task
+        from bobi.prompts import SLEEP_CYCLE_PATH
+
+        # A sleep-cycle task behind a fresh Codex thread's agent instructions.
+        task = build_sleep_cycle_task(SLEEP_CYCLE_PATH.read_text(), "user: hello", "", {})
         wrapped = [{"kind": "message", "role": "user", "at": "1970-01-01T00:00:01.1Z",
-                    "text": "You are an agent in a bobi deployment. You are the **sleep cycle** for this agent team."}]
+                    "text": "You are a curator agent working on an adhoc task.\n\n" + task}]
         assert _turn_conversation(turn, wrapped, session=session)["semantic_title"] == "Sleep Cycle & Memory Compaction"
         startup = {**turn, "trigger_kind": "startup"}
         idle = [{"kind": "message", "role": "agent", "text": "No new events.", "at": "1970-01-01T00:00:01.1Z"}]
         assert _turn_conversation(startup, idle)["semantic_title"] == "Idle Standby (No new events)"
         assert _turn_conversation(turn, idle, session=session)["semantic_title"] == "Idle Standby (No new events)"
-        inbox = [{"kind": "message", "role": "user", "text": "Process pending inbox messages.", "at": "1970-01-01T00:00:01.1Z"}]
-        assert _turn_conversation(turn, inbox, session=session)["semantic_title"] == "Inbox Event Processing"
+        assert _turn_conversation(turn, idle)["semantic_title"] == "Idle Standby (No new events)"
+        assert _turn_conversation(turn, [])["semantic_title"] == "Inbox Event Processing"
 
     def test_runtime_preserves_tool_preview_bytes_and_marks_additional_clipping(self):
         from bobi.webapp.runtime import _turn_conversation

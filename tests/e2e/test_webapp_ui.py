@@ -194,6 +194,7 @@ class TestMetricsView:
 
     def test_metrics_maintenance_collapses_without_reclassifying_real_user(self, webapp, page, monkeypatch):
         from bobi.metrics.store import connect
+        from bobi.prompts.resolver import build_startup_prompt
 
         started = int((time.time() - 60) * 1_000_000)
         seed_dashboard(webapp.install.repo_path, started)
@@ -208,7 +209,7 @@ class TestMetricsView:
         long_context = ("維護 context " * 500).rstrip()
         prompts = [
             "You are the **sleep cycle** for this agent team. You run out-of-band, on a schedule, as a monitor to process recent transcript deltas.\n" + long_context,
-            "You are an agent in a bobi deployment. Initialize the agent.\n" + long_context,
+            build_startup_prompt("director", webapp.install.repo_path),
             "Explain curator sleep cycle and memory compaction without reclassifying my message. " + "user-content-" * 600,
         ]
         entries = []
@@ -231,7 +232,8 @@ class TestMetricsView:
             expand = dialog.locator(".io-block-system .metrics-tool-expand")
             expect(expand).to_be_visible()
             expect(expand).to_have_attribute("aria-expanded", "false")
-            assert content.text_content() == prompts[index]
+            # The page shows the prompt without its trailing newline.
+            assert content.text_content() == prompts[index].rstrip("\n")
             assert content.evaluate("element => element.clientHeight <= 180 && element.scrollHeight > element.clientHeight")
             _metrics_capture(page, f"prompt-{'maintenance' if index == 0 else 'startup'}-collapsed-1440")
             expand.focus()
@@ -979,6 +981,7 @@ class TestMetricsView:
 
     def test_metrics_semantic_headlines_and_deduped_sessions(self, webapp, page, monkeypatch):
         from bobi.metrics.store import connect
+        from bobi.prompts.resolver import build_startup_prompt
 
         started = int((time.time() - 60) * 1_000_000)
         seed_dashboard(webapp.install.repo_path, started)
@@ -993,24 +996,27 @@ class TestMetricsView:
         rekey(connection)
         connection.commit()
         connection.close()
+        # Upkeep turns as bobi runs them: the sleep cycle's task, then a compaction and an idle
+        # turn that receive no prompt of their own.
         messages = [
-            "You are the **sleep cycle** for this agent team. You run out-of-band, on a schedule, as a monitor to process recent transcript deltas.",
-            "Compaction required for the session",
-            "No new events to process",
+            ("You are the **sleep cycle** for this agent team. You run out-of-band, on a schedule, as a monitor to process recent transcript deltas.", "Maintenance completed"),
+            (None, "Maintenance completed"),
+            (None, "No new events."),
         ]
         entries = []
-        for index, prompt in enumerate(messages):
+        for index, (prompt, reply) in enumerate(messages):
             stamp = datetime.fromtimestamp((started + index * 1_000_000 + 100_000) / 1_000_000, timezone.utc).isoformat()
-            entries.extend([_entry("user", prompt, stamp), _entry("assistant", "Maintenance completed", stamp)])
+            entries.extend(([_entry("user", prompt, stamp)] if prompt else []) + [_entry("assistant", reply, stamp)])
         _seed_transcript(webapp, monkeypatch, "curator", entries)
         slack_at = datetime.fromtimestamp((started + 3_100_000) / 1_000_000, timezone.utc).isoformat()
         worker_entries = [
             _entry("user", "Event: slack/message\n  Fix metrics toolbar layout\n  conversation: slack:T123:channel:C123:thread:1791360056.16\n  channel_name: eng-team", slack_at),
             _entry("assistant", "Toolbar fixed", slack_at),
         ]
-        for index, prompt in [(4, "Process the inbox for incoming events"), (5, "You are an agent in a bobi deployment. Initialize the agent.")]:
+        for index, prompt in [(4, None), (5, build_startup_prompt("director", webapp.install.repo_path))]:
             stamp = datetime.fromtimestamp((started + index * 1_000_000 + 100_000) / 1_000_000, timezone.utc).isoformat()
-            worker_entries.extend([_entry("user", prompt, stamp), _entry("assistant", "Background event processed", stamp)])
+            worker_entries.extend(([_entry("user", prompt, stamp)] if prompt else [])
+                                  + [_entry("assistant", "Background event processed", stamp)])
         _seed_transcript(webapp, monkeypatch, "worker-a", worker_entries)
         page.set_viewport_size({"width": 1440, "height": 1000})
         page.goto(webapp.agent_url() + "/metrics")
@@ -1714,6 +1720,57 @@ class TestMetricsView:
         page.get_by_role("searchbox", name="Search loaded turns").fill("alpha")
         expect(rows).to_have_count(3, timeout=5_000)
         assert refused == ["alpha"]
+
+    def test_older_turns_and_live_refresh_survive_a_refused_refresh(self, webapp, page, monkeypatch):
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.metrics.store import connect
+        from bobi.webapp.runtime import LocalRuntime
+
+        started = int((time.time() - 600) * 1_000_000)
+        seed_dashboard(webapp.install.repo_path, started)
+        conn = connect(webapp.install.state_dir / "metrics/metrics.db")
+        # 65 turns: a latest page of 50 and an older page of 15.
+        for index in range(61):
+            at_us = started + (index + 10) * 1_000_000
+            conn.execute("INSERT INTO turns(turn_id,session_id,turn_index,started_at_us,ended_at_us,status,"
+                         "trigger_kind,is_user_initiated) VALUES(?,'s1',?,?,?,'completed','user',1)",
+                         (f"t-more-{index:02d}", index + 3, at_us, at_us + 500_000))
+        conn.commit()
+        conn.close()
+        real = LocalRuntime.metrics
+        reads = []
+
+        def refuse_first_refresh(self, name, view, args):
+            if view == "turns":
+                reads.append(args.get("cursor") or "")
+                if len(reads) == 2:
+                    raise MetricsQueryError("metrics readers are busy", "metrics_busy", retry_after_ms=250)
+            return real(self, name, view, args)
+
+        monkeypatch.setattr(LocalRuntime, "metrics", refuse_first_refresh)
+        page.clock.install()
+        page.goto(webapp.agent_url() + "/metrics")
+        page.get_by_role("button", name="Flat", exact=True).click()
+        rows = page.locator(".metrics-table-panel tbody tr")
+        expect(rows).to_have_count(50)
+        with page.expect_response(lambda response: "/metrics/turns?" in response.url and response.status == 503):
+            page.clock.run_for(10_000)
+        note = page.locator(".metrics-note").first
+        expect(note).to_contain_text("metrics readers are busy")
+        # The pager still belongs to the page on screen.
+        with page.expect_response(lambda response: "/metrics/turns?" in response.url and "cursor=" in response.url) as older:
+            page.get_by_role("button", name="older turns").click()
+        assert older.value.status == 200
+        expect(rows).to_have_count(15)
+        expect(note).not_to_contain_text("cursor does not match")
+        # Live refresh keeps running on the older page, and keeps the reader there.
+        expect(page.locator(".metrics-live-state")).to_have_text("Live")
+        with page.expect_response(lambda response: "/metrics/turns?" in response.url) as refreshed:
+            page.clock.run_for(10_000)
+        assert refreshed.value.status == 200 and "cursor=" in refreshed.value.url
+        expect(rows).to_have_count(15)
+        page.get_by_role("button", name="latest turns").click()
+        expect(rows).to_have_count(50)
 
 
 # --- opening a route --------------------------------------------------------

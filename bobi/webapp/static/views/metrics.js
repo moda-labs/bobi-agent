@@ -2107,7 +2107,10 @@ export function mountMetrics(element, { api, name, session = "" }) {
     }
   }
 
-  async function load(reset = false, clearDetail = reset) {
+  // `page` is the cursor of the page to read; without it the current page is read again.
+  // The window and cursor change only once the turns read succeeds, so a refused read
+  // leaves the page on screen, its pager and the next refresh consistent with each other.
+  async function load(reset = false, clearDetail = reset, page = null) {
     if (stopped) return;
     if (pending) {
       if (reset) { queued = true; queuedClear ||= clearDetail; } else queuedPage = true;
@@ -2119,32 +2122,33 @@ export function mountMetrics(element, { api, name, session = "" }) {
     refreshBtn.classList.add("is-refreshing");
     refreshBtn.setAttribute("aria-busy", "true");
 
+    let readParams = params;
+    let readCursor = page ?? cursor;
     if (reset || !params) {
-      cursor = "";
+      readCursor = "";
       const end = new Date();
-      // Default to 30-day window, no time buttons needed
-      params = new URLSearchParams({
+      readParams = new URLSearchParams({
         from: new Date(end.getTime() - Number(timeRange.value) * 3600000).toISOString(),
         to: end.toISOString(),
       });
       if (currentSessionFilter) {
-        params.set(recentSessions.some(item => item.session_id === currentSessionFilter) || currentSessionFilter.startsWith("ses_")
+        readParams.set(recentSessions.some(item => item.session_id === currentSessionFilter) || currentSessionFilter.startsWith("ses_")
           ? "session_id" : "session", currentSessionFilter);
       }
-      if (modelInput.value.trim()) params.set("model", modelInput.value.trim());
+      if (modelInput.value.trim()) readParams.set("model", modelInput.value.trim());
       if (clearDetail) { detailController?.abort(); closeDrawer(); }
     }
 
-    const query = new URLSearchParams(params);
-    if (cursor) query.set("cursor", cursor);
+    const query = new URLSearchParams(readParams);
+    if (readCursor) query.set("cursor", readCursor);
     if (search.value.trim()) query.set("q", search.value.trim());
 
     const results = await Promise.all([
-      api(`${base}/summary?${params}`, { signal: controller.signal }),
+      api(`${base}/summary?${readParams}`, { signal: controller.signal }),
       api(`${base}/turns?${query}`, { signal: controller.signal })
     ]);
     if (!stopped && !queued && revision === modelRevision && results.every(result => result.ok)) {
-      results.push(await api(`${base}/sessions?${new URLSearchParams({from: params.get("from"), to: params.get("to")})}`,
+      results.push(await api(`${base}/sessions?${new URLSearchParams({from: readParams.get("from"), to: readParams.get("to")})}`,
         {signal: controller.signal}));
     }
 
@@ -2175,6 +2179,8 @@ export function mountMetrics(element, { api, name, session = "" }) {
         ? "Search is waiting for a free metrics reader; the turns below are from the previous read."
         : `${turnsResult.data?.error || "Could not read metrics."} Previous values, if any, are stale.`;
     } else {
+      params = readParams;
+      cursor = readCursor;
       if (results[2]?.ok) {
         const range = `${params.get("from")}/${params.get("to")}`;
         if (sessionsRange !== range) {
@@ -2216,7 +2222,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
       if (nextCursor) {
         const next = node("button", "older turns", "btn bobi-btn small");
         next.type = "button";
-        next.addEventListener("click", () => { if (!pending) { cursor = nextCursor; load(); } });
+        next.addEventListener("click", () => { if (!pending) load(false, false, nextCursor); });
         pager.append(next);
       }
     }
@@ -2226,10 +2232,12 @@ export function mountMetrics(element, { api, name, session = "" }) {
     // A search is refreshed like the plain list. Its cost stays bounded: the server reads
     // transcripts for at most SEARCH_TRANSCRIPT_BUDGET_S and reuses every unchanged one, so a
     // refresh re-parses only transcripts that grew since the last read.
+    // Live refresh moves the latest page's window forward and re-reads an older page in place.
     timer = searchBusy
-      ? setTimeout(() => whenVisible(() => { if (search.value.trim() === query.get("q")) load(); }),
-        Math.max(1000, Number(turnsResult.data?.retry_after_ms) || 0))
-      : setTimeout(() => whenVisible(() => { if (auto.checked && !cursor) load(true, false); }), 10000);
+      ? setTimeout(() => whenVisible(() => {
+        if (search.value.trim() === query.get("q")) load(reset, false, reset ? null : readCursor);
+      }), Math.max(1000, Number(turnsResult.data?.retry_after_ms) || 0))
+      : setTimeout(() => whenVisible(() => { if (auto.checked) load(!cursor, false); }), 10000);
   }
 
   let currentRoutingConfig = null;

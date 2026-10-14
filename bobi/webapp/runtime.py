@@ -17,7 +17,9 @@ handlers.
 
 from __future__ import annotations
 
+import functools
 import re
+import string
 import sys
 import threading
 import time
@@ -25,6 +27,7 @@ import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from bobi import paths
 from bobi.chat_history import read_chat, read_transcript_messages
@@ -92,22 +95,6 @@ class _TranscriptCache:
             while self._bytes > self._max_bytes:
                 self._bytes -= self._entries.popitem(last=False)[1][0]
 
-def _clean_event_text(text: str) -> str:
-    lines = text.strip().splitlines()
-    content_lines = []
-    in_meta = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("Event:"):
-            continue
-        if _EVENT_METADATA.match(stripped):
-            in_meta = True
-            continue
-        if not in_meta and stripped:
-            content_lines.append(stripped)
-    return "\n".join(content_lines).strip()
-
-
 def _turn_cost_models(data: dict) -> list[str]:
     """The models a turn's cost covers, one name per model identity.
 
@@ -137,88 +124,276 @@ def _turn_search_text(turn: dict, prompt: str | None) -> str:
     return " ".join(str(value) for value in fields if value).lower()
 
 
-_BOOTSTRAP_MARKERS = ("You are an agent in a bobi deployment", "You are a bobi ", "# Bobi Agent", "How you receive events")
-_EVENT_METADATA = re.compile(r"^(?:conversation|channel|user_id|repo|action|sender|thread_ts|event_ts|channel_name|chat_id|thread_id):\s*")
-# The two blocks the workflow orchestrator puts before a step's instruction, by their shape:
-# a one-line background header over a fenced YAML of the run's scopes, and a one-line step header.
-_WORKFLOW_BACKGROUND = re.compile(r"(?m)^Workflow `[^`\n]+` background for run `[^`\n]*`[^\n]*\n\n```yaml\n([\s\S]*?)\n```\n\n")
-_WORKFLOW_STEP_HEADER = re.compile(r"(?m)^Workflow `[^`\n]+` steps: [^\n]*\n\n")
+class _Prompt(NamedTuple):
+    """One prompt read the way bobi wrote it.
 
-
-def _prompt_search_text(raw: str) -> str:
-    """The operator's part of one prompt, for a search: the text without what bobi wraps around it.
-
-    Dropped: the agent bootstrap, an event's `Event:` line and metadata lines, and a workflow's
-    background and step headers. Kept: the event's content lines (before and after its metadata),
-    a workflow's launch input and handoffs (the YAML body), and the step instruction.
+    *message* is the operator's text a turn is titled by, *search* the operator's text a
+    search matches, and *body* the message bobi delivered, after any agent instructions
+    put before it. *conversation* and *channel_name* come only from a delivered event's
+    metadata. A prompt bobi wrote end to end (an agent's startup brief) is None instead.
     """
-    # A workflow step first: its task may itself carry a forwarded `Event:` block, which is
-    # operator input to keep whole, not an event delivered to this agent.
-    if _WORKFLOW_STEP_HEADER.search(raw):
-        text = _WORKFLOW_BACKGROUND.sub(lambda match: match[1] + "\n", raw)
-        return _WORKFLOW_STEP_HEADER.sub("", text)
-    text = raw
-    if text.lstrip().startswith(_BOOTSTRAP_MARKERS):
-        parts = re.split(r"(?m)^(?=Event:\s*[\w\-\./]+)", text)
-        if len(parts) == 1:
-            return ""
-        text = parts[-1]
-    # An event as delivered: the prompt opens with its `Event:` line.
-    if text.lstrip().startswith("Event:"):
-        return "\n".join(line for line in text.splitlines()
-                         if not line.strip().startswith("Event:") and not _EVENT_METADATA.match(line.strip()))
-    return text
+
+    message: str
+    search: str
+    body: str
+    conversation: str | None = None
+    channel_name: str | None = None
 
 
-def _clean_user_message(raw: str) -> str:
-    if not raw:
-        return ""
-    # Filter out system prompts and agent bootstrap instructions
-    if raw.lstrip().startswith(_BOOTSTRAP_MARKERS):
-        parts = re.split(r"(?m)^(?=Event:\s*[\w\-\./]+)", raw)
-        if len(parts) > 1:
-            last_part = parts[-1].strip()
-            return _clean_event_text(last_part)
-        return ""
-
-    # A workflow step before an event: its task may forward an `Event:` block, and its
-    # title is the step instruction after the orchestrator's header.
-    if _WORKFLOW_STEP_HEADER.search(raw):
-        instruction = _WORKFLOW_STEP_HEADER.split(raw)[-1].strip()
-        if instruction:
-            return instruction
-
-    if "Event:" in raw:
-        return _clean_event_text(raw)
-
-    # Detect workflow background execution prompts and extract the concise task objective
-    if "Workflow " in raw and ("background for run" in raw or "steps:" in raw):
-        m_step = re.search(r"Workflow `?[^`\n]+`? steps:[^\n]+\n\n([\s\S]+)$", raw)
-        if m_step and m_step.group(1).strip():
-            return m_step.group(1).strip()
-        m_task = re.search(r"(?m)^\s*task:\s*([^\n]+(?:\n\s{4,}[^\n]+)*)", raw)
-        if m_task:
-            return re.sub(r"\s+", " ", m_task.group(1).strip())
-
-    return raw.strip()
+def _plain(text: str) -> _Prompt:
+    return _Prompt(text.strip(), text, text)
 
 
-def _internal_activity_title(text: str, trigger: str) -> str | None:
+@functools.cache
+def _agent_prompt_frame() -> tuple[str, tuple[tuple[str, str], ...]] | None:
+    """The base prompt, and the start and end of the notice line that closes every agent prompt.
+
+    Both come from the code that writes them: the notice is rendered by `resolve_agent_prompt`
+    for a project directory that does not exist, so the base prompt and the notice are all it
+    holds, and is split around that directory's name, which the notice carries.
+    """
+    from bobi.prompts import BASE_PATH
+    from bobi.prompts.resolver import resolve_agent_prompt
+
+    try:
+        base = BASE_PATH.read_text()
+        slot = "bobi-webapp-notice-" + uuid.uuid4().hex
+        notices = []
+        for interactive in (True, False):
+            rendered = resolve_agent_prompt("", Path(slot), interactive=interactive)
+            head, _, tail = rendered.removeprefix(base + "\n\n").partition(slot)
+            if not rendered.startswith(base + "\n\n") or not tail or slot in tail or "\n" in head + tail:
+                return None
+            notices.append((head, tail))
+    except (OSError, UnicodeError):
+        return None
+    return base, tuple(notices)
+
+
+@functools.cache
+def _event_frame() -> tuple[str, str, str, str] | None:
+    """How bobi delivers an event, rendered by `format_event_for_manager` itself: the event
+    line's prefix, the indent of the lines under it, the conversation line's prefix, and the
+    separator between a metadata key and its value."""
+    from bobi.events.client import format_event_for_manager
+
+    lines = format_event_for_manager({"source": "s", "type": "t", "text": "x", "conversation": "c",
+                                      "fields": {"k": "v"}}).split("\n")
+    if len(lines) != 4 or not lines[0].endswith("s/t") or not lines[1].endswith("x"):
+        return None
+    indent = lines[1][:-1]
+    event_prefix, conversation_prefix = lines[0][:-3], lines[2][:-1]
+    if (not indent or not conversation_prefix.startswith(indent) or not lines[3].startswith(indent + "k")
+            or not lines[3].endswith("v")):
+        return None
+    return event_prefix, indent, conversation_prefix, lines[3][len(indent) + 1:-1]
+
+
+def _first_line(text: str) -> str:
+    end = text.find("\n")
+    return text if end < 0 else text[:end]
+
+
+def _template_parts(template: str) -> tuple[str, ...]:
+    """The literal text around a format template's fields."""
+    return tuple(literal for literal, *_ in string.Formatter().parse(template))
+
+
+def _matches(line: str, parts: tuple[str, ...]) -> bool:
+    """Whether *line* is the template whose literal text is *parts*, with any fields filled in."""
+    if not line.startswith(parts[0]):
+        return False
+    position = len(parts[0])
+    for part in parts[1:-1]:
+        found = line.find(part, position)
+        if found < 0:
+            return False
+        position = found + len(part)
+    return len(parts) == 1 or (line.endswith(parts[-1]) and position <= len(line) - len(parts[-1]))
+
+
+@functools.cache
+def _workflow_frame() -> tuple[tuple[str, ...], tuple[str, ...], str, str, str]:
+    """The blocks the workflow orchestrator writes around a step's instruction: the background
+    header and step header lines, the background's fence opening and closing, and the gap after a block."""
+    from bobi.workflow import orchestrator
+
+    fence_open, fence_close = orchestrator.WORKFLOW_BACKGROUND_FENCE
+    gap = orchestrator.WORKFLOW_BLOCK_GAP
+    return (_template_parts(orchestrator.WORKFLOW_BACKGROUND_HEADER), _template_parts(orchestrator.WORKFLOW_STEP_HEADER),
+            gap + fence_open, fence_close + gap, gap)
+
+
+def _workflow_prompt(body: str) -> _Prompt | None:
+    """A workflow step as the orchestrator sends it: [background block] step header, instruction."""
+    background_header, step_header, fence_open, fence_close, gap = _workflow_frame()
+    background = ""
+    rest = body
+    first = _first_line(rest)
+    if _matches(first, background_header):
+        start = len(first)
+        if not rest.startswith(fence_open, start):
+            return None
+        start += len(fence_open)
+        # The YAML body nests every value under a scope name, so no line of it is a bare fence.
+        close = rest.find(fence_close, start - 1)
+        if close < 0:
+            return None
+        background = rest[start:close]
+        rest = rest[close + len(fence_close):]
+        first = _first_line(rest)
+    if not _matches(first, step_header) or not rest.startswith(gap, len(first)):
+        return None
+    instruction = rest[len(first) + len(gap):]
+    return _Prompt(instruction.strip(), background + "\n" + instruction if background else instruction, body)
+
+
+def _event_prompt(body: str, frame: tuple[str, str, str, str]) -> _Prompt | None:
+    """One or more events as the event bus delivers them: blocks joined by a blank line, each an
+    event line, the event's text (its first line indented), then indented metadata and notes."""
+    event_prefix, indent, conversation_prefix, separator = frame
+
+    def is_event_line(line: str) -> bool:
+        name = line[len(event_prefix):]
+        return line.startswith(event_prefix) and "/" in name and not any(char.isspace() for char in name)
+
+    def is_metadata(line: str) -> bool:
+        if not line.startswith(indent):
+            return False
+        rest = line[len(indent):]
+        key, found, _ = rest.partition(separator)
+        return rest.startswith("[") or bool(found and key and not any(char.isspace() for char in key))
+
+    lines = body.split("\n")
+    blocks: list[list[str]] = []
+    for index, line in enumerate(lines):
+        if index == 0 or (lines[index - 1] == "" and is_event_line(line)):
+            if blocks:
+                blocks[-1].pop()  # the blank line between two events
+            blocks.append([line])
+        else:
+            blocks[-1].append(line)
+    texts = []
+    conversation = channel_name = None
+    for block in blocks:
+        if not is_event_line(block[0]) or (len(block) > 1 and not block[1].startswith(indent)):
+            return None
+        # The text comes first, then metadata: the conversation line opens it when there is one
+        # (the text may hold anything before it); otherwise every trailing indented `key: value`.
+        start = next((index for index in range(len(block) - 1, 0, -1)
+                      if block[index].startswith(conversation_prefix)), None)
+        if start is None:
+            start = len(block)
+            while start > 1 and is_metadata(block[start - 1]):
+                start -= 1
+        elif conversation is None:
+            conversation = block[start][len(conversation_prefix):].strip() or None
+            channel_prefix = indent + "channel_name" + separator
+            channel_name = next((line[len(channel_prefix):].strip() for line in block[start:]
+                                 if line.startswith(channel_prefix)), None)
+        text = "\n".join(block[1:start])[len(indent):]
+        if text.strip():
+            texts.append(text)
+    joined = "\n\n".join(texts)
+    return _Prompt(joined.strip(), joined, body, conversation, channel_name)
+
+
+# Brains whose fresh thread carries the agent instructions before the first message (`_CodexSession`).
+_INSTRUCTED_BRAINS = frozenset({"codex", "gateway-openai"})
+
+
+def _delivered_message(raw: str, delivered_bytes: object) -> str | None:
+    """The message bobi delivered, when *raw* carries agent instructions before it.
+
+    A fresh Codex thread sends ``instructions + "\\n\\n" + message`` (`_CodexSession`), and the
+    turn records the message's UTF-8 size as sent (`prompt_bytes`, measured by the session or
+    workflow). The transcript readers keep a message without the whitespace it ends with
+    (`message_text`), so the message starts that size from the end, or later by only the
+    whitespace stripped from its end: past newlines alone, to just after the blank-line separator.
+    """
+    from bobi.chat_history import message_text
+
+    if type(delivered_bytes) is not int or delivered_bytes <= 0:
+        return None
+    encoded = raw.encode("utf-8", "surrogatepass")
+    cut = len(encoded) - delivered_bytes
+    if cut < 2:
+        return None
+    while encoded[cut:cut + 1] == b"\n":
+        cut += 1
+    if encoded[cut - 2:cut] != b"\n\n":
+        return None
+    try:
+        message = encoded[cut:].decode("utf-8", "surrogatepass")
+    except UnicodeDecodeError:
+        return None
+    return message if message and message_text(message) == message else None
+
+
+def _read_prompt(raw: str, delivered_bytes: object = None) -> _Prompt | None:
+    """*raw* split into what bobi wrote and what the operator did, in one pass over its text.
+
+    Only exact structures bobi itself produces are recognised: agent instructions before the
+    delivered message (cut by the turn's recorded message size or, without it, the base prompt
+    through the agent prompt's closing notice), an agent's startup brief, a workflow step, and a
+    delivered event. Anything else, including a structure that is cut short or altered, is read
+    as plain text, whole.
+    """
+    delivered = _delivered_message(raw, delivered_bytes)
+    body = raw if delivered is None else delivered
+    frame = _agent_prompt_frame()
+    if frame is not None:
+        base, notices = frame
+        at = body.find(base)
+        if at >= 0:
+            # A persistent agent's startup brief: its opening line, a blank line, the agent prompt.
+            from bobi.prompts.resolver import STARTUP_OPENING
+
+            opening_end = at - len("\n\n")
+            opening = body[body.rfind("\n", 0, max(opening_end, 0)) + 1:max(opening_end, 0)]
+            if (opening_end >= 0 and body.startswith("\n\n", opening_end)
+                    and _matches(opening, _template_parts(STARTUP_OPENING))):
+                return None
+        if at >= 0 and delivered is None:
+            # The agent prompt's own sections run from the base prompt to its notice line;
+            # what follows the blank line after it is the message.
+            position = at + len(base)
+            while True:
+                end = body.find("\n", position)
+                line = body[position:] if end < 0 else body[position:end]
+                if any(line.startswith(head) and line.endswith(tail) and len(line) > len(head) + len(tail)
+                       for head, tail in notices):
+                    break
+                if end < 0:
+                    return _plain(body)
+                position = end + 1
+            if end < 0:
+                return None
+            if not body.startswith("\n\n", end):
+                return _plain(body)
+            body = body[end + 2:]
+    first = _first_line(body)
+    if first.startswith(_workflow_frame()[1][0]):
+        return _workflow_prompt(body) or _plain(body)
+    events = _event_frame()
+    if events is not None and first.startswith(events[0]):
+        return _event_prompt(body, events) or _plain(body)
+    return _plain(body)
+
+
+def _is_upkeep_prompt(text: str) -> bool:
+    """A prompt bobi sends for its own upkeep: the sleep cycle's task, recognised by the
+    markers its builder writes. Operator text is never classified by how it starts."""
     from bobi.history import _is_sleep_cycle_task
 
-    if _is_sleep_cycle_task(text):
-        return "Sleep Cycle & Memory Compaction"
-    if trigger in {"user", "chat", "direct", "slack", "slack/message"}:
-        return None
-    if re.match(r"(?is)^\s*(?:compaction(?: required| requested| notice)?|compact(?:ing)? (?:the )?(?:session|conversation|context))\b", text):
-        return "Sleep Cycle & Memory Compaction"
-    if re.match(r"(?is)^\s*(?:no (?:new |pending )?events\b|(?:idle|waiting)\s*[:.-]?\s*(?:no events|for events))", text):
-        return "Idle Standby (No new events)"
-    if re.match(r"(?is)^\s*(?:process(?:ing)? (?:the |pending |incoming )?inbox\b|check(?:ing)? (?:the )?inbox\b)", text):
-        return "Inbox Event Processing"
-    if text.lstrip().startswith(_BOOTSTRAP_MARKERS):
-        return "Agent Startup & Initialization"
-    return None
+    return _is_sleep_cycle_task(text)
+
+
+def _is_idle_response(text: str) -> bool:
+    """An agent reply that says it had nothing to do."""
+    return re.match(r"(?is)^\s*(?:no (?:new |pending )?events\b|(?:idle|waiting)\s*[:.-]?\s*(?:no events|for events))",
+                    text) is not None
+
 
 def _turn_conversation(turn: dict, entries: list[dict], next_started: int | None = None,
                        session: dict | None = None, full_message: bool = False) -> dict:
@@ -254,19 +429,27 @@ def _turn_conversation(turn: dict, entries: list[dict], next_started: int | None
     user_messages = []
     searchable = []
     internal_titles = []
+    events = []
     trigger = turn.get("trigger_kind") or "agent"
-    for text in inputs:
-        internal_title = _internal_activity_title(text, trigger)
-        cleaned = _clean_user_message(text)
-        # A prompt bobi generated for its own upkeep (sleep cycle, idle, bootstrap) is not searched.
-        if internal_title is None or (internal_title == "Agent Startup & Initialization" and "Event:" in text):
-            searchable.append(_prompt_search_text(text))
-        if cleaned and (internal_title is None or (internal_title == "Agent Startup & Initialization" and "Event:" in text)):
-            user_messages.append(cleaned)
-        elif internal_title:
-            internal_titles.append(internal_title)
+    # Only a Codex session puts its agent instructions before the message it delivers; the
+    # turn's recorded message size is that of its first prompt.
+    delivered_bytes = turn.get("prompt_bytes") if (session or turn).get("brain") in _INSTRUCTED_BRAINS else None
+    for index, text in enumerate(inputs):
+        read = _read_prompt(text, delivered_bytes if index == 0 else None)
+        # A prompt bobi generated for its own upkeep (startup brief, sleep cycle) is neither titled nor searched.
+        if read is None:
+            internal_titles.append("Agent Startup & Initialization")
+            continue
+        if _is_upkeep_prompt(read.body):
+            internal_titles.append("Sleep Cycle & Memory Compaction")
+            continue
+        searchable.append(read.search)
+        if read.message:
+            user_messages.append(read.message)
+        if read.conversation:
+            events.append(read)
     user_message = "\n\n".join(user_messages)
-    if not user_message and any(_internal_activity_title(text, "agent") == "Idle Standby (No new events)" for text in responses):
+    if not user_message and any(_is_idle_response(text) for text in responses):
         internal_titles.append("Idle Standby (No new events)")
     context = session or turn
     session_name = context.get("session_name") or ""
@@ -280,15 +463,14 @@ def _turn_conversation(turn: dict, entries: list[dict], next_started: int | None
         else "Inbox Event Processing" if trigger == "inbox" else "Agent activity",
     )
     origin = {"source": turn.get("trigger_kind") or "agent"}
-    reference = re.search(r"(?m)^\s*conversation:\s*(\S+)", prompt)
-    if reference:
+    # Only a delivered event's own metadata names where the turn came from.
+    if events:
         from bobi.conversation import parse_conversation
 
-        conversation = parse_conversation(reference[1])
+        conversation = parse_conversation(events[0].conversation)
         if conversation and conversation.source == "slack":
-            channel = re.search(r"(?m)^\s*channel_name:\s*([^\n]+)", prompt)
             origin = {"source": "slack", "channel_id": conversation.chat_id,
-                      "channel_name": channel[1].strip() if channel else None, "thread_id": conversation.thread_id,
+                      "channel_name": events[0].channel_name, "thread_id": conversation.thread_id,
                       "url": None}
             if (re.fullmatch(r"T[A-Z0-9]+", conversation.scope)
                     and re.fullmatch(r"[CDG][A-Z0-9]+", conversation.chat_id)
@@ -1319,7 +1501,9 @@ class LocalRuntime(TeamRuntime):
                     health = {}
                 data["collector"] = {key: health.get(key) for key in (
                     "status", "db_ready", "import_lag_ms", "last_success_at_us",
-                    "reconciliation_errors", "uncovered_turns", "telemetry_events_dropped",
+                    "reconciliation_errors", "reconciliation_retry_exhausted_turns",
+                    "reconciliation_waiting_turns", "uncovered_turns",
+                    "telemetry_events_dropped",
                 )}
                 # A crash leaves "running" behind; a stale heartbeat is not live.
                 last = data["collector"]["last_success_at_us"]

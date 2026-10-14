@@ -178,7 +178,7 @@ def _read_claude_transcript_messages(session_id: str,
         msg_type = obj.get("type", "")
         if msg_type not in ("human", "user", "assistant"):
             continue
-        text = _extract_text(obj.get("message", {}).get("content", "")).strip()
+        text = message_text(_extract_text(obj.get("message", {}).get("content", "")))
         if not text:
             continue
         role = "agent" if msg_type == "assistant" else "user"
@@ -415,7 +415,7 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
         role = "agent" if obj.get("type") == "assistant" else "user"
         content = obj.get("message", {}).get("content", "")
 
-        text = _extract_text(content).strip()
+        text = message_text(_extract_text(content))
         if text:
             out.append(_entry(KIND_MESSAGE, role, text, at))
             seen += 1
@@ -450,6 +450,11 @@ def find_codex_rollout(session_id: str) -> Path | None:
 
 
 _codex_rollout_path = find_codex_rollout
+
+
+def message_text(text: str) -> str:
+    """A transcript message as the readers keep it: without surrounding whitespace."""
+    return text.strip()
 
 
 def _codex_text(content) -> str:
@@ -518,7 +523,7 @@ def read_codex_transcript_messages(session_id: str,
         role = payload.get("role")
         if role not in ("user", "assistant"):
             continue
-        text = _codex_text(payload.get("content")).strip()
+        text = message_text(_codex_text(payload.get("content")))
         if not text or _codex_injected(text):
             continue
         out.append({"role": "agent" if role == "assistant" else "user",
