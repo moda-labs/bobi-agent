@@ -653,8 +653,8 @@ def test_old_issue_runs_resume_without_new_handoff_fields(issue_notice_runtime, 
     monkeypatch.setattr("bobi.workflow.orchestrator.get_registry", lambda: MagicMock())
     monkeypatch.setattr("bobi.brain.get_brain", lambda: FakeBrain())
     monkeypatch.setattr("bobi.workflow.orchestrator.load_session_id", lambda *a: "")
-    monkeypatch.setattr("bobi.workflow.orchestrator.save_session_id", lambda *a: None)
-    monkeypatch.setattr("bobi.brain.turns.save_session_id", lambda *a: None)
+    monkeypatch.setattr("bobi.workflow.orchestrator.save_session_id", lambda *a, **kw: None)
+    monkeypatch.setattr("bobi.brain.turns.save_session_id", lambda *a, **kw: None)
     if entry == "approval":
         success = resume_workflow(WorkflowRun.load(run.run_id), workflow,
                                   event={"data": {"verdict": "approve"}})
