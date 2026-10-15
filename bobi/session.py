@@ -27,6 +27,8 @@ from bobi.brain.base import (
 )
 from bobi.brain_availability import observe_brain_turn
 from bobi.inbox import Inbox, Message
+from bobi.metrics.routing import may_rerun_on_control
+from bobi.metrics.runtime import observe_turn, prompt_bytes
 from bobi.sdk import (
     save_session_id,
     load_session_id,
@@ -319,10 +321,17 @@ class Session:
         role: str = "engineer",
         subscribe: list[str] | None = None,
         fresh: bool = False,
+        run_key: str = "",
+        routing=None,
     ) -> None:
         self.name = name
         self.cwd = cwd
         self.role = role
+        self.run_key = run_key
+        self._routing = routing
+        # The policy's decision while its chosen model has not yet completed a
+        # turn: a failure in that window retries once on the control model.
+        self._route_decision = None
         # ``fresh`` skips resuming this name's saved transcript. Session names
         # are deliberately stable — they name the worktree branch
         # (orchestrator._setup_worktree) and are what the launch admission
@@ -374,6 +383,7 @@ class Session:
         self._state = "stopped"
         self._last_response = ""
         self._last_is_error = False
+        self._last_tools_ran = False
         self._last_api_error_status: int | None = None
         # The brain's own diagnosis of the last failed turn (#845). Without
         # these, consumers built an error out of _last_response, which is EMPTY
@@ -384,6 +394,7 @@ class Session:
         self._total_cost_usd = 0.0
         self._total_duration_ms = 0
         self._total_turns = 0
+        self._metrics_observation = None
 
         # Context rotation state (Steps 1-4, #273). Rotation now cycles the
         # client directly (no decision-log flush — #456 removed it); the only
@@ -440,6 +451,17 @@ class Session:
             result_text=self._last_response,
             api_error_status=self._last_api_error_status,
         )
+
+    def _route_to_control(self, error: str) -> bool:
+        """Switch to the control model after the policy's choice failed; log it."""
+        from bobi.metrics.routing import candidate_failed
+
+        decision, self._route_decision = self._route_decision, None
+        control = candidate_failed(decision, session_name=self.name,
+            brain=getattr(self._routing, "brain", ""), model=self._session_model(), error=error)
+        if control:
+            self._extra_options["model"] = control
+        return bool(control)
 
     def _is_transient_turn_error(self) -> bool:
         """Whether the last turn's error is worth retrying.
@@ -647,7 +669,7 @@ class Session:
         # Clear resumability only once the replacement is ready. Clearing this
         # before background preparation would make a failed rotation destroy a
         # still-usable old session on process restart.
-        save_session_id(self.name, "")
+        save_session_id(self.name, "", preserve_route=True)
         self._client = candidate
         self._set_state("waiting_input")
         self._rotate_pending = False
@@ -906,6 +928,17 @@ class Session:
         # and fires a perpetual false "rotation pending". One call's usage is
         # the actual window fill.
         last_assistant_usage: dict | None = None
+        observation = self._metrics_observation
+        owns_observation = observation is None
+        if observation is None:
+            observation = observe_turn(
+                self.name,
+                provider=getattr(self._client, "provider", "anthropic"),
+                role=self.role,
+                run_key=self.run_key,
+                trigger_kind="direct",
+                model_requested=self._session_model(),
+            )
 
         # Heartbeat last_activity for the duration of the turn so a director
         # blocked on a live child (e.g. a Task subagent) is not mistaken for a
@@ -915,6 +948,8 @@ class Session:
         try:
             async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantText):
+                    if msg.text:
+                        observation.mark_first_output()
                     if msg.usage is not None:
                         last_assistant_usage = msg.usage
                     if msg.text:
@@ -930,12 +965,16 @@ class Session:
                             except Exception:
                                 pass
                 elif isinstance(msg, TurnResult):
+                    observation.record_result(msg)
                     turn_completed = True
                     save_session_id(self.name, msg.session_id,
                                     model=self._session_model())
                     self._last_is_error = msg.is_error
                     self._last_error_kind = msg.error_kind
                     self._last_error_message = msg.error_message
+                    # Accumulated across a message's retries: a tool that ran in
+                    # any attempt makes a control-model rerun unsafe.
+                    self._last_tools_ran = self._last_tools_ran or bool(msg.tool_executions)
                     cost = msg.total_cost_usd or 0.0
                     self._total_cost_usd += cost
                     self._total_duration_ms += msg.duration_ms
@@ -1096,6 +1135,21 @@ class Session:
                 log.debug(
                     "keepalive: teardown for '%s' raised", self.name, exc_info=True
                 )
+
+        if owns_observation:
+            latest = observation.results[-1] if observation.results else None
+            observation.finish(
+                status=(
+                    "completed"
+                    if turn_completed and latest is not None and not latest.is_error
+                    else "failed"
+                ),
+                error_kind=(
+                    latest.error_kind
+                    if latest is not None
+                    else ("drain_error" if not turn_completed else "")
+                ),
+            )
 
         # Turn complete — clear any "is thinking…" indicators the drain loop
         # started for this turn. The gateway clears the indicator when a
@@ -1267,11 +1321,13 @@ class Session:
             return
 
         try:
+            self._metrics_observation = self._observe_message(msg)
             log_activity(
                 "inbox",
                 {"sender": msg.sender, "text": msg.text[:200]},
                 session=self.name,
             )
+            self._last_tools_ran = False
             await self._client.query(msg.text)
             response = await self._drain_turn()
 
@@ -1298,6 +1354,23 @@ class Session:
                     await asyncio.sleep(delay)
                 await self._client.query(msg.text)
                 response = await self._drain_turn()
+
+            if (self._last_is_error and self._state == "waiting_input"
+                    and may_rerun_on_control(self._route_decision, error_kind=self._last_error_kind,
+                                             tools_ran=self._last_tools_ran)
+                    and self._route_to_control(self.last_error())):
+                # The policy's model failed its first turn: rerun it once on the
+                # control model in a fresh session instead of failing the event.
+                # The rerun is its own turn, so it records the fallback.
+                self._finish_observation()
+                self._metrics_observation = self._observe_message(msg)
+                await self._safe_disconnect(self._client)
+                self._client = self._make_brain_session(resume=None)
+                await self._client.connect()
+                await self._client.query(msg.text)
+                response = await self._drain_turn()
+            if response is not None:
+                self._route_decision = None
 
             if response is None:
                 log.error(
@@ -1347,6 +1420,31 @@ class Session:
             if msg.wait:
                 self.inbox.respond(msg, f"error: {e}")
             self._set_state("error")
+        finally:
+            self._finish_observation()
+
+    def _observe_message(self, msg):
+        return observe_turn(
+            self.name,
+            provider=getattr(self._client, "provider", "anthropic"),
+            role=self.role,
+            run_key=self.run_key,
+            trigger_kind="startup" if msg.sender == "launch" else "inbox",
+            trigger_id=msg.id,
+            is_user_initiated=msg.sender != "launch",
+            model_requested=self._session_model(),
+            prompt_bytes=prompt_bytes(msg.text),
+        )
+
+    def _finish_observation(self) -> None:
+        observation, self._metrics_observation = self._metrics_observation, None
+        if observation is None:
+            return
+        latest = observation.results[-1] if observation.results else None
+        observation.finish(
+            status="completed" if latest is not None and not latest.is_error else "failed",
+            error_kind=latest.error_kind if latest is not None else "drain_error",
+        )
 
     def _start_pending_rotation(self) -> None:
         """Start one coalesced background candidate preparation."""
@@ -1521,6 +1619,19 @@ class Session:
                     return
 
     async def _run(self, startup_prompt: str | None = None) -> None:
+        if self._routing is not None:
+            from dataclasses import replace
+            from bobi.metrics.routing import resolve_route
+
+            outcome = await resolve_route(replace(
+                self._routing, session_name=self.name, prompt=startup_prompt or "",
+                fresh=self._fresh, repo_path=self.cwd,
+            ))
+            if outcome.model:
+                self._extra_options["model"] = outcome.model
+            else:
+                self._extra_options.pop("model", None)
+            self._route_decision = outcome.decision
         saved_id = (
             "" if self._fresh
             else load_resumable_session_id(self.name, self._session_model())
@@ -1534,7 +1645,11 @@ class Session:
         except Exception as e:
             if resume_id:
                 log.warning(f"Resume failed for '{self.name}', retrying fresh: {e}")
-                save_session_id(self.name, "")
+                save_session_id(self.name, "", preserve_route=True)
+                self._client = self._make_brain_session(resume=None)
+                await self._client.connect()
+            elif self._route_to_control(f"{type(e).__name__}: {e}"):
+                # The policy's model could not start; the control model runs instead.
                 self._client = self._make_brain_session(resume=None)
                 await self._client.connect()
             else:
@@ -1615,6 +1730,13 @@ class Session:
         finally:
             self._main_task = None
             self._shutdown_client()
+            from bobi.metrics.runtime import finish_metrics_session
+
+            finish_metrics_session(
+                self.name,
+                status="failed" if self._state == "error" else "stopped",
+                error_kind=self._last_error_kind if self._state == "error" else "",
+            )
             self._loop.close()
             self._loop = None
 

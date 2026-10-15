@@ -105,6 +105,12 @@ def _fake_llm():
     return fn
 
 
+@pytest.fixture(scope="session")
+def browser_context_args(browser_context_args):
+    """Render times in UTC, as CI does, wherever the suite runs."""
+    return {**browser_context_args, "timezone_id": "UTC"}
+
+
 @pytest.fixture(autouse=True)
 def _isolate_env():
     """Credential capture writes straight to os.environ (so the running setup

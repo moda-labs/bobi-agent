@@ -6,63 +6,66 @@ and rollup functions for the named cost-attribution CLI command.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Fallback price per million tokens (input, cached_input, output) by
-# provider:model. Used only when the provider doesn't report cost directly
-# (e.g. the codex brain reports token counts only - #760); an estimate is
-# never mixed into recorded dollars, it rides the separate estimated_* fields.
-# The cached-input rate is carried per model because the discount is NOT a
-# constant: gpt-5.x cache reads are 10% of input, o-series and codex-mini are
-# 25%, gpt-4o was 50%. Models a fleet may have recorded historically stay in
-# the table - the fold prices the model each session actually recorded, never
-# "the current default". Approximate list prices as of 2026-07
-# (developers.openai.com/api/docs/pricing; cross-checked against LiteLLM's
-# model_prices json and models.dev) and should be updated periodically - the
-# authoritative source of cost is always the provider's own billing.
-PRICE_TABLE: dict[str, tuple[float, float, float]] = {
-    # Anthropic (cache read = 10% of input)
-    "anthropic:claude-sonnet-4-20250514": (3.0, 0.30, 15.0),
-    "anthropic:claude-opus-4-20250514": (15.0, 1.50, 75.0),
-    "anthropic:claude-haiku-3-5-20241022": (0.80, 0.08, 4.0),
-    # OpenAI - current codex lineup (gpt-5.6 family) and still-offered tiers
+
+# Official list prices in USD per million tokens, read from
+# bobi/model_prices.json. scripts/update_prices.py regenerates that file from
+# the Anthropic and OpenAI pricing pages; a weekly CI job opens a PR when
+# they change. Each entry carries input, cache_read, cache_write_5m,
+# cache_write_1h and output rates.
+def _official_prices() -> dict[str, dict[str, float]]:
+    try:
+        return json.loads(Path(__file__).with_name("model_prices.json").read_text())["models"]
+    except (OSError, ValueError, KeyError):
+        log.warning("bobi/model_prices.json is missing or unreadable; using fallback prices only")
+        return {}
+
+
+OFFICIAL_PRICES: dict[str, dict[str, float]] = _official_prices()
+
+# Hand-kept prices for models the official pages no longer (or never) list:
+# retired Claude models and codex-specific ids a fleet may have recorded
+# historically, plus Google. The fold prices the model each session actually
+# recorded, never "the current default". The cached-input rate is per model
+# because the discount is not a constant.
+_FALLBACK_PRICES: dict[str, tuple[float, float, float]] = {
+    "anthropic:claude-3-7-sonnet-20250219": (3.0, 0.30, 15.0),
+    "anthropic:claude-3-7-sonnet": (3.0, 0.30, 15.0),
+    "anthropic:claude-3-5-sonnet-20241022": (3.0, 0.30, 15.0),
+    "anthropic:claude-3-5-sonnet": (3.0, 0.30, 15.0),
+    "anthropic:claude-3-5-haiku-20241022": (0.80, 0.08, 4.0),
+    "anthropic:claude-3-5-haiku": (0.80, 0.08, 4.0),
     "openai:gpt-5.6": (5.00, 0.50, 30.00),
-    "openai:gpt-5.6-sol": (5.00, 0.50, 30.00),
-    "openai:gpt-5.6-terra": (2.50, 0.25, 15.00),
-    "openai:gpt-5.6-luna": (1.00, 0.10, 6.00),
-    "openai:gpt-5.5": (5.00, 0.50, 30.00),
-    "openai:gpt-5.4": (2.50, 0.25, 15.00),
-    "openai:gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai:gpt-5.3-codex": (1.75, 0.175, 14.00),
     "openai:gpt-5.3-codex-spark": (1.75, 0.175, 14.00),
-    # OpenAI - legacy codex-era models a fleet may have recorded
-    "openai:gpt-5.2": (1.75, 0.175, 14.00),
     "openai:gpt-5.2-codex": (1.75, 0.175, 14.00),
-    "openai:gpt-5.1": (1.25, 0.125, 10.00),
     "openai:gpt-5.1-codex": (1.25, 0.125, 10.00),
     "openai:gpt-5.1-codex-max": (1.25, 0.125, 10.00),
     "openai:gpt-5.1-codex-mini": (0.25, 0.025, 2.00),
-    "openai:gpt-5": (1.25, 0.125, 10.00),
     "openai:gpt-5-codex": (1.25, 0.125, 10.00),
     "openai:codex-mini-latest": (1.50, 0.375, 6.00),
-    # OpenAI - older API models
-    "openai:gpt-4o": (2.50, 1.25, 10.0),
-    "openai:gpt-4o-mini": (0.15, 0.075, 0.60),
-    "openai:gpt-4.1": (2.0, 0.50, 8.0),
-    "openai:gpt-4.1-mini": (0.40, 0.10, 1.60),
-    "openai:o3": (2.0, 0.50, 8.0),
-    "openai:o4-mini": (1.10, 0.275, 4.40),
-    # Google (implicit cache read = 25% of input)
     "google:gemini-2.5-pro": (1.25, 0.3125, 10.0),
     "google:gemini-2.5-flash": (0.15, 0.0375, 0.60),
 }
 
-# Per-image pricing for image generation models.
+# Per million tokens (input, cached_input, output) by provider:model. An
+# estimate is never mixed into recorded dollars; it rides the separate
+# estimated_* fields. The authoritative source of cost is always the
+# provider's own billing.
+PRICE_TABLE: dict[str, tuple[float, float, float]] = {
+    **_FALLBACK_PRICES,
+    **{key: (entry["input"], entry["cache_read"], entry["output"]) for key, entry in OFFICIAL_PRICES.items()},
+}
+
+
 IMAGE_PRICE_TABLE: dict[str, float] = {
     "openai:gpt-image-1": 0.04,  # 1024x1024 standard
     "openai:dall-e-3": 0.04,
@@ -70,24 +73,145 @@ IMAGE_PRICE_TABLE: dict[str, float] = {
 }
 
 
+# Routing prefixes a gateway may record on Claude or Codex model ids
+# ("cx/gpt-5.6-sol", "openai:gpt-5.4") name the upstream provider.
+_ROUTE_PREFIX_PROVIDERS = {
+    "cx": "openai", "codex": "openai", "openai": "openai",
+    "anthropic": "anthropic", "claude": "anthropic",
+}
+
+# Claude Code model aliases resolve to the current model of each family.
+# Updating a mapping reprices historical alias usage at the new model's rate.
+_CLAUDE_ALIASES = {
+    "opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-4-5",
+}
+
+
+@functools.lru_cache(maxsize=1024)
+def normalize_model(provider: str, model: str) -> tuple[str, str]:
+    """Resolve a recorded model id to the ``(provider, model)`` price-table key.
+
+    Strips a routing prefix (``cx/``, ``openai:``) into the provider
+    and rewrites dotted Claude versions (``claude-opus-5.5``) to the dashed
+    API id (``claude-opus-5-5``). A context-window suffix
+    (``claude-opus-5-5[1m]``) and the bare Claude Code aliases (``sonnet``)
+    resolve to the same price-table key."""
+    model = re.sub(r"\[[^\]]*\]$", "", (model or "").strip())
+    match = re.match(r"^([a-z]+)[/:](.+)$", model, re.IGNORECASE)
+    if match and match.group(1).lower() in _ROUTE_PREFIX_PROVIDERS:
+        provider = _ROUTE_PREFIX_PROVIDERS[match.group(1).lower()]
+        model = match.group(2)
+    if model.lower() in _CLAUDE_ALIASES:
+        provider, model = "anthropic", _CLAUDE_ALIASES[model.lower()]
+    if model.lower().startswith("claude-"):
+        model = re.sub(r"(\d)\.(\d)", r"\1-\2", model)
+    return provider, model
+
+
+def model_identity(model: str | None) -> str:
+    """Comparable model identity: ``sonnet``, ``claude-sonnet-5.5`` and
+    ``claude-sonnet-5-5-20260101`` share one key."""
+    name = normalize_model("gateway", model or "")[1].lower()
+    return re.sub(r"-(?:\d{8}|latest)$", "", name)
+
+
+# Model-name patterns for unprefixed ids, checked after routing prefixes and aliases.
+_NAME_PROVIDERS: tuple[tuple[str, str], ...] = (
+    ("anthropic", r"^claude-"), ("openai", r"^(?:gpt-|o\d|codex-|chatgpt-)"),
+)
+
+
+def model_provider(model: str | None) -> str | None:
+    """The upstream provider a model id belongs to, or None when unknown."""
+    provider, name = normalize_model("", model or "")
+    if provider:
+        return provider
+    return next((name_provider for name_provider, pattern in _NAME_PROVIDERS
+                 if re.search(pattern, name.lower())), None)
+
+
+def native_models(brain: str) -> list[str]:
+    """Priced model ids a brain can run, as its CLI names them.
+
+    ``claude``: the Claude Code aliases, then undated Anthropic ids;
+    ``codex``: undated OpenAI ids."""
+    provider = {"claude": "anthropic", "codex": "openai"}.get(brain)
+    names = list(_CLAUDE_ALIASES) if provider == "anthropic" else []
+    for key in PRICE_TABLE:
+        table_provider, model = key.split(":", 1)
+        if table_provider == provider and not re.search(r"-\d{8}$", model) and model not in names:
+            names.append(model)
+    return names
+
+
+def model_prices(model: str, provider: str = "gateway") -> tuple[float, float, float] | None:
+    """Per-MTok ``(input, cached_input, output)`` list prices, or None."""
+    return _lookup_prices(provider, model)
+
+
+@functools.lru_cache(maxsize=1024)
+def _price_key(provider: str, model: str) -> str | None:
+    """The price-table key for a recorded model, tolerating a date or
+    ``-latest`` suffix. A gateway can front Anthropic or OpenAI, so it tries
+    both vendors' exact entries."""
+    provider, model = normalize_model(provider, model)
+    stripped = re.sub(r"-latest$", "", re.sub(r"-\d{8}$", "", model))
+    for vendor in (("anthropic", "openai") if provider == "gateway" else (provider,)):
+        for name in (model, stripped):
+            if f"{vendor}:{name}" in PRICE_TABLE:
+                return f"{vendor}:{name}"
+    return None
+
+
+def _lookup_prices(provider: str, model: str) -> tuple[float, float, float] | None:
+    """Exact price-table entries only (after alias, suffix and date
+    normalisation). No family guess: an unknown model has no list price and
+    renders as token volume, so a new model is never billed at an old rate."""
+    key = _price_key(provider, model)
+    return PRICE_TABLE[key] if key else None
+
+
+def cache_write_prices(provider: str, model: str) -> tuple[float, float] | None:
+    """Per-MTok ``(5-minute, 1-hour)`` cache-write rates, or None when unpriced.
+
+    Official entries carry both rates. Otherwise Anthropic models use the
+    published multipliers (1.25x and 2x input) and other vendors bill cache
+    writes as plain input."""
+    key = _price_key(provider, model)
+    if key in OFFICIAL_PRICES:
+        entry = OFFICIAL_PRICES[key]
+        return entry["cache_write_5m"], entry["cache_write_1h"]
+    prices = _lookup_prices(provider, model)
+    if not prices:
+        return None
+    vendor = (key or "").split(":", 1)[0] or model_provider(model)
+    return (prices[0] * 1.25, prices[0] * 2) if vendor == "anthropic" else (prices[0], prices[0])
+
+
 def estimate_cost(provider: str, model: str,
                   input_tokens: int = 0, output_tokens: int = 0,
-                  cached_input_tokens: int = 0) -> float:
+                  cached_input_tokens: int = 0, cache_write_tokens: int = 0,
+                  cache_write_1h_tokens: int = 0) -> float:
     """Estimate cost from the price table. Returns 0.0 if not in the table.
 
-    ``cached_input_tokens`` is the cached SUBSET of ``input_tokens`` (the
-    provider convention), priced at the per-model cached rate; the remainder
-    bills at the full input rate. ``output_tokens`` already includes any
-    reasoning tokens - callers must not add those separately.
+    ``cached_input_tokens`` (cache reads) and ``cache_write_tokens`` are
+    SUBSETS of ``input_tokens`` (the provider convention); reads bill at the
+    cached rate, writes at the cache-write rate (``cache_write_1h_tokens`` of
+    them at the 1-hour rate, the rest at the 5-minute rate), and the remainder
+    at the full input rate. ``output_tokens`` already includes any reasoning
+    tokens - callers must not add those separately.
     """
-    key = f"{provider}:{model}"
-    prices = PRICE_TABLE.get(key)
+    prices = _lookup_prices(provider, model)
     if not prices:
         return 0.0
     input_price, cached_price, output_price = prices
-    cached = min(max(cached_input_tokens, 0), max(input_tokens, 0))
-    uncached = max(input_tokens, 0) - cached
-    return (uncached * input_price + cached * cached_price
+    total = max(input_tokens, 0)
+    cached = min(max(cached_input_tokens, 0), total)
+    writes = min(max(cache_write_tokens, 0), total - cached)
+    writes_1h = min(max(cache_write_1h_tokens, 0), writes)
+    write_5m_price, write_1h_price = cache_write_prices(provider, model) or (input_price, input_price)
+    return ((total - cached - writes) * input_price + cached * cached_price
+            + (writes - writes_1h) * write_5m_price + writes_1h * write_1h_price
             + max(output_tokens, 0) * output_price) / 1_000_000
 
 

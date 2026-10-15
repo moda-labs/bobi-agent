@@ -90,13 +90,49 @@ class TestTranscriptDetail:
     def test_tool_results_are_previewed_and_flagged(self, tmp_path, monkeypatch):
         _seed_transcript(tmp_path, monkeypatch, [
             _line("user", [{"type": "tool_result",
-                            "content": [{"type": "text", "text": "x" * 900}]}]),
+                            "content": [{"type": "text", "text": "x" * 4900}]}]),
         ])
         [entry] = read_transcript_detail("sid")
         assert entry["kind"] == KIND_TOOL_RESULT
         assert len(entry["text"]) == TOOL_RESULT_PREVIEW
         assert entry["truncated"] is True
         assert entry["is_error"] is False
+        assert entry["total_bytes"] == 4900
+
+    def test_tool_preview_ends_at_line_boundary_and_counts_utf8(self, tmp_path, monkeypatch):
+        text = "é" * 2500 + "\n" + "界" * 2500
+        _seed_transcript(tmp_path, monkeypatch, [
+            _line("user", [{"type": "tool_result", "content": text}]),
+        ])
+        [entry] = read_transcript_detail("sid")
+        assert entry["text"] == "é" * 2500 + "\n"
+        assert entry["truncated"] is True
+        assert entry["total_bytes"] == len(text.encode("utf-8"))
+
+    def test_tool_preview_keeps_exact_limit_untruncated(self, tmp_path, monkeypatch):
+        text = "界" * TOOL_RESULT_PREVIEW
+        _seed_transcript(tmp_path, monkeypatch, [
+            _line("user", [{"type": "tool_result", "content": text}]),
+        ])
+        [entry] = read_transcript_detail("sid")
+        assert entry["text"] == text
+        assert entry["truncated"] is False
+        assert entry["total_bytes"] == 3 * TOOL_RESULT_PREVIEW
+
+    @pytest.mark.parametrize("text,expected", [
+        ("hello " * 800, "hello " * 666),
+        ("界 " * 2500, "界 " * 2000),
+        ("🙂" * 4500, "🙂" * 4000),
+        ("x" * 4000 + " rest", "x" * 4000),
+        ("x" * 3900 + "\t" + "y" * 200, "x" * 3900 + "\t"),
+    ])
+    def test_tool_preview_safe_word_boundaries_and_original_bytes(self, tmp_path, monkeypatch, text, expected):
+        _seed_transcript(tmp_path, monkeypatch, [_line("user", [{"type": "tool_result", "content": text}])])
+        [entry] = read_transcript_detail("sid")
+        assert entry["text"] == expected
+        assert len(entry["text"]) <= TOOL_RESULT_PREVIEW
+        assert entry["truncated"] is True
+        assert entry["total_bytes"] == len(text.encode("utf-8"))
 
     def test_error_results_are_marked(self, tmp_path, monkeypatch):
         _seed_transcript(tmp_path, monkeypatch, [
@@ -133,7 +169,7 @@ class TestTranscriptDetail:
             ]),
         ])
         expected = {"kind", "role", "text", "at", "tool", "truncated",
-                    "is_error"}
+                    "is_error", "total_bytes"}
         for entry in read_transcript_detail("sid"):
             assert set(entry) == expected
 
@@ -318,3 +354,73 @@ class TestEndpoints:
     def test_details_unknown_agent_404s(self, bobi_install):
         assert _client().get(
             "/api/agents/nope/runs/whatever/details").status_code == 404
+
+
+class TestBoundedTranscriptRead:
+    """A turn's transcript window is read from the newest end of the file."""
+
+    @staticmethod
+    def _us(iso):
+        from datetime import datetime
+        return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp() * 1_000_000)
+
+    def test_a_large_transcript_still_returns_its_newest_turn(self, tmp_path, monkeypatch):
+        old = _line("assistant", [{"type": "text", "text": "x" * 1_000_000}],
+                    at="2026-08-01T10:00:00.000Z")
+        newest = [
+            _line("user", "the newest question", at="2026-08-01T12:00:00.000Z"),
+            _line("assistant", [{"type": "text", "text": "the newest answer"}],
+                  at="2026-08-01T12:00:05.000Z"),
+        ]
+        _seed_transcript(tmp_path, monkeypatch, [old] * 17 + newest)
+
+        entries = read_transcript_detail(
+            "sid", after_us=self._us("2026-08-01T11:59:00.000Z"),
+            before_us=self._us("2026-08-01T12:01:00.000Z"))
+
+        assert [entry["text"] for entry in entries] == ["the newest question", "the newest answer"]
+
+    def test_records_before_the_window_are_not_returned(self, tmp_path, monkeypatch):
+        _seed_transcript(tmp_path, monkeypatch, [
+            _line("user", "earlier", at="2026-08-01T11:00:00.000Z"),
+            _line("user", "inside", at="2026-08-01T12:00:00.000Z"),
+            _line("user", "later", at="2026-08-01T13:00:00.000Z"),
+        ])
+        entries = read_transcript_detail(
+            "sid", after_us=self._us("2026-08-01T11:30:00.000Z"),
+            before_us=self._us("2026-08-01T12:30:00.000Z"))
+        assert [entry["text"] for entry in entries] == ["inside"]
+
+    @pytest.mark.parametrize("bounded", [False, True])
+    def test_half_an_emoji_in_a_tool_result_does_not_break_the_view(
+            self, tmp_path, monkeypatch, bounded):
+        _seed_transcript(tmp_path, monkeypatch, [
+            '{"type": "user", "timestamp": "%s", "message": {"content": '
+            '[{"type": "tool_result", "content": "cut \\ud83d"}]}}' % AT,
+        ])
+        window = ({"after_us": self._us(AT) - 1, "before_us": self._us(AT) + 1}
+                  if bounded else {})
+        [entry] = read_transcript_detail("sid", **window)
+        assert entry["text"] == "cut \ud83d"
+
+    def test_an_older_record_inside_the_turn_does_not_end_the_read(self, tmp_path, monkeypatch):
+        # Claude stamps hook and queued-command attachments with when they were
+        # made, so a transcript is not in timestamp order.
+        _seed_transcript(tmp_path, monkeypatch, [
+            _line("user", "the prompt", at="2026-08-01T12:00:00.000Z"),
+            json.dumps({"type": "attachment", "timestamp": "2026-08-01T11:55:00.000Z"}),
+            _line("assistant", [{"type": "text", "text": "the answer"}],
+                  at="2026-08-01T12:00:05.000Z"),
+        ])
+        entries = read_transcript_detail(
+            "sid", after_us=self._us("2026-08-01T11:59:00.000Z"),
+            before_us=self._us("2026-08-01T12:01:00.000Z"))
+        assert [entry["text"] for entry in entries] == ["the prompt", "the answer"]
+
+    def test_a_long_last_line_is_read_within_the_budget(self, tmp_path, monkeypatch):
+        _seed_transcript(tmp_path, monkeypatch, [
+            _line("assistant", [{"type": "text", "text": "y" * (12 * 1024 * 1024)}]),
+        ])
+        [entry] = read_transcript_detail("sid", after_us=self._us(AT) - 1,
+                                         before_us=self._us(AT) + 1)
+        assert len(entry["text"]) == 12 * 1024 * 1024

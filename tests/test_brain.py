@@ -12,7 +12,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    ResultMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 
 from bobi.brain import (
     AssistantText,
@@ -478,6 +485,46 @@ def test_make_session_sets_generous_max_buffer_size(monkeypatch):
     assert captured["max_buffer_size"] > 1024 * 1024
 
 
+def test_make_session_scrubs_metrics_routing_secrets(monkeypatch):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "private-config")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "private-policy-key")
+    captured, _options = _capture_options()
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
+
+    for name in ("BOBI_METRICS_EXPERIMENT_JSON", "TYPESAFE_API_KEY"):
+        assert captured["env"][name] == ""
+        assert name in captured["env"]["BOBI_INTERNAL_PROVIDER_CLEARED_ENV"].split(",")
+
+
+@pytest.mark.parametrize("routing_env", [{}, {"TYPESAFE_API_KEY": "", "BOBI_METRICS_EXPERIMENT_JSON": ""}])
+def test_make_session_passes_only_what_differs_from_this_process(monkeypatch, routing_env):
+    import os
+
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+    for name in ("TYPESAFE_API_KEY", "BOBI_METRICS_EXPERIMENT_JSON", "BOBI_METRICS_EXPERIMENT_DISABLED_JSON"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in routing_env.items():
+        monkeypatch.setenv(name, value)  # empty counts as unset
+    captured, _options = _capture_options()
+    with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
+        ClaudeSDKClient=MagicMock(),
+        ClaudeAgentOptions=_options,
+    )}):
+        ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
+
+    env = captured.get("env") or {}
+    # The SDK merges options.env over this process's env and owns these two.
+    assert "CLAUDECODE" not in env and "CLAUDE_CODE_ENTRYPOINT" not in env
+    assert not {"TYPESAFE_API_KEY", "BOBI_METRICS_EXPERIMENT_JSON",
+                "BOBI_INTERNAL_PROVIDER_CLEARED_ENV"} & set(env)
+    assert all(os.environ.get(name) != value for name, value in env.items())
+
+
 def test_make_session_max_buffer_size_env_override(monkeypatch):
     monkeypatch.setenv("BOBI_CLAUDE_MAX_BUFFER_SIZE", str(8 * 1024 * 1024))
     captured, _options = _capture_options()
@@ -701,6 +748,16 @@ def test_result_to_turn_handles_error_and_status():
     assert turn.result_text == "API Error: 529 Overloaded"
 
 
+def test_result_to_turn_keeps_a_successful_answer_that_mentions_an_api_error():
+    # The agent's own answer can quote an outage; only the provider's error
+    # flag marks a turn failed.
+    msg = _result(is_error=False, result="The deploy failed with API Error: 502 Bad Gateway, so I retried.")
+    turn = _result_to_turn(msg)
+    assert turn.is_error is False
+    assert turn.error_kind == ""
+
+
+
 def test_result_to_turn_normalizes_max_turns_error():
     msg = _result(
         is_error=True,
@@ -859,10 +916,11 @@ class _FakeSDKClient:
             yield m
 
 
-def _claude_session_over(messages):
+def _claude_session_over(messages, *, provider="anthropic"):
     """A _ClaudeSession whose underlying SDK client is swapped for a fake."""
     sess = _ClaudeSession.__new__(_ClaudeSession)
     sess._client = _FakeSDKClient(messages)
+    sess.provider = provider
     return sess
 
 
@@ -882,6 +940,315 @@ async def test_receive_response_converts_assistant_and_result():
     assert out[0].usage == {"input_tokens": 5, "cache_read_input_tokens": 100}
     assert isinstance(out[1], TurnResult)
     assert out[1].total_cost_usd == 0.1
+
+
+@pytest.mark.asyncio
+async def test_receive_response_captures_invocation_and_tool_metadata():
+    first = AssistantMessage(
+        content=[ToolUseBlock(id="tool-1", name="view_file", input={"path": "x"})],
+        model="claude-opus-4-8",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    tool_result = UserMessage(
+        content=[ToolResultBlock(tool_use_id="tool-1", content="ok")]
+    )
+    second = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="claude-opus-4-8",
+        usage={"input_tokens": 6, "output_tokens": 3},
+        message_id="message-2",
+    )
+    result = _result(
+        model_usage={
+            "claude-opus-4-8": {"input_tokens": 11, "output_tokens": 5}
+        }
+    )
+
+    out = [
+        message
+        async for message in _claude_session_over(
+            [first, tool_result, second, result]
+        ).receive_response()
+    ]
+    turn = out[-1]
+
+    assert [item.provider_event_id for item in turn.invocations] == [
+        "message-1",
+        "message-2",
+    ]
+    assert turn.invocations[0].usage.input_tokens == 5
+    assert len(turn.tool_executions) == 1
+    tool = turn.tool_executions[0]
+    assert tool.provider_tool_call_id == "tool-1"
+    assert tool.tool_name == "view_file"
+    assert tool.tool_kind == "file_read"
+    assert tool.triggering_provider_event_id == "message-1"
+    assert tool.consuming_provider_event_id == "message-2"
+    assert tool.ended_at_us >= tool.started_at_us
+
+
+@pytest.mark.asyncio
+async def test_receive_response_deduplicates_repeated_provider_message_chunks():
+    first = AssistantMessage(
+        content=[ToolUseBlock(id="tool-1", name="view_file", input={"path": "x"})],
+        model="claude-haiku-4-5",
+        usage={"input_tokens": 5, "output_tokens": 0},
+        message_id="message-1",
+    )
+    repeated = AssistantMessage(
+        content=[TextBlock(text="working")],
+        model="claude-haiku-4-5",
+        usage={"input_tokens": 5, "output_tokens": 0},
+        message_id="message-1",
+    )
+    turn = [
+        message
+        async for message in _claude_session_over(
+            [
+                first,
+                repeated,
+                _result(model_usage={
+                    "claude-opus-5": {"inputTokens": 5, "outputTokens": 2}
+                }),
+            ]
+        ).receive_response()
+    ][-1]
+
+    assert [item.provider_event_id for item in turn.invocations] == ["message-1"]
+    assert turn.invocations[0].usage.input_tokens == 5
+    assert turn.invocations[0].ended_at_us >= turn.invocations[0].started_at_us
+
+
+@pytest.mark.asyncio
+async def test_receive_response_uses_gateway_invocation_model_for_turn_usage():
+    assistant = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="claude-haiku-4-5",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    result = _result(
+        model_usage={
+            "claude-opus-5": {
+                "inputTokens": 5,
+                "outputTokens": 2,
+                "canonicalModel": "claude-opus-5",
+            }
+        }
+    )
+
+    turn = [
+        message
+        async for message in _claude_session_over(
+            [assistant, result], provider="gateway"
+        ).receive_response()
+    ][-1]
+
+    assert [item.model for item in turn.usage] == ["claude-haiku-4-5"]
+    assert [item.model for item in turn.costs] == ["claude-haiku-4-5"]
+    assert turn.usage[0].raw_usage["canonicalModel"] == "claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_receive_response_preserves_native_anthropic_usage_model():
+    assistant = AssistantMessage(
+        content=[TextBlock(text="done")],
+        model="claude-sonnet-4-5-20250929",
+        usage={"input_tokens": 5, "output_tokens": 2},
+        message_id="message-1",
+    )
+    result = _result(model_usage={
+        "claude-3-7-sonnet-20250219": {
+            "inputTokens": 5,
+            "outputTokens": 2,
+        }
+    })
+
+    turn = [
+        message
+        async for message in _claude_session_over([assistant, result]).receive_response()
+    ][-1]
+
+    assert [item.model for item in turn.usage] == ["claude-3-7-sonnet-20250219"]
+    assert [item.model for item in turn.costs] == ["claude-3-7-sonnet-20250219"]
+
+
+@pytest.mark.asyncio
+async def test_receive_response_deltas_persistent_session_usage_and_cost():
+    session = _claude_session_over([
+        AssistantMessage(
+            content=[TextBlock(text="first")],
+            model="claude-opus-5",
+            usage={"input_tokens": 2, "output_tokens": 4},
+            message_id="message-1",
+        ),
+        _result(
+            total_cost_usd=0.31,
+            usage={
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 30,
+                "cache_creation": {"ephemeral_1h_input_tokens": 30},
+                "cache_read_input_tokens": 8,
+                "output_tokens": 4,
+            },
+            model_usage={
+                "claude-opus-5": {
+                    "inputTokens": 2,
+                    "cacheCreationInputTokens": 30,
+                    "cacheReadInputTokens": 8,
+                    "outputTokens": 4,
+                },
+                "claude-haiku-4-5": {
+                    "inputTokens": 10,
+                    "outputTokens": 1,
+                },
+            },
+        ),
+    ])
+    first = [message async for message in session.receive_response()][-1]
+
+    session._client = _FakeSDKClient([
+        AssistantMessage(
+            content=[TextBlock(text="second")],
+            model="claude-opus-5",
+            usage={"input_tokens": 2, "output_tokens": 15},
+            message_id="message-2",
+        ),
+        _result(
+            total_cost_usd=0.35,
+            usage={
+                "input_tokens": 2,
+                "cache_creation_input_tokens": 2,
+                "cache_creation": {"ephemeral_1h_input_tokens": 2},
+                "cache_read_input_tokens": 38,
+                "output_tokens": 15,
+            },
+            model_usage={
+                "claude-opus-5": {
+                    "inputTokens": 4,
+                    "cacheCreationInputTokens": 32,
+                    "cacheReadInputTokens": 46,
+                    "outputTokens": 19,
+                },
+                "claude-haiku-4-5": {
+                    "inputTokens": 10,
+                    "outputTokens": 1,
+                },
+            },
+        ),
+    ])
+    second = [message async for message in session.receive_response()][-1]
+
+    assert {usage.model for usage in first.usage} == {
+        "claude-opus-5",
+        "claude-haiku-4-5",
+    }
+    assert [usage.model for usage in second.usage] == ["claude-opus-5"]
+    usage = second.usage[0]
+    assert usage.uncached_input_tokens == 2
+    assert usage.cache_read_input_tokens == 38
+    assert usage.cache_write_input_tokens == 2
+    assert usage.cache_write_1h_input_tokens == 2
+    assert usage.output_tokens == 15
+    assert second.total_cost_usd == pytest.approx(0.04)
+    assert second.costs == [usage.legacy_cost()]
+
+
+@pytest.mark.asyncio
+async def test_resumed_session_omits_ambiguous_first_cumulative_total():
+    session = _claude_session_over([_result(
+        total_cost_usd=0.35,
+        model_usage={
+            "claude-opus-5": {"inputTokens": 100, "outputTokens": 10}
+        },
+    )])
+    session._cumulative_usage_ready = False
+    first = [message async for message in session.receive_response()][-1]
+
+    session._client = _FakeSDKClient([_result(
+        total_cost_usd=0.40,
+        model_usage={
+            "claude-opus-5": {"inputTokens": 120, "outputTokens": 14}
+        },
+    )])
+    second = [message async for message in session.receive_response()][-1]
+
+    assert first.usage == []
+    assert first.costs == []
+    assert first.total_cost_usd == 0
+    assert second.usage[0].uncached_input_tokens == 20
+    assert second.usage[0].output_tokens == 4
+    assert second.total_cost_usd == pytest.approx(0.05)
+
+
+def _claude_process(monkeypatch, messages, *, resume=None):
+    """A _ClaudeSession built the way a new agent process builds it."""
+    monkeypatch.setattr(
+        _ClaudeSession, "_new_client", lambda self: _FakeSDKClient(messages)
+    )
+    return _ClaudeSession(SimpleNamespace(resume=resume))
+
+
+@pytest.mark.asyncio
+async def test_resume_in_a_new_process_reports_only_the_new_turn(tmp_path, monkeypatch):
+    # The CLI's totals stay session-cumulative after a resume in a new process.
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    before = _claude_process(monkeypatch, [_result(
+        total_cost_usd=0.42,
+        model_usage={"claude-opus-5": {"inputTokens": 100, "outputTokens": 10}},
+    )])
+    first = [message async for message in before.receive_response()][-1]
+
+    after = _claude_process(monkeypatch, [_result(
+        total_cost_usd=0.50,
+        model_usage={"claude-opus-5": {"inputTokens": 130, "outputTokens": 14}},
+    )], resume="sess-xyz")
+    resumed = [message async for message in after.receive_response()][-1]
+
+    assert first.total_cost_usd == pytest.approx(0.42)
+    assert resumed.total_cost_usd == pytest.approx(0.08)
+    assert resumed.usage[0].uncached_input_tokens == 30
+    assert resumed.usage[0].output_tokens == 4
+    assert resumed.costs == [resumed.usage[0].legacy_cost()]
+
+
+@pytest.mark.asyncio
+async def test_resume_without_a_saved_baseline_reports_no_usage(tmp_path, monkeypatch):
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    session = _claude_process(monkeypatch, [_result(
+        total_cost_usd=0.50,
+        model_usage={"claude-opus-5": {"inputTokens": 130, "outputTokens": 14}},
+    )], resume="sess-xyz")
+    resumed = [message async for message in session.receive_response()][-1]
+
+    assert resumed.total_cost_usd == 0
+    assert resumed.usage == []
+    assert resumed.costs == []
+
+
+@pytest.mark.asyncio
+async def test_resume_after_a_first_turn_with_no_usage_counts_the_resumed_turn(tmp_path, monkeypatch):
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    failed = _claude_process(monkeypatch, [_result(is_error=True, result="boom", total_cost_usd=0.05,
+                                                   model_usage=None)])
+    [message async for message in failed.receive_response()]
+
+    after = _claude_process(monkeypatch, [_result(
+        total_cost_usd=0.30,
+        model_usage={"claude-opus-5": {"inputTokens": 100, "outputTokens": 10}},
+    )], resume="sess-xyz")
+    resumed = [message async for message in after.receive_response()][-1]
+
+    # The failed turn's own 0.05 was already reported; the resume counts only its turn.
+    assert resumed.total_cost_usd == pytest.approx(0.25)
+    assert resumed.usage[0].output_tokens == 10
 
 
 @pytest.mark.asyncio

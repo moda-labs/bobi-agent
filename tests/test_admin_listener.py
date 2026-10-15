@@ -7,9 +7,18 @@ driven through injected register/client seams so the subscription wiring is
 covered too.
 """
 
+import threading
 import time
 
-from bobi.supervisor.admin import AdminListener, admin_topic
+import pytest
+
+from bobi.supervisor.admin import (
+    METRICS_QUERY_CAPACITY,
+    METRICS_QUERY_QUEUE_CAPACITY,
+    METRICS_QUERY_WORKERS,
+    AdminListener,
+    admin_topic,
+)
 
 
 def _wait(predicate, timeout=5.0):
@@ -155,21 +164,384 @@ def test_usage_command_returns_the_rolling_summary(monkeypatch):
         "cost_usd": 1.25,
         "estimated_cost_usd": 0.0,
     }
-    monkeypatch.setattr(listener, "_read_usage", lambda args: usage)
+    monkeypatch.setattr(listener, "_read_usage", lambda args, metrics=True: dict(usage))
     listener._dispatch(_event("usage", command_id="u1",
                               args={"window_seconds": 259200}))
+    assert _wait(lambda: listener._published)
     _topic, _source, data = listener._published[0]
     assert data["status"] == "done"
-    assert data["result"] == {"usage": usage}
+    assert data["result"] == {"usage": {**usage, "fine_grained_unavailable": {"code": "metrics_not_ready"}}}
 
 
-def test_usage_command_requires_a_positive_window():
+def test_usage_command_defaults_to_a_24_hour_window(monkeypatch):
     listener = _listener()
+    seen = []
+    monkeypatch.setattr(
+        "bobi.webapp.runs.build_usage_summary",
+        lambda root, **kwargs: seen.append(kwargs) or {"window": kwargs},
+    )
+    monkeypatch.setattr(
+        "bobi.service.manager_session_name",
+        lambda _root: "manager",
+    )
+
     listener._dispatch(_event("usage", command_id="u1", args={}))
+    assert _wait(lambda: listener._published)
+
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert seen[0]["window_seconds"] == 24 * 60 * 60
+
+
+def _usage_listener(tmp_path, monkeypatch, published=None):
+    listener = _listener(published=published)
+    listener.project_root = tmp_path
+    monkeypatch.setattr(
+        listener, "_read_usage",
+        lambda args, metrics=True: {"window": {"seconds": args.get("window_seconds")}},
+    )
+    return listener
+
+
+def _legacy_only(seconds, code):
+    """A `usage` reply without the fine-grained block, naming why."""
+    return {"usage": {"window": {"seconds": seconds}, "fine_grained_unavailable": {"code": code}}}
+
+
+@pytest.mark.parametrize("days", [3, 31, 32, 90, 365])
+def test_usage_command_serves_the_legacy_summary_for_any_window_without_metrics(
+    tmp_path, monkeypatch, days,
+):
+    # No metrics.db: windows the fine-grained layer refuses (over 31 days)
+    # must still answer with the legacy fold, as before fine-grained metrics.
+    listener = _usage_listener(tmp_path, monkeypatch)
+    window = days * 24 * 60 * 60
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": window}))
+    assert _wait(lambda: listener._published)
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"] == _legacy_only(window, "invalid_range" if days > 31 else "metrics_not_ready")
+
+
+def test_usage_command_serves_the_legacy_summary_for_a_long_from_to_range(
+    tmp_path, monkeypatch,
+):
+    listener = _usage_listener(tmp_path, monkeypatch)
+    end = 1_800_000_000
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"from": end - 90 * 86400, "to": end}))
+    assert _wait(lambda: listener._published)
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"]["usage"]["window"]["seconds"] == 90 * 86400
+
+
+@pytest.mark.parametrize(("message", "code"), [
+    ("metrics database is busy", "metrics_busy"),
+    ("metrics query exceeded its one-second deadline", "query_too_slow"),
+])
+def test_usage_command_omits_the_fine_grained_block_when_metrics_are_busy(
+    tmp_path, monkeypatch, message, code,
+):
+    from bobi.metrics.query import MetricsQueries, MetricsQueryError
+
+    def busy(self, args):
+        raise MetricsQueryError(message, code)
+
+    monkeypatch.setattr(MetricsQueries, "summary", busy)
+    listener = _usage_listener(tmp_path, monkeypatch)
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": 3600}))
+    assert _wait(lambda: listener._published)
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"] == _legacy_only(3600, code)
+    expected = 1 if "deadline" in message else 0
+    assert listener.metrics_query_health()["deadline_cancellations"] == expected
+
+
+def test_usage_command_serves_the_legacy_summary_when_admission_is_refused(
+    tmp_path, monkeypatch,
+):
+    listener = _usage_listener(tmp_path, monkeypatch)
+    monkeypatch.setattr(listener._metrics_slots, "acquire", lambda blocking=False: False)
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": 3600}))
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"] == _legacy_only(3600, "metrics_busy")
+
+
+def test_runs_never_reads_metrics_on_the_dispatch_thread(tmp_path, monkeypatch):
+    # The hosted runs table polls this every few seconds on the thread that
+    # serves stop and restart; it shows registry figures only.
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("metrics read on the admin dispatch thread")
+
+    monkeypatch.setattr("bobi.webapp.runs.metrics_session_usage", forbidden)
+    listener = _listener()
+    listener.project_root = tmp_path
+    (tmp_path / "state" / "metrics").mkdir(parents=True)
+    (tmp_path / "state" / "metrics" / "metrics.db").touch()
+    listener._dispatch(_event("runs", command_id="r1", args={}))
+    data = listener._published[0][2]
+    assert data["status"] == "done", data
+    assert data["result"]["counts"]["all"] == 0
+
+
+def test_refused_usage_never_reads_metrics_on_the_dispatch_thread(tmp_path, monkeypatch):
+    # The fallback runs on the thread that also serves stop and restart, so it
+    # folds the registry only and never waits on SQLite.
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("metrics read on the admin dispatch thread")
+
+    monkeypatch.setattr("bobi.webapp.runs.metrics_session_usage", forbidden)
+    listener = _listener()
+    listener.project_root = tmp_path
+    (tmp_path / "state" / "metrics").mkdir(parents=True)
+    (tmp_path / "state" / "metrics" / "metrics.db").touch()
+    monkeypatch.setattr(listener._metrics_slots, "acquire", lambda blocking=False: False)
+    listener._dispatch(_event("usage", command_id="u1", args={"window_seconds": 3600}))
+    data = listener._published[0][2]
+    assert data["status"] == "done"
+    assert data["result"]["usage"]["jobs"]["total"] == 0
+    assert data["result"]["usage"]["fine_grained_unavailable"] == {"code": "metrics_busy"}
+
+
+def test_usage_command_serves_the_legacy_summary_after_shutdown_begins(
+    tmp_path, monkeypatch,
+):
+    listener = _usage_listener(tmp_path, monkeypatch)
+    listener._metrics_shutdown_grace_seconds = 0.01
+    listener.stop()
+    listener._dispatch(_event("usage", command_id="u1",
+                              args={"window_seconds": 3600}))
+    data = listener._published[-1][2]
+    assert data["status"] == "done"
+    assert data["result"] == _legacy_only(3600, "metrics_busy")
+
+
+@pytest.mark.parametrize(("args", "code"), [
+    ({"from": 1_800_000_000}, "invalid_range"),
+    ({"from": 1_800_000_000, "to": 1_700_000_000}, "invalid_range"),
+    ({"from": 1_700_000_000, "to": 1_800_000_000, "window_seconds": 60}, "invalid_range"),
+    ({"from": 0, "to": 1e303}, "invalid_range"),
+    ({"from": -1e303, "to": 0}, "invalid_range"),
+    ({"window_seconds": 3600, "group_by": "model"}, "bad_request"),
+    ({"window_seconds": 90 * 86400, "group_by": "model"}, "bad_request"),
+])
+def test_usage_command_keeps_caller_errors_visible(tmp_path, monkeypatch, args, code):
+    # The legacy fallback covers fine-grained refusals only; a malformed
+    # request still fails, whatever its range.
+    listener = _usage_listener(tmp_path, monkeypatch)
+    (tmp_path / "state" / "metrics").mkdir(parents=True)
+    (tmp_path / "state" / "metrics" / "metrics.db").touch()
+    listener._dispatch(_event("usage", command_id="u1", args=args))
+    assert _wait(lambda: listener._published)
+    data = listener._published[0][2]
+    assert data["status"] == "error"
+    assert data["result"]["code"] == code
+
+
+@pytest.mark.parametrize("window", [0, -1, "invalid", True])
+def test_usage_command_rejects_an_explicit_invalid_window(window):
+    listener = _listener()
+    listener._dispatch(_event(
+        "usage", command_id="u1", args={"window_seconds": window},
+    ))
+    assert _wait(lambda: listener._published)
     data = listener._published[0][2]
     assert data["status"] == "error"
     assert data["result"]["code"] == "bad_request"
     assert "window_seconds" in data["error"]
+
+def test_metrics_turn_runs_on_dedicated_executor(monkeypatch):
+    listener = _listener()
+    called_on = []
+
+    def execute(command, args):
+        called_on.append(threading.current_thread().name)
+        return {command: {"turn": {"turn_id": args["turn_id"]}}}
+
+    monkeypatch.setattr(listener, "_execute_metrics_query", execute)
+    listener._dispatch(_event("usage_turn", command_id="mt1",
+                              args={"turn_id": "turn-1"}))
+
+    assert _wait(lambda: listener._published)
+    assert called_on[0].startswith("admin-metrics-query")
+    assert listener._published[0][2] == {
+        "command_id": "mt1",
+        "deployment": {"fleet": "acme", "instance": "prod-1"},
+        "status": "done",
+        "result": {"usage_turn": {"turn": {"turn_id": "turn-1"}}},
+    }
+
+def test_metrics_saturation_fails_fast_without_delaying_status(monkeypatch):
+    listener = _listener(telemetry=FakeTelemetry(snapshot={"status": "ready"}))
+    monkeypatch.setattr(listener._metrics_slots, "acquire", lambda blocking=False: False)
+
+    listener._dispatch(_event("usage_turn", command_id="busy",
+                              args={"turn_id": "turn-1"}))
+    listener._dispatch(_event("status", command_id="status"))
+
+    busy, status = [item[2] for item in listener._published]
+    assert busy["status"] == "error"
+    assert busy["result"] == {"code": "metrics_busy", "retry_after_ms": 250}
+    assert status["status"] == "done"
+    assert status["result"] == {"status": "ready"}
+
+
+def test_metrics_executor_capacity_matches_documented_workers_and_queue():
+    assert METRICS_QUERY_WORKERS == 4
+    assert METRICS_QUERY_QUEUE_CAPACITY == 8
+    assert METRICS_QUERY_CAPACITY == 12
+
+
+def test_metrics_admission_refuses_only_the_request_past_capacity(monkeypatch):
+    listener = _listener()
+    listener._metrics_shutdown_grace_seconds = 0.01
+    release = threading.Event()
+
+    def blocked_query(_command, _args):
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    monkeypatch.setattr(listener, "_execute_metrics_query", blocked_query)
+    try:
+        for index in range(METRICS_QUERY_CAPACITY + 1):
+            listener._dispatch(_event("usage_turn", command_id=f"query-{index}",
+                                      args={"turn_id": f"turn-{index}"}))
+        refused = [data for _topic, _source, data in listener._published if data["status"] == "error"]
+        assert [(data["command_id"], data["result"]) for data in refused] == [
+            (f"query-{METRICS_QUERY_CAPACITY}", {"code": "metrics_busy", "retry_after_ms": 250})]
+    finally:
+        release.set()
+        listener.stop()
+
+
+def test_metrics_dispatch_rejects_after_shutdown_begins(monkeypatch):
+    listener = _listener()
+    listener._metrics_shutdown_grace_seconds = 0.01
+    listener.stop()
+
+    listener._dispatch(_event("usage_turn", command_id="after-stop",
+                              args={"turn_id": "turn-1"}))
+
+    payload = listener._published[-1][2]
+    assert payload["status"] == "error"
+    assert payload["result"] == {"code": "metrics_busy", "retry_after_ms": 250}
+    health = listener.metrics_query_health()
+    assert health["accepting"] is False
+    assert health["rejected_queries"] == 1
+
+
+def test_metrics_shutdown_cancels_queue_and_releases_each_permit_once(monkeypatch):
+    listener = _listener()
+    listener._metrics_shutdown_grace_seconds = 0.01
+    release = threading.Event()
+    started = threading.Event()
+    release_calls = 0
+    original_release = listener._metrics_slots.release
+
+    def counted_release():
+        nonlocal release_calls
+        release_calls += 1
+        original_release()
+
+    def blocked_query(_command, _args):
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    monkeypatch.setattr(listener._metrics_slots, "release", counted_release)
+    monkeypatch.setattr(listener, "_execute_metrics_query", blocked_query)
+    for index in range(METRICS_QUERY_CAPACITY):
+        listener._dispatch(_event(
+            "usage_turn", command_id=f"query-{index}",
+            args={"turn_id": f"turn-{index}"},
+        ))
+    assert started.wait(timeout=1)
+
+    listener.stop()
+    release.set()
+    assert _wait(lambda: release_calls == METRICS_QUERY_CAPACITY)
+
+    health = listener.metrics_query_health()
+    assert health["active_workers"] == 0
+    assert health["queue_depth"] == 0
+    assert release_calls == METRICS_QUERY_CAPACITY
+
+
+def test_metrics_shutdown_wait_is_bounded(monkeypatch):
+    listener = _listener()
+    listener._metrics_shutdown_grace_seconds = 0.05
+    release = threading.Event()
+    started = threading.Event()
+
+    def blocked_query(_command, _args):
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": True}
+
+    monkeypatch.setattr(listener, "_execute_metrics_query", blocked_query)
+    listener._dispatch(_event("usage_turn", command_id="blocked",
+                              args={"turn_id": "turn-1"}))
+    assert started.wait(timeout=1)
+
+    before = time.monotonic()
+    listener.stop()
+    elapsed = time.monotonic() - before
+    release.set()
+
+    assert elapsed < 0.25
+    assert listener.metrics_query_health()["accepting"] is False
+
+
+def test_metrics_query_health_reports_activity_rejections_deadlines_and_latency(monkeypatch):
+    from bobi.metrics.query import MetricsQueryError
+
+    listener = _listener()
+    release = threading.Event()
+    started = threading.Event()
+    outcomes = iter(("ok", "deadline", "blocked"))
+
+    def execute(_command, _args):
+        outcome = next(outcomes)
+        if outcome == "deadline":
+            raise MetricsQueryError(
+                "metrics query exceeded its one-second deadline",
+                "query_too_slow",
+            )
+        if outcome == "blocked":
+            started.set()
+            release.wait(timeout=5)
+        return {"outcome": outcome}
+
+    monkeypatch.setattr(listener, "_execute_metrics_query", execute)
+    listener._dispatch(_event("usage_turn", command_id="ok",
+                              args={"turn_id": "turn-ok"}))
+    assert _wait(lambda: listener.metrics_query_health()["completed_queries"] == 1)
+    listener._dispatch(_event("usage_turn", command_id="deadline",
+                              args={"turn_id": "turn-deadline"}))
+    assert _wait(lambda: listener.metrics_query_health()["deadline_cancellations"] == 1)
+    listener._dispatch(_event("usage_turn", command_id="blocked",
+                              args={"turn_id": "turn-blocked"}))
+    assert started.wait(timeout=1)
+
+    health = listener.metrics_query_health()
+    assert health["active_workers"] == 1
+    assert health["queue_depth"] == 0
+    assert health["deadline_cancellations"] == 1
+    assert health["completed_queries"] == 2
+    assert set(health["query_latency_ms"]) == {"p50", "p95", "p99"}
+    assert all(value is not None for value in health["query_latency_ms"].values())
+
+    monkeypatch.setattr(listener._metrics_slots, "acquire", lambda blocking=False: False)
+    listener._dispatch(_event("usage_turn", command_id="rejected",
+                              args={"turn_id": "turn-rejected"}))
+    assert listener.metrics_query_health()["rejected_queries"] == 1
+    release.set()
 
 
 def test_session_log_command_returns_history(monkeypatch):

@@ -6,6 +6,7 @@
 
 import { mountDashboard } from "./views/dashboard.js";
 import { mountAgent } from "./views/agent.js";
+import { mountMetrics } from "./views/metrics.js";
 
 const TOKEN = document
   .querySelector('meta[name="bobi-webui-token"]')
@@ -26,7 +27,7 @@ export async function api(path, opts = {}) {
       },
     });
   } catch {
-    noteFailure();
+    if (!opts.signal?.aborted) noteFailure();
     return { ok: false, status: 0, data: null };
   }
   noteSuccess();
@@ -152,7 +153,10 @@ function parseRoute() {
   const params = new URLSearchParams(query);
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "agents" && parts[1]) {
-    return { view: "agent", name: decodeURIComponent(parts[1]) };
+    const isMetrics = parts[2] === "metrics";
+    const session = (isMetrics && parts[3]) ? decodeURIComponent(parts[3]) : (params.get("session") || "");
+    return { view: isMetrics ? "metrics" : "agent",
+      name: decodeURIComponent(parts[1]), session };
   }
   if (parts[0] === "setup") {
     return {
@@ -165,14 +169,27 @@ function parseRoute() {
 }
 
 function route() {
-  if (teardown) { teardown(); teardown = null; }
+  if (teardown) {
+    try {
+      teardown();
+    } catch (e) {
+      console.error("View teardown failed:", e);
+    }
+    teardown = null;
+  }
   const el = document.getElementById("view");
   const r = parseRoute();
   setNavBack();
+  if (r.view === "metrics") {
+    setSubtitle("metrics & routing");
+    setNavBack(r.name, "#/agents/" + encodeURIComponent(r.name));
+    teardown = mountMetrics(el, { api, name: r.name, session: r.session });
+    return;
+  }
   if (r.view === "agent") {
     setSubtitle(r.name);
     setNavBack("agents", "#/");
-    teardown = mountAgent(el, { api, name: r.name });
+    teardown = mountAgent(el, { api, name: r.name, session: r.session });
     return;
   }
   if (r.view === "setup") {
@@ -223,5 +240,20 @@ async function mountSetupEntry(el, routeInfo = {}) {
   }
 }
 
-window.addEventListener("hashchange", route);
-route();
+// A hash navigation fires both popstate and hashchange; mount the view once.
+let routedHref = null;
+function routeOnce() {
+  if (location.href === routedHref) return;
+  routedHref = location.href;
+  route();
+}
+// A view that rewrites its URL in place has not navigated; record the new URL so
+// returning to the old one later still routes.
+const replaceHistoryState = history.replaceState.bind(history);
+history.replaceState = (...args) => {
+  replaceHistoryState(...args);
+  if (routedHref !== null) routedHref = location.href;
+};
+window.addEventListener("hashchange", routeOnce);
+window.addEventListener("popstate", routeOnce);
+routeOnce();

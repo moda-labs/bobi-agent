@@ -194,9 +194,13 @@ def _workflow_rows(root: Path, *, now: float,
     # One session's usage lands on ONE row. Retries reuse their entry, but a
     # --fresh relaunch mints a second entry on the same session name; giving
     # each the session's tokens would double-count spend in a column read as
-    # a running total. list_runs is newest-first, so the newest row wins.
+    # a running total. The run started last wins; file times cannot say which
+    # that is (entries written in one filesystem tick tie, and an update
+    # rewrites an older run's entry).
     usage_claimed: set[str] = set()
-    for run in WorkflowRun.list_runs(root=root):
+    runs = sorted(WorkflowRun.list_runs(root=root),
+                  key=lambda run: _epoch(run.started_at) or 0.0, reverse=True)
+    for run in runs:
         status = _workflow_status(run, now=now)
         trigger = (run.trigger_event or {}).get("type", "")
         started = _epoch(run.started_at)
@@ -369,8 +373,50 @@ def _matches_query(row: dict, query: str) -> bool:
     )
 
 
-def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
-    """Build the de-duplicated rows once for list and usage views."""
+def metrics_session_usage(
+    root: Path, windows: dict[str, tuple[float, float]],
+) -> dict[str, dict]:
+    """Usage from the fine-grained metrics for sessions the registry recorded
+    none for, keyed by session name.
+
+    Each window is that session's own lifetime, so an earlier session with the
+    same name is not counted. One read through the same query rules as every
+    other metrics view: its range cap and deadline apply, and any refusal or
+    database error means no figure rather than a broken page. Unknown
+    dimensions stay None, and an estimate never fills ``cost_usd``.
+    """
+    windows = {name: span for name, span in windows.items() if span[0]}
+    if not windows or not (root / "state" / "metrics" / "metrics.db").is_file():
+        return {}
+    from bobi.metrics.query import MetricsQueries, MetricsQueryError
+
+    try:
+        totals = MetricsQueries(root).session_totals(
+            [(name, start, end + 1) for name, (start, end) in windows.items()])
+    except MetricsQueryError:
+        return {}
+    usage = {}
+    for name, row in totals.items():
+        input_tokens = row.get("input_tokens")
+        output_tokens = row.get("output_tokens")
+        usage[name] = {
+            "input_tokens": input_tokens,
+            "cached_input_tokens": row.get("cache_read_input_tokens"),
+            "output_tokens": output_tokens,
+            "total_tokens": (input_tokens + output_tokens
+                             if input_tokens is not None and output_tokens is not None
+                             else None),
+            "cost_usd": row.get("reported_cost_usd") or 0.0,
+            "estimated_cost_usd": row.get("estimated_cost_usd") or 0.0,
+        }
+    return usage
+
+
+def _all_rows(root: Path, *, manager_name: str, now: float,
+              metrics: bool = True) -> list[dict]:
+    """Build the de-duplicated rows once for list and usage views.
+
+    ``metrics=False`` uses the registry alone, without the bounded metrics read."""
     from bobi.costs import session_usage
     from bobi.sdk import ACTIVE_STATUSES, SessionRegistry
 
@@ -380,6 +426,12 @@ def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
     usage_by_session = {
         e.name: session_usage(e.model_usage, e.total_cost_usd) for e in entries
     }
+    if metrics:
+        usage_by_session.update(metrics_session_usage(root, {
+            e.name: (e.started_at, e.terminal_at or now) for e in entries
+            if not usage_by_session[e.name]["total_tokens"]
+            and not usage_by_session[e.name]["cost_usd"]
+        }))
     # Who can be spoken to right now. The same predicate `list_active` uses,
     # off the same read - and the read reaps, so an active status with a dead
     # pid is already `crashed` here rather than a chat target that is gone.
@@ -409,7 +461,8 @@ def _all_rows(root: Path, *, manager_name: str, now: float) -> list[dict]:
 
 def build_usage_summary(root: Path, *, window_seconds: float,
                         manager_name: str = "",
-                        now: float | None = None) -> dict:
+                        now: float | None = None,
+                        metrics: bool = True) -> dict:
     """Usage for terminal jobs completed inside a rolling window.
 
     Usage is stored per session rather than per token timestamp. A terminal
@@ -422,7 +475,7 @@ def build_usage_summary(root: Path, *, window_seconds: float,
     start = now - window_seconds
     terminal = (DONE, FAILED, CRASHED, CLOSED)
     rows = [
-        row for row in _all_rows(root, manager_name=manager_name, now=now)
+        row for row in _all_rows(root, manager_name=manager_name, now=now, metrics=metrics)
         if row["status"] in terminal and start <= row["_ended"] <= now
     ]
 
@@ -458,7 +511,8 @@ def build_usage_summary(root: Path, *, window_seconds: float,
 
 def build_runs(root: Path, *, manager_name: str = "", status: str = "",
                query: str = "", offset: int = 0,
-               limit: int = DEFAULT_LIMIT, now: float | None = None) -> dict:
+               limit: int = DEFAULT_LIMIT, now: float | None = None,
+               metrics: bool = True) -> dict:
     """Everything this agent did, newest first, live runs at the top.
 
     ``status`` and ``query`` filter before ``offset`` / ``limit`` paginate.
@@ -467,7 +521,7 @@ def build_runs(root: Path, *, manager_name: str = "", status: str = "",
     and the pager stay honest.
     """
     now = time.time() if now is None else now
-    rows = _all_rows(root, manager_name=manager_name, now=now)
+    rows = _all_rows(root, manager_name=manager_name, now=now, metrics=metrics)
 
     counts = {"all": len(rows), "running": 0, "awaiting_action": 0,
               "failed": 0}

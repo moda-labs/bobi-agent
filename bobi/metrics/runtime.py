@@ -1,0 +1,1118 @@
+"""Fail-safe runtime wiring for metadata-only fine-grained metrics."""
+
+from __future__ import annotations
+
+import atexit
+import itertools
+import json
+import logging
+import math
+import os
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Mapping
+
+from bobi.costs import model_identity
+from bobi.metrics.events import MetricsEvent, deterministic_metric_id, uuid7
+from bobi.metrics.producer import MetricsProducer, process_start_token
+from bobi.metrics.policy import policy_health
+from bobi.metrics.router import RouterDecision, projection_fields
+
+if TYPE_CHECKING:
+    from bobi.brain.base import BrainInvocation, BrainToolExecution, BrainUsage, TurnResult
+
+log = logging.getLogger(__name__)
+
+METRICS_MODE_ENV = "BOBI_METRICS_MODE"
+DISABLED = "disabled"
+ENABLED_MODES = frozenset({"enabled"})
+
+
+def resolve_mode(env: Mapping[str, str] | None = None) -> str:
+    value = str((os.environ if env is None else env).get(METRICS_MODE_ENV, DISABLED)).strip().lower()
+    if value in {"", "0", "off", "false", "disabled"}:
+        return DISABLED
+    if value in ENABLED_MODES:
+        return value
+    log.warning("metrics: unsupported mode %r; telemetry disabled", value)
+    return DISABLED
+
+
+def _stable_id(prefix: str, *parts: object) -> str:
+    return deterministic_metric_id(prefix, *parts)
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def _brain_name(provider: str) -> str:
+    return {"anthropic": "claude", "openai": "codex"}.get(provider, provider or "unknown")
+
+
+class MetricsRuntime:
+    """One process-local producer; every public operation fails closed to no-op."""
+
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        mode: str | None = None,
+        capacity: int = 8192,
+        producer_factory=MetricsProducer,
+    ) -> None:
+        self.root = Path(root).resolve()
+        self.mode = resolve_mode() if mode is None else mode
+        self.pid = os.getpid()
+        # The process start value lets a reader tell this process from a
+        # later one that reuses its pid (see producer_exited).
+        start = process_start_token(self.pid)
+        self.producer_id = f"producer-{self.pid}-{uuid7()}" + (
+            f"-{start}" if start is not None else "")
+        self._sequence = itertools.count()
+        self._session_ids: dict[str, str] = {}
+        self._turn_indexes: dict[str, int] = {}
+        self._session_starts: dict[str, int] = {}
+        self._emitted_sessions: set[str] = set()
+        self._provider_sessions: dict[str, str] = {}
+        self._session_contexts: dict[str, dict[str, object]] = {}
+        self._producer: MetricsProducer | None = None
+        self._init_error = ""
+        self.events_emitted = 0
+
+        if self.mode not in ENABLED_MODES:
+            self.mode = DISABLED
+            return
+
+        metrics_root = self.root / "state" / "metrics"
+        segment = (
+            metrics_root
+            / "spool"
+            / self.producer_id
+            / f"{time.time_ns()}-{uuid7()}.telemetry"
+        )
+        health_path = segment.parent / "health.json"
+        try:
+            self._producer = producer_factory(
+                segment,
+                capacity=capacity,
+                health_path=health_path,
+                producer_id=self.producer_id,
+            )
+            self._producer.start()
+        except Exception as exc:
+            self._producer = None
+            self._init_error = type(exc).__name__
+            log.debug("metrics: producer startup failed", exc_info=True)
+
+    @property
+    def enabled(self) -> bool:
+        return self._producer is not None
+
+    def session_id(self, session_name: str) -> str:
+        session_id = self._session_ids.get(session_name)
+        if session_id is None:
+            session_id = _stable_id(
+                "ses", self.producer_id, session_name, str(uuid7())
+            )
+            self._session_ids[session_name] = session_id
+        return session_id
+
+    def admit_route(self, session_name: str, decision: RouterDecision | None, *,
+                    brain: str, role: str = "", run_key: str = "",
+                    workflow_name: str = "", fallback_reason: str = "",
+                    error_kind: str = "") -> bool:
+        """Admit a resolved decision or explicit routing-failure metadata."""
+        if not self.enabled:
+            return False
+        session_id = self.session_id(session_name)
+        if self._turn_indexes.get(session_id):
+            return False
+        started = self._session_starts.get(session_id, time.time_ns() // 1000)
+        context = {
+            "session_id": session_id, "session_name": session_name,
+            "brain": brain, "provider": "unknown", "role": role or None,
+            "run_key": run_key or None, "project": None,
+            "workflow_name": workflow_name or None, "started_at_us": started,
+            "parent_session_id": None,
+            "metadata_json": _json(
+                {"router_assignment": projection_fields(decision)} if decision is not None
+                else {"router_fallback": {"fallback_reason": fallback_reason, "error_kind": error_kind}}
+            ),
+        }
+        if not self.emit("session.recorded", {
+            **context, "provider_session_id": None, "ended_at_us": None,
+            "status": "running", "terminal_error_kind": None,
+        }, session_id=session_id):
+            return False
+        self._session_contexts[session_id] = context
+        self._session_starts[session_id] = started
+        self._emitted_sessions.add(session_id)
+        return True
+
+    def reroute(self, session_name: str, decision: RouterDecision) -> None:
+        """Record *decision* on the session's later turns; earlier turns keep theirs."""
+        session_id = self._session_ids.get(session_name)
+        context = self._session_contexts.get(session_id) if session_id else None
+        if context is None:
+            return
+        metadata = json.loads(str(context.get("metadata_json") or "{}"))
+        if isinstance(metadata, dict) and "router_assignment" in metadata:
+            metadata["router_assignment"] = projection_fields(decision)
+            context["metadata_json"] = _json(metadata)
+
+    def discard_route(self, session_name: str) -> None:
+        """Discard unexecuted routing metadata after a persistence failure."""
+        session_id = self._session_ids.get(session_name)
+        if session_id is None or self._turn_indexes.get(session_id):
+            return
+        context = self._session_contexts.get(session_id)
+        if context is not None:
+            context["metadata_json"] = "{}"
+        self._emitted_sessions.discard(session_id)
+
+    def emit(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        session_id: str | None = None,
+        turn_id: str | None = None,
+        invocation_id: str | None = None,
+        source: str = "runtime",
+    ) -> bool:
+        producer = self._producer
+        if producer is None:
+            return False
+        try:
+            event = MetricsEvent(
+                event_type=event_type,
+                producer_id=self.producer_id,
+                producer_sequence=next(self._sequence),
+                source=source,
+                payload=payload,
+                session_id=session_id,
+                turn_id=turn_id,
+                invocation_id=invocation_id,
+                _validate_payload=False,
+            )
+            accepted = producer.try_emit(event)
+            if accepted:
+                self.events_emitted += 1
+            return accepted
+        except Exception:
+            log.debug("metrics: event emission failed", exc_info=True)
+            return False
+
+    def close(self, *, timeout: float = 2.0) -> bool:
+        for context in list(self._session_contexts.values()):
+            self.finish_session(
+                str(context["session_name"]),
+                status="stopped",
+            )
+        producer = self._producer
+        self._producer = None
+        if producer is None:
+            self._clear_session_state()
+            return True
+        try:
+            closed = producer.close(timeout=timeout)
+        except Exception:
+            log.debug("metrics: producer shutdown failed", exc_info=True)
+            closed = False
+        self._clear_session_state()
+        return closed
+
+    def _clear_session_state(self) -> None:
+        self._turn_indexes.clear()
+        self._session_ids.clear()
+        self._session_starts.clear()
+        self._emitted_sessions.clear()
+        self._provider_sessions.clear()
+        self._session_contexts.clear()
+
+    def health(self) -> dict[str, object]:
+        producer = self._producer
+        health: dict[str, object] = {
+            "mode": self.mode,
+            "enabled": producer is not None,
+            "producer_id": self.producer_id,
+            "events_emitted": self.events_emitted,
+            "init_error": self._init_error or None,
+            "router_policy": policy_health(),
+        }
+        if producer is not None:
+            health.update(producer.health())
+        return health
+
+    def finish_session(
+        self,
+        session_name: str,
+        *,
+        status: str,
+        error_kind: str = "",
+        ended_at_us: int | None = None,
+    ) -> bool:
+        session_id = self._session_ids.get(session_name)
+        if session_id is None:
+            return True
+        context = self._session_contexts.get(session_id)
+        if context is None:
+            self._turn_indexes.pop(session_id, None)
+            self._session_starts.pop(session_id, None)
+            self._emitted_sessions.discard(session_id)
+            self._provider_sessions.pop(session_id, None)
+            self._session_ids.pop(session_name, None)
+            return True
+        payload = {
+            **context,
+            "provider_session_id": self._provider_sessions.get(session_id) or None,
+            "ended_at_us": ended_at_us or time.time_ns() // 1000,
+            "status": status,
+            "terminal_error_kind": error_kind or None,
+        }
+        accepted = self.emit("session.recorded", payload, session_id=session_id)
+        if accepted:
+            self._turn_indexes.pop(session_id, None)
+            self._session_starts.pop(session_id, None)
+            self._emitted_sessions.discard(session_id)
+            self._provider_sessions.pop(session_id, None)
+            self._session_contexts.pop(session_id, None)
+            self._session_ids.pop(session_name, None)
+        return accepted
+
+    def begin_turn(
+        self,
+        session_name: str,
+        *,
+        provider: str,
+        brain: str = "",
+        role: str = "",
+        run_key: str = "",
+        project: str = "",
+        workflow_name: str = "",
+        workflow_step_id: str | None = None,
+        trigger_kind: str = "agent",
+        trigger_id: str = "",
+        is_user_initiated: bool = False,
+        model_requested: str = "",
+        prompt_bytes: int | None = None,
+        started_at_us: int | None = None,
+        routed: bool = True,
+    ) -> "TurnObservation":
+        started = started_at_us or time.time_ns() // 1000
+        session_id = self.session_id(session_name)
+        self._session_starts.setdefault(session_id, started)
+        context = self._session_contexts.setdefault(session_id, {
+            "session_id": session_id,
+            "session_name": session_name,
+            "brain": brain or _brain_name(provider),
+            "provider": provider or "unknown",
+            "role": role or None,
+            "run_key": run_key or None,
+            "project": project or None,
+            "workflow_name": workflow_name or None,
+            "started_at_us": self._session_starts[session_id],
+            "parent_session_id": None,
+            "metadata_json": "{}",
+        })
+        context_changed = False
+        for key, value in (
+            ("brain", brain or _brain_name(provider)),
+            ("provider", provider or "unknown"),
+            ("role", role or None),
+            ("run_key", run_key or None),
+            ("project", project or None),
+            ("workflow_name", workflow_name or None),
+        ):
+            if value is not None and (context.get(key) in (None, "", "unknown")):
+                context[key] = value
+                context_changed = True
+        if self.enabled and session_id not in self._provider_sessions:
+            # A resumed process continues the saved provider session; record it
+            # now, not at the first turn's end, so reconciliation can see that
+            # a dead process's turn ends where this one starts. A turn's result
+            # corrects it when the brain started fresh instead.
+            saved = _saved_provider_session(self.root, session_name)
+            if saved:
+                self._provider_sessions[session_id] = saved
+                context_changed = True
+        if context_changed:
+            # Admission runs before the provider client exists, so its session
+            # event uses placeholders. Re-emit the enriched context before the
+            # first turn so an abrupt death does not leave them permanently.
+            self._emitted_sessions.discard(session_id)
+        turn_index = self._turn_indexes.get(session_id, 0) + 1
+        self._turn_indexes[session_id] = turn_index
+        observation = TurnObservation(
+            runtime=self,
+            session_id=session_id,
+            session_name=session_name,
+            turn_id=f"turn_{uuid7()}",
+            turn_index=turn_index,
+            provider=provider or "unknown",
+            brain=brain or _brain_name(provider),
+            role=role,
+            run_key=run_key,
+            project=project,
+            workflow_name=workflow_name,
+            workflow_step_id=workflow_step_id,
+            trigger_kind=trigger_kind,
+            trigger_id=trigger_id,
+            is_user_initiated=is_user_initiated,
+            model_requested=model_requested,
+            prompt_bytes=prompt_bytes,
+            started_at_us=started,
+            routed=routed,
+        )
+        observation.start()
+        return observation
+
+    def begin_workflow_step(
+        self,
+        session_name: str,
+        *,
+        workflow_name: str,
+        step_name: str,
+        step_index: int | None,
+        attempt: int,
+        step_type: str,
+        run_key: str = "",
+        provider: str = "unknown",
+        brain: str = "unknown",
+        role: str = "",
+        turn_id: str | None = None,
+    ) -> "WorkflowStepObservation":
+        started = time.time_ns() // 1000
+        session_id = self.session_id(session_name)
+        self._session_starts.setdefault(session_id, started)
+        self._session_contexts.setdefault(session_id, {
+            "session_id": session_id,
+            "session_name": session_name,
+            "brain": brain,
+            "provider": provider,
+            "role": role or None,
+            "run_key": run_key or None,
+            "project": None,
+            "workflow_name": workflow_name,
+            "started_at_us": self._session_starts[session_id],
+            "parent_session_id": None,
+            "metadata_json": "{}",
+        })
+        return WorkflowStepObservation(
+            runtime=self,
+            workflow_step_id=f"step_{uuid7()}",
+            session_id=session_id,
+            session_name=session_name,
+            workflow_name=workflow_name,
+            step_name=step_name,
+            step_index=step_index,
+            attempt=attempt,
+            step_type=step_type,
+            run_key=run_key,
+            provider=provider,
+            brain=brain,
+            role=role,
+            turn_id=turn_id,
+            started_at_us=started,
+        )
+
+
+@dataclass
+class TurnObservation:
+    runtime: MetricsRuntime
+    session_id: str
+    session_name: str
+    turn_id: str
+    turn_index: int
+    provider: str
+    brain: str
+    role: str
+    run_key: str
+    project: str
+    workflow_name: str
+    workflow_step_id: str | None
+    trigger_kind: str
+    trigger_id: str
+    is_user_initiated: bool
+    model_requested: str
+    prompt_bytes: int | None
+    started_at_us: int
+    first_output_at_us: int | None = None
+    results: list["TurnResult"] = field(default_factory=list)
+    router_decision_id: str | None = None
+    router_decision: RouterDecision | None = None
+    # Whether this turn runs the session's routed model. A workflow run is one
+    # session for all its agents and steps; only the route's turns are routed.
+    routed: bool = True
+    _finished: bool = False
+
+    def start(self) -> None:
+        if self.session_id not in self.runtime._emitted_sessions:
+            _emit_session(
+                self,
+                self.runtime._provider_sessions.get(self.session_id, ""),
+            )
+        context = self.runtime._session_contexts[self.session_id]
+        assignment = json.loads(str(context.get("metadata_json", "{}"))).get("router_assignment")
+        if self.routed and isinstance(assignment, dict) and assignment.get("experiment_id"):
+            self.router_decision_id = _stable_id("route", self.turn_id, assignment["experiment_id"])
+        _emit_turn_row(self, status="running", ended_at_us=None, error_kind="")
+        if self.router_decision_id:
+            self.runtime.emit("router_decision.recorded", {
+                **assignment, "router_decision_id": self.router_decision_id,
+                "turn_id": self.turn_id, "decided_at_us": self.started_at_us,
+            }, session_id=self.session_id, turn_id=self.turn_id)
+
+
+    def mark_first_output(self) -> None:
+        if self.first_output_at_us is None:
+            self.first_output_at_us = time.time_ns() // 1000
+
+    def record_result(self, result: "TurnResult") -> None:
+        if not self._finished:
+            self.results.append(result)
+
+    def finish(self, *, status: str, error_kind: str = "") -> None:
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            _emit_turn(self, status=status, error_kind=error_kind)
+        except Exception:
+            log.debug("metrics: turn observation failed", exc_info=True)
+
+
+@dataclass
+class WorkflowStepObservation:
+    runtime: MetricsRuntime
+    workflow_step_id: str
+    session_id: str
+    session_name: str
+    workflow_name: str
+    step_name: str
+    step_index: int | None
+    attempt: int
+    step_type: str
+    run_key: str
+    provider: str
+    brain: str
+    role: str
+    turn_id: str | None
+    started_at_us: int
+    _finished: bool = False
+
+    def __post_init__(self) -> None:
+        if self.session_id not in self.runtime._emitted_sessions:
+            accepted = self.runtime.emit(
+                "session.recorded",
+                {
+                    **self.runtime._session_contexts[self.session_id],
+                    "provider_session_id": None,
+                    "ended_at_us": None,
+                    "status": "running",
+                    "terminal_error_kind": None,
+                },
+                session_id=self.session_id,
+            )
+            if accepted:
+                self.runtime._emitted_sessions.add(self.session_id)
+
+    def finish(self, *, status: str, error_kind: str = "") -> None:
+        if self._finished:
+            return
+        self._finished = True
+        ended = time.time_ns() // 1000
+        self.runtime.emit(
+            "workflow_step.recorded",
+            {
+                "workflow_step_id": self.workflow_step_id,
+                "session_id": self.session_id,
+                "turn_id": self.turn_id,
+                "run_key": self.run_key or None,
+                "workflow_name": self.workflow_name,
+                "step_name": self.step_name,
+                "step_index": self.step_index,
+                "attempt": self.attempt,
+                "step_type": self.step_type,
+                "started_at_us": self.started_at_us,
+                "ended_at_us": ended,
+                "status": status,
+                "error_kind": error_kind or None,
+            },
+            session_id=self.session_id,
+            turn_id=self.turn_id,
+        )
+
+
+def _sum_reported(items: list[int | None]) -> int | None:
+    """Sum a dimension only when every contributing invocation reports it."""
+    if not items or any(item is None for item in items):
+        return None
+    return sum(items)
+
+
+def _aggregate_usage(items: list["BrainUsage"]) -> dict[str, object]:
+    fields = (
+        "input_tokens",
+        "uncached_input_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+        "cache_write_5m_input_tokens",
+        "cache_write_1h_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+    )
+    payload = {
+        name: _sum_reported([getattr(item, name) for item in items])
+        for name in fields
+    }
+    incomplete = [item for item in items if not item.cache_write_breakdown_complete]
+    payload["cache_write_unknown_ttl_input_tokens"] = _sum_reported([
+        item.cache_write_unknown_ttl_input_tokens for item in incomplete
+    ])
+    payload["cache_write_breakdown_complete"] = int(bool(items) and not incomplete)
+    payload["token_semantics_version"] = max(
+        (item.token_semantics_version for item in items), default=1
+    )
+    payload["raw_usage_json"] = _json([item.raw_usage for item in items])
+    return payload
+
+
+def _usage_payload(
+    usage: "BrainUsage",
+    *,
+    measurement_id: str,
+    scope: str,
+    turn_id: str,
+    invocation_id: str | None,
+    provider: str,
+    observed_at_us: int,
+) -> dict[str, object]:
+    return {
+        "measurement_id": measurement_id,
+        "scope": scope,
+        "turn_id": turn_id,
+        "invocation_id": invocation_id,
+        "provider": provider,
+        "model": usage.model or "unknown",
+        "provider_event_id": usage.provider_event_id or None,
+        "measurement_source": "provider_stream",
+        "is_estimated": 0,
+        "estimator_name": None,
+        "estimator_version": None,
+        "token_semantics_version": usage.token_semantics_version,
+        "input_tokens": usage.input_tokens,
+        "uncached_input_tokens": usage.uncached_input_tokens,
+        "cache_read_input_tokens": usage.cache_read_input_tokens,
+        "cache_write_input_tokens": usage.cache_write_input_tokens,
+        "cache_write_5m_input_tokens": usage.cache_write_5m_input_tokens,
+        "cache_write_1h_input_tokens": usage.cache_write_1h_input_tokens,
+        "cache_write_unknown_ttl_input_tokens": usage.cache_write_unknown_ttl_input_tokens,
+        "cache_write_breakdown_complete": int(usage.cache_write_breakdown_complete),
+        "output_tokens": usage.output_tokens,
+        "reasoning_output_tokens": usage.reasoning_output_tokens,
+        "observed_at_us": observed_at_us,
+        "raw_usage_json": _json(usage.raw_usage),
+        "supersedes_measurement_id": None,
+    }
+
+
+def _saved_provider_session(root: Path, session_name: str) -> str:
+    """The provider session id saved for *session_name*, or "" if unreadable."""
+    from bobi.sdk import load_session_id
+
+    try:
+        return load_session_id(session_name, root=root)
+    except OSError:
+        log.debug("metrics: saved session id unreadable", exc_info=True)
+        return ""
+
+
+def _emit_session(observation: TurnObservation, provider_session_id: str) -> None:
+    runtime = observation.runtime
+    accepted = runtime.emit(
+        "session.recorded",
+        {
+            **runtime._session_contexts[observation.session_id],
+            "provider_session_id": provider_session_id or None,
+            "ended_at_us": None,
+            "status": "running",
+            "terminal_error_kind": None,
+        },
+        session_id=observation.session_id,
+    )
+    if not accepted:
+        return
+    runtime._emitted_sessions.add(observation.session_id)
+    if provider_session_id:
+        runtime._provider_sessions[observation.session_id] = provider_session_id
+
+
+def _emit_turn_row(
+    observation: TurnObservation,
+    *,
+    status: str,
+    ended_at_us: int | None,
+    error_kind: str,
+) -> None:
+    duration_ms = sum(result.duration_ms for result in observation.results) or None
+    api_duration_ms = sum(result.api_duration_ms for result in observation.results) or None
+    provider_turn_id = next(
+        (
+            result.provider_turn_id
+            for result in reversed(observation.results)
+            if result.provider_turn_id
+        ),
+        "",
+    )
+    observation.runtime.emit(
+        "turn.recorded",
+        {
+            "turn_id": observation.turn_id,
+            "session_id": observation.session_id,
+            "turn_index": observation.turn_index,
+            "trigger_kind": observation.trigger_kind,
+            "trigger_id": observation.trigger_id or None,
+            "is_user_initiated": int(observation.is_user_initiated),
+            "prompt_template_id": None,
+            "prompt_template_version": None,
+            "prompt_sha256": None,
+            "prompt_bytes": observation.prompt_bytes,
+            "started_at_us": observation.started_at_us,
+            "first_output_at_us": observation.first_output_at_us,
+            "ended_at_us": ended_at_us,
+            "wall_duration_ms": (
+                (ended_at_us - observation.started_at_us) / 1000
+                if ended_at_us is not None else None
+            ),
+            "provider_duration_ms": duration_ms,
+            "provider_api_duration_ms": api_duration_ms,
+            "status": status,
+            "error_kind": error_kind or None,
+            "provider_turn_id": provider_turn_id or None,
+            # Not a turns column: it tells projection not to give a turn that
+            # ran outside its session's route that route's decision.
+            "routed": observation.routed,
+        },
+        session_id=observation.session_id,
+        turn_id=observation.turn_id,
+    )
+
+
+def _invocation_rows(
+    observation: TurnObservation,
+    ended_at_us: int,
+) -> tuple[list[tuple[str, "BrainInvocation", "TurnResult"]], dict[str, str]]:
+    rows: list[tuple[str, BrainInvocation, TurnResult]] = []
+    provider_ids: dict[str, str] = {}
+    for result_index, result in enumerate(observation.results):
+        invocations = list(result.invocations)
+        if not invocations:
+            from bobi.brain.base import BrainInvocation
+
+            model = next((usage.model for usage in result.usage if usage.model), "")
+            invocations = [BrainInvocation(
+                provider_event_id=(result.provider_turn_id or f"result-{result_index}"),
+                model=model or observation.model_requested or "unknown",
+                started_at_us=None,
+                ended_at_us=None,
+                status="failed" if result.is_error else "completed",
+            )]
+        for invocation in invocations:
+            index = len(rows) + 1
+            provider_event_id = invocation.provider_event_id or f"invocation-{index}"
+            invocation_id = _stable_id(
+                "inv", observation.turn_id, provider_event_id, index
+            )
+            provider_ids[provider_event_id] = invocation_id
+            rows.append((invocation_id, invocation, result))
+    return rows, provider_ids
+
+
+def _emit_turn(observation: TurnObservation, *, status: str, error_kind: str) -> None:
+    runtime = observation.runtime
+    if not runtime.enabled:
+        return
+    ended_at_us = time.time_ns() // 1000
+    provider_session_id = next(
+        (result.session_id for result in reversed(observation.results) if result.session_id),
+        "",
+    )
+    if (
+        provider_session_id
+        and runtime._provider_sessions.get(observation.session_id)
+        != provider_session_id
+    ):
+        _emit_session(observation, provider_session_id)
+    _emit_turn_row(
+        observation,
+        status=status,
+        ended_at_us=ended_at_us,
+        error_kind=error_kind,
+    )
+
+    provider_turn_id = next(
+        (
+            result.provider_turn_id
+            for result in reversed(observation.results)
+            if result.provider_turn_id
+        ),
+        "",
+    )
+
+    invocation_rows, provider_ids = _invocation_rows(observation, ended_at_us)
+    # A subagent call on another model was not the turn's requested model;
+    # stamping it would let a filter on the requested model count it too.
+    invocation_models = {model_identity(row[1].model) for row in invocation_rows if row[1].model}
+    for index, (invocation_id, invocation, result) in enumerate(invocation_rows, 1):
+        requested = observation.model_requested or None
+        if (requested and invocation.model and len(invocation_models) > 1
+                and model_identity(invocation.model) != model_identity(requested)):
+            requested = None
+        started = invocation.started_at_us or observation.started_at_us
+        ended = invocation.ended_at_us or ended_at_us
+        runtime.emit(
+            "invocation.recorded",
+            {
+                "invocation_id": invocation_id,
+                "turn_id": observation.turn_id,
+                "workflow_step_id": observation.workflow_step_id,
+                "router_decision_id": observation.router_decision_id,
+                "parent_invocation_id": None,
+                "invocation_index": index,
+                "provider": observation.provider,
+                "model_requested": requested,
+                "model_selected": invocation.model or observation.model_requested or "unknown",
+                "provider_event_id": invocation.provider_event_id or None,
+                "provider_request_id": None,
+                "started_at_us": started,
+                "first_token_at_us": None,
+                "ended_at_us": ended,
+                "wall_duration_ms": max(0, ended - started) / 1000,
+                "provider_latency_ms": None,
+                "time_to_first_token_ms": None,
+                "status": invocation.status or ("failed" if result.is_error else "completed"),
+                "stop_reason": invocation.stop_reason or None,
+                "error_kind": result.error_kind or None,
+            },
+            session_id=observation.session_id,
+            turn_id=observation.turn_id,
+            invocation_id=invocation_id,
+        )
+        if invocation.usage is not None:
+            usage = invocation.usage
+            measurement_id = _stable_id(
+                "use", observation.turn_id, invocation_id, usage.provider_event_id
+            )
+            runtime.emit(
+                "usage.recorded",
+                _usage_payload(
+                    usage,
+                    measurement_id=measurement_id,
+                    scope="invocation",
+                    turn_id=observation.turn_id,
+                    invocation_id=invocation_id,
+                    provider=observation.provider,
+                    observed_at_us=ended,
+                ),
+                session_id=observation.session_id,
+                turn_id=observation.turn_id,
+                invocation_id=invocation_id,
+            )
+
+    fallback_invocation_id = invocation_rows[0][0] if invocation_rows else None
+    for result in observation.results:
+        for tool in result.tool_executions:
+            _emit_tool(
+                observation,
+                tool,
+                provider_ids=provider_ids,
+                fallback_invocation_id=fallback_invocation_id,
+                ended_at_us=ended_at_us,
+            )
+
+    usage_by_model: dict[str, list[BrainUsage]] = {}
+    invocation_usage_by_model: dict[str, list[BrainUsage]] = {}
+    for _invocation_id, invocation, _result in invocation_rows:
+        if invocation.usage is not None:
+            invocation_usage_by_model.setdefault(
+                invocation.usage.model or invocation.model or "unknown", []
+            ).append(invocation.usage)
+    for result in observation.results:
+        for usage in result.usage:
+            usage_by_model.setdefault(usage.model or "unknown", []).append(usage)
+    for model, usage_items in usage_by_model.items():
+        aggregate = _aggregate_usage(usage_items)
+        invocation_items = [
+            item
+            for invocation_model, items in invocation_usage_by_model.items()
+            if model_identity(invocation_model) == model_identity(model)
+            for item in items
+        ]
+        if (
+            not invocation_items
+            and len(usage_by_model) == 1
+            and len(invocation_usage_by_model) == 1
+        ):
+            invocation_items = next(iter(invocation_usage_by_model.values()))
+        invocation_aggregate = _aggregate_usage(
+            invocation_items
+        )
+        for field in (
+            "input_tokens",
+            "uncached_input_tokens",
+            "cache_read_input_tokens",
+            "cache_write_input_tokens",
+            "cache_write_5m_input_tokens",
+            "cache_write_1h_input_tokens",
+            "cache_write_unknown_ttl_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+        ):
+            if aggregate[field] is None and invocation_aggregate[field] is not None:
+                aggregate[field] = invocation_aggregate[field]
+        measurement_id = _stable_id("use", observation.turn_id, "turn", model)
+        runtime.emit(
+            "usage.recorded",
+            {
+                "measurement_id": measurement_id,
+                "scope": "turn",
+                "turn_id": observation.turn_id,
+                "invocation_id": None,
+                "provider": observation.provider,
+                "model": model,
+                "provider_event_id": None,
+                "measurement_source": "provider_stream",
+                "is_estimated": 0,
+                "estimator_name": None,
+                "estimator_version": None,
+                **aggregate,
+                "observed_at_us": ended_at_us,
+                "supersedes_measurement_id": None,
+            },
+            session_id=observation.session_id,
+            turn_id=observation.turn_id,
+        )
+
+    total_cost = sum(result.total_cost_usd or 0.0 for result in observation.results)
+    if total_cost > 0:
+        # A multi-model turn's total is split by the per-model costs Claude
+        # reports with it, so a model-filtered summary gets its model's share.
+        models = sorted(usage_by_model)
+        shares = (
+            _reported_model_costs(usage_by_model, total_cost) if len(models) > 1 else None
+        ) or {models[0] if len(models) == 1 else None: total_cost}
+        source, is_estimated, id_parts = "provider_stream", 0, ()
+    else:
+        from bobi.costs import estimate_cost
+        shares = {}
+        for m, usages in (usage_by_model or invocation_usage_by_model).items():
+            agg = _aggregate_usage(usages)
+            amount = estimate_cost(
+                observation.provider,
+                m,
+                input_tokens=agg.get("input_tokens") or 0,
+                output_tokens=agg.get("output_tokens") or 0,
+                cached_input_tokens=agg.get("cache_read_input_tokens") or 0,
+                cache_write_tokens=agg.get("cache_write_input_tokens") or 0,
+                cache_write_1h_tokens=agg.get("cache_write_1h_input_tokens") or 0,
+            )
+            if amount > 0:
+                shares[m] = amount
+        source, is_estimated, id_parts = "calibrated_estimator", 1, ("est",)
+    for model, amount in shares.items():
+        per_model = (model,) if len(shares) > 1 else ()
+        runtime.emit(
+            "cost.recorded",
+            {
+                "cost_measurement_id": _stable_id(
+                    "cost", observation.turn_id, "turn", *id_parts, *per_model
+                ),
+                "scope": "turn",
+                "session_id": observation.session_id,
+                "turn_id": observation.turn_id,
+                "invocation_id": None,
+                "provider": observation.provider,
+                "model": model,
+                "amount_usd": amount,
+                "measurement_source": source,
+                "is_estimated": is_estimated,
+                "provider_event_id": provider_turn_id or None,
+                "observed_at_us": ended_at_us,
+                "raw_cost_json": None,
+            },
+            session_id=observation.session_id,
+            turn_id=observation.turn_id,
+        )
+
+
+def _reported_model_costs(
+    usage_by_model: Mapping[str, list[BrainUsage]], total_cost: float
+) -> dict[str, float] | None:
+    """Claude's per-model ``costUSD``, when every model has one and they add up."""
+    costs: dict[str, float] = {}
+    for model, items in usage_by_model.items():
+        values = [item.raw_usage.get("costUSD") for item in items]
+        if not values or not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) for value in values
+        ):
+            return None
+        costs[model] = float(sum(values))
+    if not math.isclose(sum(costs.values()), total_cost, rel_tol=1e-6, abs_tol=1e-9):
+        return None
+    return costs
+
+
+def _emit_tool(
+    observation: TurnObservation,
+    tool: "BrainToolExecution",
+    *,
+    provider_ids: dict[str, str],
+    fallback_invocation_id: str | None,
+    ended_at_us: int,
+) -> None:
+    triggering = provider_ids.get(tool.triggering_provider_event_id)
+    attribution_method = "provider_ids"
+    confidence = 1.0
+    if triggering is None:
+        triggering = fallback_invocation_id
+        attribution_method = "turn_aggregate"
+        confidence = 0.0
+    if triggering is None:
+        return
+    consuming = provider_ids.get(tool.consuming_provider_event_id)
+    started = tool.started_at_us or observation.started_at_us
+    ended = tool.ended_at_us or ended_at_us
+    tool_id = _stable_id(
+        "tool",
+        observation.turn_id,
+        tool.provider_tool_call_id or tool.tool_name,
+        started,
+    )
+    observation.runtime.emit(
+        "tool_execution.recorded",
+        {
+            "tool_execution_id": tool_id,
+            "turn_id": observation.turn_id,
+            "triggering_invocation_id": triggering,
+            "consuming_invocation_id": consuming,
+            "provider_tool_call_id": tool.provider_tool_call_id or None,
+            "tool_name": tool.tool_name or "unknown",
+            "tool_kind": tool.tool_kind or "provider",
+            "input_sha256": None,
+            "input_bytes": getattr(tool, "input_bytes", None),
+            "output_sha256": None,
+            "output_bytes": getattr(tool, "output_bytes", None),
+            "output_estimated_tokens": None,
+            "started_at_us": started,
+            "ended_at_us": ended,
+            "status": tool.status or "completed",
+            "is_error": int(tool.is_error),
+            "attribution_method": attribution_method,
+            "attribution_confidence": confidence,
+            "metadata_json": "{}",
+        },
+        session_id=observation.session_id,
+        turn_id=observation.turn_id,
+        invocation_id=triggering,
+    )
+
+
+_runtime: MetricsRuntime | None = None
+
+
+def current_runtime() -> MetricsRuntime | None:
+    """This process's metrics runtime, if one was started; never creates one."""
+    return _runtime if _runtime is not None and _runtime.pid == os.getpid() else None
+
+
+def get_runtime(root: Path | str | None = None) -> MetricsRuntime:
+    global _runtime
+    pid = os.getpid()
+    if root is None:
+        try:
+            from bobi import paths
+
+            root = paths.bound_root()
+        except Exception:
+            root = None
+    resolved = Path(root).resolve() if root is not None else None
+    if resolved is None:
+        # An unbound process cannot safely select or reuse an agent-local store.
+        return MetricsRuntime(Path.cwd(), mode=DISABLED)
+    if (
+        _runtime is not None
+        and _runtime.pid == pid
+        and _runtime.root == resolved
+    ):
+        return _runtime
+    previous = _runtime
+    if previous is not None:
+        try:
+            atexit.unregister(previous.close)
+        except Exception:
+            pass
+        # A fork inherits the producer object but not its writer thread. Do not
+        # touch the inherited writer from the child; process exit closes its fd.
+        if previous.pid == pid:
+            previous.close()
+    _runtime = MetricsRuntime(resolved)
+    atexit.register(_runtime.close)
+    return _runtime
+
+
+def prompt_bytes(text: str) -> int:
+    """UTF-8 size of a prompt, for metrics only.
+
+    A prompt can hold a lone surrogate (half an emoji cut by an upstream
+    truncation); counting its bytes must never be what fails the turn.
+    """
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
+def observe_turn(session_name: str, **kwargs: Any) -> TurnObservation:
+    try:
+        return get_runtime().begin_turn(session_name, **kwargs)
+    except Exception:
+        log.debug("metrics: turn observer startup failed", exc_info=True)
+        return MetricsRuntime(Path.cwd(), mode=DISABLED).begin_turn(
+            session_name, **kwargs
+        )
+
+
+def finish_metrics_session(
+    session_name: str,
+    *,
+    status: str,
+    error_kind: str = "",
+) -> bool:
+    try:
+        return get_runtime().finish_session(
+            session_name,
+            status=status,
+            error_kind=error_kind,
+        )
+    except Exception:
+        log.debug("metrics: session finalization failed", exc_info=True)
+        return False
+
+
+def observe_workflow_step(
+    session_name: str, **kwargs: Any
+) -> WorkflowStepObservation:
+    try:
+        return get_runtime().begin_workflow_step(session_name, **kwargs)
+    except Exception:
+        log.debug("metrics: workflow-step observer startup failed", exc_info=True)
+        return MetricsRuntime(Path.cwd(), mode=DISABLED).begin_workflow_step(
+            session_name, **kwargs
+        )
+
+
+def reset_runtime_for_tests() -> None:
+    global _runtime
+    if _runtime is not None:
+        _runtime.close()
+    _runtime = None

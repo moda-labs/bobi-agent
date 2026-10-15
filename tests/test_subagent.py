@@ -1403,6 +1403,25 @@ class TestRunAgentEntryRootBinding:
         assert get_process_brain_model() == ""
 
     @patch("bobi.subagent.run_persistent_agent")
+    def test_unreadable_runtime_env_does_not_kill_the_child(self, mock_spawn, tmp_path,
+                                                            monkeypatch):
+        """The spawner tolerates a runtime .env it cannot decode; so does the child."""
+        monkeypatch.setattr("bobi.paths._root", None)
+        root = tmp_path / "dev"
+        repo = root / "jobtack"
+        _write_agent_yaml(root, "name: t\n")
+        repo.mkdir()
+        paths.env_path(root).write_bytes(b"DB_PASS=fake\xff\n")
+
+        from bobi.subagent import _run_agent_entry
+        _run_agent_entry({
+            "task": "t", "cwd": str(repo), "root": str(root),
+            "workflow_name": "adhoc", "persistent": True, "subscribe": [],
+        })
+
+        mock_spawn.assert_called_once()
+
+    @patch("bobi.subagent.run_persistent_agent")
     def test_missing_root_is_a_spawner_bug(self, mock_spawn, tmp_path,
                                            monkeypatch):
         """An args blob without a root fails loudly — the child never

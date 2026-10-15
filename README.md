@@ -449,6 +449,7 @@ the prompt-injection surface, and trusted team code. Event-bus internals:
 | Connect Slack / Linear | [skills/slack-setup.md](skills/slack-setup.md) · [skills/linear-setup.md](skills/linear-setup.md) |
 | Run Bobi in a container | [docs/REFERENCE_IMAGE.md](docs/REFERENCE_IMAGE.md) — `ghcr.io/moda-labs/bobi`, the published image |
 | Control a deployment remotely | [docs/ADMIN_PROTOCOL.md](docs/ADMIN_PROTOCOL.md) — the supervisor's wire contract |
+| Implement or operate fine-grained usage metrics | [docs/FINE_GRAINED_METRICS.md](docs/FINE_GRAINED_METRICS.md) — architecture, schema, queries, smoke tests, and recovery |
 
 ## Development
 
