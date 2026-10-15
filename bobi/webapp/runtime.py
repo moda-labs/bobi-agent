@@ -1117,6 +1117,8 @@ def _saved_experiment(root):
 
     saved = routing_config_source(root)
     raw = saved.get(EXPERIMENT_CONFIG_ENV, "").strip() or saved.get(DISABLED_EXPERIMENT_CONFIG_ENV, "").strip()
+    if (raw.startswith("'") and raw.endswith("'")) or (raw.startswith('"') and raw.endswith('"')):
+        raw = raw[1:-1].strip()
     if not raw:
         raise ValueError("configure a JEV policy before simulating routing")
     return ExperimentConfig.from_mapping(json.loads(raw))

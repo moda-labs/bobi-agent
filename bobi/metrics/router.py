@@ -248,6 +248,8 @@ def routing_config_source(root=None) -> Mapping[str, str]:
 def load_experiment(env: Mapping[str, str] | None = None) -> ExperimentConfig | None:
     values = os.environ if env is None else env
     encoded = str(values.get(EXPERIMENT_CONFIG_ENV, "")).strip()
+    if (encoded.startswith("'") and encoded.endswith("'")) or (encoded.startswith('"') and encoded.endswith('"')):
+        encoded = encoded[1:-1].strip()
     if not encoded:
         return None
     try:
