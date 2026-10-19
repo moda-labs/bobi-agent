@@ -2820,6 +2820,8 @@ describe("handleChannelsSend", () => {
 });
 
 describe("handleChannelsSend: Slack tables as Block Kit (#1123)", () => {
+	afterEach(() => vi.restoreAllMocks());
+
 	// Captures every Slack Web API call. `respond` lets a test fail a
 	// specific call (by method and attempt) to drive the safety net.
 	function stubSlack(respond?: (method: string, body: Record<string, unknown>, n: number) => unknown) {
@@ -3029,6 +3031,7 @@ describe("handleChannelsSend: Slack tables as Block Kit (#1123)", () => {
 			await seed(store);
 			const result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text: TABLE_REPLY }, "bubA");
 			expect(result.status).toBe(200);
+			expect((result.body as Record<string, unknown>).ts).toBe("200.1");
 			const posts = sends(calls);
 			expect(posts).toHaveLength(2);
 			expect(posts[0].body.blocks).toBeDefined();
@@ -3038,7 +3041,6 @@ describe("handleChannelsSend: Slack tables as Block Kit (#1123)", () => {
 			const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
 			expect(logged).toContain(error);
 			expect(logged).not.toContain("Shipped");
-			warn.mockRestore();
 		});
 	}
 
@@ -3055,7 +3057,6 @@ describe("handleChannelsSend: Slack tables as Block Kit (#1123)", () => {
 		const updates = calls.filter((c) => c.method === "chat.update");
 		expect(updates).toHaveLength(2);
 		expect(updates[1].body).toMatchObject({ ts: "12.99", markdown_text: TABLE_REPLY });
-		vi.restoreAllMocks();
 	});
 
 	it("resends a rejected follow-up piece without reporting a partial delivery", async () => {
@@ -3071,7 +3072,54 @@ describe("handleChannelsSend: Slack tables as Block Kit (#1123)", () => {
 		expect(posts).toHaveLength(3);
 		expect(posts[1].body.blocks).toBeDefined();
 		expect(String(posts[2].body.markdown_text)).toContain("| B | y |");
-		vi.restoreAllMocks();
+	});
+
+	it("reports a partial delivery when a later piece fails with a non-block error", async () => {
+		const store = createMockStorage();
+		const calls = stubSlack((method, _body, n) =>
+			method === "chat.postMessage" && n === 2 ? { ok: false, error: "ratelimited" } : undefined);
+		await seed(store);
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", text: twoTables("A", "B"), mode: "final",
+		}, "bubA");
+		expect(result.status).toBe(502);
+		const body = result.body as Record<string, unknown>;
+		expect(body.ts).toBe("200.1");
+		expect(String(body.error)).toBe(
+			"chunk 2/2 failed after partial delivery (do not resend; the reply is partially visible): ratelimited");
+		expect(sends(calls)).toHaveLength(2);
+		expect(calls[calls.length - 1].method).toBe("assistant.threads.setStatus");
+	});
+
+	it("surfaces the error when the markdown_text resend fails too", async () => {
+		const store = createMockStorage();
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		const calls = stubSlack((method, body) => {
+			if (method !== "chat.postMessage") return undefined;
+			return body.blocks ? { ok: false, error: "invalid_blocks" } : { ok: false, error: "ratelimited" };
+		});
+		await seed(store);
+		const result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text: TABLE_REPLY }, "bubA");
+		expect(result.status).toBe(502);
+		expect((result.body as Record<string, string>).error).toBe("ratelimited");
+		expect(sends(calls)).toHaveLength(2);
+	});
+
+	it("never resends after a network error, which may follow a delivered post", async () => {
+		const store = createMockStorage();
+		let attempts = 0;
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: "T1", bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			attempts++;
+			throw new TypeError("fetch failed");
+		}));
+		await seed(store);
+		const result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text: TABLE_REPLY }, "bubA");
+		expect(result.status).toBe(502);
+		expect((result.body as Record<string, string>).error).toContain("fetch failed");
+		expect(attempts).toBe(1);
 	});
 
 	for (const error of ["ratelimited", "internal_error", "fatal_error", "channel_not_found"]) {

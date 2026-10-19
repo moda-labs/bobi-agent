@@ -214,10 +214,13 @@ except a message holding a GFM table (#1123): that goes out as Block Kit blocks,
 prose as `markdown` blocks around a `table` block whose columns all wrap, with a
 `text` fallback carrying the prose and the table rows. Slack takes one table per
 message, so `chunkForChannel` splits a multi-table reply into one message per table
-(`maxTablesPerMessage`). A table Slack cannot hold (over 100 rows, 20 columns or
-10,000 cell characters, a row wider than its header, or a table inside a list or
-quote) goes out as `markdown_text`, and so does any message whose blocks Slack
-rejects: it is resent once as `markdown_text` (`event-server/core/src/markdown-tables.ts`).
+(`maxTablesPerMessage`). A table that cannot convert goes out as `markdown_text`:
+one over Slack's limits (100 rows, 20 columns, 10,000 cell characters), a row wider
+than its header, or a table inside a list or quote. A message whose blocks Slack
+rejects is resent once as `markdown_text`. Conversion lives in
+`event-server/core/src/markdown-tables.ts`, the resend in `deliverSlack`
+(`channels.ts`). Slack stores a block message's `text` with newlines turned into
+spaces, so `bobi read-conversation` shows such a message on one line.
 `POST /channels/typing` sets/clears the thinking indicator and `GET /channels/history`
 reads a conversation's messages; both share the send path's auth and tenancy
 boundary. Channel capabilities (edit, typing, files, length budget) are declared per

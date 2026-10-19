@@ -328,30 +328,31 @@ type SlackContent = Pick<SlackMessageOptions, "markdownText" | "blocks" | "text"
  * Deliver one Slack post or update. Raw markdown goes out as Slack's native
  * `markdown_text` (AST-rendered by Slack, 12k budget), unless it holds a
  * table that converts: then it goes out as blocks with a text fallback. If
- * Slack rejects those blocks, the same message is resent once as
- * `markdown_text`, today's payload, and the rejection is logged without any
- * message text. Every other error surfaces unchanged and is never resent.
+ * Slack rejects those blocks, the same message goes out as `markdown_text`,
+ * today's payload, and the rejection is logged without any message text.
+ * Every other error surfaces unchanged and is never resent.
  */
 async function deliverSlack(
 	text: string,
 	call: (content: SlackContent) => Promise<{ id: string }>,
 ): Promise<SendResult> {
 	const tables = convertSlackTables(text, SLACK_MAX_TABLES);
-	if (tables.kind === "fallback") console.info(`slack: table sent as markdown_text: ${tables.reason}`);
+	if (tables.kind === "fallback") console.log(`slack: table sent as markdown_text: ${tables.reason}`);
 	try {
-		if (tables.kind !== "blocks") return { ok: true, ts: (await call({ markdownText: text })).id };
-		try {
-			return { ok: true, ts: (await call({ blocks: tables.blocks, text: tables.text })).id };
-		} catch (err) {
-			if (!(err instanceof SlackApiError) || !SLACK_BLOCK_ERRORS.has(String(err.response?.error))) throw err;
-			const meta = err.response?.response_metadata as Record<string, unknown> | undefined;
-			console.warn(
-				`slack: ${err.method} rejected table blocks (${String(err.response?.error)}; `
-				+ `errors=${JSON.stringify(err.response?.errors ?? [])}; `
-				+ `messages=${JSON.stringify(meta?.messages ?? [])}); resending as markdown_text`,
-			);
-			return { ok: true, ts: (await call({ markdownText: text })).id };
+		if (tables.kind === "blocks") {
+			try {
+				return { ok: true, ts: (await call({ blocks: tables.blocks, text: tables.text })).id };
+			} catch (err) {
+				if (!(err instanceof SlackApiError) || !SLACK_BLOCK_ERRORS.has(String(err.response?.error))) throw err;
+				console.warn(
+					`slack: ${err.method} rejected table blocks (${String(err.response?.error)}; `
+					+ `errors=${JSON.stringify(err.response?.errors ?? [])}; `
+					+ `messages=${JSON.stringify(err.response?.response_metadata?.messages ?? [])}); `
+					+ "resending as markdown_text",
+				);
+			}
 		}
+		return { ok: true, ts: (await call({ markdownText: text })).id };
 	} catch (err) {
 		return { ok: false, error: slackError(err) };
 	}

@@ -7,14 +7,14 @@
  * around each table as `markdown` blocks (exact source slices, so it renders
  * through the same Slack translator as before), and each table as a `table`
  * block with every column wrapped and `rich_text` cells shaped like the ones
- * Slack's own conversion produces.
+ * Slack's own conversion produces (checked against it on 2026-10-19).
  *
  * Tables are found with a real GFM lexer (marked), never with regexes, and
  * only when some line looks like a delimiter row, so replies without a table
  * never pay for lexing. Anything this module cannot convert faithfully goes
  * out as `markdown_text`, byte-identical to before.
  */
-import { Lexer, type Token, type Tokens } from "marked";
+import { Lexer, type MarkedToken, type Token, type Tokens } from "marked";
 
 // Table block limits (docs.slack.dev table block). Rows include the header.
 const MAX_ROWS = 100;
@@ -25,6 +25,10 @@ const MAX_CELL_CHARS = 10_000;
 // blockquote markers, with at least one dash and one pipe or colon.
 const DELIMITER_ROW = /^(?=[ \t>|:-]*-)(?=[ \t>|:-]*[|:])[ \t>|:-]+$/m;
 
+// A paragraph longer than this is never a lead-in heading, so splitting
+// never lexes long paragraphs inline.
+const MAX_LEAD_CHARS = 300;
+
 export interface RichTextStyle {
 	bold?: true;
 	italic?: true;
@@ -32,13 +36,15 @@ export interface RichTextStyle {
 	code?: true;
 }
 
+type BroadcastRange = "here" | "channel" | "everyone";
+
 export type RichTextElement =
 	| { type: "text"; text: string; style?: RichTextStyle }
 	| { type: "link"; url: string; text?: string; style?: RichTextStyle }
 	| { type: "user"; user_id: string; style?: RichTextStyle }
 	| { type: "channel"; channel_id: string; style?: RichTextStyle }
 	| { type: "usergroup"; usergroup_id: string; style?: RichTextStyle }
-	| { type: "broadcast"; range: "here" | "channel" | "everyone"; style?: RichTextStyle }
+	| { type: "broadcast"; range: BroadcastRange; style?: RichTextStyle }
 	| { type: "emoji"; name: string };
 
 export interface RichTextCell {
@@ -66,29 +72,45 @@ export type SlackTableConversion =
 	| { kind: "blocks"; blocks: SlackBlock[]; text: string }
 	| { kind: "fallback"; reason: string };
 
-function normalizeNewlines(text: string): string {
-	return text.replace(/\r\n?/g, "\n");
-}
-
-/** Top-level tokens of `text` (already normalized), or null when no line can be a delimiter row. */
-function lexTables(text: string): Token[] | null {
-	if (!DELIMITER_ROW.test(text)) return null;
+/**
+ * Top-level tokens of `source` (newlines already normalized), or null when no
+ * line can be a delimiter row. `inline: false` skips inline lexing, which
+ * splitting does not need and which is the costly part on long input. Also
+ * null when the tokens do not cover the source exactly - marked drops a
+ * repeated link definition from the token list - because every offset below
+ * is a running sum of `raw` lengths.
+ */
+function topLevelTokens(source: string, inline: boolean): Token[] | null {
+	if (!DELIMITER_ROW.test(source)) return null;
+	let tokens: Token[];
 	try {
-		return Lexer.lex(text, { gfm: true });
+		if (inline) {
+			tokens = Lexer.lex(source, { gfm: true });
+		} else {
+			const lexer = new Lexer({ gfm: true });
+			tokens = lexer.blockTokens(source, lexer.tokens);
+		}
 	} catch {
 		return null; // a lexer bug must never fail a send; the message goes out as today
 	}
+	let covered = 0;
+	for (const token of tokens) covered += token.raw.length;
+	return covered === source.length ? tokens : null;
 }
 
 /** Tables in `token`, counting tables nested in lists and blockquotes. */
 function tableCount(token: Token): number {
-	if (token.type === "table") return 1;
-	const children = token.type === "list"
-		? (token as Tokens.List).items
-		: (token as Tokens.Generic).tokens;
-	let n = 0;
-	for (const child of children ?? []) n += tableCount(child as Token);
-	return n;
+	const t = token as MarkedToken;
+	switch (t.type) {
+	case "table":
+		return 1;
+	case "blockquote":
+		return t.tokens.reduce((n, child) => n + tableCount(child), 0);
+	case "list":
+		return t.items.reduce((n, item) => n + item.tokens.reduce((m, child) => m + tableCount(child), 0), 0);
+	default:
+		return 0;
+	}
 }
 
 /**
@@ -98,12 +120,12 @@ function tableCount(token: Token): number {
  * from Slack syntax such as `<#C1|general>`, whose pipe splits a cell).
  */
 function rawCellCount(row: string): number {
-	const marked = row.replace(/\|/g, (_pipe: string, offset: number, str: string) => {
+	const spaced = row.replace(/\|/g, (_pipe: string, offset: number, str: string) => {
 		let escaped = false;
 		for (let i = offset - 1; i >= 0 && str[i] === "\\"; i--) escaped = !escaped;
 		return escaped ? "|" : " |";
 	});
-	const cells = marked.split(/ \|/);
+	const cells = spaced.split(/ \|/);
 	if (!cells[0].trim()) cells.shift();
 	if (cells.length > 0 && !cells[cells.length - 1].trim()) cells.pop();
 	return cells.length;
@@ -128,14 +150,21 @@ function cellChars(table: Tokens.Table): number {
 
 // --- cells -----------------------------------------------------------------
 
-const NAMED_ENTITIES: Record<string, string> = {
-	amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " ",
-};
+// Slack's conversion decodes HTML entities; these are the ones agents write.
+// Anything else stays as written.
+const NAMED_ENTITIES = new Map(Object.entries({
+	amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0",
+	mdash: "\u2014", ndash: "\u2013", hellip: "\u2026", middot: "\u00b7", bull: "\u2022",
+	rarr: "\u2192", larr: "\u2190", harr: "\u2194", uarr: "\u2191", darr: "\u2193",
+	times: "\u00d7", divide: "\u00f7", plusmn: "\u00b1", deg: "\u00b0",
+	le: "\u2264", ge: "\u2265", ne: "\u2260",
+	lsquo: "\u2018", rsquo: "\u2019", ldquo: "\u201c", rdquo: "\u201d", laquo: "\u00ab", raquo: "\u00bb",
+	copy: "\u00a9", reg: "\u00ae", trade: "\u2122",
+}));
 
-/** Decode the HTML entities agents write; Slack's own conversion decodes them too. */
 function decodeEntities(text: string): string {
 	return text.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (match, ref: string) => {
-		if (ref[0] !== "#") return NAMED_ENTITIES[ref.toLowerCase()] ?? match;
+		if (ref[0] !== "#") return NAMED_ENTITIES.get(ref) ?? match;
 		const code = ref[1] === "x" || ref[1] === "X" ? parseInt(ref.slice(2), 16) : parseInt(ref.slice(1), 10);
 		return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
 			? String.fromCodePoint(code)
@@ -154,70 +183,59 @@ function withStyle<T extends RichTextElement>(element: T, style: RichTextStyle):
 }
 
 /**
- * A run of plain text (not code) as rich text elements. Slack syntax is
- * matched on the source before entities are decoded, so `&lt;@U1&gt;`
- * stays literal text, as it renders today. An emoji shortcode only counts
- * between non-alphanumerics, so times such as `10:30:45` stay text, and
- * adjacent shortcodes (`:wave::skin-tone-2:`) are each an emoji.
+ * A run of text source (never code) as rich text elements. Slack syntax is
+ * matched on the source before entities are decoded, so `&lt;@U1&gt;` and
+ * `&#60;!here&#62;` stay literal text, as Slack's own conversion keeps them.
+ * An emoji shortcode only counts between non-alphanumerics, so times such as
+ * `10:30:45` and `word:smile:` stay text, and adjacent shortcodes
+ * (`:wave::skin-tone-2:`) are each an emoji, as in Slack's conversion.
  */
-function textElements(text: string, style: RichTextStyle): RichTextElement[] {
+function textElements(source: string, style: RichTextStyle): RichTextElement[] {
 	const out: RichTextElement[] = [];
 	let last = 0;
 	let lastEmojiEnd = -1;
 	const pushText = (s: string) => {
 		if (s) out.push(withStyle({ type: "text", text: decodeEntities(s) }, style));
 	};
-	for (const m of text.matchAll(SLACK_TOKEN)) {
+	for (const m of source.matchAll(SLACK_TOKEN)) {
 		const start = m.index;
 		const end = start + m[0].length;
 		let element: RichTextElement | null = null;
 		if (m[1]) element = withStyle({ type: "user", user_id: m[1] }, style);
 		else if (m[2]) element = withStyle({ type: "channel", channel_id: m[2] }, style);
 		else if (m[3]) element = withStyle({ type: "usergroup", usergroup_id: m[3] }, style);
-		else if (m[4]) element = withStyle({ type: "broadcast", range: m[4] as "here" | "channel" | "everyone" }, style);
+		else if (m[4]) element = withStyle({ type: "broadcast", range: m[4] as BroadcastRange }, style);
 		else {
 			const name = m[5];
-			const before = text[start - 1];
+			const before = source[start - 1];
 			const boundedBefore = start === 0 || start === lastEmojiEnd || (!isAlnum(before) && before !== ":");
 			const plausible = /[a-z]/.test(name) || NUMERIC_EMOJI.has(name);
-			if (boundedBefore && !isAlnum(text[end]) && plausible) {
+			if (boundedBefore && !isAlnum(source[end]) && plausible) {
 				element = { type: "emoji", name };
 				lastEmojiEnd = end;
 			}
 		}
 		if (!element) continue;
-		pushText(text.slice(last, start));
+		pushText(source.slice(last, start));
 		out.push(element);
 		last = end;
 	}
-	pushText(text.slice(last));
+	pushText(source.slice(last));
 	return out;
 }
 
+/** Text source still to be matched for Slack syntax, or a finished element. */
 type InlineRun =
-	| { kind: "text"; text: string; style: RichTextStyle }
+	| { kind: "source"; source: string; style: RichTextStyle }
 	| { kind: "element"; element: RichTextElement };
 
 function sameStyle(a: RichTextStyle, b: RichTextStyle): boolean {
 	return a.bold === b.bold && a.italic === b.italic && a.strike === b.strike && a.code === b.code;
 }
 
-/** Plain text of inline tokens, for link labels and readback. */
-function plainText(tokens: Token[] | undefined): string {
-	let out = "";
-	for (const token of tokens ?? []) {
-		const t = token as Tokens.Generic;
-		if (t.type === "br") out += " ";
-		else if (t.tokens && t.tokens.length > 0 && t.type !== "codespan") out += plainText(t.tokens);
-		else if (t.type === "text" || t.type === "escape" || t.type === "codespan") out += decodeEntities(String(t.text));
-		else out += t.raw;
-	}
-	return out;
-}
-
-function inlineRuns(tokens: Token[] | undefined, style: RichTextStyle, out: InlineRun[]): void {
-	for (const token of tokens ?? []) {
-		const t = token as Tokens.Generic;
+function inlineRuns(tokens: Token[], style: RichTextStyle, out: InlineRun[]): void {
+	for (const token of tokens) {
+		const t = token as MarkedToken;
 		switch (t.type) {
 		case "strong":
 			inlineRuns(t.tokens, { ...style, bold: true }, out);
@@ -229,73 +247,72 @@ function inlineRuns(tokens: Token[] | undefined, style: RichTextStyle, out: Inli
 			inlineRuns(t.tokens, { ...style, strike: true }, out);
 			break;
 		case "codespan":
-			out.push({ kind: "element", element: withStyle({ type: "text", text: String(t.text) }, { ...style, code: true }) });
+			out.push({ kind: "element", element: withStyle({ type: "text", text: t.text }, { ...style, code: true }) });
 			break;
 		case "link": {
 			// One link element per link, styled by what encloses it; a label's
-			// own formatting is dropped, as Slack's conversion drops it.
-			const link = t as Tokens.Link;
-			const label = plainText(link.tokens);
-			const element: RichTextElement = link.autolink
-				? { type: "link", url: link.href }
-				: { type: "link", url: link.href, text: label || link.href };
+			// own formatting is dropped, as Slack's conversion drops it. An
+			// autolink shows its URL, so it carries no label.
+			const label = inlineElements(t.tokens).map(displayText).join("");
+			const element: RichTextElement = t.autolink
+				? { type: "link", url: t.href }
+				: { type: "link", url: t.href, text: label || t.href };
 			out.push({ kind: "element", element: withStyle(element, style) });
 			break;
 		}
 		case "image": {
 			// Slack's conversion turns an image into a link to it.
-			const image = t as Tokens.Image;
-			const element: RichTextElement = image.text
-				? { type: "link", url: image.href, text: image.text }
-				: { type: "link", url: image.href };
+			const element: RichTextElement = t.text
+				? { type: "link", url: t.href, text: t.text }
+				: { type: "link", url: t.href };
 			out.push({ kind: "element", element: withStyle(element, style) });
 			break;
 		}
 		case "br":
-			out.push({ kind: "text", text: "\n", style });
+			out.push({ kind: "source", source: "\n", style });
 			break;
 		case "escape":
-			out.push({ kind: "text", text: String(t.text), style });
+			// Slack's conversion still reads `\<!here>` as a broadcast, so an
+			// escaped character joins the source around it.
+			out.push({ kind: "source", source: t.text, style });
 			break;
 		case "text":
 			if (t.tokens && t.tokens.length > 0) inlineRuns(t.tokens, style, out);
-			else out.push({ kind: "text", text: String(t.text), style });
+			// The raw source: marked's `text` has numeric entities decoded.
+			else out.push({ kind: "source", source: t.raw, style });
 			break;
 		default:
 			// Inline HTML and anything else keep their source, as Slack does.
-			out.push({ kind: "text", text: t.raw, style });
+			out.push({ kind: "source", source: t.raw, style });
 		}
 	}
 }
 
-function cellElements(tokens: Token[]): RichTextElement[] {
+function inlineElements(tokens: Token[]): RichTextElement[] {
 	const runs: InlineRun[] = [];
 	inlineRuns(tokens, {}, runs);
-	// Merge neighbouring text runs first: the lexer splits text at `<` and
-	// `!`, which would otherwise cut `<!here>` in two.
+	// Escapes and inline HTML arrive as tokens of their own; join neighbouring
+	// source so Slack syntax spanning them is still found.
 	const merged: InlineRun[] = [];
 	for (const run of runs) {
 		const prev = merged[merged.length - 1];
-		if (run.kind === "text" && prev?.kind === "text" && sameStyle(prev.style, run.style)) {
-			merged[merged.length - 1] = { ...prev, text: prev.text + run.text };
+		if (run.kind === "source" && prev?.kind === "source" && sameStyle(prev.style, run.style)) {
+			merged[merged.length - 1] = { ...prev, source: prev.source + run.source };
 		} else {
 			merged.push(run);
 		}
 	}
-	const elements: RichTextElement[] = [];
-	for (const run of merged) {
-		if (run.kind === "element") elements.push(run.element);
-		else elements.push(...textElements(run.text, run.style));
-	}
-	// An empty cell holds one space, the same shape Slack's conversion uses.
-	return elements.length > 0 ? elements : [{ type: "text", text: " " }];
+	return merged.flatMap((run) => (run.kind === "element" ? [run.element] : textElements(run.source, run.style)));
 }
 
 function richTextCell(cell: Tokens.TableCell): RichTextCell {
-	return { type: "rich_text", elements: [{ type: "rich_text_section", elements: cellElements(cell.tokens) }] };
+	const elements = inlineElements(cell.tokens);
+	// An empty cell holds one space, the same shape Slack's conversion uses.
+	if (elements.length === 0) elements.push({ type: "text", text: " " });
+	return { type: "rich_text", elements: [{ type: "rich_text_section", elements }] };
 }
 
-function tableBlock(table: Tokens.Table): SlackBlock {
+function tableBlock(table: Tokens.Table): Extract<SlackBlock, { type: "table" }> {
 	return {
 		type: "table",
 		column_settings: table.align.map((align) => (align ? { is_wrapped: true, align } : { is_wrapped: true })),
@@ -303,26 +320,44 @@ function tableBlock(table: Tokens.Table): SlackBlock {
 	};
 }
 
-/** A table as plain rows for the fallback text: header first, cells joined by ` | `. */
-function tableRows(table: Tokens.Table): string {
-	const cellText = (cell: Tokens.TableCell) =>
-		cellElements(cell.tokens).map((e) => {
-			switch (e.type) {
-			case "text": return e.text;
-			case "link": return e.text && e.text !== e.url ? `${e.text} (${e.url})` : e.url;
-			case "user": return `<@${e.user_id}>`;
-			case "channel": return `<#${e.channel_id}>`;
-			case "usergroup": return `<!subteam^${e.usergroup_id}>`;
-			case "broadcast": return `<!${e.range}>`;
-			case "emoji": return `:${e.name}:`;
-			}
-		}).join("").trim();
-	return [table.header, ...table.rows].map((row) => row.map(cellText).join(" | ")).join("\n");
+/** What an element shows, as plain text. */
+function displayText(e: RichTextElement): string {
+	switch (e.type) {
+	case "text": return e.text;
+	case "link": return e.text ?? e.url;
+	case "user": return `<@${e.user_id}>`;
+	case "channel": return `<#${e.channel_id}>`;
+	case "usergroup": return `<!subteam^${e.usergroup_id}>`;
+	case "broadcast": return `<!${e.range}>`;
+	case "emoji": return `:${e.name}:`;
+	}
 }
 
-/** `s` without the blank lines that separate it from a neighbouring table. */
+// Slack parses `text` as mrkdwn, so literal text escapes its control
+// characters; only real mentions and broadcasts keep their `<...>` form.
+const escapeMrkdwn = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function fallbackText(e: RichTextElement): string {
+	if (e.type === "text") return escapeMrkdwn(e.text);
+	if (e.type === "link") return e.text && e.text !== e.url ? `${escapeMrkdwn(e.text)} (${e.url})` : e.url;
+	return displayText(e);
+}
+
+/** A table block as plain rows: header first, cells joined by ` | `. */
+function tableAsRows(block: Extract<SlackBlock, { type: "table" }>): string {
+	return block.rows
+		.map((row) => row.map((cell) => cell.elements[0].elements.map(fallbackText).join("").trim()).join(" | "))
+		.join("\n");
+}
+
+/** `s` without the whitespace-only lines that separate it from a neighbouring table. */
 function trimBlankLines(s: string): string {
-	return s.replace(/^(?:[ \t]*\n)+/, "").replace(/(?:\n[ \t]*)+$/, "");
+	const lines = s.split("\n");
+	let start = 0;
+	let end = lines.length;
+	while (start < end && !lines[start].trim()) start++;
+	while (end > start && !lines[end - 1].trim()) end--;
+	return lines.slice(start, end).join("\n");
 }
 
 /**
@@ -333,8 +368,8 @@ function trimBlankLines(s: string): string {
  * which is never shorter than the visible text.
  */
 export function convertSlackTables(text: string, maxTables: number): SlackTableConversion {
-	const source = normalizeNewlines(text);
-	const tokens = lexTables(source);
+	const source = text.replace(/\r\n?/g, "\n");
+	const tokens = topLevelTokens(source, true);
 	if (!tokens) return { kind: "none" };
 	const tables = tokens.reduce((n, token) => n + tableCount(token), 0);
 	if (tables === 0) return { kind: "none" };
@@ -352,7 +387,7 @@ export function convertSlackTables(text: string, maxTables: number): SlackTableC
 	const fallback: string[] = [];
 	const pushProse = (slice: string) => {
 		const prose = trimBlankLines(slice);
-		if (!prose.trim()) return;
+		if (!prose) return;
 		blocks.push({ type: "markdown", text: prose });
 		fallback.push(prose);
 	};
@@ -363,8 +398,9 @@ export function convertSlackTables(text: string, maxTables: number): SlackTableC
 		offset += token.raw.length;
 		if (token.type !== "table") continue;
 		pushProse(source.slice(proseStart, start));
-		blocks.push(tableBlock(token as Tokens.Table));
-		fallback.push(tableRows(token as Tokens.Table));
+		const block = tableBlock(token as Tokens.Table);
+		blocks.push(block);
+		fallback.push(tableAsRows(block));
 		proseStart = offset;
 	}
 	pushProse(source.slice(proseStart));
@@ -373,12 +409,13 @@ export function convertSlackTables(text: string, maxTables: number): SlackTableC
 
 // --- splitting a reply at tables --------------------------------------------
 
-/** Heading, divider, or a paragraph that is bold from start to end. */
+/** Heading, divider, or a short paragraph that is bold from start to end. */
 function isLeadToken(token: Token): boolean {
 	if (token.type === "heading" || token.type === "hr") return true;
 	if (token.type !== "paragraph") return false;
-	const inline = ((token as Tokens.Paragraph).tokens ?? [])
-		.filter((t) => !(t.type === "text" && !String((t as Tokens.Text).text).trim()));
+	const text = (token as Tokens.Paragraph).text.trim();
+	if (text.length > MAX_LEAD_CHARS || !(text.startsWith("**") || text.startsWith("__"))) return false;
+	const inline = Lexer.lexInline(text, { gfm: true });
 	return inline.length === 1 && inline[0].type === "strong";
 }
 
@@ -391,8 +428,8 @@ function isLeadToken(token: Token): boolean {
  * slices in order. Text needing no cut comes back whole, byte-identical.
  */
 export function splitAtTables(text: string, maxTables: number): string[] {
-	const source = normalizeNewlines(text);
-	const tokens = lexTables(source);
+	const source = text.replace(/\r\n?/g, "\n");
+	const tokens = topLevelTokens(source, false);
 	if (!tokens) return [text];
 	const bearing = tokens.flatMap((token, i) => (tableCount(token) > 0 ? [i] : []));
 	if (bearing.length <= maxTables) return [text];
@@ -409,17 +446,15 @@ export function splitAtTables(text: string, maxTables: number): string[] {
 		const next = bearing[k];
 		let cut = next;
 		let i = next - 1;
-		while (i > prev && !isLeadToken(tokens[i])) i--; // skip to the end of the last lead run
-		while (i > prev && (isLeadToken(tokens[i]) || tokens[i].type === "space")) {
-			if (isLeadToken(tokens[i])) cut = i;
+		while (i > prev && !isLeadToken(tokens[i])) i--; // back to the end of the last lead run
+		while (i > prev && (tokens[i].type === "space" || isLeadToken(tokens[i]))) {
+			if (tokens[i].type !== "space") cut = i;
 			i--;
 		}
 		cuts.push(starts[cut]);
 	}
 	const bounds = [0, ...cuts, source.length];
 	const pieces: string[] = [];
-	for (let p = 0; p + 1 < bounds.length; p++) {
-		pieces.push(source.slice(bounds[p], bounds[p + 1]).replace(/\s+$/, ""));
-	}
+	for (let p = 0; p + 1 < bounds.length; p++) pieces.push(source.slice(bounds[p], bounds[p + 1]).trimEnd());
 	return pieces;
 }

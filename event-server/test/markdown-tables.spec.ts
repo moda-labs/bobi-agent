@@ -112,11 +112,14 @@ describe("convertSlackTables", () => {
 			{ type: "text", text: "hi ", style: { bold: true } },
 			{ type: "user", user_id: "U1", style: { bold: true } },
 		]);
-		// Code is literal, and an escaped mention stays text.
-		expect(cell("`<@U1>` &lt;@U2&gt;")).toEqual([
+		// Code is literal, and entity-escaped syntax stays text, as in Slack's
+		// own conversion (checked 2026-10-19), which still reads a backslash
+		// escape as a broadcast.
+		expect(cell("`<@U1>` &lt;@U2&gt; &#60;!channel&#62; &#x3C;@U3&#x3E;")).toEqual([
 			{ type: "text", text: "<@U1>", style: { code: true } },
-			{ type: "text", text: " <@U2>" },
+			{ type: "text", text: " <@U2> <!channel> <@U3>" },
 		]);
+		expect(cell("\\<!channel>")).toEqual([{ type: "broadcast", range: "channel" }]);
 	});
 
 	it("matches emoji shortcodes conservatively", () => {
@@ -129,11 +132,20 @@ describe("convertSlackTables", () => {
 			{ type: "emoji", name: "+1" },
 		]);
 		expect(cell("ratio 3:2:1 and a:b:c and :12:")).toEqual([{ type: "text", text: "ratio 3:2:1 and a:b:c and :12:" }]);
+		// A shortcode glued to a word stays text, as in Slack's conversion.
+		expect(cell("word:smile: (:smile:)")).toEqual([
+			{ type: "text", text: "word:smile: (" },
+			{ type: "emoji", name: "smile" },
+			{ type: "text", text: ")" },
+		]);
 	});
 
 	it("decodes entities, unescapes pipes and keeps inline HTML literal", () => {
 		expect(cell("a &amp; b &#x41;&#66; x \\| y <b>raw</b>")).toEqual([
 			{ type: "text", text: "a & b AB x | y <b>raw</b>" },
+		]);
+		expect(cell("a &mdash; b &rarr; c &constructor; &unknown;")).toEqual([
+			{ type: "text", text: "a \u2014 b \u2192 c &constructor; &unknown;" },
 		]);
 	});
 
@@ -142,6 +154,26 @@ describe("convertSlackTables", () => {
 			"Before.\n\n| Name | Link |\n|---|---|\n| **Bold** | [PR](https://x.example/1) |\n| <@U1> | https://x.example/2 |\n\nAfter.", 1);
 		expect(result.kind === "blocks" && result.text).toBe(
 			"Before.\n\nName | Link\nBold | PR (https://x.example/1)\n<@U1> | https://x.example/2\n\nAfter.");
+	});
+
+	it("escapes literal mrkdwn characters in the fallback but keeps real mentions", () => {
+		const result = convertSlackTables("| who | note |\n|---|---|\n| <@U1> | `<@U2>` &lt;!here&gt; a & b |", 1);
+		expect(result.kind === "blocks" && result.text).toBe(
+			"who | note\n<@U1> | &lt;@U2&gt; &lt;!here&gt; a &amp; b");
+	});
+
+	it("leaves a message alone when marked's tokens do not cover its source", () => {
+		// marked drops a repeated link definition from the token list, which
+		// would shift every offset after it.
+		const text = "[a]: https://one.example\n[a]: https://two.example\n\nIntro.\n\n| h | k |\n|---|---|\n| c1 | c2 |\n\nOutro.";
+		expect(convertSlackTables(text, 1)).toEqual({ kind: "none" });
+		expect(splitAtTables(`${text}\n\n| t2 |\n|---|\n| x |`, 1)).toEqual([`${text}\n\n| t2 |\n|---|\n| x |`]);
+	});
+
+	it("converts a table whose rows have no outer pipes", () => {
+		expect(tableOf("a | b\n--- | ---\n1 | 2").rows[1].map((c) => c.elements[0].elements)).toEqual([
+			[{ type: "text", text: "1" }], [{ type: "text", text: "2" }],
+		]);
 	});
 
 	it("converts CRLF input", () => {
@@ -237,6 +269,25 @@ describe("splitAtTables", () => {
 		]);
 	});
 
+	it("splits CRLF input at the same places as LF input", () => {
+		const lf = `${table("A")}\n\n**B**\n\n${table("B")}`;
+		expect(splitAtTables(lf.replace(/\n/g, "\r\n"), 1)).toEqual(splitAtTables(lf, 1));
+		expect(splitAtTables(lf, 1)).toEqual([table("A"), `**B**\n\n${table("B")}`]);
+	});
+
+	it("treats a list holding a table as a table for the cut", () => {
+		const nested = "- item\n\n  | n | v |\n  |---|---|\n  | 1 | 2 |";
+		expect(splitAtTables(`${table("A")}\n\n${nested}`, 1)).toEqual([table("A"), nested]);
+	});
+
+	it("stays fast on a long whitespace run between tables", () => {
+		const text = `${table("A")}\n\n${" ".repeat(200_000)}x\n\n${table("B")}`;
+		const started = Date.now();
+		expect(splitAtTables(text, 1)).toHaveLength(2);
+		// The old whole-reply lex plus a backtracking trim took about 25 s here.
+		expect(Date.now() - started).toBeLessThan(5_000);
+	});
+
 	it("never cuts inside one token holding two tables", () => {
 		const quote = `> ${table("A").split("\n").join("\n> ")}\n>\n> ${table("B").split("\n").join("\n> ")}`;
 		expect(splitAtTables(quote, 1)).toEqual([quote]);
@@ -271,6 +322,8 @@ describe("chunkForChannel with Slack's one-table cap", () => {
 			expect(chunks).toHaveLength(8);
 			expect(chunks.slice(0, 7).every((c) => convertSlackTables(c, 1).kind === "blocks")).toBe(true);
 			expect(convertSlackTables(chunks[7], 1)).toEqual({ kind: "fallback", reason: `${n - 7} tables in one message (max 1)` });
+			// Joined pieces keep the blank line that separates them in the source.
+			expect(chunks[7]).toContain("| 7 | x |\n\n**T9**");
 			// Content survives in order across all eight messages.
 			const joined = chunks.join("\n\n");
 			const order = Array.from({ length: n }, (_, i) => joined.indexOf(`| T${i + 1} | v |`));
