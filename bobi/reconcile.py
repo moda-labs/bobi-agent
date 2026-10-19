@@ -14,8 +14,12 @@ POST). This reconciler reads it and closes the gaps:
   2. crashed — a live status with a dead pid → mark ``crashed`` and emit
      ``agent/session.failed`` so the launcher's thread is closed instead of
      hanging on a never-arriving completion.
-  3. timed out — past the run's declared ``timeout`` (+ grace) with the pid still
-     alive → cancel it, mark ``failed``, emit ``agent/session.failed``.
+  3. timed out — past its deadline (+ grace) with the pid still alive → cancel
+     it, mark ``failed``, emit ``agent/session.failed``. The deadline is the
+     later of the run-level ``started_at + timeout`` and the ``deadline_at`` a
+     workflow runner arms before each drain from that step's own budget
+     (#1124), so a manager restart never closes a run that is still inside
+     the budget of the work it is doing.
 
 It is event-driven, not a poll loop: run it on manager wake (and it composes with
 the dead-pid sweep in ``SessionRegistry.list_active``). Idempotency is via the
@@ -101,6 +105,22 @@ def _completed_payload(entry) -> dict:
         "requested_by": entry.requested_by or None,
         "text": f"{label} finished {entry.run_key}",
     }
+
+
+def run_deadline(entry) -> float:
+    """The epoch a live run is allowed to run until; 0.0 when none is declared.
+
+    Never earlier than the run-level ``started_at + timeout``: ``deadline_at``
+    can only extend it. That keeps a stale ``deadline_at`` - left behind when
+    an await suspension is resumed and re-stamped (#826) - from closing the
+    resumed run early, and leaves runs that never arm one judged as before.
+    A run declared with no timeout has no deadline at all, whatever its
+    runner armed.
+    """
+    if not entry.timeout:
+        return 0.0
+    base = entry.started_at + entry.timeout if entry.started_at else 0.0
+    return max(base, entry.deadline_at or 0.0)
 
 
 def is_dead_run(entry) -> bool:
@@ -197,15 +217,16 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
                             "emitted": landed})
             continue
 
-        # (3) Past declared deadline, pid still alive → cancel + failed + emit.
-        if entry.timeout and entry.started_at and (
-            entry.started_at + entry.timeout + RECONCILE_GRACE < now
-        ):
+        # (3) Past its deadline, pid still alive → cancel + failed + emit.
+        deadline = run_deadline(entry)
+        if deadline and deadline + RECONCILE_GRACE < now:
             cancel(entry.name)
+            step = f" in step {entry.phase}" if entry.phase else ""
             registry.mark_terminal(
                 entry.name, TERMINAL_FAILED,
-                error=(f"agent exceeded its {entry.timeout}s timeout "
-                       "without reporting a terminal status"),
+                error=(f"agent ran past its deadline{step} "
+                       f"({int(now - deadline)}s over) without reporting a "
+                       "terminal status"),
                 reconciled=True,
             )
             landed = emit("agent/session.failed",

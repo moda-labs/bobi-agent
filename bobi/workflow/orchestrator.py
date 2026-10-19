@@ -90,8 +90,10 @@ OUTCOME_SUSPENDED = "suspended"
 # calls `asyncio.run` bare), so a resume begun just under the deadline still
 # gets a full fresh budget. Worst case per prompt step is therefore
 # `max_turns * (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by
-# the agent finishing; the dead-man reconciler is the outer net. Raising
-# either number raises that product - see #845 review.
+# the agent finishing; the dead-man reconciler is the outer net. Each drain
+# re-arms the registry's `deadline_at` from the step's budget, so that net
+# judges a live run by the drain it is in (#1124). Raising either number
+# raises that product - see #845 review.
 MAX_TURN_BUDGET_RESUMES = 3
 
 
@@ -530,6 +532,7 @@ def resume_workflow(
     registry.update(
         session_name, status="running", phase="resuming",
         pid=os.getpid(), started_at=started_at, timeout=timeout,
+        deadline_at=0.0,
     )
 
     ctx = VariableContext()
@@ -1062,6 +1065,17 @@ async def _run_workflow_async(
             return bool(resume_id)
         raise RuntimeError("session open fell through both attempts")
 
+    def _drain_deadline(step: StepDef) -> float:
+        """Deadline for one piece of step work that can block (#1124).
+
+        Nothing here interrupts a running drain, so the dead-man reconciler is
+        the only wall clock; it must judge the drain in flight by its own
+        step's budget. The run's ``timeout`` is a floor, so a step that
+        declares a shorter budget is never closed sooner than the run-level
+        deadline would have closed it.
+        """
+        return time.time() + max(step.timeout, timeout)
+
     try:
         registry.update(session_name, status="running")
 
@@ -1164,6 +1178,8 @@ async def _run_workflow_async(
             if step.action:
                 step_observation = _observe_step(step, "action", step_idx)
                 log.info(f"Native action step {step.name}: {step.action}")
+                registry.update(session_name, phase=step.name,
+                                deadline_at=_drain_deadline(step))
                 try:
                     result = _execute_native_action(step, ctx, cwd)
                 except Exception as exc:
@@ -1274,7 +1290,8 @@ async def _run_workflow_async(
 
             # Prompt step — inject into the persistent session
             step_start = time.time()
-            registry.update(session_name, phase=step.name)
+            registry.update(session_name, phase=step.name,
+                            deadline_at=_drain_deadline(step))
 
             step_on_route = _on_route(step)
             step_model = _step_model(step)
@@ -1499,6 +1516,8 @@ async def _run_workflow_async(
                     model=current_model, effort=current_effort,
                     max_turns=current_max_turns,
                 )
+                registry.update(session_name,
+                                deadline_at=_drain_deadline(step))
                 try:
                     await client.connect()
                     resume_prompt = _turn_budget_resume_prompt(step, final_try)
@@ -1612,6 +1631,8 @@ async def _run_workflow_async(
                     model_requested=current_model,
                     **telemetry_context,
                 )
+                registry.update(session_name,
+                                deadline_at=_drain_deadline(step))
                 await client.query(fix_prompt)
                 await _drain_response(
                     client,

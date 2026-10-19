@@ -95,6 +95,60 @@ class TestTimeoutReconcile:
         assert actions == []
         assert get_registry().get(name).status == "running"
 
+    def test_long_run_inside_its_current_drain_budget_survives(self):
+        # The #1124 production shape: a healthy issue-lifecycle run 1h48m in,
+        # past the flat run-level 3600s, but its current step's drain armed a
+        # deadline that has not passed. A manager restart must leave it alone.
+        name = _seed("wf-t-3", status="running", pid=__import__("os").getpid(),
+                     project="r", phase="implement", timeout=3600,
+                     started_at=time.time() - 6480,
+                     deadline_at=time.time() + 1000)
+        cancelled = []
+        emit = _Emitter()
+        actions = reconcile_sessions(emit=emit, cancel=cancelled.append)
+        assert actions == []
+        assert cancelled == []
+        assert emit.calls == []
+        assert get_registry().get(name).status == "running"
+
+    def test_drain_past_its_budget_is_closed_and_names_the_step(self):
+        name = _seed("wf-t-4", status="running", pid=__import__("os").getpid(),
+                     project="r", phase="implement", timeout=3600,
+                     started_at=time.time() - 6480,
+                     deadline_at=time.time() - (RECONCILE_GRACE + 60))
+        cancelled = []
+        emit = _Emitter()
+        reconcile_sessions(emit=emit, cancel=cancelled.append)
+
+        entry = get_registry().get(name)
+        assert entry.status == TERMINAL_FAILED
+        assert cancelled == [name]
+        assert "implement" in entry.error
+        assert "agent/session.failed" in emit.types()
+
+    def test_run_declared_without_timeout_is_never_closed(self):
+        # timeout=0 declares no deadline; whatever the runner armed, the run
+        # is left alone - exactly as before deadline_at existed.
+        name = _seed("wf-t-6", status="running", pid=__import__("os").getpid(),
+                     project="r", phase="implement", timeout=0,
+                     started_at=time.time() - 90_000,
+                     deadline_at=time.time() - 90_000)
+        actions = reconcile_sessions(emit=_Emitter(), cancel=lambda n: None)
+        assert actions == []
+        assert get_registry().get(name).status == "running"
+
+    def test_stale_drain_deadline_never_closes_before_the_run_level_one(self):
+        # A resume from await re-stamps started_at/timeout (#826) but leaves
+        # the pre-suspension deadline_at behind; the later of the two governs.
+        name = _seed("wf-t-5", status="running", pid=__import__("os").getpid(),
+                     project="r", phase="resuming", timeout=3600,
+                     started_at=time.time() - 5,
+                     deadline_at=time.time() - 90_000)
+        emit = _Emitter()
+        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        assert actions == []
+        assert get_registry().get(name).status == "running"
+
 
 # --- (1) terminal-but-unconfirmed: swallowed emit ---------------------------
 

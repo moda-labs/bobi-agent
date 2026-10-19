@@ -148,6 +148,23 @@ class TestSchemaLoad:
         assert step.goto == "spec"
         assert step.else_goto == "implement"
 
+    @pytest.mark.parametrize("raw, expected", [
+        ("", 1800), ("timeout: 7200", 7200), ("timeout: null", 1800),
+        ('timeout: "2h"', 1800), ("timeout: 0", 1800),
+    ])
+    def test_step_timeout_parses_as_positive_int(self, tmp_path, raw, expected):
+        # Every step's drain deadline is computed from it (#1124), so an
+        # unusable value must fall back to the default, not raise mid-run.
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent(f"""\
+            name: t
+            steps:
+              - name: s
+                prompt: "go"
+                {raw}
+        """))
+        assert load_workflow(f).steps[0].timeout == expected
+
     def test_load_route_iteration_cap(self, tmp_path):
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent("""\
@@ -2484,6 +2501,154 @@ class TestResumeRegistryRefresh:
         assert entry.timeout == 1234
         # The resumed run survives a reconcile pass untouched.
         assert mid_run["actions"] == []
+
+
+class TestDrainDeadline:
+    """#1124: before any work that can block, the runner arms the registry's
+    ``deadline_at`` to ``now + max(step.timeout, run timeout)``, so a manager
+    restart's reconciler judges a live run by its current drain's budget and
+    not by a flat run-level deadline that nothing in the run enforces."""
+
+    STALE = 1.0  # an obviously-expired deadline, planted to prove a re-arm
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        from bobi.sdk import SessionRegistry
+
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        self.registry = SessionRegistry()
+        self.observed = []  # (label, deadline_at - now) at each armed point
+
+    def _observe(self, label):
+        [entry] = self.registry.list_all()
+        self.observed.append((label, entry.deadline_at - time.time()))
+
+    def _plant_stale(self):
+        [entry] = self.registry.list_all()
+        self.registry.update(entry.name, deadline_at=self.STALE)
+
+    def _run(self, workflow, brain, *, saved_id="", timeout=3600):
+        with patch("bobi.brain.get_brain", lambda kind=None: brain), \
+             patch("bobi.workflow.orchestrator.get_registry",
+                   return_value=self.registry), \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree",
+                   return_value="/tmp"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value=saved_id), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.observe_brain_turn"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
+            return run_workflow(workflow, task="t", repo="r", cwd="/tmp",
+                                run_key="1124", timeout=timeout)
+
+    def _assert_armed(self, label, budget):
+        remaining = dict(self.observed)[label]
+        assert budget - 5 <= remaining <= budget, (label, remaining)
+
+    def test_each_prompt_step_arms_its_own_budget(self):
+        observe = self._observe
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                observe("short" if "Say hi" in text else "long")
+
+        brain = MagicMock()
+        brain.make_session.side_effect = lambda **_kw: Client()
+        wf = Workflow(name="t", steps=[
+            StepDef(name="short", prompt="Say hi", timeout=60),
+            StepDef(name="long", prompt="Build it", timeout=7200),
+        ])
+
+        assert self._run(wf, brain) is True
+        # A step budget below the run's timeout is floored at the run's own.
+        self._assert_armed("short", 3600)
+        self._assert_armed("long", 7200)
+
+    def test_turn_cap_resume_rearms_the_deadline(self):
+        from bobi.brain import AssistantText, TurnResult
+
+        observe, plant = self._observe, self._plant_stale
+        clients = []
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                if not clients[1:]:
+                    plant()          # first drain: leave an expired deadline
+                else:
+                    observe("resume")
+
+            async def receive_response(self):
+                if len(clients) == 1:
+                    yield TurnResult(session_id="s", is_error=True,
+                                     error_kind="max_turns_reached",
+                                     error_message="cap hit")
+                    return
+                yield AssistantText(text="Done.")
+                yield TurnResult(session_id="s")
+
+        def make_session(**_kw):
+            clients.append(Client())
+            return clients[-1]
+
+        brain = MagicMock()
+        brain.make_session.side_effect = make_session
+        wf = Workflow(name="t", steps=[
+            StepDef(name="build", prompt="Build it", timeout=7200),
+        ])
+
+        assert self._run(wf, brain, saved_id="s") is True
+        assert len(clients) == 2
+        self._assert_armed("resume", 7200)
+
+    def test_handoff_repair_retry_rearms_the_deadline(self):
+        from bobi.sdk import session_handoff_path
+
+        observe, plant, registry = self._observe, self._plant_stale, self.registry
+        queries = []
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                queries.append(text)
+                if len(queries) == 1:
+                    plant()          # the step's drain ran out its deadline
+                    return
+                observe("repair")
+                [entry] = registry.list_all()
+                path = session_handoff_path(entry.name, "build")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("summary: done\n")
+
+        brain = MagicMock()
+        brain.make_session.side_effect = lambda **_kw: Client()
+        wf = Workflow(name="t", steps=[
+            StepDef(name="build", prompt="Build it", timeout=7200,
+                    handoff=HandoffContract(required=["summary"])),
+        ])
+
+        assert self._run(wf, brain) is True
+        assert "handoff-repair retry" in queries[1]
+        self._assert_armed("repair", 7200)
+
+    def test_native_action_arms_the_deadline(self):
+        observe = self._observe
+
+        def action(step, ctx, cwd):
+            observe("action")
+            return {"status": "ok"}
+
+        wf = Workflow(name="t", steps=[
+            StepDef(name="cleanup", action="cleanup_worktree", timeout=600),
+        ])
+        with patch("bobi.workflow.orchestrator._execute_native_action",
+                   side_effect=action):
+            assert self._run(wf, MagicMock()) is True
+        self._assert_armed("action", 3600)
+        [entry] = self.registry.list_all()
+        assert entry.phase == "cleanup"
 
 
 # ---------------------------------------------------------------------------

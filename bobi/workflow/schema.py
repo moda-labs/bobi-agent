@@ -200,7 +200,7 @@ def load_workflow(path: Path) -> Workflow:
             effort=s.get("effort", ""),
             max_turns=positive_int(s.get("max_turns")),
             handoff=handoff,
-            timeout=s.get("timeout", 1800),
+            timeout=positive_int(s.get("timeout")) or 1800,
             worktree=s.get("worktree", False),
             condition=s.get("if", ""),
             goto=s.get("goto", ""),

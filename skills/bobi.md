@@ -248,8 +248,12 @@ every rule above - the derived key, the active-run guard, and period
 override included. Two identical `--wait` launches therefore refuse each
 other; fan identical copies out with `--id-random`, exactly as detached.
 `--timeout` is the run's declared deadline for the dead-man reconciler, the
-same as a detached run - the in-process bound on a runaway agent is the
-role's turn cap, not a wall clock.
+same as a detached run, and also the floor of each step's drain deadline:
+before each piece of step work the engine arms a deadline of
+`max(step timeout, --timeout)` from that moment, and the reconciler closes a
+live run only once both that deadline and `--timeout` from the run's start
+have passed, plus a grace period. `--timeout 0` declares no deadline. The
+in-process bound on a runaway agent is the role's turn cap, not a wall clock.
 `--as-check` is the explicit short-lived monitoring-check harness; it prints
 verdict JSON and is the only `subagents launch` mode that accepts
 `--post-event`. It never reaches the launch admission path, so run keys do not

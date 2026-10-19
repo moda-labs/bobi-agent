@@ -110,12 +110,17 @@ then runs as its own `agent`. The CLI allows that only when every prompt step
 (not route/action/notify/await) names an installed `agent`; otherwise `--role`
 is required. A prompt step with no `agent` inherits the previous step's.
 `timeout` (seconds, default
-1800) is the step's wall-clock budget, and it has exactly one enforcement point:
-it gates whether a turn-cap restart is allowed to **start** (see [Turn
-budget](#turn-budget) for the resulting bound). Nothing interrupts a drain already in
-flight on it. It is **not** the value the reconciler's dead-man check uses —
-that check reads the **run-level** timeout (`run_workflow`'s own parameter,
-default 3600), which covers the whole run, not any single step.
+1800) is the step's wall-clock budget. Nothing interrupts a drain already in
+flight on it; it is read at two points. It gates whether a turn-cap restart is
+allowed to **start** (see [Turn budget](#turn-budget) for the resulting bound).
+And before every piece of step work that can block - the step's turn, each
+turn-cap restart, each handoff-repair retry, a native action - the engine arms
+the registry entry's `deadline_at` to `now + max(step.timeout, run timeout)`.
+The reconciler's dead-man check judges a live run by the later of that and the
+**run-level** deadline (`started_at` + `run_workflow`'s own `timeout`, default
+3600), so a manager restart never closes a run that is still inside the budget
+of the drain it is in (#1124), and never closes one earlier than the run-level
+deadline would.
 
 `model` is optional. When omitted, a prompt step uses the acting role's
 configured model (`roles.<role>.model` in `agent.yaml`), then the team default
@@ -235,7 +240,9 @@ whether a new resume **starts**; nothing enforces it against a drain already
 running, so a resume begun just under the deadline still gets a full fresh
 budget. Worst case for one prompt step is therefore
 `max_turns × (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by the
-agent finishing. The dead-man reconciler is the outer net.
+agent finishing. The dead-man reconciler is the outer net: each restart re-arms
+the run's `deadline_at` from the step's `timeout`, so a manager restart closes
+a restarted drain only once it outlives its own step budget plus the grace.
 
 ### Route step
 
