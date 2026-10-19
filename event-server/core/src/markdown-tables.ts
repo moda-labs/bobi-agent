@@ -73,29 +73,34 @@ export type SlackTableConversion =
 	| { kind: "fallback"; reason: string };
 
 /**
- * Top-level tokens of `source` (newlines already normalized), or null when no
- * line can be a delimiter row. `inline: false` skips inline lexing, which
- * splitting does not need and which is the costly part on long input. Also
- * null when the tokens do not cover the source exactly - marked drops a
- * repeated link definition from the token list - because every offset below
- * is a running sum of `raw` lengths.
+ * Block-level lexing of `source` (newlines already normalized). Only the
+ * block structure is lexed here, which is cheap; inline lexing, the costly
+ * part on long input, is left to the few table cells that need it. Every
+ * offset below is a running sum of token `raw`s, so the tokens must spell
+ * the source exactly, and marked does not always: it drops a repeated link
+ * definition, and a quote holding a list with lazy continuation lines gets
+ * a `raw` that differs from the source.
  */
-function topLevelTokens(source: string, inline: boolean): Token[] | null {
-	if (!DELIMITER_ROW.test(source)) return null;
+type Lexed =
+	| { kind: "no-table" }
+	| { kind: "uncovered" }
+	| { kind: "lexed"; lexer: Lexer; tokens: Token[] };
+
+function lexBlocks(source: string): Lexed {
+	if (!DELIMITER_ROW.test(source)) return { kind: "no-table" };
+	const lexer = new Lexer({ gfm: true });
 	let tokens: Token[];
 	try {
-		if (inline) {
-			tokens = Lexer.lex(source, { gfm: true });
-		} else {
-			const lexer = new Lexer({ gfm: true });
-			tokens = lexer.blockTokens(source, lexer.tokens);
-		}
+		tokens = lexer.blockTokens(source, lexer.tokens);
 	} catch {
-		return null; // a lexer bug must never fail a send; the message goes out as today
+		return { kind: "uncovered" }; // a lexer bug must never fail a send
 	}
-	let covered = 0;
-	for (const token of tokens) covered += token.raw.length;
-	return covered === source.length ? tokens : null;
+	let offset = 0;
+	for (const token of tokens) {
+		if (!source.startsWith(token.raw, offset)) return { kind: "uncovered" };
+		offset += token.raw.length;
+	}
+	return offset === source.length ? { kind: "lexed", lexer, tokens } : { kind: "uncovered" };
 }
 
 /** Tables in `token`, counting tables nested in lists and blockquotes. */
@@ -154,6 +159,7 @@ function cellChars(table: Tokens.Table): number {
 // Anything else stays as written.
 const NAMED_ENTITIES = new Map(Object.entries({
 	amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: "\u00a0",
+	AMP: "&", LT: "<", GT: ">", QUOT: "\"",
 	mdash: "\u2014", ndash: "\u2013", hellip: "\u2026", middot: "\u00b7", bull: "\u2022",
 	rarr: "\u2192", larr: "\u2190", harr: "\u2194", uarr: "\u2191", darr: "\u2193",
 	times: "\u00d7", divide: "\u00f7", plusmn: "\u00b1", deg: "\u00b0",
@@ -252,19 +258,22 @@ function inlineRuns(tokens: Token[], style: RichTextStyle, out: InlineRun[]): vo
 		case "link": {
 			// One link element per link, styled by what encloses it; a label's
 			// own formatting is dropped, as Slack's conversion drops it. An
-			// autolink shows its URL, so it carries no label.
+			// autolink shows its URL, so it carries no label, and its URL is
+			// literal; any other destination may hold entities.
 			const label = inlineElements(t.tokens).map(displayText).join("");
+			const url = t.autolink ? t.href : decodeEntities(t.href);
 			const element: RichTextElement = t.autolink
-				? { type: "link", url: t.href }
-				: { type: "link", url: t.href, text: label || t.href };
+				? { type: "link", url }
+				: { type: "link", url, text: label || url };
 			out.push({ kind: "element", element: withStyle(element, style) });
 			break;
 		}
 		case "image": {
 			// Slack's conversion turns an image into a link to it.
+			const url = decodeEntities(t.href);
 			const element: RichTextElement = t.text
-				? { type: "link", url: t.href, text: t.text }
-				: { type: "link", url: t.href };
+				? { type: "link", url, text: decodeEntities(t.text) }
+				: { type: "link", url };
 			out.push({ kind: "element", element: withStyle(element, style) });
 			break;
 		}
@@ -339,7 +348,9 @@ const escapeMrkdwn = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;
 
 function fallbackText(e: RichTextElement): string {
 	if (e.type === "text") return escapeMrkdwn(e.text);
-	if (e.type === "link") return e.text && e.text !== e.url ? `${escapeMrkdwn(e.text)} (${e.url})` : e.url;
+	if (e.type === "link") {
+		return e.text && e.text !== e.url ? `${escapeMrkdwn(e.text)} (${escapeMrkdwn(e.url)})` : escapeMrkdwn(e.url);
+	}
 	return displayText(e);
 }
 
@@ -369,8 +380,10 @@ function trimBlankLines(s: string): string {
  */
 export function convertSlackTables(text: string, maxTables: number): SlackTableConversion {
 	const source = text.replace(/\r\n?/g, "\n");
-	const tokens = topLevelTokens(source, true);
-	if (!tokens) return { kind: "none" };
+	const lexed = lexBlocks(source);
+	if (lexed.kind === "no-table") return { kind: "none" };
+	if (lexed.kind === "uncovered") return { kind: "fallback", reason: "the markdown lexer did not map back onto the message" };
+	const { lexer, tokens } = lexed;
 	const tables = tokens.reduce((n, token) => n + tableCount(token), 0);
 	if (tables === 0) return { kind: "none" };
 	const topLevel = tokens.filter((token): token is Tokens.Table => token.type === "table");
@@ -382,6 +395,10 @@ export function convertSlackTables(text: string, maxTables: number): SlackTableC
 	}
 	const chars = topLevel.reduce((n, table) => n + cellChars(table), 0);
 	if (chars > MAX_CELL_CHARS) return { kind: "fallback", reason: `table cells hold ${chars} characters (max ${MAX_CELL_CHARS})` };
+	// Inline-lex only the cells, on the same lexer so reference links resolve.
+	for (const table of topLevel) {
+		for (const cell of [...table.header, ...table.rows.flat()]) lexer.inlineTokens(cell.text, cell.tokens);
+	}
 
 	const blocks: SlackBlock[] = [];
 	const fallback: string[] = [];
@@ -429,8 +446,9 @@ function isLeadToken(token: Token): boolean {
  */
 export function splitAtTables(text: string, maxTables: number): string[] {
 	const source = text.replace(/\r\n?/g, "\n");
-	const tokens = topLevelTokens(source, false);
-	if (!tokens) return [text];
+	const lexed = lexBlocks(source);
+	if (lexed.kind !== "lexed") return [text];
+	const { tokens } = lexed;
 	const bearing = tokens.flatMap((token, i) => (tableCount(token) > 0 ? [i] : []));
 	if (bearing.length <= maxTables) return [text];
 

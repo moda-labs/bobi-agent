@@ -150,6 +150,8 @@ export interface ChannelAdapter {
 const TRUNCATION_MARKER = "\n_(truncated)_";
 /** Runaway guard: past this many chunks the tail is truncated with the marker. */
 const MAX_CHUNKS = 8;
+/** Replies up to this many budgets long are split at tables (#1123). */
+const TABLE_SPLIT_BUDGETS = 2;
 /** Appended to a chunk that splits inside a code fence, so it renders closed. */
 const FENCE_CLOSE = "\n```";
 
@@ -232,7 +234,13 @@ function fenceStateAfter(s: string, open: string): string {
  * table cut comes back as a single chunk, byte-identical.
  */
 export function chunkForChannel(text: string, caps: ChannelCapabilities): string[] {
-	const pieces = caps.maxTablesPerMessage ? splitAtTables(text, caps.maxTablesPerMessage) : [text];
+	// Lexing cost grows faster than length on crafted input, so a reply past
+	// two messages' budget is never split at tables; each chunk of it still
+	// converts when it holds one table.
+	const maxTables = caps.maxTablesPerMessage;
+	const pieces = maxTables !== undefined && unitLength(text, caps) <= TABLE_SPLIT_BUDGETS * caps.maxLength
+		? splitAtTables(text, maxTables)
+		: [text];
 	if (pieces.length === 1 && unitLength(text, caps) <= caps.maxLength) return [text];
 
 	const chunks: string[] = [];

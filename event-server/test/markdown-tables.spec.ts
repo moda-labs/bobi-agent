@@ -166,8 +166,43 @@ describe("convertSlackTables", () => {
 		// marked drops a repeated link definition from the token list, which
 		// would shift every offset after it.
 		const text = "[a]: https://one.example\n[a]: https://two.example\n\nIntro.\n\n| h | k |\n|---|---|\n| c1 | c2 |\n\nOutro.";
-		expect(convertSlackTables(text, 1)).toEqual({ kind: "none" });
+		expect(convertSlackTables(text, 1)).toEqual({
+			kind: "fallback", reason: "the markdown lexer did not map back onto the message",
+		});
 		expect(splitAtTables(`${text}\n\n| t2 |\n|---|\n| x |`, 1)).toEqual([`${text}\n\n| t2 |\n|---|\n| x |`]);
+	});
+
+	it("leaves a message alone when a token's raw differs from its source", () => {
+		// marked gives a quoted list with lazy continuation lines a `raw` one
+		// character longer per lazy line, which would swallow the table header.
+		const quote = Array.from({ length: 6 }, (_, i) => `> - point ${i}\nwrapped line ${i}`).join("\n");
+		const text = `Notes:\n\n${quote}\n\n| Owner | Status |\n|---|---|\n| <@U1> | done |`;
+		expect(convertSlackTables(text, 1)).toEqual({
+			kind: "fallback", reason: "the markdown lexer did not map back onto the message",
+		});
+		const two = `| A |\n|---|\n| 1 |\n\n> - a\nb\n> - a\nb\n> - a\nb\n\n| BB |\n|---|\n| 2 |`;
+		expect(splitAtTables(two, 1)).toEqual([two]);
+	});
+
+	it("resolves a reference link in a cell against a definition elsewhere", () => {
+		expect(tableOf("| [PR][d] |\n|---|\n| x |\n\n[d]: https://d.example/1").rows[0][0].elements[0].elements).toEqual([
+			{ type: "link", url: "https://d.example/1", text: "PR" },
+		]);
+	});
+
+	it("decodes entities in link destinations and escapes URLs in the fallback", () => {
+		expect(cell("[q](https://a.example/?a=1&amp;b=2)")).toEqual([
+			{ type: "link", url: "https://a.example/?a=1&b=2", text: "q" },
+		]);
+		const result = convertSlackTables("| l |\n|---|\n| [q](https://a.example/?a=1&amp;b=2) |", 1);
+		expect(result.kind === "blocks" && result.text).toBe("l\nq (https://a.example/?a=1&amp;b=2)");
+	});
+
+	it("stays fast on crafted input that makes inline lexing slow", () => {
+		const started = Date.now();
+		// Prose is never inline-lexed: it goes out as source slices.
+		expect(convertSlackTables(`${"**a ".repeat(2900)}\n\n| a |\n|---|\n| 1 |`, 1).kind).toBe("blocks");
+		expect(Date.now() - started).toBeLessThan(5_000);
 	});
 
 	it("converts a table whose rows have no outer pipes", () => {
@@ -288,6 +323,12 @@ describe("splitAtTables", () => {
 		expect(Date.now() - started).toBeLessThan(5_000);
 	});
 
+	it("stays fast on crafted quotes before a table", () => {
+		const started = Date.now();
+		splitAtTables(`${"> - a\nb\n".repeat(2500)}\n| A |\n|---|\n| 1 |\n\n| B |\n|---|\n| 2 |`, 1);
+		expect(Date.now() - started).toBeLessThan(5_000);
+	});
+
 	it("never cuts inside one token holding two tables", () => {
 		const quote = `> ${table("A").split("\n").join("\n> ")}\n>\n> ${table("B").split("\n").join("\n> ")}`;
 		expect(splitAtTables(quote, 1)).toEqual([quote]);
@@ -343,6 +384,15 @@ describe("chunkForChannel with Slack's one-table cap", () => {
 		for (const c of chunks) expect(c.length).toBeLessThanOrEqual(12000);
 		expect(convertSlackTables(chunks[0], 1).kind).toBe("blocks");
 		expect(chunks[chunks.length - 1]).toBe(tables(1));
+	});
+
+	it("does not split a reply past two budgets at tables, bounding lexing cost", () => {
+		const prose = Array.from({ length: 250 }, (_, i) => `paragraph ${i} ${"p".repeat(90)}`).join("\n\n");
+		const text = `${tables(2)}\n\n${prose}`;
+		expect(text.length).toBeGreaterThan(24_000);
+		const chunks = chunkForChannel(text, slack);
+		expect(convertSlackTables(chunks[0], 1)).toEqual({ kind: "fallback", reason: "2 tables in one message (max 1)" });
+		for (const c of chunks) expect(c.length).toBeLessThanOrEqual(12000);
 	});
 
 	it("leaves Discord and WhatsApp chunking of multi-table text byte-identical", () => {
