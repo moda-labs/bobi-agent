@@ -1819,6 +1819,16 @@ class TestRoutingConfig:
 
         assert _saved_experiment(bobi_install.repo_path).control_model == "sonnet"
 
+    @pytest.mark.parametrize("quote", ["'", '"'])
+    def test_test_routing_reads_a_quoted_policy_from_the_process_environment(self, bobi_install, monkeypatch, quote):
+        from tests.metrics.test_routing import concise_config
+        from bobi.webapp.runtime import _saved_experiment
+
+        # With no policy in run/.env, the process env is read as set, quotes and all.
+        policy = {**concise_config(), "control_model": "sonnet"}
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", f"{quote}{json.dumps(policy)}{quote}")
+        assert _saved_experiment(bobi_install.repo_path).control_model == "sonnet"
+
     def test_jev_config_offers_native_models_and_names_unusable_policy(self, bobi_install):
         from bobi import paths
         from bobi.costs import model_prices

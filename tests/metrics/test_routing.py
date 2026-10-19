@@ -100,6 +100,11 @@ def test_concise_jev_config_compiles_to_the_typesafe_policy(mode):
     TypeSafePolicy(config.policy)
     assert load_experiment({"BOBI_METRICS_EXPERIMENT_JSON": json.dumps(raw)}) == config
     assert load_experiment({}) is None
+    # A deployment env (Docker --env-file, a hand-set variable) may keep the
+    # quotes that parse_env_file strips from run/.env.
+    for quote in ("'", '"'):
+        quoted = f"{quote}{json.dumps(raw)}{quote}"
+        assert load_experiment({"BOBI_METRICS_EXPERIMENT_JSON": quoted}) == config
 
 
 @pytest.mark.parametrize("field,value", [

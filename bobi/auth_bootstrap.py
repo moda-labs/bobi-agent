@@ -73,13 +73,6 @@ def _clean_terminal_output(text: str) -> str:
     return text
 
 
-_ANSI_RE = re.compile(
-    r"\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)"
-    r"|\x1b\[[0-?]*[ -/]*[@-~]"
-    r"|\x1b[@-Z\\-_]"
-)
-
-
 @dataclass(frozen=True)
 class SubscriptionLogin:
     """How one brain performs an interactive subscription login on a headless box."""

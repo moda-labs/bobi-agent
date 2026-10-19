@@ -2863,14 +2863,19 @@ def test_reconciling_a_large_backlog_costs_little_more_than_the_recovery_itself(
         source.close()
 
     def timed(call):
-        started = time.monotonic()
+        # CPU time, not wall-clock: each pass waits on the same fdatasync
+        # calls, one per recovery event, and the disk's latency moves its
+        # wall time more than the pass's own work does.
+        started = time.process_time()
         result = call()
-        return time.monotonic() - started, result
+        return time.process_time() - started, result
 
     # The recovery alone, with no import or spool scan between turns.
     baseline, result = timed(lambda: reconcile_missing(
         copies["baseline"], collect=False, terminal_only=True, import_spool=lambda: None))
     assert result["turns_reconciled"] == turns
+    # Importing what the recovery spooled, which a background pass also does.
+    imported, _ = timed(MetricsCollectorService(copies["baseline"]).collect_once)
     # The bare manual command, no collector running.
     manual, result = timed(lambda: reconcile_missing(root, collect=False, terminal_only=True))
     assert (result["turns_reconciled"], result["errors"]) == (turns, 0)
@@ -2887,7 +2892,7 @@ def test_reconciling_a_large_backlog_costs_little_more_than_the_recovery_itself(
         conn.close()
 
     assert manual <= 1.5 * baseline + 1.0, (manual, baseline)
-    assert background <= 1.5 * baseline + 1.0, (background, baseline)
+    assert background <= 1.5 * baseline + imported + 1.0, (background, baseline, imported)
 
 
 def test_a_manual_reconcile_with_no_collector_running_imports_the_spool_itself(monkeypatch, tmp_path):
