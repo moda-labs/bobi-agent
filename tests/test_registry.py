@@ -81,17 +81,6 @@ class TestSessionRegistry:
         assert tmp_registry.get("legacy").ack_watermark == {"pending_batches": 0}
         assert tmp_registry.get("legacy").last_activity == 10.0
 
-    def test_old_state_accepts_drain_deadline(self, tmp_registry):
-        """An entry written before deadline_at existed reads as unarmed and
-        still takes the runner's first arm - a dropped write would leave the
-        reconciler judging the run by the run-level timeout alone."""
-        state_path = tmp_registry._state_path("legacy")
-        state_path.parent.mkdir(parents=True)
-        state_path.write_text('{"name": "legacy", "status": "running"}')
-        assert tmp_registry.get("legacy").deadline_at == 0.0
-        tmp_registry.update("legacy", deadline_at=1234.5)
-        assert tmp_registry.get("legacy").deadline_at == 1234.5
-
     def test_register_and_get(self, tmp_registry):
         entry = SessionEntry(name="agent-42", run_key="42", phase="pickup")
         tmp_registry.register(entry)

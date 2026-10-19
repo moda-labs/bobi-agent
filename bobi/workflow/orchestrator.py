@@ -532,7 +532,6 @@ def resume_workflow(
     registry.update(
         session_name, status="running", phase="resuming",
         pid=os.getpid(), started_at=started_at, timeout=timeout,
-        deadline_at=0.0,
     )
 
     ctx = VariableContext()
@@ -1178,8 +1177,7 @@ async def _run_workflow_async(
             if step.action:
                 step_observation = _observe_step(step, "action", step_idx)
                 log.info(f"Native action step {step.name}: {step.action}")
-                registry.update(session_name, phase=step.name,
-                                deadline_at=_drain_deadline(step))
+                registry.update(session_name, deadline_at=_drain_deadline(step))
                 try:
                     result = _execute_native_action(step, ctx, cwd)
                 except Exception as exc:

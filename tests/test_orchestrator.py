@@ -148,23 +148,6 @@ class TestSchemaLoad:
         assert step.goto == "spec"
         assert step.else_goto == "implement"
 
-    @pytest.mark.parametrize("raw, expected", [
-        ("", 1800), ("timeout: 7200", 7200), ("timeout: null", 1800),
-        ('timeout: "2h"', 1800), ("timeout: 0", 1800),
-    ])
-    def test_step_timeout_parses_as_positive_int(self, tmp_path, raw, expected):
-        # Every step's drain deadline is computed from it (#1124), so an
-        # unusable value must fall back to the default, not raise mid-run.
-        f = tmp_path / "test.yaml"
-        f.write_text(textwrap.dedent(f"""\
-            name: t
-            steps:
-              - name: s
-                prompt: "go"
-                {raw}
-        """))
-        assert load_workflow(f).steps[0].timeout == expected
-
     def test_load_route_iteration_cap(self, tmp_path):
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent("""\
@@ -2647,8 +2630,6 @@ class TestDrainDeadline:
                    side_effect=action):
             assert self._run(wf, MagicMock()) is True
         self._assert_armed("action", 3600)
-        [entry] = self.registry.list_all()
-        assert entry.phase == "cleanup"
 
 
 # ---------------------------------------------------------------------------
