@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { Lexer } from "marked";
 import {
 	convertSlackTables,
 	splitAtTables,
@@ -196,6 +197,17 @@ describe("convertSlackTables", () => {
 		]);
 		const result = convertSlackTables("| l |\n|---|\n| [q](https://a.example/?a=1&amp;b=2) |", 1);
 		expect(result.kind === "blocks" && result.text).toBe("l\nq (https://a.example/?a=1&amp;b=2)");
+	});
+
+	it("inline-lexes only table cells, never the prose around them", () => {
+		const inline = vi.spyOn(Lexer.prototype, "inlineTokens");
+		try {
+			convertSlackTables("First paragraph.\n\nSecond paragraph.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nAfter.", 1);
+			// Four plain cells, one call each; prose would add a call per paragraph.
+			expect(inline).toHaveBeenCalledTimes(4);
+		} finally {
+			inline.mockRestore();
+		}
 	});
 
 	it("stays fast on crafted input that makes inline lexing slow", () => {

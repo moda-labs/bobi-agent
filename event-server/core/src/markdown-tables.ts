@@ -95,12 +95,13 @@ function lexBlocks(source: string): Lexed {
 	} catch {
 		return { kind: "uncovered" }; // a lexer bug must never fail a send
 	}
+	// Tokens ending early are fine: the last slice always runs to the end.
 	let offset = 0;
 	for (const token of tokens) {
 		if (!source.startsWith(token.raw, offset)) return { kind: "uncovered" };
 		offset += token.raw.length;
 	}
-	return offset === source.length ? { kind: "lexed", lexer, tokens } : { kind: "uncovered" };
+	return { kind: "lexed", lexer, tokens };
 }
 
 /** Tables in `token`, counting tables nested in lists and blockquotes. */

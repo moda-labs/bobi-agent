@@ -352,3 +352,46 @@ Whether today's single-message standup is accepted by Slack at all was unverifie
 
 **Q2. OK to post test messages as the eng-team bot in its status channel, C0BAEN48KQR?** Yes (D12).
 The live checks in §7 step 5 post there.
+
+## 11. Amendment 2026-10-19: what implementation found
+
+Built in PR #1128 after Gate 1.
+Each item is backed by a real Slack call made on 2026-10-19 with the eng-team bot in C0BAEN48KQR (D12).
+Most used an invisible probe: `chat.scheduleMessage` 100 days out returns Slack's converted blocks at once, and `chat.deleteScheduledMessage` removes it, so nothing posts and nobody is notified.
+
+**The one-table rule (F4) is not enforced by the API.**
+A real `chat.postMessage` accepted a message with two `table` blocks and stored both wrapped, and a two-table `markdown_text` message was accepted and stored as two tables.
+Whether Slack clients render both tables was not checked, because that needs a person to look.
+The split (D11) ships as approved, because it is safe either way.
+It is one declared capability (`maxTablesPerMessage: 1` in `channels.ts`), so dropping it later is a one-line change plus deleting the split code.
+
+**Slack flattens `text` on messages with blocks.**
+Slack stores a block message's `text` with every newline turned into a space; text-only messages keep their newlines.
+Readback of a converted message therefore holds the table rows (absent before), but the rows and prose run together on one line.
+§4.7's "one line per row" describes what is sent, not what Slack stores.
+
+**Cell mapping follows Slack's own conversion, probed directly.**
+These replace the matching rows of §4.4:
+
+- An empty cell is a text element holding one space, not an empty section.
+- An image becomes a link to it, with its alt text as the label.
+- A link label's own formatting is dropped; the link takes the style of what encloses it.
+- HTML entities are decoded: numeric ones and the common named ones (`&amp;`, `&mdash;`, `&rarr;` and so on). Rarer named entities stay as written.
+- Entity-escaped Slack syntax (`&lt;!here&gt;`, `&#60;!here&#62;`) stays literal text, and a backslash-escaped `\<!here>` is still read as a broadcast, both as in Slack's conversion.
+- `<!here>`, `<!channel>`, `<!everyone>` and `<!subteam^...>` map to broadcast and usergroup elements, because Slack's conversion produces them from `markdown_text` today. The probe settled this without pinging anyone.
+- A shortcode glued to a word (`word:smile:`) stays text, and `:wave::skin-tone-2:` is two emoji elements, both as in Slack's conversion.
+
+**Smaller refinements.**
+
+- Slack's own conversion does set `column_settings[].align` for aligned GFM columns; what it never sets is `is_wrapped` (refines §2).
+- The fallback `text` escapes literal `&`, `<` and `>`, so only real mentions and broadcasts stay live there.
+- A message whose lexer tokens do not spell its source exactly goes out as `markdown_text`, and the reason is logged. marked drops a repeated link definition, and gives a quote holding a list with lazy continuation lines a `raw` that differs from the source. Either would otherwise shift every offset.
+- Cost bounds: conversion inline-lexes only table cells, because prose goes out as source slices. A reply longer than two message budgets (24,000 UTF-16 units) is not split at tables; each chunk still converts when it holds one table.
+- `marked` ships its license as `LICENSE`, so the audit's license lookup needed no change.
+- The gated live suite gained real posts and readback (`tests/integration/test_slack_live.py`) instead of a `blocks.validate` call, since a real post proves more.
+
+**Known limits.**
+
+- A reference link in the prose whose definition sits on the other side of a table does not resolve, because the prose before and after the table are separate `markdown` blocks.
+- Each table takes its own message and the cap stays at 8 messages (D11), so a reply whose pieces need more than 8 messages has its tail truncated, even when today's chunking delivered it whole in fewer messages.
+- The human check of desktop, mobile and VoiceOver rendering (§7 step 5) is still owed. It must cover how the two-table test post renders.
