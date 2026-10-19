@@ -210,6 +210,24 @@ describe("convertSlackTables", () => {
 		}
 	});
 
+	it("falls back instead of failing the send when the lexer throws", () => {
+		const boom = () => { throw new Error("lexer bug"); };
+		const inline = vi.spyOn(Lexer.prototype, "inlineTokens").mockImplementation(boom);
+		const lead = vi.spyOn(Lexer, "lexInline").mockImplementation(boom);
+		try {
+			expect(convertSlackTables("| a |\n|---|\n| 1 |", 1)).toEqual({
+				kind: "fallback", reason: "the markdown lexer failed on a table cell",
+			});
+			// A lead-in check that throws counts as no lead-in: cut before the table.
+			expect(splitAtTables("| A |\n|---|\n| 1 |\n\n**B**\n\n| B |\n|---|\n| 2 |", 1)).toEqual([
+				"| A |\n|---|\n| 1 |\n\n**B**", "| B |\n|---|\n| 2 |",
+			]);
+		} finally {
+			inline.mockRestore();
+			lead.mockRestore();
+		}
+	});
+
 	it("stays fast on crafted input that makes inline lexing slow", () => {
 		const started = Date.now();
 		// Prose is never inline-lexed: it goes out as source slices.

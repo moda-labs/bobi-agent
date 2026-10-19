@@ -397,8 +397,12 @@ export function convertSlackTables(text: string, maxTables: number): SlackTableC
 	const chars = topLevel.reduce((n, table) => n + cellChars(table), 0);
 	if (chars > MAX_CELL_CHARS) return { kind: "fallback", reason: `table cells hold ${chars} characters (max ${MAX_CELL_CHARS})` };
 	// Inline-lex only the cells, on the same lexer so reference links resolve.
-	for (const table of topLevel) {
-		for (const cell of [...table.header, ...table.rows.flat()]) lexer.inlineTokens(cell.text, cell.tokens);
+	try {
+		for (const table of topLevel) {
+			for (const cell of [...table.header, ...table.rows.flat()]) lexer.inlineTokens(cell.text, cell.tokens);
+		}
+	} catch {
+		return { kind: "fallback", reason: "the markdown lexer failed on a table cell" };
 	}
 
 	const blocks: SlackBlock[] = [];
@@ -433,8 +437,12 @@ function isLeadToken(token: Token): boolean {
 	if (token.type !== "paragraph") return false;
 	const text = (token as Tokens.Paragraph).text.trim();
 	if (text.length > MAX_LEAD_CHARS || !(text.startsWith("**") || text.startsWith("__"))) return false;
-	const inline = Lexer.lexInline(text, { gfm: true });
-	return inline.length === 1 && inline[0].type === "strong";
+	try {
+		const inline = Lexer.lexInline(text, { gfm: true });
+		return inline.length === 1 && inline[0].type === "strong";
+	} catch {
+		return false; // a lexer bug must never fail a send
+	}
 }
 
 /**
