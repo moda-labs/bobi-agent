@@ -6,9 +6,13 @@ from pathlib import Path
 import pytest
 
 from bobi.costs import (
+    OFFICIAL_PRICES,
+    PRICE_TABLE,
     CostSummary,
+    cache_write_prices,
     estimate_cost,
     format_costs,
+    model_prices,
     rollup_costs,
 )
 
@@ -41,6 +45,45 @@ class TestPriceTable:
         # 100K * 5.0 + 900K * 0.50 + 10K * 30.0 = 0.5 + 0.45 + 0.3
         assert abs(cost - 1.25) < 0.001
 
+    @pytest.mark.parametrize("model,prices", [
+        ("claude-opus-5-5", (4.0, 0.20, 20.0)),
+        ("claude-opus-5.5", (4.0, 0.20, 20.0)),
+        ("claude-sonnet-5.5", (2.0, 0.10, 10.0)),
+        ("claude-haiku-4-5", (1.0, 0.10, 5.0)),
+        ("claude-opus-5-5[1m]", (4.0, 0.20, 20.0)),
+        ("opus", (4.0, 0.20, 20.0)),
+        ("sonnet", (2.0, 0.10, 10.0)),
+        ("haiku", (1.0, 0.10, 5.0)),
+        ("claude-opus-4-5", (5.0, 0.50, 25.0)),
+        ("cx/gpt-5.6-sol", (4.0, 0.40, 20.0)),
+        ("cx/gpt-5.6-terra", (2.0, 0.20, 12.0)),
+        ("cx/gpt-5.6-luna", (0.2, 0.02, 1.2)),
+        ("openai:gpt-5.4-mini", (0.75, 0.075, 4.5)),
+        ("gpt-5.4", (2.5, 0.25, 15.0)),
+        ("anthropic:claude-sonnet-5-5", (2.0, 0.10, 10.0)),
+    ])
+    def test_routed_model_ids_resolve_to_list_prices(self, model, prices):
+        assert model_prices(model) == prices
+
+    @pytest.mark.parametrize("model", [
+        "cx/gpt-7-nova", "claude-opus-9", "claude-sonnet-next", "claude-haiku-9-9",
+        "gpt-4-vision-preview", "gpt-5.9-codex", "codex-ultra",
+    ])
+    def test_unlisted_model_stays_unpriced(self, model):
+        # No published price: never borrow a sibling's rate, even when the
+        # name carries a family word. Unknown models render as token volume.
+        assert model_prices(model) is None
+
+    @pytest.mark.parametrize("model", [
+        # Ids Claude Code and Codex record: dated, context-suffixed or codex-specific.
+        "claude-sonnet-4-5-20250929", "claude-opus-4-1-20250805", "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022", "claude-3-7-sonnet-20250219",
+        "claude-opus-5-5[1m]", "gpt-5-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini",
+        "gpt-5.2-codex", "gpt-5.3-codex", "codex-mini-latest", "gpt-5.5", "o4-mini",
+    ])
+    def test_recorded_model_ids_price_by_exact_key(self, model):
+        assert model_prices(model) is not None
+
     def test_cached_clamped_to_input(self):
         # A malformed entry claiming more cached than input must not go
         # negative on the uncached remainder.
@@ -48,6 +91,27 @@ class TestPriceTable:
                              input_tokens=100,
                              cached_input_tokens=500)
         assert abs(cost - 100 * 0.50 / 1_000_000) < 1e-9
+
+    def test_cache_writes_bill_at_their_own_rates(self):
+        # Anthropic bills 5-minute writes at 1.25x input and 1-hour writes at 2x;
+        # both are subsets of input_tokens, like cache reads.
+        cost = estimate_cost("anthropic", "claude-opus-5-5", input_tokens=1_000, output_tokens=10,
+                             cached_input_tokens=200, cache_write_tokens=500, cache_write_1h_tokens=300)
+        expected = (300 * 4.0 + 200 * 0.20 + 200 * 5.0 + 300 * 8.0 + 10 * 20.0) / 1_000_000
+        assert cost == pytest.approx(expected)
+        assert cache_write_prices("gateway", "claude-opus-5-5[1m]") == (5.0, 8.0)
+
+    def test_cache_writes_without_an_official_entry_use_the_published_multipliers(self):
+        assert cache_write_prices("anthropic", "claude-3-5-haiku") == pytest.approx((1.0, 1.6))
+        assert cache_write_prices("openai", "gpt-5.1-codex") == (1.25, 1.25)
+        assert cache_write_prices("openai", "gpt-7-nova") is None
+
+    def test_official_prices_come_from_the_generated_file(self):
+        data = json.loads((Path(__file__).parent.parent / "bobi" / "model_prices.json").read_text())
+        assert data["models"] == OFFICIAL_PRICES
+        for key, entry in OFFICIAL_PRICES.items():
+            assert set(entry) == {"input", "cache_read", "cache_write_5m", "cache_write_1h", "output"}
+            assert PRICE_TABLE[key] == (entry["input"], entry["cache_read"], entry["output"])
 
 
 class TestCostRollup:
@@ -306,10 +370,10 @@ class TestEstimatedRollup:
 
     def test_unknown_model_not_estimated(self, tmp_path):
         sessions_dir = self._make_sessions(
-            tmp_path, {"dev-1-task": self._codex_session(model="codex")})
+            tmp_path, {"dev-1-task": self._codex_session(model="unknown-model-without-pricing")})
         summary = rollup_costs(sessions_dir)
         assert summary.estimated_cost_usd == 0.0
-        assert "openai:codex" in summary.tokens_by_model
+        assert "openai:unknown-model-without-pricing" in summary.tokens_by_model
 
     def test_reported_cost_never_reestimated(self, tmp_path):
         # An entry with provider-reported dollars must not ALSO contribute
@@ -429,3 +493,17 @@ class TestToDict:
         # tokens ranked by volume, values untouched (raw facts, not dollars)
         assert list(d["tokens_by_model"]) == ["openai:b", "openai:a"]
         assert d["tokens_by_model"]["openai:a"]["cached_input_tokens"] == 5
+
+
+@pytest.mark.parametrize("brain,present,absent", [
+    ("claude", ["opus", "sonnet", "haiku", "claude-haiku-4-5", "claude-opus-5-5", "claude-3-7-sonnet", "claude-3-5-sonnet"],
+     ["gpt-5.4", "cx/gpt-5.6-luna", "claude-haiku-4-5-20251001"]),
+    ("codex", ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4", "gpt-4o", "gpt-4o-mini", "o1", "o3"],
+     ["opus", "cx/gpt-5.6-luna", "claude-haiku-4-5"]),
+])
+def test_native_models_list_what_each_brain_runs_directly(brain, present, absent):
+    from bobi.costs import native_models
+
+    models = native_models(brain)
+    assert set(present) <= set(models) and not set(absent) & set(models)
+    assert all(model_prices(model) for model in models)

@@ -185,7 +185,75 @@ class TestTelemetryHeartbeat:
         assert set(data["resources"]) == {"disk_free_mb", "mem_free_mb",
                                           "mem_pct"}
         assert set(data["expectations"]) == {"subscriptions", "monitors"}
+        assert data["metrics"] == {
+            "mode": "disabled", "status": "disabled", "db_ready": False
+        }
         assert "generated_at" in data
+
+    def test_poll_includes_fail_safe_collector_health(self, monkeypatch):
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(
+            tele.probe, "status_file_age", lambda root, session, now: 1.0
+        )
+        published = []
+        health = {
+            "mode": "shadow",
+            "status": "running",
+            "db_ready": True,
+            "telemetry_events_dropped": 0,
+        }
+        observer = _telemetry(
+            published, metrics_health_fn=lambda: health
+        )
+
+        observer.poll(_state(status="idle"))
+
+        heartbeat = next(
+            data for topic, _source, data in published
+            if topic == "fleet/heartbeat"
+        )
+        assert heartbeat["metrics"] == health
+
+    def test_poll_adds_query_executor_health_without_replacing_collector_health(
+            self, monkeypatch):
+        import bobi.supervisor.telemetry as tele
+        monkeypatch.setattr(tele.probe, "manager_pid_alive", lambda root: True)
+        monkeypatch.setattr(
+            tele.probe, "status_file_age", lambda root, session, now: 1.0
+        )
+        published = []
+        observer = _telemetry(
+            published,
+            metrics_health_fn=lambda: {
+                "mode": "shadow", "status": "running", "db_ready": True,
+            },
+        )
+        observer.set_metrics_query_health_fn(lambda: {
+            "accepting": True,
+            "active_workers": 1,
+            "queue_depth": 2,
+            "rejected_queries": 3,
+            "deadline_cancellations": 4,
+            "query_latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0},
+        })
+
+        observer.poll(_state(status="idle"))
+
+        heartbeat = next(
+            data for topic, _source, data in published
+            if topic == "fleet/heartbeat"
+        )
+        assert heartbeat["metrics"]["mode"] == "shadow"
+        assert heartbeat["metrics"]["db_ready"] is True
+        assert heartbeat["metrics"]["query_executor"] == {
+            "accepting": True,
+            "active_workers": 1,
+            "queue_depth": 2,
+            "rejected_queries": 3,
+            "deadline_cancellations": 4,
+            "query_latency_ms": {"p50": 1.0, "p95": 2.0, "p99": 3.0},
+        }
 
     def test_wedge_emits_probe_failing_then_recovered(self, monkeypatch):
         import bobi.supervisor.telemetry as tele
@@ -468,3 +536,118 @@ class TestLoadGraceTelemetry:
         events = [d["event"] for d in lifecycle]
         assert events == ["load_grace_active", "load_grace_cleared"]
         assert not [d for d in lifecycle if "probe" in d["event"]]
+
+
+class TestSupervisorMetricsWiring:
+    """run() hands the Supervisor collector ownership only for a collector
+    that actually started, and publishes a bounded metrics block."""
+
+    class _Stop(Exception):
+        pass
+
+    def _run(self, tmp_path, monkeypatch, *, mode, collector_cls=None):
+        from bobi.supervisor import __main__ as sm
+
+        captured = {}
+        stop = self._Stop
+
+        class FakeTelemetry:
+            identity = {}
+
+            def __init__(self, **kwargs):
+                captured["metrics_health_fn"] = kwargs["metrics_health_fn"]
+
+            def join_bubble(self):
+                pass
+
+            def lifecycle(self, *a, **k):
+                pass
+
+        class FakeAlerter:
+            def __init__(self, **kwargs):
+                pass
+
+            def announce_fallback(self, *a, **k):
+                pass
+
+        def fake_supervisor(*args, **kwargs):
+            captured["supervisor_kwargs"] = kwargs
+            raise stop()
+
+        monkeypatch.delenv("BOBI_SUPERVISED", raising=False)
+        monkeypatch.setenv("BOBI_METRICS_MODE", mode)
+        monkeypatch.setattr(sm, "_sweep_if_os_service", lambda root: False)
+        monkeypatch.setattr(sm, "Telemetry", FakeTelemetry)
+        monkeypatch.setattr(sm, "SlackAlerter", FakeAlerter)
+        monkeypatch.setattr(sm, "Supervisor", fake_supervisor)
+        if collector_cls is not None:
+            monkeypatch.setattr("bobi.metrics.collector.MetricsCollectorService",
+                                collector_cls)
+        with pytest.raises(self._Stop):
+            sm.run(tmp_path, ["--foreground"])
+        return captured
+
+    @staticmethod
+    def _collector(health=None, fail=False):
+        class FakeCollector:
+            def __init__(self, root):
+                pass
+
+            def start(self):
+                if fail:
+                    raise RuntimeError("collector start failed")
+
+            def stop(self):
+                return True
+
+            def health(self):
+                return dict(health or {"status": "running", "db_ready": True})
+
+        return FakeCollector
+
+    def test_started_collector_claims_ownership(self, tmp_path, monkeypatch):
+        captured = self._run(tmp_path, monkeypatch, mode="enabled",
+                             collector_cls=self._collector())
+        assert captured["supervisor_kwargs"]["collector_owner"] is True
+
+    def test_failed_collector_start_does_not_claim_ownership(
+            self, tmp_path, monkeypatch):
+        captured = self._run(tmp_path, monkeypatch, mode="enabled",
+                             collector_cls=self._collector(fail=True))
+        assert captured["supervisor_kwargs"]["collector_owner"] is False
+        assert captured["metrics_health_fn"]()["mode"] == "unknown"
+
+    def test_disabled_metrics_do_not_claim_ownership(self, tmp_path,
+                                                     monkeypatch):
+        captured = self._run(tmp_path, monkeypatch, mode="disabled")
+        assert captured["supervisor_kwargs"]["collector_owner"] is False
+
+    def test_heartbeat_metrics_carry_only_scalars(self, tmp_path, monkeypatch):
+        health = {
+            "status": "running",
+            "role": "active",
+            "db_ready": True,
+            "spool_bytes": 10,
+            "import_lag_ms": None,
+            "last_error": None,
+            "reconciliation_errors": 1,
+            "reconciliation_attempts": {"turn-1": 2, "turn-2": 1},
+            "some_future_list": [1, 2, 3],
+            "query_executor": {"accepting": True, "queue_depth": 0},
+        }
+        captured = self._run(tmp_path, monkeypatch, mode="enabled",
+                             collector_cls=self._collector(health=health))
+
+        block = captured["metrics_health_fn"]()
+
+        assert block == {
+            "mode": "enabled",
+            "status": "running",
+            "role": "active",
+            "db_ready": True,
+            "spool_bytes": 10,
+            "import_lag_ms": None,
+            "last_error": None,
+            "reconciliation_errors": 1,
+            "query_executor": {"accepting": True, "queue_depth": 0},
+        }

@@ -359,6 +359,8 @@ export const ADMIN_COMMANDS = [
 	"roster",
 	"spend",
 	"usage",
+	"usage_session",
+	"usage_turn",
 	"session_log",
 	// The single-agent view's read model + the three operator writes it
 	// offers on a waiting workflow run.

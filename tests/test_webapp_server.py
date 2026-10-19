@@ -4,6 +4,7 @@ calls and read a real (temp) BOBI_HOME via the bobi_install fixture;
 TestMultiAgentRealService runs the real service layer on purpose (#706)."""
 
 import json
+import time
 
 import pytest
 import yaml
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from bobi import service
 from bobi.webapp import server
+from tests.metrics.helpers import seed_dashboard
 
 TOKEN = "test-token-123"
 
@@ -25,6 +27,813 @@ def _client():
     c = _testclient()
     c.headers.update({"x-bobi-webui-token": TOKEN})
     return c
+
+
+def _first_workflow_prompt(monkeypatch, task: str, instruction: str) -> str:
+    """The first prompt a real workflow run sends its brain, so a search test follows the
+    orchestrator's own templates rather than a copy of them."""
+    return _first_workflow_call(monkeypatch, task, instruction)[1]
+
+
+def _codex_fresh_thread_prompt(system_prompt, message: str) -> str:
+    """What the real Codex session sends for *message* on a fresh thread: the agent
+    instructions it was made with, then the message."""
+    import asyncio
+
+    from bobi.brain.codex import _CodexSession, _instructions
+
+    sent = []
+
+    async def runner(argv, cwd, prompt):
+        sent.append(prompt)
+        return
+        yield
+
+    session = _CodexSession(cwd=".", instructions=_instructions(system_prompt), runner=runner)
+
+    async def turn():
+        await session.query(message)
+        async for _ in session.receive_response():
+            pass
+
+    asyncio.run(turn())
+    return sent[0]
+
+
+def _event(**event) -> str:
+    """An event as the event bus delivers it to an agent."""
+    from bobi.events.client import format_event_for_manager
+
+    return format_event_for_manager(event)
+
+
+def _first_workflow_call(monkeypatch, task: str, instruction: str) -> tuple[dict, str]:
+    """The system prompt and first prompt of a real workflow run's first session."""
+    from unittest.mock import MagicMock, patch
+
+    from bobi.workflow.orchestrator import run_workflow
+    from bobi.workflow.schema import StepDef, Workflow
+    from tests.test_orchestrator import _recording_brain
+
+    monkeypatch.setenv("BOBI_BRAIN", "claude")
+    brain, calls, clients = _recording_brain()
+    workflow = Workflow(name="deploy", steps=[StepDef(name="implement", prompt=instruction),
+                                              StepDef(name="review", prompt="Review it.")])
+    with patch("bobi.brain.get_brain", lambda kind=None: brain), \
+            patch("bobi.workflow.orchestrator.get_registry", return_value=MagicMock()), \
+            patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+            patch("bobi.workflow.orchestrator._setup_worktree", return_value="/tmp"), \
+            patch("bobi.workflow.orchestrator.load_session_id", return_value=""), \
+            patch("bobi.workflow.orchestrator.save_session_id"), \
+            patch("bobi.brain.turns.save_session_id"), \
+            patch("bobi.workflow.orchestrator.log_activity"), \
+            patch("bobi.brain.turns.log_activity"):
+        assert run_workflow(workflow, task=task, repo="r", cwd="/tmp", run_key="1") is True
+    return calls[0]["system_prompt"], clients[0].queries[0]
+
+
+class TestMetrics:
+    RANGE = {"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z"}
+
+    def test_metrics_endpoints_and_collector_privacy(self, bobi_install):
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        health = bobi_install.state_dir / "metrics/collector.state.json"
+        health.write_text(json.dumps({"status": "running", "db_ready": True,
+                                     "reconciliation_errors": 1, "reconciliation_waiting_turns": 2,
+                                     "reconciliation_retry_exhausted_turns": 3,
+                                     "last_error": "private-task"}))
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        summary = _client().get(base + "/summary", params=self.RANGE)
+        assert summary.status_code == 200
+        assert summary.headers["cache-control"] == "no-store"
+        assert summary.json()["totals"]["input_tokens"] == 720
+        assert summary.json()["collector"]["reconciliation_errors"] == 1
+        assert summary.json()["collector"]["reconciliation_waiting_turns"] == 2
+        assert summary.json()["collector"]["reconciliation_retry_exhausted_turns"] == 3
+        assert "private-task" not in summary.text
+        summary_s1 = _client().get(base + "/summary", params={**self.RANGE, "session_id": "s1"})
+        assert summary_s1.status_code == 200
+        for endpoint in ("/turns", "/turns/t-pro", "/sessions/s1"):
+            result = _client().get(base + endpoint, params=self.RANGE)
+            assert result.status_code == 200
+            assert "private-task" not in result.text
+        assert _client().get(base + "/turns/t-pro").json()["router_decisions"][0]["confidence"] == 0.96
+        assert _client().get(base + "/turns/absent").status_code == 404
+        assert _client().get(base + "/sessions/absent").status_code == 404
+        assert _client().get("/api/agents/absent/metrics/summary", params=self.RANGE).status_code == 404
+
+    def test_metrics_summary_says_whether_the_collector_is_live(self, bobi_install):
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        health = bobi_install.state_dir / "metrics/collector.state.json"
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/summary"
+        now_us = time.time_ns() // 1000
+
+        def live():
+            return _client().get(url, params=self.RANGE).json()["collector"]["live"]
+
+        assert live() is False
+        health.write_text(json.dumps({"status": "running", "last_success_at_us": now_us}))
+        assert live() is True
+        health.write_text(json.dumps({"status": "degraded", "last_success_at_us": now_us}))
+        assert live() is False
+        # A collector that died mid-run leaves "running" behind with an old heartbeat.
+        health.write_text(json.dumps({"status": "running", "last_success_at_us": now_us - 120_000_000}))
+        assert live() is False
+        # A clock stepped back must not keep a dead collector live.
+        health.write_text(json.dumps({"status": "running", "last_success_at_us": now_us + 120_000_000}))
+        assert live() is False
+        for garbage in ('{"status": "running", "last_success_at_us": "soon"}', "{not json"):
+            health.write_text(garbage)
+            assert live() is False
+
+    def test_metrics_unavailable_validation_and_security(self, bobi_install):
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        response = _client().get(base + "/summary", params=self.RANGE)
+        assert response.status_code == 503
+        assert response.json()["code"] == "metrics_not_ready"
+        assert response.headers["retry-after"] == "1"
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+        assert _testclient().get(base + "/summary", params=self.RANGE).status_code == 403
+        hostile = TestClient(server.build_app(token=TOKEN), base_url="http://evil.example")
+        hostile.headers.update({"x-bobi-webui-token": TOKEN})
+        assert hostile.get(base + "/summary", params=self.RANGE).status_code == 403
+        assert _client().get(base + "/summary").status_code == 422
+        assert _client().get(base + "/summary", params={**self.RANGE, "from": "bad"}).status_code == 400
+        assert _client().get(base + "/turns", params={**self.RANGE, "limit": 201}).status_code == 422
+
+    def test_a_query_too_slow_is_a_client_error_without_retry(self, bobi_install, monkeypatch):
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.webapp.runtime import LocalRuntime
+
+        def too_slow(self, name, view, args):
+            raise MetricsQueryError("metrics query exceeded its one-second deadline", "query_too_slow")
+
+        monkeypatch.setattr(LocalRuntime, "metrics", too_slow)
+        response = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/summary",
+                                 params=self.RANGE)
+        assert response.status_code == 400
+        assert response.json()["code"] == "query_too_slow"
+        assert "retry-after" not in response.headers
+
+    def test_metrics_reader_saturation_release_and_unsupported_runtime(self, bobi_install):
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.webapp.runtime import LocalRuntime, TeamRuntime
+
+        runtime = LocalRuntime()
+        client = TestClient(server.build_app(token=TOKEN, runtime=runtime), base_url="http://127.0.0.1")
+        client.headers.update({"x-bobi-webui-token": TOKEN})
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/summary"
+        for _ in range(4):
+            assert runtime._metrics_reads.acquire(blocking=False)
+        assert client.get(url, params=self.RANGE).json()["code"] == "metrics_busy"
+        for _ in range(4):
+            runtime._metrics_reads.release()
+        for _ in range(5):
+            assert client.get(url, params=self.RANGE).json()["code"] == "metrics_not_ready"
+        with pytest.raises(MetricsQueryError) as error:
+            TeamRuntime.metrics(runtime, bobi_install.agent_name, "summary", self.RANGE)
+        assert error.value.code == "metrics_unsupported"
+
+    def test_metrics_turn_io_is_lifecycle_scoped_and_web_only(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.query import MetricsQueries
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        prompt = "Event: slack/message\n  Please explain **WAL**.\n  conversation: slack:T123:channel:C123:thread:1791360056.16\n  channel_name: eng-team"
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at,
+            "message": {"content": text}}) for kind, at, text in [
+                ("user", "1970-01-01T00:00:01.100Z", prompt),
+                ("assistant", "1970-01-01T00:00:01.800Z", "A **write-ahead log**."),
+                ("user", "1970-01-01T00:00:02.100Z", "Different turn"),
+                ("assistant", "1970-01-01T00:00:02.800Z", "Different answer"),
+        ]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        result = _client().get(base + "/turns/t-routine")
+        assert result.status_code == 200
+        io = result.json()["conversation"]
+        assert io["input"] == prompt
+        assert io["response"] == "A **write-ahead log**."
+        assert io["status"] == "matched"
+        assert io["origin"] == {"source": "slack", "channel_id": "C123", "channel_name": "eng-team",
+                                "thread_id": "1791360056.16", "url": "https://app.slack.com/client/T123/C123/thread/C123-1791360056.16"}
+        assert "Different" not in json.dumps(io)
+        turns = _client().get(base + "/turns", params=self.RANGE).json()["turns"]
+        routine = next(turn for turn in turns if turn["turn_id"] == "t-routine")
+        assert routine["conversation"]["prompt_snippet"] == "Please explain **WAL**."
+        assert routine["semantic_title"] == io["semantic_title"] == "Please explain **WAL**."
+        assert routine["conversation"]["response_snippet"] == "A **write-ahead log**."
+        assert "entries" not in routine["conversation"]
+        assert "conversation" not in MetricsQueries(bobi_install.repo_path).turn({"turn_id": "t-routine"})
+        assert _client().get(base + "/turns/t-unknown").json()["conversation"]["status"] == "unavailable"
+        sessions = _client().get(base + "/sessions", params=self.RANGE)
+        assert sessions.status_code == 200
+        assert {session["session_id"] for session in sessions.json()["sessions"]} == {"s1", "s2"}
+
+    def test_metrics_resumed_lifecycle_reads_its_own_part_of_a_shared_transcript(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='shared'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        transcript = tmp_path / "shared.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [
+            ("user", "1970-01-01T00:00:01.100Z", "First lifecycle question"),
+            ("assistant", "1970-01-01T00:00:01.800Z", "First answer"),
+            ("user", "1970-01-01T00:00:04.100Z", "Resumed lifecycle question"),
+            ("assistant", "1970-01-01T00:00:04.800Z", "Resumed answer"),
+        ]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "shared" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        turns = {turn["turn_id"]: turn for turn in _client().get(base + "/turns", params=self.RANGE).json()["turns"]}
+        assert turns["t-routine"]["conversation"]["prompt_snippet"] == "First lifecycle question"
+        assert turns["t-unknown"]["conversation"]["prompt_snippet"] == "Resumed lifecycle question"
+
+    def test_metrics_turn_list_carries_a_short_prompt_and_long_text_fits(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        prompt = "Giải thích nhật ký ghi trước. " * 1000
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z", prompt),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Xong.")]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        turns = _client().get(base + "/turns", params=self.RANGE).json()["turns"]
+        routine = next(turn for turn in turns if turn["turn_id"] == "t-routine")
+        assert len(routine["conversation"]["user_message"]) <= 512
+        assert routine["conversation"]["user_message_truncated"] is True
+        detail = _client().get(base + "/turns/t-routine")
+        assert detail.status_code == 200
+        assert detail.json()["conversation"]["user_message"].startswith("Giải thích")
+
+    def _long_prompt_transcript(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z", "x" * 626 + " zebracrossing"),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]) + "\n")
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        return transcript
+
+    def test_metrics_turn_search_says_how_many_turns_it_could_read(self, bobi_install, monkeypatch, tmp_path):
+        self._long_prompt_transcript(bobi_install, monkeypatch, tmp_path)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        client = _client()
+        assert "search" not in client.get(base + "/turns", params=self.RANGE).json()
+        full = client.get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
+        assert full["search"] == {"loaded": 4, "searched": 4}
+
+        # Out of time, s1's three turns go unread: the answer says so instead of claiming no match.
+        monkeypatch.setattr("bobi.webapp.runtime.SEARCH_TRANSCRIPT_BUDGET_S", 0.0)
+        fresh = _client()
+        cut = fresh.get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
+        assert cut["turns"] == []
+        assert cut["search"] == {"loaded": 4, "searched": 1}
+        # Fields the row already carries still match without the transcript.
+        by_model = fresh.get(base + "/turns", params={**self.RANGE, "q": "sonnet"}).json()
+        assert {turn["turn_id"] for turn in by_model["turns"]} == {"t-pro", "t-reused"}
+
+    def test_metrics_turn_search_does_not_count_a_prompt_out_of_reach(self, bobi_install, monkeypatch, tmp_path):
+        transcript = self._long_prompt_transcript(bobi_install, monkeypatch, tmp_path)
+        with transcript.open("a") as handle:
+            for _ in range(50):
+                handle.write(json.dumps({"type": "assistant", "timestamp": "1970-01-01T00:10:00Z",
+                                         "message": {"content": "y" * 100}}) + "\n")
+        # The prompt sits before the last bytes the reader reaches.
+        monkeypatch.setattr("bobi.chat_history._WINDOW_READ_BYTES", 2000)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        cut = _client().get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
+        assert cut["turns"] == []
+        assert cut["search"] == {"loaded": 4, "searched": 1}
+
+    def test_metrics_turn_listing_finds_each_transcript_once_and_within_its_budget(
+            self, bobi_install, monkeypatch, tmp_path):
+        import bobi.chat_history
+
+        self._long_prompt_transcript(bobi_install, monkeypatch, tmp_path)
+        lookups = []
+        find = bobi.chat_history.find_claude_transcript
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: lookups.append(session_id) or find(session_id))
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        client = _client()
+        client.get(base + "/turns", params=self.RANGE)
+        first = len(lookups)
+        assert set(lookups) == {"old-provider"}
+        # The found file is remembered; a refresh only checks it is still there.
+        client.get(base + "/turns", params=self.RANGE)
+        client.get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"})
+        assert len(lookups) == first
+        # Out of time, a listing does not go looking for files.
+        monkeypatch.setattr("bobi.webapp.runtime.LIST_TRANSCRIPT_BUDGET_S", 0.0)
+        assert _client().get(base + "/turns", params=self.RANGE).status_code == 200
+        assert len(lookups) == first
+
+    def test_metrics_turn_reads_reuse_an_unchanged_transcript(self, bobi_install, monkeypatch, tmp_path):
+        import bobi.chat_history
+
+        transcript = self._long_prompt_transcript(bobi_install, monkeypatch, tmp_path)
+        reads = []
+        real = bobi.chat_history.read_transcript_detail
+        monkeypatch.setattr("bobi.chat_history.read_transcript_detail",
+                            lambda *args, **kwargs: reads.append(args) or real(*args, **kwargs))
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+        client = _client()
+        search = {**self.RANGE, "q": "zebracrossing"}
+        assert len(client.get(base + "/turns", params=search).json()["turns"]) == 1
+        first = len(reads)
+        assert first == 1
+        assert len(client.get(base + "/turns", params=search).json()["turns"]) == 1
+        assert len(client.get(base + "/turns", params=self.RANGE).json()["turns"]) == 4
+        assert len(reads) == first
+        # A transcript that grew is read again.
+        with transcript.open("a") as handle:
+            handle.write(json.dumps({"type": "assistant", "timestamp": "1970-01-01T00:00:01.850Z",
+                                     "message": {"content": "Also done."}}) + "\n")
+        client.get(base + "/turns", params=search)
+        assert len(reads) == first + 1
+        # A read as slow as the reader's own time limit may be cut short, so it is not kept.
+        monkeypatch.setattr("bobi.chat_history._WINDOW_READ_SECONDS", 0.0)
+        slow = _client()
+        slow.get(base + "/turns", params=search)
+        slow.get(base + "/turns", params=search)
+        assert len(reads) == first + 3
+
+    def test_metrics_turn_search_matches_the_whole_prompt(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider' WHERE session_id='s1'")
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        prompt = "x" * 626 + " zebracrossing"
+        assert len(prompt) == 640
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z", prompt),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]))
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        base = f"/api/agents/{bobi_install.agent_name}/metrics"
+
+        everything = _client().get(base + "/turns", params=self.RANGE).json()
+        # An empty search is the plain listing.
+        assert _client().get(base + "/turns", params={**self.RANGE, "q": "  "}).json() == everything
+        matched = _client().get(base + "/turns", params={**self.RANGE, "q": "ZebraCrossing"}).json()
+        assert [turn["turn_id"] for turn in matched["turns"]] == ["t-routine"]
+        # The row stays bounded: only the match used the full prompt.
+        assert matched["turns"][0]["conversation"]["user_message_truncated"] is True
+        assert "zebracrossing" not in matched["turns"][0]["conversation"]["user_message"]
+        assert matched["next_cursor"] == everything["next_cursor"]
+        # The rest of the page comes back apart, so a thread can still be walked turn by turn.
+        assert "unmatched_turns" not in everything
+        assert [turn["turn_id"] for turn in matched["unmatched_turns"]] == ["t-unknown", "t-reused", "t-pro"]
+        assert matched["unmatched_turns"][0] == next(
+            turn for turn in everything["turns"] if turn["turn_id"] == "t-unknown")
+        # The other listed fields still match, as they did in the browser.
+        by_model = _client().get(base + "/turns", params={**self.RANGE, "q": "SONNET"}).json()["turns"]
+        assert {turn["turn_id"] for turn in by_model} == {"t-pro", "t-reused"}
+        assert _client().get(base + "/turns", params={**self.RANGE, "q": "no-such-text"}).json()["turns"] == []
+
+        # Under load the listing skips transcripts it has no time for; a search reads them all.
+        monkeypatch.setattr("bobi.webapp.runtime.LIST_TRANSCRIPT_BUDGET_S", 0.0)
+        assert _client().get(base + "/turns", params=self.RANGE).json()["turns"][0]["conversation"]["user_message"] is None
+        matched = _client().get(base + "/turns", params={**self.RANGE, "q": "zebracrossing"}).json()
+        assert [turn["turn_id"] for turn in matched["turns"]] == ["t-routine"]
+
+        # A word past the drawer's 32 KiB view of the prompt still matches.
+        transcript.write_text("\n".join(json.dumps({"type": kind, "timestamp": at, "message": {"content": text}})
+                                        for kind, at, text in [("user", "1970-01-01T00:00:01.100Z",
+                                                                "x" * 40000 + " farpastword"),
+                                                               ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]))
+        far = _client().get(base + "/turns", params={**self.RANGE, "q": "farpastword"}).json()
+        assert [turn["turn_id"] for turn in far["turns"]] == ["t-routine"]
+        assert far["search"] == {"loaded": 4, "searched": 4}
+
+    SLACK_EVENT = {"source": "slack", "type": "message", "text": "please check zebraevent logs\nsecond line here",
+                   "conversation": "slack:T1:channel:C1:thread:1.2",
+                   "fields": {"channel": "C1", "channel_type": "im", "ts": "123.456", "user_id": "U1",
+                              "channel_name": "ops-room"}}
+    GITHUB_EVENT = {"source": "github", "type": "github.issues", "text": "Issue opened: flaky zebratest",
+                    "fields": {"repo": "acme/api", "state": "open", "number": 42}}
+
+    def _prompt(self, monkeypatch, bobi_install, shape):
+        """One prompt of *shape*, each built by the code that writes it for real."""
+        from bobi.prompts.resolver import build_startup_prompt
+
+        if shape == "workflow":
+            return _first_workflow_prompt(monkeypatch, "rotate the zebracredential on staging", "Implement the change.")
+        if shape == "forwarded-event":
+            return _first_workflow_prompt(
+                monkeypatch, "Event: github/push\nrepo: acme/api\nplease deploy zebraforward", "Deploy it.")
+        if shape == "codex-workflow":
+            # A fresh Codex thread carries the agent instructions, base prompt included, before the step.
+            return _codex_fresh_thread_prompt(*_first_workflow_call(
+                monkeypatch, "rotate the zebracredential on staging", "Implement the change."))
+        if shape == "codex-direct":
+            system_prompt, _ = _first_workflow_call(monkeypatch, "anything", "Implement the change.")
+            return _codex_fresh_thread_prompt(system_prompt, "Please rotate the zebrakey on staging")
+        if shape == "startup":
+            return build_startup_prompt("director", bobi_install.repo_path)
+        if shape == "codex-startup":
+            return _codex_fresh_thread_prompt(
+                {"append": "You are a director agent working on an adhoc task."},
+                build_startup_prompt("director", bobi_install.repo_path))
+        if shape == "slack-event":
+            return _event(**self.SLACK_EVENT)
+        if shape == "github-event":
+            return _event(**self.GITHUB_EVENT)
+        if shape == "metadata-like-text":
+            return _event(**{**self.SLACK_EVENT, "text": "action: restart the zebraworker"})
+        if shape == "quoted-step-header":
+            header = _first_workflow_prompt(monkeypatch, "anything", "Implement the change.").split("\n\n")[-2]
+            assert header.startswith("Workflow `deploy` steps: ")
+            return _event(**{**self.SLACK_EVENT, "text": header + "\n\nImplement the change."})
+        if shape == "event-batch":
+            # Two events in one delivery, as the drain loop joins them, one annotated.
+            return "\n\n".join([_event(**self.SLACK_EVENT), _event(**self.GITHUB_EVENT)
+                                + "\n  [AUTO-DISPATCHED: workflow launched — no action needed]"])
+        raise AssertionError(shape)
+
+    def _one_prompt_turn(self, bobi_install, monkeypatch, tmp_path, prompt, *, brain="claude", prompt_size=None):
+        """Turn t-routine of the seeded dashboard received *prompt*, in a *brain* transcript, with
+        *prompt_size* recorded as the size of the message delivered; returns the metrics URL."""
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider',brain=? WHERE session_id='s1'", (brain,))
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.execute("UPDATE turns SET prompt_bytes=? WHERE turn_id='t-routine'", (prompt_size,))
+        conn.commit()
+        conn.close()
+        entries = [("user", "1970-01-01T00:00:01.100Z", prompt), ("assistant", "1970-01-01T00:00:01.800Z", "Done.")]
+        if brain == "codex":
+            rows = [{"type": "response_item", "timestamp": at, "payload": {"type": "message", "role": role,
+                     "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}]}}
+                    for role, at, text in entries]
+        else:
+            rows = [{"type": role, "timestamp": at, "message": {"content": text}} for role, at, text in entries]
+        transcript = tmp_path / "old-provider.jsonl"
+        transcript.write_text("\n".join(map(json.dumps, rows)))
+        found = lambda session_id: transcript if session_id == "old-provider" else None  # noqa: E731
+        monkeypatch.setattr("bobi.chat_history.find_claude_transcript", found)
+        monkeypatch.setattr("bobi.chat_history.find_codex_rollout", found)
+        return f"/api/agents/{bobi_install.agent_name}/metrics"
+
+    @pytest.mark.parametrize("shape,word,found", [
+        # A workflow turn's title is its step instruction; the launch task is still searched.
+        ("workflow", "zebracredential", True),
+        ("workflow", "implement the change", True),
+        # Text bobi wraps around the operator's input is not.
+        ("workflow", "repeat steps", False),
+        ("workflow", "background for run", False),
+        ("workflow", "yaml", False),
+        # A workflow whose task forwards an event is still a workflow prompt: its task is kept whole.
+        ("forwarded-event", "acme/api", True),
+        ("forwarded-event", "zebraforward", True),
+        ("forwarded-event", "repeat steps", False),
+        ("forwarded-event", "background for run", False),
+        # A fresh Codex thread: the agent instructions before the message are bobi's.
+        ("codex-workflow", "zebracredential", True),
+        ("codex-workflow", "implement the change", True),
+        ("codex-workflow", "stable slack identity", False),
+        ("codex-workflow", "jobtack", False),
+        ("codex-workflow", "can you check the deploy", False),
+        ("codex-workflow", "ask for guidance", False),
+        ("codex-workflow", "repeat steps", False),
+        ("codex-direct", "zebrakey", True),
+        ("codex-direct", "jobtack", False),
+        ("codex-direct", "you are an agent working on issue", False),
+        # An agent's startup brief is bobi's from end to end.
+        ("startup", "can you check the deploy", False),
+        ("startup", "jobtack", False),
+        ("startup", "available workflows", False),
+        ("codex-startup", "can you check the deploy", False),
+        ("codex-startup", "stable slack identity", False),
+        # An event: its text is searched, its delivery line and metadata are not.
+        ("slack-event", "zebraevent", True),
+        ("slack-event", "second line here", True),
+        ("slack-event", "slack/message", False),
+        ("slack-event", "channel_type", False),
+        ("slack-event", "123.456", False),
+        ("slack-event", "ops-room", False),
+        ("slack-event", "slack:t1", False),
+        ("github-event", "zebratest", True),
+        ("github-event", "state: open", False),
+        ("github-event", "number: 42", False),
+        ("github-event", "acme/api", False),
+        # A message that starts like metadata is still the message.
+        ("metadata-like-text", "restart the zebraworker", True),
+        ("quoted-step-header", "repeat steps", True),
+        ("quoted-step-header", "channel_type", False),
+        ("event-batch", "zebraevent", True),
+        ("event-batch", "zebratest", True),
+        ("event-batch", "auto-dispatched", False),
+        ("event-batch", "state: open", False),
+        ("event-batch", "channel_type", False),
+    ])
+    def test_metrics_turn_search_matches_operator_text_not_framework_text(
+            self, bobi_install, monkeypatch, tmp_path, shape, word, found):
+        prompt = self._prompt(monkeypatch, bobi_install, shape)
+        # The word is in what the agent received: a miss means it was left out on purpose.
+        assert word in prompt.lower()
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        listed = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()
+        assert [turn["turn_id"] for turn in listed["turns"]] == (["t-routine"] if found else [])
+
+    @pytest.mark.parametrize("shape,title,origin", [
+        ("workflow", "Implement the change.", {"source": "user"}),
+        ("forwarded-event", "Deploy it.", {"source": "user"}),
+        ("codex-workflow", "Implement the change.", {"source": "user"}),
+        ("codex-direct", "Please rotate the zebrakey on staging", {"source": "user"}),
+        ("startup", "Agent Startup & Initialization", {"source": "user"}),
+        ("codex-startup", "Agent Startup & Initialization", {"source": "user"}),
+        ("slack-event", "please check zebraevent logs second line here",
+         {"source": "slack", "channel_id": "C1", "channel_name": "ops-room", "thread_id": "1.2", "url": "https://app.slack.com/client/T1/C1/thread/C1-1.2"}),
+        ("github-event", "Issue opened: flaky zebratest", {"source": "user"}),
+        ("metadata-like-text", "action: restart the zebraworker",
+         {"source": "slack", "channel_id": "C1", "channel_name": "ops-room", "thread_id": "1.2", "url": "https://app.slack.com/client/T1/C1/thread/C1-1.2"}),
+        ("event-batch", "please check zebraevent logs second line here Issue opened: flaky zebratest",
+         {"source": "slack", "channel_id": "C1", "channel_name": "ops-room", "thread_id": "1.2", "url": "https://app.slack.com/client/T1/C1/thread/C1-1.2"}),
+    ])
+    def test_metrics_turn_title_and_origin_come_from_the_operator_part(
+            self, bobi_install, monkeypatch, tmp_path, shape, title, origin):
+        prompt = self._prompt(monkeypatch, bobi_install, shape)
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        listed = next(turn for turn in _client().get(base + "/turns", params=self.RANGE).json()["turns"]
+                      if turn["turn_id"] == "t-routine")
+        drawer = _client().get(base + "/turns/t-routine").json()
+        assert listed["semantic_title"] == drawer["conversation"]["semantic_title"] == title
+        assert listed["conversation"]["origin"] == drawer["conversation"]["origin"] == origin
+
+    def test_metrics_slack_event_quoting_a_step_header_is_titled_by_its_own_text(
+            self, bobi_install, monkeypatch, tmp_path):
+        prompt = self._prompt(monkeypatch, bobi_install, "quoted-step-header")
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        header = prompt.splitlines()[1].strip()
+        assert drawer["user_message"] == header + "\n\nImplement the change."
+        assert drawer["origin"]["source"] == "slack"
+
+    def test_metrics_prompt_structure_that_is_not_exact_is_read_whole(self, monkeypatch, bobi_install):
+        from bobi.prompts import BASE_PATH
+        from bobi.webapp.runtime import _read_prompt
+
+        workflow = self._prompt(monkeypatch, bobi_install, "workflow")
+        for raw in (
+            # The base prompt without the notice that closes an agent prompt.
+            BASE_PATH.read_text() + "\n\nPlease rotate the zebrakey",
+            # A workflow background block that is never closed.
+            workflow[:workflow.index("```\n\n")],
+            # An event whose text is not where the event bus puts it.
+            "Event: slack/message\nunindented text\n  conversation: slack:T1:channel:C1:thread:1.2",
+        ):
+            read = _read_prompt(raw)
+            assert (read.search, read.body, read.conversation) == (raw, raw, None)
+
+    def _session_instructions(self, bobi_install, monkeypatch, kind):
+        """The system prompt a session of *kind* is made with, captured from the real launch code."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from bobi.prompts.resolver import build_startup_prompt
+        from bobi.session import Session
+        from bobi.subagent import run_persistent_agent, run_phase_blocking
+
+        if kind == "workflow":
+            return _first_workflow_call(monkeypatch, "anything", "Implement the change.")[0]
+        made = []
+
+        class Recorded:
+            def __init__(self, **kwargs):
+                made.append(kwargs)
+
+            def start(self, **_):
+                return False
+
+            def stop(self):
+                pass
+
+        if kind == "rotated-with-memory":
+            (bobi_install.state_dir / "long_term_memory.md").write_text(
+                "## Facts\n- deploys go out on Tuesdays\n\n## Decisions\n- keep the zebra board\n")
+        with patch("bobi.session.Session", Recorded), patch("bobi.subagent._emit_session_started"), \
+                patch("bobi.subagent._emit_session_finished"):
+            if kind == "phase":
+                run_phase_blocking("42", "implement", str(bobi_install.repo_path), role="director")
+            else:
+                run_persistent_agent(cwd=str(bobi_install.repo_path), name="manager", role="director",
+                                     task=build_startup_prompt("director", bobi_install.repo_path))
+        system_prompt = made[0]["system_prompt"]
+        if kind == "rotated-with-memory":
+            # A context-cap rotation rebuilds the instructions, reloading long-term memory.
+            system_prompt = Session._rebuild_system_prompt(SimpleNamespace(_system_prompt=system_prompt,
+                                                                           name="manager"))
+            assert "deploys go out on Tuesdays" in system_prompt["append"]
+        return system_prompt
+
+    @pytest.mark.parametrize("kind", ["adhoc", "rotated-with-memory", "phase", "workflow"])
+    @pytest.mark.parametrize("message", ["event", "batch", "crlf-non-ascii"])
+    def test_metrics_fresh_codex_thread_is_read_from_the_message_it_delivered(
+            self, bobi_install, monkeypatch, tmp_path, kind, message):
+        from bobi.metrics.runtime import prompt_bytes
+
+        slack = {**self.SLACK_EVENT, "conversation": "slack:T0952RZRZ0X:channel:C0REAL:thread:999.111"}
+        if message == "crlf-non-ascii":
+            slack["text"] = "Kiểm tra nhật ký zebraevent\r\nsecond line here 🚀"
+        delivered = _event(**slack)
+        if message == "batch":
+            delivered = "\n\n".join([_event(**self.GITHUB_EVENT), delivered])
+        prompt = _codex_fresh_thread_prompt(self._session_instructions(bobi_install, monkeypatch, kind), delivered)
+        assert prompt.endswith("\n\n" + delivered) and len(prompt) > len(delivered) + 2
+        # The session records the size of the message it delivered (`Session._observe_message`).
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt, brain="codex",
+                                     prompt_size=prompt_bytes(delivered))
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        listed = next(turn for turn in _client().get(base + "/turns", params=self.RANGE).json()["turns"]
+                      if turn["turn_id"] == "t-routine")
+        origin = {"source": "slack", "channel_id": "C0REAL", "channel_name": "ops-room", "thread_id": "999.111",
+                  "url": "https://app.slack.com/client/T0952RZRZ0X/C0REAL/thread/C0REAL-999.111"}
+        assert drawer["origin"] == listed["conversation"]["origin"] == origin
+        assert drawer["user_message"].endswith(slack["text"])
+        assert listed["semantic_title"] == drawer["semantic_title"]
+        for word, found in [("zebraevent", True), ("second line here", True), ("working on", False),
+                            ("channel_type", False)]:
+            hits = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()["turns"]
+            assert [turn["turn_id"] for turn in hits] == (["t-routine"] if found else []), word
+
+    @pytest.mark.parametrize("kind", ["adhoc", "workflow"])
+    @pytest.mark.parametrize("ending", ["\n", "  ", " \n"])
+    @pytest.mark.parametrize("message", ["event", "plain"])
+    def test_metrics_fresh_codex_thread_message_ending_in_whitespace(
+            self, bobi_install, monkeypatch, tmp_path, kind, ending, message):
+        from bobi.metrics.runtime import prompt_bytes
+
+        # The rollout reader strips the prompt, so the message ends without the whitespace it was sent with.
+        slack = {**self.SLACK_EVENT, "conversation": "slack:T0952RZRZ0X:channel:C0REAL:thread:999.111"}
+        delivered = (_event(**slack) if message == "event" else "Please rotate the zebraevent key") + ending
+        prompt = _codex_fresh_thread_prompt(self._session_instructions(bobi_install, monkeypatch, kind), delivered)
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt, brain="codex",
+                                     prompt_size=prompt_bytes(delivered))
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        assert drawer["origin"]["source"] == ("slack" if message == "event" else "user")
+        assert drawer["user_message"] == (slack["text"] if message == "event" else delivered.strip())
+        for word, found in [("zebraevent", True), ("working on", False)]:
+            hits = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()["turns"]
+            assert [turn["turn_id"] for turn in hits] == (["t-routine"] if found else []), word
+
+    @pytest.mark.parametrize("recorded", [None, "short", "off-separator", "mid-character", "claude"])
+    def test_metrics_message_size_that_does_not_prove_the_cut_is_not_used(
+            self, bobi_install, monkeypatch, tmp_path, recorded):
+        from bobi.metrics.runtime import prompt_bytes
+
+        delivered = _event(**{**self.SLACK_EVENT, "text": "Kiểm tra zebraevent"})
+        prompt = "Instructions say zebrainstruction.\n\n" + delivered
+        size = {None: None, "short": prompt_bytes(delivered) - 1, # Larger than the message by more than the separator: the cut would fall in the instructions.
+                "off-separator": prompt_bytes(delivered) + 3,
+                "mid-character": prompt_bytes(delivered) - len("Kiểm tra zebraevent".encode()) + 2,
+                "claude": prompt_bytes(delivered)}[recorded]
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt,
+                                     brain="claude" if recorded == "claude" else "codex", prompt_size=size)
+        # Read whole, as without the size: the instructions stay searchable and nothing is linked.
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        assert drawer["origin"] == {"source": "user"}
+        assert drawer["user_message"] == prompt.strip()
+        hits = _client().get(base + "/turns", params={**self.RANGE, "q": "zebrainstruction"}).json()["turns"]
+        assert [turn["turn_id"] for turn in hits] == ["t-routine"]
+
+    @pytest.mark.parametrize("prompt", [
+        "Check the inbox retry logic for the okapibug",
+        "Process the inbox for incoming events",
+        "Compaction required for the session",
+        "No new events to process",
+        "You are an agent in a bobi deployment. Explain the okapibug",
+    ])
+    def test_metrics_operator_message_shaped_like_upkeep_is_still_the_message(
+            self, bobi_install, monkeypatch, tmp_path, prompt):
+        from bobi.metrics.store import connect
+
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE turns SET trigger_kind='inbox' WHERE turn_id='t-routine'")
+        conn.commit()
+        conn.close()
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        assert drawer["semantic_title"] == drawer["user_message"] == prompt
+        word = prompt.split()[-1].lower()
+        listed = _client().get(base + "/turns", params={**self.RANGE, "q": word}).json()
+        assert [turn["turn_id"] for turn in listed["turns"]] == ["t-routine"]
+
+    def test_metrics_sleep_cycle_task_is_upkeep(self, bobi_install, monkeypatch, tmp_path):
+        from bobi.monitors.sleep_cycle import build_sleep_cycle_task
+        from bobi.prompts import SLEEP_CYCLE_PATH
+
+        prompt = build_sleep_cycle_task(SLEEP_CYCLE_PATH.read_text(), "user: hello zebradelta", "", {})
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, prompt)
+        drawer = _client().get(base + "/turns/t-routine").json()["conversation"]
+        assert drawer["semantic_title"] == "Sleep Cycle & Memory Compaction"
+        assert _client().get(base + "/turns", params={**self.RANGE, "q": "zebradelta"}).json()["turns"] == []
+
+    HOSTILE_CHARS = 256 * 1024
+
+    def _hostile_prompt(self, shape):
+        from bobi.prompts import BASE_PATH
+
+        if shape == "repeated-background":
+            # One Slack message repeating the workflow background opening, never closed.
+            unit = "Workflow `a` background for run `b` x\n\n```yaml\n"
+            text = unit * (self.HOSTILE_CHARS // len(unit)) + "Workflow `a` steps: s\n\nhello"
+            return _event(**{**self.SLACK_EVENT, "text": text})
+        if shape == "many-events":
+            unit = "Event: slack/message\n  hi\n"
+            return BASE_PATH.read_text() + "\n\n" + unit * (self.HOSTILE_CHARS // len(unit))
+        if shape == "many-blocks":
+            return "\n\n".join([_event(**self.SLACK_EVENT)] * (self.HOSTILE_CHARS // 200))
+        raise AssertionError(shape)
+
+    @pytest.mark.parametrize("shape", ["repeated-background", "many-events", "many-blocks"])
+    def test_metrics_prompt_reading_is_linear(self, shape):
+        from bobi.webapp.runtime import _turn_conversation
+
+        prompt = self._hostile_prompt(shape)
+        assert len(prompt) >= self.HOSTILE_CHARS
+        turn = {"started_at_us": 1_000_000, "ended_at_us": 2_000_000, "trigger_kind": "slack"}
+        entries = [{"kind": "message", "role": "user", "text": prompt, "at": "1970-01-01T00:00:01.1Z"}]
+        _turn_conversation(turn, entries, full_message=True)
+        started = time.perf_counter()
+        _turn_conversation(turn, entries, full_message=True)
+        assert time.perf_counter() - started < 0.1
+
+    def test_metrics_reads_stay_fast_beside_a_hostile_prompt(self, bobi_install, monkeypatch, tmp_path):
+        base = self._one_prompt_turn(bobi_install, monkeypatch, tmp_path, self._hostile_prompt("repeated-background"))
+        client = _client()
+        for path, params in [("/turns", self.RANGE), ("/turns", {**self.RANGE, "q": "hello"}), ("/turns/t-routine", {})]:
+            client.get(base + path, params=params)
+            started = time.perf_counter()
+            assert client.get(base + path, params=params).status_code == 200
+            assert time.perf_counter() - started < 1.0, path
+
+    @pytest.mark.parametrize("brain", ["claude", "codex"])
+    def test_metrics_old_turn_uses_timestamp_window_before_tail_limit(self, bobi_install, monkeypatch, tmp_path, brain):
+        from bobi.metrics.store import connect
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        conn = connect(bobi_install.state_dir / "metrics/metrics.db")
+        conn.execute("UPDATE sessions SET provider_session_id='old-provider',brain=? WHERE session_id='s1'", (brain,))
+        conn.execute("UPDATE turns SET ended_at_us=started_at_us+900000")
+        conn.commit()
+        conn.close()
+        transcript = tmp_path / "old-provider.jsonl"
+        entries = [("user", "1970-01-01T00:00:01.100Z", "Original prompt"),
+                   ("assistant", "1970-01-01T00:00:01.900Z", "Original answer")]
+        entries.extend(("assistant", "1970-01-01T00:00:03.000Z", "Later answer") for _ in range(250))
+        entries.append(("user", "", "Missing timestamp must not match"))
+        if brain == "claude":
+            rows = [{"type": role, "timestamp": at, "message": {"content": text}} for role, at, text in entries]
+        else:
+            rows = [{"type": "response_item", "timestamp": at, "payload": {"type": "message", "role": role,
+                     "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}]}}
+                    for role, at, text in entries]
+        transcript.write_text("\n".join(map(json.dumps, rows)))
+        monkeypatch.setattr(f"bobi.chat_history.find_{brain}_{'transcript' if brain == 'claude' else 'rollout'}",
+                            lambda session_id: transcript if session_id == "old-provider" else None)
+        io = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/turns/t-routine").json()["conversation"]
+        assert io["input"] == "Original prompt"
+        assert io["response"] == "Original answer"
+        assert io["origin"] == {"source": "user"}
+        assert "Later answer" not in json.dumps(io)
+        assert "Missing timestamp" not in json.dumps(io)
 
 
 def _add_design_slot(agents_dir, name, description="An idea, not installed."):
@@ -968,3 +1777,933 @@ class TestMultiAgentRealService:
         for name in two_agents:
             assert c.get(f"/api/agents/{name}/subagents").status_code == 200
         assert paths.bound_root() is None
+
+
+class TestRoutingConfig:
+
+    @staticmethod
+    def _agent_runs(bobi_install, brain, *, gateway=""):
+        """Install the agent's brain the way an operator does: in its own ``run/.env``."""
+        from bobi import paths
+
+        env_file = paths.env_path(bobi_install.repo_path)
+        kept = [line for line in (env_file.read_text().splitlines() if env_file.exists() else [])
+                if not line.startswith(("BOBI_BRAIN=", "BOBI_GATEWAY_BASE_URL="))]
+        extra = [f"BOBI_BRAIN={brain}"] + ([f"BOBI_GATEWAY_BASE_URL={gateway}"] if gateway else [])
+        env_file.write_text("\n".join(kept + extra) + "\n")
+
+    def test_jev_config_without_experiment_is_disabled_not_missing(self, bobi_install):
+        route = "metrics/jev-config"
+        response = _client().get(f"/api/agents/{bobi_install.agent_name}/{route}")
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False and response.json()["mode"] == "off"
+        assert (response.json()["config_saved"], response.json()["raw_json"]) == (False, "")
+        assert response.headers["cache-control"] == "no-store"
+        assert _client().get(f"/api/agents/missing-agent/{route}").status_code == 404
+
+    def test_jev_config_reads_the_saved_policy_not_the_value_the_process_started_with(self, bobi_install, monkeypatch):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        # A service-launched runtime carries the policy in its own environment,
+        # frozen at start; the editor saves to run/.env, which is what it must show.
+        started = {**concise_config(), "control_model": "haiku"}
+        saved = {**concise_config(), "control_model": "sonnet"}
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(started))
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(saved) + "\n")
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        assert config["control_model"] == "sonnet"
+        assert json.loads(config["raw_json"])["control_model"] == "sonnet"
+        # Test Routing tests the same saved policy.
+        from bobi.webapp.runtime import _saved_experiment
+
+        assert _saved_experiment(bobi_install.repo_path).control_model == "sonnet"
+
+    @pytest.mark.parametrize("quote", ["'", '"'])
+    def test_test_routing_reads_a_quoted_policy_from_the_process_environment(self, bobi_install, monkeypatch, quote):
+        from tests.metrics.test_routing import concise_config
+        from bobi.webapp.runtime import _saved_experiment
+
+        # With no policy in run/.env, the process env is read as set, quotes and all.
+        policy = {**concise_config(), "control_model": "sonnet"}
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", f"{quote}{json.dumps(policy)}{quote}")
+        assert _saved_experiment(bobi_install.repo_path).control_model == "sonnet"
+        # The editor shows the same policy, so a save keeps it rather than starting over.
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        assert json.loads(config["raw_json"])["control_model"] == "sonnet"
+
+    def test_jev_config_offers_native_models_and_names_unusable_policy(self, bobi_install):
+        from bobi import paths
+        from bobi.costs import model_prices
+        from tests.metrics.test_routing import concise_config
+
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        # The picker lists the agent's own brain models, unprefixed; every one has a list price.
+        assert config["agent_brain"] == "claude"
+        assert {"opus", "claude-haiku-4-5", "claude-3-7-sonnet"} <= set(config["native_models"])
+        assert not any("/" in model or model.startswith("gpt-") for model in config["native_models"])
+        assert all(model_prices(model) for model in config["native_models"])
+        assert not {"gateway", "priced_models", "unpriced_models"} & set(config)
+        assert config["config_error"] == ""
+        broken = {**concise_config(), "min_confidence": 7}
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" + json.dumps(broken) + "\n")
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        # A saved policy that fails validation is named instead of silently shown as defaults.
+        assert config["enabled"] is False and "min_confidence" in config["config_error"]
+        # It exists, but is never echoed while invalid.
+        assert (config["config_saved"], config["raw_json"]) == (True, "")
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON={not json\n")
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        assert config["config_error"] == "BOBI_METRICS_EXPERIMENT_DISABLED_JSON is not valid JSON"
+        assert (config["config_saved"], config["raw_json"]) == (True, "")
+        legacy = {**concise_config(), "entry_points": ["subagent_persistent", "session_start", "workflow_start"]}
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(legacy) + "\n")
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        assert config["enabled"] is True and not config.get("config_error")
+        assert config["entry_points"] == ["subagent_persistent", "workflow_start"]
+        assert config["ignored_entry_points"] == ["session_start"]
+
+    def test_jev_config_does_not_hide_runtime_failure(self, bobi_install, monkeypatch):
+        def unavailable(env):
+            raise OSError("configuration unavailable")
+
+        monkeypatch.setattr("bobi.metrics.router.load_experiment", unavailable)
+        with pytest.raises(OSError, match="configuration unavailable"):
+            _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config")
+
+    def test_jev_config_bounds_security_and_hosted_refusal(self, bobi_install):
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.webapp.runtime import LocalRuntime, TeamRuntime, UnknownTeam
+
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        client = _client()
+        for content in ("[]", "{", '{"instructions":"' + "x" * 131072 + '"}', '{"min_confidence":NaN}'):
+            response = client.post(url, content=content, headers={"content-type": "application/json"})
+            assert response.status_code == 400 and response.json()["code"] == "invalid_jev_config"
+        for method in ("get", "post", "delete"):
+            assert getattr(_testclient(), method)(url).status_code == 403
+        hostile = TestClient(server.build_app(token=TOKEN), base_url="http://evil.example")
+        assert hostile.delete(url, headers={"x-bobi-webui-token": TOKEN}).status_code == 403
+        runtime = LocalRuntime()
+        for call in (TeamRuntime.get_routing_config, TeamRuntime.update_routing_config):
+            with pytest.raises(MetricsQueryError) as error:
+                if call == TeamRuntime.get_routing_config:
+                    call(runtime, bobi_install.agent_name)
+                else:
+                    call(runtime, bobi_install.agent_name, {"mode": "off"})
+            assert error.value.code == "metrics_unsupported"
+        with pytest.raises(UnknownTeam):
+            runtime.get_routing_config("../outside")
+        with pytest.raises(UnknownTeam):
+            runtime.update_routing_config("../outside", {"mode": "off"})
+
+    @pytest.mark.parametrize("stored", [{"policy": {"scope": "invalid"}}, {"api_key": "do-not-expose"}, []])
+    def test_invalid_saved_config_is_safe_to_read(self, bobi_install, stored):
+        from bobi import paths
+
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(stored) + "\n")
+        response = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config")
+        assert response.status_code == 200
+        assert response.json()["enabled"] is False and response.json()["mode"] == "off"
+        assert response.json()["raw_json"] == "" and "do-not-expose" not in response.text
+
+    def test_jev_config_roundtrip_reset_and_runtime_environment(self, bobi_install):
+        import os
+        from bobi import paths
+        from bobi.config import parse_env_file, project_env
+        from bobi.metrics.router import load_experiment
+        from bobi.env import child_agent_env
+
+        env_file = paths.env_path(bobi_install.repo_path)
+        env_file.write_text("# keep this comment\nOTHER_TOKEN=synthetic-private\n")
+        before = dict(os.environ)
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        payload = {"mode": "shadow", "control_model": "haiku", "candidate_models": ["haiku", "sonnet"],
+                   "roles": ["engineer"], "instructions": "Choose sonnet for complex work.\nOtherwise choose haiku."}
+        client = _client()
+        saved = client.post(url, json=payload)
+        assert saved.status_code == 200, saved.text
+        assert saved.headers["cache-control"] == "no-store"
+        assert saved.json()["enabled"] is True
+        assert saved.json()["instructions"] == payload["instructions"]
+        assert saved.json()["restart_required"] is False and saved.json()["applies_on"] == "new_sessions"
+        assert env_file.stat().st_mode & 0o777 == 0o600
+        assert env_file.read_text().startswith("# keep this comment\nOTHER_TOKEN=synthetic-private\n")
+        assert "synthetic-private" not in saved.text
+        assert dict(os.environ) == before
+        config = load_experiment(project_env(bobi_install.repo_path))
+        assert load_experiment(child_agent_env(bobi_install.repo_path, base={})) == config
+        assert config.policy.mode == "shadow"
+        # Routing needs no assignment secret; the editor never writes one.
+        assert "BOBI_METRICS_ASSIGNMENT_SECRET" not in env_file.read_text()
+        assert json.loads(config.policy.options_json)["instructions"] == payload["instructions"]
+        assert client.get(url).json() == saved.json()
+        deleted = client.delete(url)
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json()["enabled"] is False and deleted.json()["mode"] == "off"
+        assert deleted.json()["raw_json"] == ""
+        assert parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"] == ""
+        assert "BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" not in env_file.read_text()
+        assert load_experiment(project_env(bobi_install.repo_path)) is None
+        assert dict(os.environ) == before
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+        assert client.post(url, json={"mode": "off"}).json()["mode"] == "off"
+
+    @pytest.mark.parametrize("invalid,field", [
+        ({"mode": "invalid"}, "mode"), ({"mode": True}, "mode"), ({"enabled": "false"}, "enabled"),
+        ({"enabled": True, "mode": "off"}, "mode"), ({"instructions": ""}, "instructions"),
+        ({"instructions": 5}, "instructions"), ({"candidate_models": []}, "candidate_models"),
+        ({"candidate_models": "model-a"}, "candidate_models"),
+        ({"candidate_models": ["model-a", "model-a"]}, "candidate_models"),
+        ({"candidate_models": [None]}, "candidate_models"), ({"control_model": "not-a-candidate"}, "control_model"),
+        ({"roles": []}, "roles"), ({"roles": ["unknown-role"]}, "roles"), ({"roles": ["engineer", "engineer"]}, "roles"),
+        ({"roles": "engineer"}, "roles"), ({"min_confidence": True}, "min_confidence"),
+        ({"min_confidence": 1.5}, "min_confidence"), ({"api_key": "never-echo-this"}, "api_key"),
+        ({"candidate_models": ["haiku", "opus", "claude-opus-5-5"]}, "candidate_models"),
+    ])
+    def test_jev_config_rejects_invalid_input_without_mutation(self, bobi_install, invalid, field):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        env_file = paths.env_path(bobi_install.repo_path)
+        before = "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n"
+        env_file.write_text(before)
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config", json=invalid)
+        assert response.status_code == 400, response.text
+        assert response.json()["code"] == "invalid_jev_config"
+        assert "never-echo-this" not in response.text
+        assert env_file.read_text() == before
+        # The message names the offending field so the editor can say what to fix.
+        assert field in response.json()["error"]
+
+    @pytest.mark.parametrize("gateway", [False, True])
+    @pytest.mark.parametrize("brain,candidates,problem", [
+        ("claude", ["haiku", "claude-opus-5-5"], None),
+        ("claude", ["haiku", "gpt-5.4"], "gpt-5.4 is not an Anthropic model this agent's claude brain can run"),
+        ("claude", ["haiku", "cx/gpt-5"], "cx/gpt-5 is not an Anthropic model this agent's claude brain can run"),
+        ("codex", ["gpt-5.6-luna", "gpt-5.6-sol"], None),
+        ("codex", ["gpt-5.6-luna", "opus"], "opus is not an OpenAI model this agent's codex brain can run"),
+    ])
+    def test_jev_candidates_must_run_on_the_agent_brain(self, bobi_install, monkeypatch, brain, candidates, problem,
+                                                         gateway):
+        from bobi import paths
+        from bobi.config import parse_env_file
+
+        # A gateway does not widen the roster: JEV routes only between the brain's own models.
+        self._agent_runs(bobi_install, brain, gateway="https://gateway.invalid/v1" if gateway else "")
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        config = _client().get(url).json()
+        assert config["agent_brain"] == brain and "gateway" not in config
+        # A new policy sends no task text until the operator opts in.
+        assert config["brain"] == "auto" and config["prompt_egress"] == "none"
+        response = _client().post(url, json={"mode": "shadow", "control_model": candidates[0],
+            "candidate_models": candidates, "roles": ["engineer"], "instructions": "Route by difficulty."})
+        if problem:
+            assert response.status_code == 400 and problem in response.json()["error"]
+            assert "pick one from the model list" in response.json()["error"]
+            return
+        assert response.status_code == 200, response.text
+        saved = json.loads(parse_env_file(paths.env_path(bobi_install.repo_path))["BOBI_METRICS_EXPERIMENT_JSON"])
+        # The policy follows whichever brain the agent runs (the default, so not
+        # written) and sends metadata only.
+        assert "brain" not in saved and saved["prompt_egress"] == "none"
+        assert response.json()["config_warnings"] == []
+
+    def test_jev_pinned_brain_must_match_the_agent(self, bobi_install, monkeypatch):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        rejected = _client().post(url, json={**{k: concise_config()[k] for k in ("control_model", "candidate_models", "roles", "instructions")},
+                                             "mode": "enforce", "brain": "codex", "prompt_egress": "none"})
+        assert rejected.status_code == 400 and "does not match this agent's claude brain" in rejected.json()["error"]
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(
+            {**concise_config(), "brain": "codex"}) + "\n")
+        # A saved policy that can never route this agent is flagged on read.
+        assert "does not match" in _client().get(url).json()["config_warnings"][0]
+
+    def test_jev_follows_the_agent_brain_not_the_web_app_process(self, bobi_install, monkeypatch):
+        import yaml
+        from bobi import paths
+
+        # Starting a codex team from the UI pins the brain in this process.
+        monkeypatch.setenv("BOBI_BRAIN", "codex")
+        monkeypatch.setenv("BOBI_GATEWAY_BASE_URL", "https://gateway.invalid/v1")
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        config = _client().get(url).json()
+        assert config["agent_brain"] == "claude"
+        assert not any(model.startswith("gpt-") for model in config["native_models"])
+        policy = {"mode": "shadow", "roles": ["engineer"], "instructions": "Route by difficulty."}
+        assert _client().post(url, json={**policy, "control_model": "haiku",
+                                         "candidate_models": ["haiku", "sonnet"]}).status_code == 200
+        rejected = _client().post(url, json={**policy, "control_model": "gpt-5.6-luna",
+                                             "candidate_models": ["gpt-5.6-luna", "gpt-5.6-sol"]})
+        assert rejected.status_code == 400 and "claude brain" in rejected.json()["error"]
+        # The sandbox's native-brain gate reads the same source.
+        response, _ = self._sandbox_run(bobi_install, monkeypatch, brain="claude")
+        assert response.status_code == 200, response.text
+        # agent.yaml's brain.kind wins over run/.env, as when the agent starts.
+        agent_yaml = paths.agent_yaml_path(bobi_install.repo_path)
+        agent_yaml.write_text(yaml.safe_dump({**yaml.safe_load(agent_yaml.read_text()), "brain": {"kind": "codex"}}))
+        self._agent_runs(bobi_install, "claude")
+        assert _client().get(url).json()["agent_brain"] == "codex"
+
+    def test_declared_brain_ignores_a_gateway_left_in_run_env(self, bobi_install):
+        import yaml
+        from bobi import paths
+        from bobi.webapp.runtime import _agent_brain
+
+        agent_yaml = paths.agent_yaml_path(bobi_install.repo_path)
+        agent_yaml.write_text(yaml.safe_dump({**yaml.safe_load(agent_yaml.read_text()), "brain": {"kind": "claude"}}))
+        self._agent_runs(bobi_install, "claude", gateway="https://gateway.invalid/v1")
+        # The agent starts on the native endpoint agent.yaml declares, not the stale gateway.
+        assert _agent_brain(bobi_install.repo_path) == ("claude", False)
+        agent_yaml.write_text(yaml.safe_dump({**yaml.safe_load(agent_yaml.read_text()),
+                                              "brain": {"kind": "claude", "base_url": "https://gw.invalid/v1"}}))
+        assert _agent_brain(bobi_install.repo_path) == ("claude", True)
+
+    def test_jev_config_reports_whether_the_policy_key_is_set(self, bobi_install, monkeypatch):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        env_file = paths.env_path(bobi_install.repo_path)
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        assert _client().get(url).json()["credential_configured"] is False
+        env_file.write_text(env_file.read_text() + "TYPESAFE_API_KEY=synthetic-sandbox-key\n")
+        response = _client().get(url)
+        # The flag says the key exists; the response never carries it.
+        assert response.json()["credential_configured"] is True
+        assert "synthetic-sandbox-key" not in response.text
+
+    def _sandbox_run(self, bobi_install, monkeypatch, *, brain="claude", final=None, payload=None):
+        from bobi import paths
+        from bobi.brain import BrainUsage, StreamDelta, TurnResult
+
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps({
+            "control_model": "haiku", "candidate_models": ["haiku", "sonnet"],
+            "instructions": "Route by difficulty."}) + "\n")
+        self._agent_runs(bobi_install, brain)
+        calls = []
+
+        class FakeBrain:
+            async def stream_once(self, **kwargs):
+                calls.append(kwargs)
+                yield StreamDelta(text="Use a lock ")
+                yield StreamDelta(text="around resume.")
+                yield final or TurnResult(usage=[BrainUsage(model="sonnet", input_tokens=1200, output_tokens=80)])
+
+        monkeypatch.setattr("bobi.brain.get_brain", lambda kind=None: FakeBrain())
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-run",
+                                  json=payload or {"prompt": "Find the deadlock", "model": "sonnet"})
+        return response, calls
+
+    def test_sandbox_runs_the_prompt_on_the_chosen_model_without_tools_or_metrics(self, bobi_install, monkeypatch):
+        from pathlib import Path
+
+        response, calls = self._sandbox_run(bobi_install, monkeypatch)
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["model"] == "sonnet" and data["output"] == "Use a lock around resume."
+        assert (data["input_tokens"], data["output_tokens"]) == (1200, 80) and data["list_price_usd"] > 0
+        [call] = calls
+        assert call["model"] == "sonnet" and call["user_prompt"] == "Find the deadlock"
+        # Nothing is allowed: no built-in tools, no MCP servers, no settings, no bypass.
+        assert call["options"]["max_turns"] == 1 and call["options"]["tools"] == []
+        assert call["options"]["mcp_servers"] == {} and call["options"]["strict_mcp_config"] is True
+        assert call["options"]["setting_sources"] == [] and call["options"]["permission_mode"] == "default"
+        # The agent's own environment and login, from an empty directory outside the repo.
+        assert call["options"]["env"]["BOBI_ROOT"] == str(bobi_install.repo_path.resolve())
+        assert not Path(call["cwd"]).is_relative_to(bobi_install.repo_path)
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+
+    @pytest.mark.parametrize("case,status,code", [
+        ("not_a_candidate", 400, "invalid_simulation"),
+        ("codex_brain", 400, "model_run_unsupported"),
+        ("model_error", 502, "model_run_failed"),
+    ])
+    def test_sandbox_run_refuses_or_reports_failures(self, bobi_install, monkeypatch, case, status, code):
+        from bobi.brain import TurnResult
+
+        response, calls = self._sandbox_run(
+            bobi_install, monkeypatch, brain="codex" if case == "codex_brain" else "claude",
+            final=TurnResult(is_error=True, error_kind="api_error", error_message="overloaded")
+            if case == "model_error" else None,
+            payload={"prompt": "Find the deadlock", "model": "opus"} if case == "not_a_candidate" else None)
+        assert response.status_code == status and response.json()["code"] == code
+        assert len(calls) == (1 if case == "model_error" else 0)
+
+    def test_jev_mode_off_keeps_the_policy_for_re_enabling(self, bobi_install):
+        from bobi import paths
+        from bobi.config import parse_env_file
+        from tests.metrics.test_routing import concise_config
+
+        env_file = paths.env_path(bobi_install.repo_path)
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        off = _client().post(url, json={"mode": "off"}).json()
+        assert off["enabled"] is False and off["configured_mode"] == "enforce"
+        assert off["instructions"] == concise_config()["instructions"]
+        assert parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"] == ""
+        restored = _client().post(url, json={"mode": "enforce"}).json()
+        assert restored["enabled"] is True and restored["instructions"] == concise_config()["instructions"]
+
+    def test_disabled_policy_survives_a_setup_env_rewrite(self, bobi_install):
+        from bobi import paths
+        from bobi.setup.actions import read_env, write_env
+        from tests.metrics.test_routing import concise_config
+
+        paths.env_path(bobi_install.repo_path).write_text(
+            "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        assert _client().post(url, json={"mode": "off"}).status_code == 200
+        # Setup saving a credential rewrites the whole .env through the one serializer.
+        write_env(bobi_install.repo_path, {**read_env(bobi_install.repo_path), "SLACK_BOT_TOKEN": "xoxb-test"})
+        config = _client().get(url).json()
+        assert config["enabled"] is False and config["configured_mode"] == "enforce"
+        assert config["candidate_models"] == concise_config()["candidate_models"]
+        restored = _client().post(url, json={"mode": "enforce"}).json()
+        assert restored["enabled"] is True and restored["instructions"] == concise_config()["instructions"]
+        assert "BOBI_METRICS_EXPERIMENT_DISABLED_JSON" not in read_env(bobi_install.repo_path)
+
+    def test_jev_edit_preserves_advanced_policy_and_updates_criteria(self, bobi_install, monkeypatch):
+        from bobi import paths
+        from bobi.config import parse_env_file
+        from bobi.metrics.router import ExperimentConfig
+        from tests.metrics.test_routing import concise_config
+
+        raw = {**concise_config(), "brain": "codex", "deadline_ms": 1750,
+               "control_model": "gpt-5.6-luna", "candidate_models": ["gpt-5.6-luna", "gpt-5.6-sol"],
+               "endpoint": "https://example.invalid/systemone", "prompt_egress": "redacted",
+               "max_prompt_bytes": 4096, "entry_points": ["subagent_phase"],
+               "criteria": {"gpt-5.6-luna": "Retain this criterion", "gpt-5.6-sol": "Removed criterion"}}
+        env_file = paths.env_path(bobi_install.repo_path)
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(raw) + "\n")
+        self._agent_runs(bobi_install, "codex")
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config", json={
+            "candidate_models": ["gpt-5.6-luna", "gpt-5.4"], "instructions": "Edited instructions"})
+        assert response.status_code == 200, response.text
+        saved = json.loads(parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"])
+        policy = ExperimentConfig.from_mapping(saved).policy
+        assert policy.brain == "codex" and policy.deadline_ms == 1750
+        assert policy.prompt_egress == "redacted" and policy.max_prompt_bytes == 4096
+        assert policy.entry_points == ("subagent_phase",)
+        options = json.loads(policy.options_json)
+        assert options["endpoint"] == "https://example.invalid/systemone"
+        assert options["instructions"] == "Edited instructions"
+        assert options["criteria"]["gpt-5.6-luna"] == "Retain this criterion"
+        assert set(options["criteria"]) == {"gpt-5.6-luna", "gpt-5.4"}
+
+    def test_long_form_config_is_reported_and_rewritten_by_the_next_save(self, bobi_install):
+        from bobi import paths
+        from bobi.config import parse_env_file
+        from bobi.metrics.router import LONG_FORM_ERROR
+        from tests.metrics.test_routing import concise_config
+
+        long_form = {"experiment_id": "old", "control_model": "haiku",
+                     "variants": [{"variant_id": "control", "weight": 0.0, "model": "haiku"},
+                                  {"variant_id": "treatment_jev", "weight": 1.0, "policy": "typesafe-jev"}],
+                     "policy": {"name": "typesafe-jev", "mode": "shadow", "candidate_models": ["haiku", "sonnet"]}}
+        env_file = paths.env_path(bobi_install.repo_path)
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        for line in ("BOBI_METRICS_EXPERIMENT_JSON=", "BOBI_METRICS_EXPERIMENT_DISABLED_JSON="):
+            env_file.write_text(line + json.dumps(long_form) + "\nOTHER_TOKEN=synthetic-private\n")
+            response = _client().get(url)
+            assert response.status_code == 200, response.text
+            config = response.json()
+            assert config["enabled"] is False and config["mode"] == "off" and config["raw_json"] == ""
+            assert config["config_error"] == LONG_FORM_ERROR
+        # The editor sends the full policy; saving replaces the old line with the short form.
+        payload = {key: concise_config()[key] for key in ("mode", "control_model", "candidate_models", "roles", "instructions")}
+        saved = _client().post(url, json=payload)
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["enabled"] is True and "config_error" not in saved.json()
+        written = env_file.read_text()
+        assert "variants" not in written and written.count("BOBI_METRICS_EXPERIMENT_JSON=") == 1
+        assert parse_env_file(env_file)["OTHER_TOKEN"] == "synthetic-private"
+        assert json.loads(parse_env_file(env_file)["BOBI_METRICS_EXPERIMENT_JSON"])["candidate_models"] == ["haiku", "sonnet"]
+
+    def test_jev_config_preserves_file_on_read_and_write_failure(self, bobi_install, monkeypatch):
+        from pathlib import Path
+        from bobi import paths
+
+        env_file = paths.env_path(bobi_install.repo_path)
+        env_file.write_text("OTHER_TOKEN=synthetic-private\n")
+        read_text = Path.read_text
+        def fail_read(target, *args, **kwargs):
+            if target == env_file:
+                raise OSError("private-error-do-not-echo")
+            return read_text(target, *args, **kwargs)
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        with monkeypatch.context() as context:
+            context.setattr(Path, "read_text", fail_read)
+            response = _client().post(url, json={"mode": "off"})
+        assert response.status_code == 500 and response.json()["code"] == "config_write_failed"
+        assert "private-error" not in response.text
+        assert env_file.read_text() == "OTHER_TOKEN=synthetic-private\n"
+        def fail_write(*args, **kwargs):
+            raise OSError("private-error-do-not-echo")
+        monkeypatch.setattr("bobi.fsutil.atomic_write_text", fail_write)
+        response = _client().delete(url)
+        assert response.status_code == 500 and response.json()["code"] == "config_write_failed"
+        assert env_file.read_text() == "OTHER_TOKEN=synthetic-private\n"
+
+    def test_jev_config_from_the_process_environment_is_shown_and_a_save_takes_over(self, bobi_install, monkeypatch):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        env_file = paths.env_path(bobi_install.repo_path)
+        env_file.write_text("OTHER_TOKEN=synthetic-private\n")
+        # A deployment that sets the config in the environment only.
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps({**concise_config(), "control_model": "haiku"}))
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/jev-config"
+        assert _client().get(url).json()["control_model"] == "haiku"
+        # Saving writes run/.env, which then decides.
+        response = _client().post(url, json={"mode": "off"})
+        assert response.status_code == 200, response.text
+        assert "BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" in env_file.read_text()
+        config = _client().get(url).json()
+        assert config["enabled"] is False and config["control_model"] == "haiku"
+
+    def test_jev_concurrent_edits_keep_both_changes(self, bobi_install):
+        from concurrent.futures import ThreadPoolExecutor
+        from bobi.webapp.runtime import LocalRuntime
+        from tests.metrics.test_routing import concise_config
+
+        runtime = LocalRuntime()
+        runtime.update_routing_config(bobi_install.agent_name, concise_config())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(runtime.update_routing_config, bobi_install.agent_name, payload) for payload in (
+                {"instructions": "Concurrent instructions"}, {"roles": ["engineer"]})]
+            for future in futures:
+                assert future.result()["enabled"] is True
+        saved = runtime.get_routing_config(bobi_install.agent_name)
+        assert saved["instructions"] == "Concurrent instructions" and saved["roles"] == ["engineer"]
+
+    def test_jev_edit_does_not_leak_into_another_agent(self, bobi_install, monkeypatch):
+        import os
+        import shutil
+        from bobi import paths
+        from bobi.config import _DOTENV_LOADED, project_env
+        from bobi.env import child_agent_env
+        from bobi.metrics.router import load_experiment
+        from bobi.webapp.runtime import LocalRuntime
+        from tests.metrics.test_routing import concise_config
+
+        other_root = bobi_install.agents_dir / "second-agent" / "run"
+        shutil.copytree(bobi_install.repo_path / "package", other_root / "package")
+        raw = json.dumps(concise_config())
+        paths.env_path(other_root).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + raw + "\n")
+        monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", raw)
+        monkeypatch.setitem(_DOTENV_LOADED, "BOBI_METRICS_EXPERIMENT_JSON", raw)
+        process_before = dict(os.environ)
+        other_before = paths.env_path(other_root).read_text()
+        runtime = LocalRuntime()
+        runtime.update_routing_config(bobi_install.agent_name, {**concise_config(), "instructions": "Changed for first agent"})
+        assert runtime.get_routing_config("second-agent")["instructions"] == concise_config()["instructions"]
+        assert paths.env_path(other_root).read_text() == other_before and dict(os.environ) == process_before
+        config = load_experiment(child_agent_env(bobi_install.repo_path))
+        assert json.loads(config.policy.options_json)["instructions"] == "Changed for first agent"
+        other = load_experiment(project_env(other_root))
+        assert json.loads(other.policy.options_json)["instructions"] == concise_config()["instructions"]
+
+    @pytest.mark.parametrize("trigger,prompt,title", [
+        ("inbox", "You are the **sleep cycle** for this agent team. Internal transcript delta", "Sleep Cycle & Memory Compaction"),
+        # Upkeep is recognised by what bobi writes, never by how an operator's message starts.
+        ("inbox", "Compaction required: reduce the session context.", "Compaction required: reduce the session context."),
+        ("inbox", "Process pending inbox messages.", "Process pending inbox messages."),
+        ("direct", "Fix sleep cycle regression", "Fix sleep cycle regression"),
+        ("chat", "Process inbox", "Process inbox"),
+        ("user", "Explain the # Bobi Agent header", "Explain the # Bobi Agent header"),
+    ])
+    def test_semantic_titles_do_not_show_internal_triggers(self, trigger, prompt, title):
+        from bobi.webapp.runtime import _turn_conversation
+
+        turn = {"started_at_us": 1_000_000, "ended_at_us": 2_000_000, "trigger_kind": trigger}
+        entries = [{"kind": "message", "role": "user", "text": prompt, "at": "1970-01-01T00:00:01.1Z"}]
+        data = _turn_conversation(turn, entries)
+        assert data["semantic_title"] == title
+        if title != prompt:
+            assert data["user_message"] is None and data["prompt_snippet"] is None
+        else:
+            assert data["user_message"] == prompt
+
+    def test_semantic_title_user_first_and_curator_session_fallback(self):
+        from bobi.webapp.runtime import _turn_conversation
+
+        turn = {"started_at_us": 1_000_000, "ended_at_us": 2_000_000, "trigger_kind": "inbox"}
+        entries = [{"kind": "message", "role": "user", "text": text, "at": "1970-01-01T00:00:01.1Z"} for text in (
+            "You are the **sleep cycle** for this agent team. Internal machinery",
+            _event(source="slack", type="message", text="Fix sleep cycle regression",
+                   conversation="slack:T123:channel:C123:thread:1791360056.16"))]
+        session = {"role": "curator", "session_name": "curator-1"}
+        data = _turn_conversation(turn, entries, session=session)
+        assert data["semantic_title"] == "Fix sleep cycle regression"
+        assert data["user_message"] == "Fix sleep cycle regression"
+        assert data["origin"]["source"] == "slack"
+        assert _turn_conversation(turn, [], session=session)["semantic_title"] == "Sleep Cycle & Memory Compaction"
+        from bobi.monitors.sleep_cycle import build_sleep_cycle_task
+        from bobi.prompts import SLEEP_CYCLE_PATH
+
+        # A sleep-cycle task behind a fresh Codex thread's agent instructions.
+        task = build_sleep_cycle_task(SLEEP_CYCLE_PATH.read_text(), "user: hello", "", {})
+        wrapped = [{"kind": "message", "role": "user", "at": "1970-01-01T00:00:01.1Z",
+                    "text": "You are a curator agent working on an adhoc task.\n\n" + task}]
+        assert _turn_conversation(turn, wrapped, session=session)["semantic_title"] == "Sleep Cycle & Memory Compaction"
+        startup = {**turn, "trigger_kind": "startup"}
+        idle = [{"kind": "message", "role": "agent", "text": "No new events.", "at": "1970-01-01T00:00:01.1Z"}]
+        assert _turn_conversation(startup, idle)["semantic_title"] == "Idle Standby (No new events)"
+        assert _turn_conversation(turn, idle, session=session)["semantic_title"] == "Idle Standby (No new events)"
+        assert _turn_conversation(turn, idle)["semantic_title"] == "Idle Standby (No new events)"
+        assert _turn_conversation(turn, [])["semantic_title"] == "Inbox Event Processing"
+
+    def test_runtime_preserves_tool_preview_bytes_and_marks_additional_clipping(self):
+        from bobi.webapp.runtime import _turn_conversation
+
+        turn = {"started_at_us": 1_000_000, "ended_at_us": 2_000_000, "trigger_kind": "inbox"}
+        entries = [{"kind": "tool_result", "role": "user", "text": "é" * 4000,
+                    "total_bytes": 12000, "truncated": True, "at": "1970-01-01T00:00:01.1Z"},
+                   {"kind": "message", "role": "agent", "text": "é" * 5000,
+                    "truncated": False, "at": "1970-01-01T00:00:01.2Z"}]
+        data = _turn_conversation(turn, entries)
+        assert data["entries"][0]["total_bytes"] == 12000 and data["entries"][0]["truncated"] is True
+        assert len(data["entries"][0]["text"]) == 4000
+        assert data["entries"][1]["total_bytes"] == 10000 and data["entries"][1]["truncated"] is False
+        assert data["entries"][1]["text"] == entries[1]["text"]
+        assert data["truncated"] is True
+
+    def test_runtime_tool_preview_has_no_secondary_cap_and_preserves_metadata(self):
+        from bobi.webapp.runtime import _turn_conversation
+
+        text = "hello " * 1000
+        turn = {"started_at_us": 1_000_000, "ended_at_us": 2_000_000, "trigger_kind": "user"}
+        entry = {"kind": "tool_result", "role": "user", "text": text, "at": "1970-01-01T00:00:01.1Z"}
+        data = _turn_conversation(turn, [entry])
+        assert data["entries"][0]["text"] == "hello " * 666
+        assert data["entries"][0]["total_bytes"] == len(text.encode("utf-8"))
+        assert data["entries"][0]["truncated"] is True
+        assert entry["text"] == text
+
+    def test_runtime_preserves_complete_messages_until_aggregate_budget(self):
+        from bobi.webapp.runtime import _turn_conversation
+
+        turn = {"started_at_us": 1_000_000, "ended_at_us": 2_000_000, "trigger_kind": "user"}
+        entry = {"kind": "message", "role": "user", "text": "é" * 10000,
+                 "truncated": False, "at": "1970-01-01T00:00:01.1Z"}
+        data = _turn_conversation(turn, [entry])
+        assert data["entries"][0]["text"] == data["input"] == data["user_message"] == entry["text"]
+        assert data["truncated"] is False
+        oversized = {**entry, "text": "界" * 100000}
+        bounded = _turn_conversation(turn, [oversized])
+        assert len(bounded["input"].encode("utf-8")) <= 32768
+        assert len(bounded["user_message"].encode("utf-8")) <= 32768
+        assert len(bounded["entries"][0]["text"].encode("utf-8")) <= 32768
+        assert bounded["entries"][0]["total_bytes"] == 300000
+        assert bounded["entries"][0]["truncated"] is True and bounded["truncated"] is True
+
+    def test_sandbox_classifies_without_writing_state_or_changing_credentials(self, bobi_install, monkeypatch):
+        import httpx
+        import os
+        from bobi import paths
+        from bobi.metrics.store import connect
+        from tests.metrics.test_routing import concise_config
+
+        seed_dashboard(bobi_install.repo_path, 1_000_000)
+        env_file = paths.env_path(bobi_install.repo_path)
+        minimal = {field: concise_config()[field] for field in ("control_model", "candidate_models", "instructions")}
+        minimal["prompt_egress"] = "redacted"
+        env_file.write_text("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=" + json.dumps(minimal) +
+                            "\nTYPESAFE_API_KEY=configured-test-key\n")
+        database = bobi_install.state_dir / "metrics/metrics.db"
+        connection = connect(database)
+        before = "\n".join(connection.iterdump())
+        connection.close()
+        files_before = {path: path.read_bytes() for path in bobi_install.state_dir.rglob("*") if path.is_file()}
+        env_before = dict(os.environ)
+        wire_calls = []
+        client_class = httpx.AsyncClient
+
+        def handler(request):
+            wire_calls.append(request)
+            payload = json.loads(request.content)
+            assert payload["state"]["task"] == "Write Raft. API_KEY=[redacted] [redacted]"
+            assert payload["state"]["role"] == "director"
+            assert payload["state"]["entry_point"] == "subagent_phase"
+            assert request.headers["authorization"] == "Bearer override-test-key"
+            return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
+                "type": "choice", "choice": "sonnet", "confidence": 0.94,
+                "probabilities": {"haiku": 0.03, "sonnet": 0.97}}},
+                "usage": {"input_tokens": 12, "output_tokens": 4}, "debug": "override-test-key",
+                "saved": "configured-test-key", "access_token": "opaque-vendor-token"})
+
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
+            lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
+        payload = {"prompt": "Write Raft. API_KEY=private configured-test-key", "api_key": "override-test-key",
+                   "features": {"role": "director", "entry_point": "subagent_phase", "brain": "claude"}}
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/test-route"
+        result = _client().post(url, json=payload)
+        assert result.status_code == 200, result.text
+        data = result.json()
+        assert data["selected_model"] == "sonnet" and data["confidence"] == 0.94
+        assert data["probabilities"]["sonnet"] == 0.97 and data["latency_ms"] >= 0
+        assert data["outgoing_payload"]["state"] == data["features"]
+        assert data["raw_response"]["debug"] == "[redacted]"
+        assert data["raw_response"]["saved"] == "[redacted]"
+        assert data["raw_response"]["access_token"] == "[redacted]"
+        assert data["raw_response"]["usage"] == {"input_tokens": 12, "output_tokens": 4}
+        assert data["features"]["prompt_bytes"] == len(payload["prompt"].encode())
+        assert result.headers["cache-control"] == "no-store"
+        assert "override-test-key" not in result.text and "private" not in result.text
+        assert len(wire_calls) == 1 and dict(os.environ) == env_before
+        connection = connect(database)
+        assert "\n".join(connection.iterdump()) == before
+        connection.close()
+        assert {path: path.read_bytes() for path in files_before} == files_before
+        assert env_file.read_text().startswith("BOBI_METRICS_EXPERIMENT_DISABLED_JSON=")
+
+    @pytest.mark.parametrize("body", [b'{"api_key":"private-canary",', b'[]',
+        b'{"prompt":"test","api_key":"private-canary","extra":"' + b'x' * 131072 + b'"}',
+        b'[' * 2000 + b'0' + b']' * 2000])
+    @pytest.mark.parametrize("endpoint", ["test-route", "test-run"])
+    def test_sandbox_rejects_bad_bodies_without_echoing_secrets(self, bobi_install, monkeypatch, body, endpoint):
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
+                            lambda **kwargs: pytest.fail("invalid body reached network"))
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/{endpoint}",
+                                  content=body, headers={"content-type": "application/json"})
+        assert response.status_code == 400
+        assert response.json()["code"] == "invalid_simulation"
+        assert "private-canary" not in response.text
+        assert response.headers["cache-control"] == "no-store"
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+
+    def test_sandbox_concurrent_keys_remain_request_local(self, bobi_install, monkeypatch):
+        import asyncio
+        import os
+        from bobi import paths
+        from bobi.metrics.policy import PolicyResult
+        from bobi.metrics.query import MetricsQueryError
+        from bobi.webapp.runtime import LocalRuntime
+        from tests.metrics.test_routing import concise_config
+
+        paths.env_path(bobi_install.repo_path).write_text(
+            "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        before = dict(os.environ)
+        calls = []
+        async def decide(policy, request, *, timeout_s):
+            key = policy.api_key
+            calls.append(key)
+            await asyncio.sleep(0.01)
+            assert policy.api_key == key
+            return PolicyResult("haiku", 0.94, None, "jev-1.13.0", None, None,
+                {"haiku": 0.97, "sonnet": 0.03}, {"debug": key}, {})
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.TypeSafePolicy.decide", decide)
+        runtime = LocalRuntime()
+        async def exercise():
+            return await asyncio.gather(*(runtime.test_route(bobi_install.agent_name,
+                {"prompt": "test", "api_key": f"request-{index}-key"}) for index in range(6)),
+                return_exceptions=True)
+        results = asyncio.run(exercise())
+        assert calls == [f"request-{index}-key" for index in range(4)]
+        assert all(result["raw_response"]["debug"] == "[redacted]" for result in results[:4])
+        assert all(isinstance(result, MetricsQueryError) and result.code == "metrics_busy" for result in results[4:])
+        assert dict(os.environ) == before
+        for _ in range(4):
+            assert runtime._routing_tests.acquire(blocking=False)
+        for _ in range(4):
+            runtime._routing_tests.release()
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+
+    @pytest.mark.parametrize("payload", [
+        {}, {"prompt": " "}, {"prompt": "é" * 32769}, {"prompt": "test", "api_key": ["bad"]},
+        {"prompt": "test", "api_key": False}, {"prompt": "test", "api_key": None},
+        {"prompt": "test", "endpoint": False}, {"prompt": "test", "endpoint": None},
+        {"prompt": "test", "features": {"task": "injected"}}, {"prompt": "test", "features": None},
+        {"prompt": "test", "features": {"role": "unknown"}},
+        {"prompt": "test", "features": {"entry_point": "unknown"}},
+        {"prompt": "test", "endpoint": "https://127.0.0.1/private"},
+        {"prompt": "test", "endpoint": "https://evil.example"},
+        {"prompt": "test", "endpoint": "https://api.typesafe.ai:444/v1/systemone"},
+        {"prompt": "test", "endpoint": "https://api.typesafe.ai:bad/v1/systemone"},
+        {"prompt": "test", "endpoint": "http://api.typesafe.ai/v1/systemone"},
+        {"prompt": "test", "endpoint": "https://user:pass@api.typesafe.ai/v1/systemone"},
+        {"prompt": "test", "endpoint": "https://api.typesafe.ai:0/v1/systemone"},
+        {"prompt": "test", "endpoint": "https://api.typesafe.ai/v1/systemone\n"},
+        {"prompt": "test", "api_key": "bad\nkey"}, {"prompt": "test", "api_key": "x" * 4097},
+    ])
+    def test_sandbox_rejects_invalid_inputs_without_network_or_database(self, bobi_install, monkeypatch, payload):
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        paths.env_path(bobi_install.repo_path).write_text(
+            "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(concise_config()) + "\n")
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
+                            lambda **kwargs: pytest.fail("invalid sandbox input reached network"))
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-route", json=payload)
+        assert response.status_code == 400
+        assert response.json()["code"] == "invalid_simulation"
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+
+    def test_sandbox_security_and_missing_configuration(self, bobi_install):
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/test-route"
+        assert _testclient().post(url, json={"prompt": "test"}).status_code == 403
+        hostile = TestClient(server.build_app(token=TOKEN), base_url="http://evil.example")
+        hostile.headers.update({"x-bobi-webui-token": TOKEN})
+        assert hostile.post(url, json={"prompt": "test"}).status_code == 403
+        assert _client().post("/api/agents/absent/metrics/test-route", json={"prompt": "test"}).status_code == 404
+        assert _client().post(url, json={"prompt": "test"}).status_code == 400
+
+    @pytest.mark.parametrize("fault", ["unexpected", "nested", "expanded", "trusted_override"])
+    def test_sandbox_bounds_and_sanitizes_vendor_results(self, bobi_install, monkeypatch, fault):
+        import httpx
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        config = {**concise_config(), "max_prompt_bytes": 65536, "prompt_egress": "redacted",
+                  "endpoint": "https://router.example:8443/v1/systemone"}
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(config) +
+                                                       "\nTYPESAFE_API_KEY=private-canary\n")
+        client_class = httpx.AsyncClient
+        def handler(request):
+            assert str(request.url) == "https://router.example:8443/alternate"
+            if fault == "unexpected":
+                raise OSError("private-canary sensitive-vendor-error")
+            raw = {"model": "jev-1.13.0", "answers": {"route": {
+                "type": "choice", "choice": "haiku", "confidence": 0.94,
+                "probabilities": {"haiku": 0.97, "sonnet": 0.03}}},
+                "usage": {"input_tokens": 12, "output_tokens": 4}}
+            if fault == "nested":
+                nested = {}
+                for _ in range(40):
+                    nested = {"child": nested}
+                raw["extra"] = nested
+            if fault == "expanded":
+                raw["extra"] = "é" * 300000
+            return httpx.Response(200, content=json.dumps(raw, ensure_ascii=False).encode())
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
+            lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-route",
+            json={"prompt": "é" * 30000 if fault == "expanded" else "test",
+                  "endpoint": "https://router.example:8443/alternate"})
+        assert response.status_code == (200 if fault == "trusted_override" else 502)
+        assert "private-canary" not in response.text and "sensitive-vendor-error" not in response.text
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+
+    def test_sandbox_deadline_and_saturation_release_without_affecting_production(self, bobi_install, monkeypatch):
+        import asyncio
+        from bobi import paths
+        from bobi.webapp.runtime import LocalRuntime
+        from tests.metrics.test_routing import concise_config
+
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" +
+            json.dumps({**concise_config(), "deadline_ms": 50}) + "\nTYPESAFE_API_KEY=test-only-key\n")
+        async def slow_policy(self, request, *, timeout_s):
+            await asyncio.sleep(1)
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.TypeSafePolicy.decide", slow_policy)
+        runtime = LocalRuntime()
+        client = TestClient(server.build_app(token=TOKEN, runtime=runtime), base_url="http://127.0.0.1")
+        client.headers.update({"x-bobi-webui-token": TOKEN})
+        url = f"/api/agents/{bobi_install.agent_name}/metrics/test-route"
+        for _ in range(4):
+            assert runtime._routing_tests.acquire(blocking=False)
+        response = client.post(url, json={"prompt": "test"})
+        assert response.status_code == 503 and response.json()["code"] == "metrics_busy"
+        for _ in range(4):
+            runtime._routing_tests.release()
+        for _ in range(2):
+            response = client.post(url, json={"prompt": "test"})
+            assert response.status_code == 504 and response.json()["code"] == "policy_timeout"
+        for _ in range(4):
+            assert runtime._routing_tests.acquire(blocking=False)
+        for _ in range(4):
+            runtime._routing_tests.release()
+        assert not (bobi_install.state_dir / "metrics/metrics.db").exists()
+
+    @pytest.mark.parametrize("mode,confidence,status,version", [
+        ("shadow", 0.94, 200, "jev-1.13.0"), ("enforce", 0.5, 200, "jev-1.13.0"),
+        ("enforce", 0.94, 401, "jev-1.13.0"), ("enforce", 0.94, 200, "jev-other"),
+        ("enforce", 0.94, 200, "jev-1.13.4"), ("enforce", 0.94, 200, "jev-1.14.0"),
+    ])
+    def test_sandbox_uses_saved_key_and_previews_guarded_decisions(self, bobi_install, monkeypatch, mode, confidence, status, version):
+        import httpx
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        config = {**concise_config(), "mode": mode}
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(config) +
+                                                       "\nTYPESAFE_API_KEY=saved-test-key\n")
+        client_class = httpx.AsyncClient
+        def handler(request):
+            assert request.headers["authorization"] == "Bearer saved-test-key"
+            return httpx.Response(status, json={"model": version, "answers": {"route": {
+                "type": "choice", "choice": "sonnet", "confidence": confidence,
+                "probabilities": {"haiku": 0.03, "sonnet": 0.97}}},
+                "usage": {"input_tokens": 12, "output_tokens": 4}})
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
+            lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-route", json={"prompt": "test"})
+        if status != 200:
+            assert response.status_code == 502
+            assert response.json()["code"] == "policy_unauthenticated"
+            assert "saved-test-key" not in response.text
+            return
+        assert response.status_code == 200, response.text
+        data = response.json()
+        # A patch bump is the pinned model; another release line previews as a fallback, not an error.
+        drift = version in {"jev-other", "jev-1.14.0"}
+        assert data["model_version"] == version and data["pinned_version"] == "jev-1.13.0"
+        assert data["fallback_reason"] == ("policy_version_drift" if drift else "policy_low_confidence" if confidence < 0.85 else None)
+        assert data["effective_model"] == ("haiku" if drift or confidence < 0.85 or mode == "shadow" else "sonnet")
+
+    @pytest.mark.parametrize("egress", ["none", "redacted"])
+    def test_sandbox_sends_task_text_only_when_production_would(self, bobi_install, monkeypatch, egress):
+        import httpx
+        from bobi import paths
+        from tests.metrics.test_routing import concise_config
+
+        paths.env_path(bobi_install.repo_path).write_text("BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(
+            {**concise_config(), "prompt_egress": egress}) + "\nTYPESAFE_API_KEY=saved-test-key\n"
+            "BILLING_DB_PASS=billing-local-pass\n")
+        client_class = httpx.AsyncClient
+        sent = []
+        def handler(request):
+            sent.append(json.loads(request.content)["state"])
+            return httpx.Response(200, json={"model": "jev-1.13.0", "answers": {"route": {
+                "type": "choice", "choice": "haiku", "confidence": 0.9,
+                "probabilities": {"haiku": 0.9, "sonnet": 0.1}}},
+                "usage": {"input_tokens": 1, "output_tokens": 1}})
+        monkeypatch.setattr("bobi.metrics.policies.typesafe.httpx.AsyncClient",
+            lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs))
+        response = _client().post(f"/api/agents/{bobi_install.agent_name}/metrics/test-route",
+                                  json={"prompt": "Refactor the billing module using billing-local-pass"})
+        assert response.status_code == 200, response.text
+        assert response.json()["prompt_egress"] == egress
+        assert ("task" in sent[0]) is (egress == "redacted")
+        assert sent[0]["prompt_bytes"] == len("Refactor the billing module using billing-local-pass")
+        # The agent's own credential values never leave, whatever their shape.
+        assert sent[0].get("task", "") in ("", "Refactor the billing module using [redacted]")
+
+
+def test_turn_cost_models_follow_the_billed_models_by_identity():
+    from bobi.webapp.runtime import _turn_cost_models
+
+    one_call = [{"model_selected": "claude-haiku-4-5"}]
+    # A background call on another model is billed but never logged as a call.
+    assert _turn_cost_models({"invocations": one_call, "best_usage": [
+        {"scope": "turn", "model": "claude-haiku-4-5"}, {"scope": "turn", "model": "claude-opus-4-7"},
+        {"scope": "invocation", "model": "claude-sonnet-5-5"}]}) == ["claude-haiku-4-5", "claude-opus-4-7"]
+    assert _turn_cost_models({"invocations": [*one_call, {"model_selected": None, "model_requested": "haiku"}],
+                              "best_usage": []}) == ["claude-haiku-4-5"]
+    assert _turn_cost_models({"invocations": [], "best_usage": []}) == []
+
+
+def test_transcript_cache_is_bounded_by_the_memory_its_entries_use():
+    from bobi.webapp.runtime import _TranscriptCache
+
+    # Two bytes a character once the text is not Latin-1: two of these do not fit in 4 KB.
+    entries = [{"kind": "message", "role": "user", "text": "ệ" * 1000, "at": ""}]
+    cache = _TranscriptCache(4000)
+    cache.put(("a",), entries, None)
+    cache.put(("b",), entries, None)
+    assert cache.get(("a",)) is None
+    assert cache.get(("b",)) == (entries, None)

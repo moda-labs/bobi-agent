@@ -15,13 +15,15 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import httpx
 
 from bobi import launch_stamp
 from bobi.events import artifact as event_server_artifact
-from bobi.fsutil import atomic_write_text
+from bobi.fsutil import atomic_write_text, try_file_lock
 
 log = logging.getLogger(__name__)
 
@@ -500,6 +502,76 @@ def _run_npm(
     return result
 
 
+# The spawner holds the transport lock through readiness: at most 30 polls of
+# 0.5 s sleep plus a 2 s health timeout. A waiter gives up a little after that
+# so a stuck holder cannot hang every session start.
+_SPAWN_READY_POLLS = 30
+_SPAWN_LOCK_TIMEOUT = _SPAWN_READY_POLLS * 2.5 + 15
+
+
+class _SpawnLockTimeout(Exception):
+    """Another process held the event-transport lock past the bound."""
+
+
+@contextmanager
+def _transport_lock(project_path: Path | None,
+                    timeout: float = _SPAWN_LOCK_TIMEOUT) -> Iterator[None]:
+    """Hold ``event-transport.lock`` for one health-check/archive/spawn cycle.
+
+    Bounded: polls the non-blocking lock until *timeout*, then raises
+    :class:`_SpawnLockTimeout`. The kernel drops the lock if its holder dies.
+    """
+    from bobi import paths
+
+    lock = paths.state_dir(project_path) / "event-transport.lock"
+    deadline = time.monotonic() + timeout
+    while True:
+        with try_file_lock(lock) as held:
+            if held:
+                yield
+                return
+        if time.monotonic() >= deadline:
+            raise _SpawnLockTimeout(f"{lock} held for more than {timeout:g}s")
+        time.sleep(0.1)
+
+
+def _port_in_use(port: int) -> bool:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _archive_local_transport_state(project_path: Path | None) -> None:
+    """Retire credentials and cursors when we launch a new volatile broker.
+
+    A server we are about to spawn cannot hold the previous process's replay
+    buffer. Keep that transport state for inspection without resetting
+    conversations. The caller holds ``_transport_lock`` and has seen health
+    fail, and calls this before the new server can accept a connection: once
+    it listens, any session may attach and read or mint transport state.
+    Never call this when attaching to an existing or remote server.
+    """
+    from bobi import paths
+
+    state = paths.state_dir(project_path)
+    stale = [state / name for name in (
+        "bubble.json", "deployments", "cursors", "cursor.json", "admin-cursor.json",
+    ) if (state / name).exists()]
+    if not stale:
+        return
+    backup = state / "event-transport-backups" / str(time.time_ns())
+    backup.mkdir(parents=True, mode=0o700)
+    for path in stale:
+        path.rename(backup / path.name)
+    log.warning(
+        "New local event-server process has no previous replay buffer; "
+        "archived old credentials and cursors in %s; sessions will re-register",
+        backup,
+    )
+
+
 def ensure_running(port: int, webhook_secret: str | None = None,
                    slack_signing_secret: str | None = None,
                    linear_webhook_secret: str | None = None,
@@ -534,11 +606,16 @@ def ensure_running(port: int, webhook_secret: str | None = None,
             )
             return "skipped"
 
-    if health(f"http://localhost:{port}"):
+    def _attach() -> str:
         if project_path is not None:
             atomic_write_text(local_port_file(project_path), str(port))
         log.info(f"Event server already running on port {port}")
         return "connected"
+
+    # Safe without the lock: a spawner archives old transport state before
+    # its server can listen, so a healthy answer means the archive is done.
+    if health(f"http://localhost:{port}"):
+        return _attach()
 
     es_dir = _find_event_server_dir()
     is_installed = _is_installed_event_server_dir(es_dir)
@@ -594,6 +671,25 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     env["WS_NO_BUFFER_UTIL"] = "1"
     env["WS_NO_UTF_8_VALIDATE"] = "1"
 
+    try:
+        with _transport_lock(project_path):
+            # Another caller may have spawned while we waited for the lock.
+            if health(f"http://localhost:{port}"):
+                return _attach()
+            # A process still holding the port (a live server that missed a
+            # health check) keeps its transport state; only a free port means
+            # the next server is new.
+            if not _port_in_use(port):
+                _archive_local_transport_state(project_path)
+            return _spawn(node, es_dir, env, port, project_path, log_file, pid_file)
+    except _SpawnLockTimeout as exc:
+        log.error(f"Event server start abandoned: {exc}")
+        return "failed"
+
+
+def _spawn(node: str, es_dir: Path, env: dict[str, str], port: int,
+           project_path: Path | None, log_file: Path, pid_file: Path) -> str:
+    """Launch the node bundle and wait for it to report healthy."""
     bundle = event_server_artifact.bundle_path(es_dir)
     with open(log_file, "a") as lf:
         proc = subprocess.Popen(
@@ -608,7 +704,7 @@ def ensure_running(port: int, webhook_secret: str | None = None,
     launch_stamp.record_launch(project_path, launch_stamp.EVENT_SERVER,
                                proc.pid, artifact=bundle)
 
-    for _ in range(30):
+    for _ in range(_SPAWN_READY_POLLS):
         time.sleep(0.5)
         if health(f"http://localhost:{port}"):
             atomic_write_text(local_port_file(project_path), str(port))

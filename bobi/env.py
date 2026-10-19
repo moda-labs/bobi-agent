@@ -81,10 +81,11 @@ def _load_dotenv_into(env: dict[str, str], root: Path) -> None:
     """Merge the runtime ``.env`` into *env* without overriding parent values."""
     try:
         from bobi import paths
-        from bobi.config import _DOTENV_LOADED, parse_env_file
+        from bobi.config import _DOTENV_LOADED, _restore_provider_env, parse_env_file
         values = parse_env_file(paths.env_path(root))
     except Exception:
         return
+    _restore_provider_env(env)
     for key, value in list(env.items()):
         if _DOTENV_LOADED.get(key) == value:
             env.pop(key)

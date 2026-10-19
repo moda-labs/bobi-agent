@@ -762,3 +762,44 @@ class TestSupervisorLoadGrace:
                               "load1", "ncpu", "busy_descendants"}
         assert block["load1"] == 8.0
         assert block["busy_descendants"] == 1
+
+
+# --- metrics collector ownership handed to the manager child --------------
+
+class TestCollectorOwnerEnv:
+    """The manager skips its own metrics collector when the spawn env says the
+    supervisor owns collection, so the supervisor may only say so when it
+    really runs one."""
+
+    def _spawn_env(self, monkeypatch, tmp_path, **kwargs):
+        captured = {}
+
+        def popen(cmd, **popen_kwargs):
+            captured.update(popen_kwargs)
+            return object()
+
+        monkeypatch.setattr("bobi.supervisor.supervision.subprocess.Popen",
+                            popen)
+        Supervisor([], SupervisorConfig(), project_root=tmp_path,
+                   **kwargs)._default_spawn()
+        return captured["env"]
+
+    def test_owner_set_when_supervisor_runs_the_collector(self, monkeypatch,
+                                                          tmp_path):
+        env = self._spawn_env(monkeypatch, tmp_path, collector_owner=True)
+        assert env["BOBI_METRICS_COLLECTOR_OWNER"] == "supervisor"
+
+    def test_owner_absent_when_metrics_enabled_only_for_the_manager(
+            self, monkeypatch, tmp_path):
+        # Metrics were off when the supervisor started, then enabled in the
+        # env a later manager respawn inherits: the manager must collect.
+        monkeypatch.setenv("BOBI_METRICS_MODE", "enabled")
+        env = self._spawn_env(monkeypatch, tmp_path)
+        assert env["BOBI_METRICS_MODE"] == "enabled"
+        assert "BOBI_METRICS_COLLECTOR_OWNER" not in env
+
+    def test_inherited_owner_marker_is_not_passed_on(self, monkeypatch,
+                                                     tmp_path):
+        monkeypatch.setenv("BOBI_METRICS_COLLECTOR_OWNER", "supervisor")
+        env = self._spawn_env(monkeypatch, tmp_path, collector_owner=False)
+        assert "BOBI_METRICS_COLLECTOR_OWNER" not in env

@@ -254,7 +254,7 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 		expect(res.status).toBe(202);
 	});
 
-	it("lists exactly the seven tools, with schemas", async () => {
+	it("lists the fleet and fine-grained metrics tools with schemas", async () => {
 		const res = await replay(findCaptured("tools/list"));
 		const msg = await rpcResult(res);
 		const tools = (msg.result as { tools: { name: string; description?: string; inputSchema?: Record<string, unknown> }[] }).tools;
@@ -266,7 +266,9 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 			"bobi_lifecycle",
 			"bobi_read_transcript",
 			"bobi_send_message",
+			"bobi_usage_session",
 			"bobi_usage_summary",
+			"bobi_usage_turn",
 		]);
 
 		for (const tool of tools) {
@@ -296,6 +298,18 @@ describe("/mcp conformance against captured claude-code traffic", () => {
 
 		const usage = tools.find((t) => t.name === "bobi_usage_summary")!;
 		expect((usage.inputSchema as { required?: string[] }).required?.sort()).toEqual(["days"]);
+		const usageTurn = tools.find((t) => t.name === "bobi_usage_turn")!;
+		expect((usageTurn.inputSchema as { required?: string[] }).required?.sort()).toEqual([
+			"fleet", "instance", "turn_id",
+		]);
+		// Each issues an admin command, which writes a command record: not read-only.
+		for (const name of [
+			"bobi_usage_summary", "bobi_usage_session", "bobi_usage_turn", "bobi_read_transcript",
+		]) {
+			const annotations = tools.find((tool) => tool.name === name)?.annotations;
+			expect(annotations?.readOnlyHint).toBe(false);
+			expect(annotations?.destructiveHint).toBe(false);
+		}
 
 		// `reason` is the audit control on lifecycle: it has to be REQUIRED at the
 		// schema, not merely documented, or an agent simply omits it.
@@ -469,7 +483,7 @@ describe("/mcp read tools", () => {
 function snapshot(fleet: string, instance: string) {
 	return {
 		deployment: { fleet, instance, platform: "fly", machine: "m1", region: "iad", node: null },
-		supervisor: { pid: 1, uptime_s: 5, version: "0.1.0" },
+		supervisor: { pid: 1, uptime_s: 5, version: "0.4.0" },
 		manager: { status: "idle", pid: 4242, healthy: true, idle_seconds: 3, restart_count: 0 },
 		sessions: [{ name: "mgr", role: "manager", status: "idle" }],
 		versions: { image: null, team_package: null, bobi: "0.53.0" },
@@ -677,6 +691,69 @@ describe("/mcp write tools", () => {
 		expect(body.unavailable).toEqual([]);
 	});
 
+	it("bobi_usage_summary says why an instance answered without its filtered block", async () => {
+		const fleetName = `filtered-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+		const { bubble, fleet, instance } = await liveInstance("filtered", fleetName);
+
+		const inFlight = callTool("bobi_usage_summary", { days: 90, fleet, model: "haiku" });
+		const recorded = await awaitRecordedCommand(fleet, instance);
+		expect(recorded).toMatchObject({ command: "usage", args: { model: "haiku" } });
+		await publishSigned("fleet/command_result", bubble, {
+			deployment: { fleet, instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: {
+				usage: {
+					jobs: { total: 2, completed: 2, failed: 0, closed: 0 },
+					tokens: { input: 10, cached_input: 0, output: 5, total: 15 },
+					cost_usd: 0.1,
+					estimated_cost_usd: 0,
+					fine_grained_unavailable: { code: "invalid_range" },
+				},
+			},
+		});
+
+		const body = JSON.parse(await toolText(await inFlight));
+		// The totals are unfiltered; the caller must see that the model filter did not apply.
+		const [entry] = body.fleets[0].instances;
+		expect(entry.fine_grained).toBeUndefined();
+		expect(entry.fine_grained_unavailable).toEqual({ code: "invalid_range" });
+	});
+
+	it("bobi_usage_summary marks a filtered answer from a pre-0.4.0 supervisor as unfiltered", async () => {
+		const fleetName = `old-sup-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+		const { bubble, fleet, instance } = await liveInstance("old-sup", fleetName);
+		const key = `fleet_instance:${encodeURIComponent(fleet)}:${encodeURIComponent(instance)}`;
+		const raw = await env.EVENTS.get(key);
+		expect(raw).toBeTruthy();
+		const record = JSON.parse(raw!);
+		record.snapshot.supervisor.version = "0.3.0";
+		await env.EVENTS.put(key, JSON.stringify(record));
+
+		const inFlight = callTool("bobi_usage_summary", { days: 1, fleet, model: "haiku" });
+		const recorded = await awaitRecordedCommand(fleet, instance);
+		// An old supervisor answers with the bare legacy fold and ignores the filter.
+		await publishSigned("fleet/command_result", bubble, {
+			deployment: { fleet, instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: {
+				usage: {
+					jobs: { total: 2, completed: 2, failed: 0, closed: 0 },
+					tokens: { input: 10, cached_input: 0, output: 5, total: 15 },
+					cost_usd: 0.1,
+					estimated_cost_usd: 0,
+				},
+			},
+		});
+
+		const body = JSON.parse(await toolText(await inFlight));
+		const [entry] = body.fleets[0].instances;
+		expect(entry.jobs.total).toBe(2);
+		expect(entry.fine_grained).toBeUndefined();
+		expect(entry.fine_grained_unavailable).toEqual({ code: "supervisor_too_old" });
+	});
+
 	it("bobi_usage_summary returns partial data when one instance is unavailable", async () => {
 		const fleetName = `partial-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
 		const live = await liveInstance("live", fleetName);
@@ -708,6 +785,39 @@ describe("/mcp write tools", () => {
 				reason: expect.stringMatching(/not delivered/i),
 			}),
 		]);
+	});
+
+	it("bobi_usage_turn maps validated arguments onto the drill-down Admin command", async () => {
+		const { bubble, fleet, instance } = await liveInstance("usage-turn");
+		const inFlight = callTool("bobi_usage_turn", { fleet, instance, turn_id: "turn-1" });
+		const recorded = await awaitRecordedCommand(fleet, instance);
+		expect(recorded).toMatchObject({ command: "usage_turn", args: { turn_id: "turn-1" } });
+		await publishSigned("fleet/command_result", bubble, {
+			deployment: { fleet, instance },
+			command_id: recorded.command_id,
+			status: "done",
+			result: { usage_turn: { turn: { turn_id: "turn-1" }, coverage: { exact_invocations: 1 } } },
+		});
+		const body = JSON.parse(await toolText(await inFlight));
+		expect(body.status).toBe("done");
+		expect(body.result.usage_turn.turn.turn_id).toBe("turn-1");
+	});
+
+	it("fine-grained usage rejects a known-old supervisor without issuing a command", async () => {
+		const { fleet, instance } = await liveInstance("usage-old");
+		const key = `fleet_instance:${encodeURIComponent(fleet)}:${encodeURIComponent(instance)}`;
+		const raw = await env.EVENTS.get(key);
+		expect(raw).toBeTruthy();
+		const record = JSON.parse(raw!);
+		record.snapshot.supervisor.version = "0.3.0";
+		await env.EVENTS.put(key, JSON.stringify(record));
+
+		const result = await toolResult(await callTool("bobi_usage_turn", {
+			fleet, instance, turn_id: "turn-1",
+		}));
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toContain("0.4.0");
+		await expectNoCommandRecorded(fleet, instance);
 	});
 
 	it("bobi_lifecycle says plainly that a pending restart is not a failure", async () => {

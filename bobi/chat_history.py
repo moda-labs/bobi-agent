@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 CHAT_HISTORY_LIMIT = 200
@@ -176,7 +178,7 @@ def _read_claude_transcript_messages(session_id: str,
         msg_type = obj.get("type", "")
         if msg_type not in ("human", "user", "assistant"):
             continue
-        text = _extract_text(obj.get("message", {}).get("content", "")).strip()
+        text = message_text(_extract_text(obj.get("message", {}).get("content", "")))
         if not text:
             continue
         role = "agent" if msg_type == "assistant" else "user"
@@ -200,15 +202,35 @@ KIND_TOOL_RESULT = "tool_result"
 
 # A tool result can be an entire file. The slab shows enough to recognize
 # what came back; the transcript on disk stays the place to read it whole.
-TOOL_RESULT_PREVIEW = 400
+TOOL_RESULT_PREVIEW = 4000
+
+def tool_result_preview(text: str) -> str:
+    if len(text) <= TOOL_RESULT_PREVIEW:
+        return text
+    preview = text[:TOOL_RESULT_PREVIEW]
+    if "\n" in preview:
+        return preview[:preview.rfind("\n") + 1]
+    if text[TOOL_RESULT_PREVIEW].isspace():
+        return preview
+    boundary = next((index for index in range(len(preview) - 1, -1, -1)
+                     if preview[index].isspace()), None)
+    return preview[:boundary + 1] if boundary is not None else preview
 
 
 def _entry(kind: str, role: str, text: str, at: str, tool: str = "",
-           truncated: bool = False, is_error: bool = False) -> dict:
+           truncated: bool = False, is_error: bool = False,
+           total_bytes: int | None = None) -> dict:
     """One rendered line. Every key on every entry, so the slab branches on
     value and never on key presence."""
     return {"kind": kind, "role": role, "text": text, "at": at, "tool": tool,
-            "truncated": truncated, "is_error": is_error}
+            "truncated": truncated, "is_error": is_error,
+            "total_bytes": _utf8_size(text) if total_bytes is None else total_bytes}
+
+
+def _utf8_size(text: str) -> int:
+    # A transcript can hold half an emoji (a lone surrogate from a cut string);
+    # its size must not be what fails the whole view.
+    return len(text.encode("utf-8", "surrogatepass"))
 
 
 def _tool_blocks(content, *, role: str, at: str) -> list[dict]:
@@ -225,11 +247,13 @@ def _tool_blocks(content, *, role: str, at: str) -> list[dict]:
                 KIND_TOOL, role, _tool_input_summary(block.get("input")), at,
                 tool=str(block.get("name", "") or "")))
         elif btype == "tool_result":
-            text = _extract_text(block.get("content", "")).strip()
+            text = _extract_text(block.get("content", ""))
+            preview = tool_result_preview(text)
             blocks.append(_entry(
-                KIND_TOOL_RESULT, role, text[:TOOL_RESULT_PREVIEW], at,
-                truncated=len(text) > TOOL_RESULT_PREVIEW,
-                is_error=bool(block.get("is_error"))))
+                KIND_TOOL_RESULT, role, preview, at,
+                truncated=len(preview) < len(text),
+                is_error=bool(block.get("is_error")),
+                total_bytes=_utf8_size(text)))
     return blocks
 
 
@@ -252,9 +276,89 @@ def _tool_input_summary(payload) -> str:
             return value.strip()[:200]
     return ", ".join(sorted(payload)[:6])
 
+# A turn's window is read from the newest end of the file, within this budget.
+# Past it the read stops and returns what it has: the newest records, which are
+# what a turn view almost always asks for.
+_WINDOW_READ_BYTES = 16 * 1024 * 1024
+_WINDOW_READ_SECONDS = 0.25
+_WINDOW_READ_CHUNK = 64 * 1024
+# Transcripts are append-ordered, not time-ordered: Claude stamps hook and
+# queued-command attachments with when they were made (seen up to ~6 minutes
+# back). The read stops only at a record this far before the window.
+_WINDOW_STOP_SLACK_US = 15 * 60 * 1_000_000
+
+
+def _parse_record(line: bytes | str) -> dict | None:
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _record_us(record: dict) -> int | None:
+    try:
+        at = datetime.fromisoformat(str(record.get("timestamp") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return int(at.timestamp() * 1_000_000) if at.tzinfo is not None else None
+
+
+def _lines_newest_first(path: Path, report: dict | None = None):
+    """The file's lines from the end, within the window read budget. Running out
+    of it before the file's start sets ``report["cut"]`` to "bytes" or "time"."""
+    deadline = time.monotonic() + _WINDOW_READ_SECONDS
+    with path.open("rb") as transcript:
+        position = transcript.seek(0, os.SEEK_END)
+        floor = max(0, position - _WINDOW_READ_BYTES)
+        # Pieces of the line being assembled, newest piece first; joined once
+        # when the line is complete, so a long line is not copied per chunk.
+        partial: list[bytes] = []
+        while position > floor and time.monotonic() < deadline:
+            size = min(_WINDOW_READ_CHUNK, position - floor)
+            position -= size
+            transcript.seek(position)
+            pieces = transcript.read(size).split(b"\n")
+            if len(pieces) == 1:
+                partial.append(pieces[0])
+                continue
+            newest = b"".join([pieces[-1], *reversed(partial)])
+            partial = [pieces[0]]
+            yield newest
+            yield from reversed(pieces[1:-1])
+        if position == 0 and partial:
+            yield b"".join(reversed(partial))
+        if position > 0 and report is not None:
+            report["cut"] = "bytes" if position == floor else "time"
+
+
+def _transcript_records(path: Path, *, after_us: int | None = None,
+                        before_us: int | None = None, report: dict | None = None):
+    """Records oldest first. With a time window, read newest first and stop at
+    the first record well before the window, so a long transcript still yields
+    its latest turns; callers apply the window to each record themselves."""
+    if after_us is None and before_us is None:
+        with path.open() as transcript:
+            for line in transcript:
+                record = _parse_record(line)
+                if record is not None:
+                    yield record
+        return
+    newest_first = []
+    for line in _lines_newest_first(path, report):
+        record = _parse_record(line)
+        if record is None:
+            continue
+        at = _record_us(record)
+        if after_us is not None and at is not None and at < after_us - _WINDOW_STOP_SLACK_US:
+            break
+        newest_first.append(record)
+    yield from reversed(newest_first)
+
 
 def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
-                           *, brain: str | None = None) -> list[dict]:
+                           *, brain: str | None = None, after_us: int | None = None,
+                           before_us: int | None = None, report: dict | None = None) -> list[dict]:
     """The transcript as timestamped lines, tool calls included.
 
     Each entry is ``{"kind", "role", "text", "at", "tool"}``; ``at`` is the
@@ -262,14 +366,34 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
     names the tool on a ``tool``/``tool_result`` line. Newest last, capped at
     *limit* entries from the end - the tail is what a debugger reads.
 
-    Claude transcripts only. A Codex rollout does not record per-entry
-    timestamps in the same shape, so rather than synthesize them this returns
-    the chat view's entries with an empty ``at``: fewer columns, no invented
-    ones. The caller renders what is there.
+    Claude and Codex timestamps come from their own records, never inferred.
+    Optional time bounds are applied before the tail limit, so old turns do
+    not disappear behind a busy session's newest entries.
+
+    A caller that passes a *report* dict learns whether the read reached the
+    start of what it asked for: ``report["cut"]`` is None, or names what
+    stopped it - "bytes" or "time" (the window read budget) or "entries"
+    (*limit*). The entries returned are the same either way.
     """
+    if report is not None:
+        report["cut"] = None
+
+    def in_window(entry: dict) -> bool:
+        if after_us is None and before_us is None:
+            return True
+        try:
+            at = datetime.fromisoformat(entry["at"].replace("Z", "+00:00"))
+            if at.tzinfo is None:
+                return False
+            at_us = int(at.timestamp() * 1_000_000)
+        except (ValueError, TypeError):
+            return False
+        return (after_us is None or at_us >= after_us) and (before_us is None or at_us < before_us)
+
     def _from_codex() -> list[dict]:
-        return [_entry(KIND_MESSAGE, m["role"], m["text"], "")
-                for m in read_codex_transcript_messages(session_id, limit)]
+        return [_entry(KIND_MESSAGE, m["role"], m["text"], m["at"])
+                for m in read_codex_transcript_messages(session_id, limit, include_timestamps=True,
+                    after_us=after_us, before_us=before_us, report=report)]
 
     if brain in ("codex", "gateway-openai"):
         return _from_codex()
@@ -280,28 +404,32 @@ def read_transcript_detail(session_id: str, limit: int = CHAT_HISTORY_LIMIT,
         # so an unrecorded-brain session still renders something.
         return _from_codex() if brain in (None, "") else []
 
-    out: list[dict] = []
-    for line in path.read_text().splitlines():
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
+    out = deque(maxlen=limit)
+    seen = 0
+    for obj in _transcript_records(path, after_us=after_us, before_us=before_us, report=report):
         if obj.get("type") not in ("human", "user", "assistant"):
             continue
         at = str(obj.get("timestamp", "") or "")
+        if ((after_us is not None or before_us is not None) and obj.get("isSidechain")) or not in_window({"at": at}):
+            continue
         role = "agent" if obj.get("type") == "assistant" else "user"
         content = obj.get("message", {}).get("content", "")
 
-        text = _extract_text(content).strip()
+        text = message_text(_extract_text(content))
         if text:
             out.append(_entry(KIND_MESSAGE, role, text, at))
-        out.extend(_tool_blocks(content, role=role, at=at))
-    return out[-limit:]
+            seen += 1
+        tools = _tool_blocks(content, role=role, at=at)
+        out.extend(tools)
+        seen += len(tools)
+    if report is not None and seen > limit:
+        report["cut"] = "entries"
+    return list(out)
 
 
 # --- Codex rollout replay ------------------------------------------------
 
-def _codex_rollout_path(session_id: str) -> Path | None:
+def find_codex_rollout(session_id: str) -> Path | None:
     """The Codex rollout file for *session_id*, if one exists.
 
     Codex writes one rollout per thread at
@@ -319,6 +447,14 @@ def _codex_rollout_path(session_id: str) -> Path | None:
         return None
     matches = sorted(root.rglob(f"*{session_id}.jsonl"))
     return matches[-1] if matches else None
+
+
+_codex_rollout_path = find_codex_rollout
+
+
+def message_text(text: str) -> str:
+    """A transcript message as the readers keep it: without surrounding whitespace."""
+    return text.strip()
 
 
 def _codex_text(content) -> str:
@@ -347,7 +483,9 @@ def _codex_injected(text: str) -> bool:
 
 
 def read_codex_transcript_messages(session_id: str,
-                                   limit: int = CHAT_HISTORY_LIMIT) -> list[dict]:
+                                   limit: int = CHAT_HISTORY_LIMIT, *, include_timestamps: bool = False,
+                                   after_us: int | None = None, before_us: int | None = None,
+                                   report: dict | None = None) -> list[dict]:
     """Replay a Codex rollout as ``{role, text}`` chat messages.
 
     Codex records a session as an NDJSON *rollout* rather than a Claude
@@ -355,29 +493,44 @@ def read_codex_transcript_messages(session_id: str,
     payload is a ``message`` with ``role`` user/assistant; developer/system
     rows, reasoning, tool calls, event bookkeeping, and Codex-injected context
     blocks (see :data:`_CODEX_INJECTED_PREFIXES`) are skipped. Mirrors
-    :func:`read_transcript_messages`'s output shape.
+    :func:`read_transcript_messages`'s output shape. *report* is as for
+    :func:`read_transcript_detail`.
     """
-    path = _codex_rollout_path(session_id)
+    if report is not None:
+        report["cut"] = None
+    path = find_codex_rollout(session_id)
     if not path:
         return []
 
-    out = []
-    for line in path.read_text().splitlines():
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
+    out = deque(maxlen=limit)
+    seen = 0
+    for obj in _transcript_records(path, after_us=after_us, before_us=before_us, report=report):
         if obj.get("type") != "response_item":
             continue
+        if after_us is not None or before_us is not None:
+            try:
+                at = datetime.fromisoformat(str(obj.get("timestamp") or "").replace("Z", "+00:00"))
+                if at.tzinfo is None:
+                    continue
+                at_us = int(at.timestamp() * 1_000_000)
+            except (ValueError, TypeError):
+                continue
+            if (after_us is not None and at_us < after_us) or (before_us is not None and at_us >= before_us):
+                continue
         payload = obj.get("payload") or {}
         if payload.get("type") != "message":
             continue
         role = payload.get("role")
         if role not in ("user", "assistant"):
             continue
-        text = _codex_text(payload.get("content")).strip()
+        text = message_text(_codex_text(payload.get("content")))
         if not text or _codex_injected(text):
             continue
         out.append({"role": "agent" if role == "assistant" else "user",
                     "text": text})
-    return out[-limit:]
+        seen += 1
+        if include_timestamps:
+            out[-1]["at"] = str(obj.get("timestamp") or "")
+    if report is not None and seen > limit:
+        report["cut"] = "entries"
+    return list(out)

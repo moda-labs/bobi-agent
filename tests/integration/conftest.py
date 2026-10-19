@@ -337,6 +337,16 @@ requires_codex = pytest.mark.skipif(
 )
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    for item in items:
+        if requires_claude.mark in item.iter_markers("skipif"):
+            item.add_marker(pytest.mark.claude)
+        if any(mark in item.iter_markers("skipif")
+               for mark in (requires_claude.mark, requires_codex.mark)):
+            item.add_marker(pytest.mark.live)
+
+
 async def _drain(client):
     """Drain one live brain turn; return (final_text, turn_result).
 

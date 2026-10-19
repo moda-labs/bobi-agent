@@ -11,7 +11,7 @@ the provider label that keeps gateway costs out of real Anthropic spend.
 
 import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -154,6 +154,8 @@ def test_make_session_injects_gateway_env_when_pinned(monkeypatch):
 
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:11434")
     monkeypatch.setenv("BOBI_BRAIN_MODEL", "qwen3:14b")
+    # An ambient vendor key must be blanked, not inherited, under a gateway.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-vendor-key")
     with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock(
         ClaudeSDKClient=MagicMock(),
         ClaudeAgentOptions=_options,
@@ -169,6 +171,8 @@ def test_make_session_injects_gateway_env_when_pinned(monkeypatch):
 
 
 def test_make_session_native_without_pin(monkeypatch):
+    # The spawn PATH puts the user bin dirs first; a parent PATH without them differs.
+    monkeypatch.setenv("PATH", "/usr/bin")
     captured = {}
 
     def _options(**kwargs):
@@ -181,7 +185,7 @@ def test_make_session_native_without_pin(monkeypatch):
     )}):
         session = ClaudeBrain().make_session(cwd="/tmp", system_prompt=None)
 
-    assert "env" not in captured
+    assert "PATH" in captured["env"]
     assert session.provider == "anthropic"
 
 
@@ -202,6 +206,7 @@ async def test_stream_once_injects_gateway_env(monkeypatch):
         TextBlock=type("TB", (), {}),
     )
     monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "http://localhost:4000")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-vendor-key")
     monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
     with patch.dict("sys.modules", {"claude_agent_sdk": fake_sdk}):
         async for _ in ClaudeBrain().stream_once(
@@ -212,6 +217,65 @@ async def test_stream_once_injects_gateway_env(monkeypatch):
     assert seen["env"]["ANTHROPIC_BASE_URL"] == "http://localhost:4000"
     assert seen["env"]["ANTHROPIC_API_KEY"] == ""
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("launch", ["session", "stream"])
+@pytest.mark.parametrize("configured", [False, True])
+async def test_sdk_spawn_does_not_restore_routing_credentials(tmp_path, monkeypatch, launch, configured):
+    import json
+    import subprocess
+    import sys
+
+    from claude_agent_sdk._internal.transport import subprocess_cli
+
+    from tests.metrics.helpers import configured as experiment_config
+
+    monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "synthetic-policy-secret")
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(experiment_config()) if configured else "invalid-json")
+    monkeypatch.setenv(GATEWAY_BASE_URL_ENV, "https://gateway.invalid")
+    monkeypatch.setenv("BOBI_GATEWAY_API_KEY", "synthetic-gateway-secret")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-gateway-secret")
+    monkeypatch.setattr("bobi.brain.claude.get_cli_path", lambda: "/usr/bin/claude")
+    process = MagicMock(stdout=None, stderr=None, stdin=None)
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(subprocess_cli.anyio, "open_process", spawn)
+
+    if launch == "session":
+        options = ClaudeBrain().make_session(cwd=None, system_prompt=None)._options
+        await subprocess_cli.SubprocessCLITransport(prompt="synthetic", options=options).connect()
+    else:
+        async def query(*, prompt, options):
+            await subprocess_cli.SubprocessCLITransport(prompt=prompt, options=options).connect()
+            yield SimpleNamespace()
+
+        monkeypatch.setattr("claude_agent_sdk.query", query)
+        async for _ in ClaudeBrain().stream_once(system_prompt="synthetic", user_prompt="synthetic"):
+            pass
+
+    environment = spawn.call_args.kwargs["env"]
+    for name in ("TYPESAFE_API_KEY", "BOBI_METRICS_EXPERIMENT_JSON"):
+        assert not environment.get(name)
+    assert environment["ANTHROPIC_AUTH_TOKEN"] == "synthetic-gateway-secret"
+    assert environment["ANTHROPIC_BASE_URL"] == "https://gateway.invalid"
+    (tmp_path / "package").mkdir()
+    (tmp_path / ".env").write_text(
+        "BOBI_METRICS_EXPERIMENT_JSON=" + json.dumps(experiment_config()) + "\n"
+        "TYPESAFE_API_KEY=synthetic-policy-secret\n")
+    restored = subprocess.run([sys.executable, "-c", """
+import os, sys
+from pathlib import Path
+from bobi.config import load_dotenv
+from bobi.metrics.router import load_experiment, provider_subprocess_env
+load_dotenv(Path(sys.argv[1]))
+assert load_experiment() is not None
+assert os.environ['TYPESAFE_API_KEY'] == 'synthetic-policy-secret'
+assert 'BOBI_INTERNAL_PROVIDER_CLEARED_ENV' not in os.environ
+isolated = provider_subprocess_env(blank_inherited=True)
+assert not isolated['TYPESAFE_API_KEY']
+assert not isolated['BOBI_METRICS_EXPERIMENT_JSON']
+""", str(tmp_path)], env=environment, capture_output=True, text=True)
+    assert restored.returncode == 0, restored.stderr
 
 # --- process pins -------------------------------------------------------------
 

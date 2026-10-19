@@ -148,6 +148,11 @@ def resolve_agent_prompt(
     return "\n\n".join(parts)
 
 
+# The line a persistent agent's startup brief opens with, before the agent prompt.
+# Module-level so the web view can recognise the brief (bobi/webapp/runtime.py).
+STARTUP_OPENING = "You are a bobi {role} for {agent}. Act directly using your tools."
+
+
 def build_startup_prompt(
     role: str,
     project_path: Path | str,
@@ -171,8 +176,7 @@ def build_startup_prompt(
         slot_name = agent_name or project.name
 
     parts = [
-        f"You are a bobi {role} for {slot_name}. "
-        f"Act directly using your tools.\n\n{prompt}",
+        STARTUP_OPENING.format(role=role, agent=slot_name) + "\n\n" + prompt,
     ]
     if memory_section:
         parts.append(memory_section)

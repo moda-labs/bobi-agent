@@ -17,6 +17,7 @@
 
 import { fmtUsd, fmtEst, fmtTok, EST_NOTE } from "../shell.js";
 import { composerMode, resumeBody } from "./composer.js";
+import { renderRunMetrics } from "./metrics.js";
 
 /* --- formatting ------------------------------------------------------ */
 
@@ -87,7 +88,7 @@ const CHAT_POLL_MS = 1500;
 
 /* --- the view -------------------------------------------------------- */
 
-export function mountAgent(el, { api, name }) {
+export function mountAgent(el, { api, name, session = "" }) {
   const base = "/api/agents/" + encodeURIComponent(name);
 
   el.innerHTML = "";
@@ -100,6 +101,8 @@ export function mountAgent(el, { api, name }) {
           <p class="desc" data-el="desc"></p>
         </div>
         <div class="ah-right">
+          <button class="btn bobi-btn small" data-el="refreshBtn" type="button">refresh</button>
+          <a class="btn bobi-btn quiet small" data-el="metricsLink">metrics & routing</a>
           <div class="agent-header-state" data-el="band"></div>
           <span class="stat-popover" data-el="savedWrap">
             <span class="chip" data-el="savedChip" tabindex="0"
@@ -123,8 +126,10 @@ export function mountAgent(el, { api, name }) {
 
       <section class="runs-section">
         <div class="section-label">
-          <span>Runs</span>
-          <span class="count" data-el="runsCount"></span>
+          <div class="section-title-wrap">
+            <span class="section-heading">Runs</span>
+            <span class="count-pill" data-el="runsCount"></span>
+          </div>
         </div>
         <div class="runs-controls">
           <span class="runs-search-field bobi-field">
@@ -145,8 +150,8 @@ export function mountAgent(el, { api, name }) {
                 <th style="width:118px">Status</th>
                 <th>Run</th>
                 <th style="width:150px">When</th>
-                <th style="width:130px" class="r-tok">Tokens · cost</th>
-                <th style="width:280px"></th>
+                <th style="width:160px" class="r-tok">Tokens · cost</th>
+                <th style="width:240px"></th>
               </tr></thead>
               <tbody data-el="runRows"></tbody>
             </table>
@@ -178,6 +183,15 @@ export function mountAgent(el, { api, name }) {
   });
 
   els.title.textContent = name;
+  els.metricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics`;
+  if (els.refreshBtn) {
+    els.refreshBtn.addEventListener("click", () => {
+      pollHealth();
+      pollRuns();
+      pollOverview();
+      pollSpend();
+    });
+  }
 
   let timers = [];
   let health = null;
@@ -191,6 +205,7 @@ export function mountAgent(el, { api, name }) {
   let runsRequest = 0;
   let busyVerb = null;
   let runsError = "";       // why the table is empty, when it is not "no runs"
+  let autoOpenedSession = false;
 
   /* --- the agent that isn't there ----------------------------------- */
 
@@ -496,9 +511,8 @@ export function mountAgent(el, { api, name }) {
     const rows = (runs && runs.runs) || [];
     els.runRows.innerHTML = "";
     const counts = (runs && runs.counts) || {};
-    // The eyebrow beside this already says "runs", so the count is a
-    // number and nothing else.
     els.runsCount.textContent = counts.all ? String(counts.all) : "";
+    els.runsCount.hidden = !counts.all;
 
     if (!rows.length) {
       els.runsEmpty.hidden = false;
@@ -620,13 +634,22 @@ export function mountAgent(el, { api, name }) {
       action, which ends the run without advancing the approval gate. */
   function rowActions(row) {
     const actions = mk("div", "row-actions");
+
+    if (row.session_id) {
+      const metricsLink = mk("a", "btn bobi-btn small metrics-jump-link", "Metrics ↗");
+      metricsLink.href = `#/agents/${encodeURIComponent(name)}/metrics?session=${encodeURIComponent(row.session_id)}`;
+      metricsLink.title = "View routing decisions, tokens, and stream telemetry for this session";
+      metricsLink.addEventListener("click", (e) => e.stopPropagation());
+      actions.appendChild(metricsLink);
+    }
+
     const transcript = mk("button", "btn bobi-btn small", "Transcript");
     transcript.type = "button";
     transcript.disabled = !row.session_id;
     if (!row.session_id) transcript.title = "No transcript was recorded for this run";
     transcript.addEventListener("click", (e) => {
       e.stopPropagation();
-      openSlab(row);
+      openSlab(row, "transcript");
     });
     actions.appendChild(transcript);
 
@@ -681,12 +704,18 @@ export function mountAgent(el, { api, name }) {
   // if the operator has moved on. Without it a reply lands in a slab now
   // showing a different run.
   let slabToken = 0;
+  let slabAbort;
 
   function closeSlab() {
+    slabAbort?.abort();
     slabToken += 1;
     els.backdrop.classList.remove("open");
     els.slabComposer.hidden = true;
     els.slabComposer.innerHTML = "";
+    if (location.hash.includes("session=")) {
+      const cleanHash = location.hash.split("?")[0];
+      history.replaceState(null, "", cleanHash);
+    }
   }
   els.slabClose.addEventListener("click", closeSlab);
   els.backdrop.addEventListener("click", (e) => {
@@ -695,7 +724,9 @@ export function mountAgent(el, { api, name }) {
   const onKey = (e) => { if (e.key === "Escape") closeSlab(); };
   document.addEventListener("keydown", onKey);
 
-  async function openSlab(row) {
+  async function openSlab(row, section = "transcript") {
+    slabAbort?.abort();
+    slabAbort = new AbortController();
     const token = ++slabToken;
     els.backdrop.classList.add("open");
     els.slabTitle.textContent = row.title || "";
@@ -1066,6 +1097,22 @@ export function mountAgent(el, { api, name }) {
       renderTabs();
       renderRuns();
       renderPager();
+      if (session && !autoOpenedSession) {
+        autoOpenedSession = true;
+        let target = (runs.runs || []).find(r => r.session_id === session || r.title === session || r.key === `session:${session}`);
+        if (!target && (session.startsWith("ses_") || session.startsWith("sess-") || session.length >= 32)) {
+          try {
+            const met = await api(`/api/agents/${encodeURIComponent(name)}/metrics/sessions/${encodeURIComponent(session)}`);
+            if (met.ok && met.data?.session?.session_name) {
+              const sessName = met.data.session.session_name;
+              target = (runs.runs || []).find(r => r.session_id === sessName || r.title === sessName || r.key === `session:${sessName}`);
+            }
+          } catch { /* ignore */ }
+        }
+        if (target) {
+          openSlab(target);
+        }
+      }
       return;
     }
     // A read that failed is not a read that is still running. Left saying
@@ -1103,6 +1150,8 @@ export function mountAgent(el, { api, name }) {
     setInterval(pollOverview, 30000),
   ];
   return () => {
+    slabAbort?.abort();
+    slabToken += 1;
     timers.forEach(clearInterval);
     clearTimeout(searchTimer);
     document.removeEventListener("keydown", onKey);

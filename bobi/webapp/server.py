@@ -24,11 +24,12 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from bobi import paths
 from bobi.chat_history import safe_name
+from bobi.metrics.query import MetricsQueryError
 from bobi.webapp.runtime import (
     LocalRuntime,
     TeamAlreadyRunning,
@@ -95,6 +96,34 @@ class _SetupHost:
         return sorted(self.sessions)
 
 
+# Bound for the JSON bodies the metrics sandbox and JEV config routes accept.
+_JSON_BODY_LIMIT = 131072
+_JSON_BODY_TIMEOUT_S = 3
+
+
+async def _read_json_object(request: Request, message: str, code: str) -> dict:
+    """The request body as a JSON object, read within a size and time bound.
+
+    A body that is too large, slow, not JSON, or not an object raises
+    ``MetricsQueryError(message, code)``; the cause is never echoed back."""
+    import asyncio
+    import json
+
+    try:
+        body = bytearray()
+        async with asyncio.timeout(_JSON_BODY_TIMEOUT_S):
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > _JSON_BODY_LIMIT:
+                    raise ValueError("body too large")
+                body.extend(chunk)
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("body must be an object")
+    except (ValueError, UnicodeError, RecursionError, TimeoutError):
+        raise MetricsQueryError(message, code) from None
+    return payload
+
+
 def _claude_available() -> bool:
     from bobi.brain.claude import get_cli_path
 
@@ -128,6 +157,18 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     @app.exception_handler(UnknownRun)
     def _unknown_run(request, exc) -> JSONResponse:
         return JSONResponse({"error": "unknown run"}, status_code=404)
+
+    @app.exception_handler(MetricsQueryError)
+    def _metrics_error(request, exc) -> JSONResponse:
+        status = 404 if exc.code in {"unknown_session", "unknown_turn"} else 503 if exc.code in {
+            "metrics_busy", "metrics_not_ready", "metrics_unsupported",
+        } else 400 if exc.code in {"query_too_large", "query_too_slow"
+        } else 500 if exc.code == "config_write_failed" else 504 if exc.code in {"policy_timeout", "model_timeout"} else 502 if exc.code.startswith("policy_") or exc.code == "model_run_failed" else 400
+        headers = {"Cache-Control": "no-store"}
+        if status == 503:
+            headers["Retry-After"] = "1"
+        return JSONResponse({"error": str(exc), "code": exc.code, **exc.detail},
+                            status_code=status, headers=headers)
 
     @app.exception_handler(TeamAlreadyRunning)
     def _already_running(request, exc) -> JSONResponse:
@@ -171,6 +212,71 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
     @app.get("/api/agents/{name}/overview")
     def agent_overview(name: str) -> dict:
         return rt.overview(name)
+
+    @app.get("/api/agents/{name}/metrics/summary")
+    def metrics_summary(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                        model: str = "", session_name: str = "", session_id: str = "",
+                        session: str = "", routing: str = "") -> JSONResponse:
+        data = rt.metrics(name, "summary", {"from": start, "to": end, "model": model,
+                          "session_name": session_name, "session_id": session_id,
+                          "session": session, "routing": routing,
+                          "include_dashboard": True})
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/agents/{name}/metrics/test-route")
+    async def metrics_test_route(name: str, request: Request) -> JSONResponse:
+        payload = await _read_json_object(request, "invalid sandbox input or JEV configuration", "invalid_simulation")
+        return JSONResponse(await rt.test_route(name, payload), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/agents/{name}/metrics/test-run")
+    async def metrics_test_run(name: str, request: Request) -> JSONResponse:
+        payload = await _read_json_object(request, "invalid sandbox input or JEV configuration", "invalid_simulation")
+        return JSONResponse(await rt.run_test_prompt(name, payload), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/turns")
+    def metrics_turns(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                      model: str = "", session_name: str = "", session_id: str = "",
+                      session: str = "", routing: str = "",
+                      limit: int = Query(default=50, ge=1, le=200), cursor: str = "",
+                      q: str = Query(default="", max_length=200)) -> JSONResponse:
+        data = rt.metrics(name, "turns", {"from": start, "to": end, "model": model,
+                          "session_name": session_name, "session_id": session_id,
+                          "session": session, "routing": routing,
+                          "limit": limit, "cursor": cursor, "q": q})
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/sessions")
+    def metrics_sessions(name: str, start: str = Query(alias="from"), end: str = Query(alias="to"),
+                         limit: int = Query(default=200, ge=1, le=200), cursor: str = "") -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "sessions", {"from": start, "to": end, "limit": limit,
+                            "cursor": cursor}), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/sessions/{session_id}")
+    def metrics_session(name: str, session_id: str, cursor: str = "",
+                        limit: int = Query(default=50, ge=1, le=200)) -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "session", {"session_id": session_id, "cursor": cursor,
+                            "limit": limit}), headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/turns/{turn_id}")
+    def metrics_turn(name: str, turn_id: str) -> JSONResponse:
+        return JSONResponse(rt.metrics(name, "turn", {"turn_id": turn_id, "include_policy": True}),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/agents/{name}/metrics/jev-config")
+    def get_routing_config(name: str) -> JSONResponse:
+        return JSONResponse(rt.get_routing_config(name), headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/agents/{name}/metrics/jev-config")
+    async def update_routing_config(name: str, request: Request) -> JSONResponse:
+        payload = await _read_json_object(request, "invalid JEV configuration", "invalid_jev_config")
+        from starlette.concurrency import run_in_threadpool
+
+        data = await run_in_threadpool(rt.update_routing_config, name, payload)
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.delete("/api/agents/{name}/metrics/jev-config")
+    def delete_routing_config(name: str) -> JSONResponse:
+        return JSONResponse(rt.update_routing_config(name, {"enabled": False}), headers={"Cache-Control": "no-store"})
 
     # System health (#733 vertical 2): manager liveness + session statuses;
     # a hosted runtime adds reachability and the sidecar's lifecycle trail.

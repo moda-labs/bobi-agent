@@ -27,6 +27,8 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
+from bobi.brain import normalize_brain_kind, session_brain_label
+from bobi.metrics.routing import RoutingContext, candidate_failed, may_rerun_on_control, resolve_route
 from bobi.brain.turns import drain_turn, timeout_error, tool_crash_error
 from bobi.transient import is_transient_api_error
 from bobi.env import (
@@ -412,6 +414,15 @@ async def _run_agent_supervised(
     model = _resolve_launch_model(role, cfg=_cfg)
     effort = _resolve_launch_effort(role, cfg=_cfg)
     max_turns = _resolve_launch_max_turns(role, explicit=max_turns, cfg=_cfg)
+    routing_brain = normalize_brain_kind(session_brain_label())
+    outcome = await resolve_route(RoutingContext(
+        name, "subagent_supervised", routing_brain,
+        model, False, prompt, role, fresh, repo_path=cwd, run_key=run_key, phase=phase,
+    ))
+    model = outcome.model
+    # Pending until the policy's model completes a turn; a failure before then
+    # retries once on the control model (bobi.metrics.routing.candidate_failed).
+    route_decision = outcome.decision
     saved_id = "" if fresh else load_resumable_session_id(name, model)
     registry = get_registry()
 
@@ -462,28 +473,54 @@ async def _run_agent_supervised(
                 await client.connect()
             except Exception as e:
                 if not saved_id:
-                    raise
-                # Stale/unresumable saved session: clear it and retry fresh once,
-                # matching Session._run and the workflow orchestrator. Without
-                # this, a bad token fails every subsequent monitor interval.
-                log.warning(
-                    "Resume failed for '%s' (stale session?), retrying fresh: %s",
-                    name, e,
-                )
-                save_session_id(name, "")
-                saved_id = ""
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                client = _build_client("")
-                await client.connect()
+                    # The policy's model could not start: run the control model instead.
+                    control = candidate_failed(route_decision, session_name=name, brain=routing_brain,
+                                               model=model, error=f"{type(e).__name__}: {e}")
+                    if not control:
+                        raise
+                    route_decision = None
+                    model = control
+                    client = _build_client("")
+                    await client.connect()
+                else:
+                    # Stale/unresumable saved session: clear it and retry fresh once,
+                    # matching Session._run and the workflow orchestrator. Without
+                    # this, a bad token fails every subsequent monitor interval.
+                    log.warning(
+                        "Resume failed for '%s' (stale session?), retrying fresh: %s",
+                        name, e,
+                    )
+                    save_session_id(name, "", preserve_route=True)
+                    saved_id = ""
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    client = _build_client("")
+                    await client.connect()
             # The task is turn 1, explicitly — connect() is never a turn
             # (#1016). Fresh and resumed sessions now take one identical path.
+            from bobi.metrics.runtime import observe_turn, prompt_bytes
+
+            turn_observation = observe_turn(
+                name,
+                provider=getattr(client, "provider", "anthropic"),
+                role=role,
+                run_key=run_key,
+                trigger_kind="supervised",
+                trigger_id=phase,
+                model_requested=model,
+                prompt_bytes=prompt_bytes(prompt),
+            )
             await client.query(prompt)
 
             while True:
-                outcome = await drain_turn(client, name, model=model)
+                outcome = await drain_turn(
+                    client,
+                    name,
+                    model=model,
+                    observation=turn_observation,
+                )
                 if outcome.final_text:
                     result.final_text = outcome.final_text
                 result_msg = outcome.result
@@ -500,6 +537,36 @@ async def _run_agent_supervised(
                                       error=result.error, phase=phase)
                     return result
 
+                if result_msg.is_error and may_rerun_on_control(
+                        route_decision, error_kind=result_msg.error_kind,
+                        tools_ran=bool(result_msg.tool_executions)):
+                    # The policy's model failed its first turn: rerun the task
+                    # once on the control model in a fresh session.
+                    control = candidate_failed(route_decision, session_name=name, brain=routing_brain,
+                                               model=model, error=result_msg.error_text())
+                    route_decision = None
+                    if control:
+                        model = control
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
+                        client = _build_client("")
+                        await client.connect()
+                        turn_observation = observe_turn(
+                            name,
+                            provider=getattr(client, "provider", "anthropic"),
+                            role=role,
+                            run_key=run_key,
+                            trigger_kind="supervised",
+                            trigger_id=phase,
+                            model_requested=model,
+                            prompt_bytes=prompt_bytes(prompt),
+                        )
+                        await client.query(prompt)
+                        continue
+                route_decision = None
+
                 result.session_id = result_msg.session_id
                 result.duration_ms += result_msg.duration_ms
                 result.total_cost_usd += result_msg.total_cost_usd or 0.0
@@ -514,6 +581,16 @@ async def _run_agent_supervised(
                     loop = asyncio.get_running_loop()
                     answer = await loop.run_in_executor(
                         None, on_input_needed, deferred.name, deferred.input,
+                    )
+                    turn_observation = observe_turn(
+                        name,
+                        provider=getattr(client, "provider", "anthropic"),
+                        role=role,
+                        run_key=run_key,
+                        trigger_kind="deferred_tool_answer",
+                        trigger_id=phase,
+                        model_requested=model,
+                        prompt_bytes=prompt_bytes(answer),
                     )
                     await client.query(answer)
                     continue
@@ -558,6 +635,13 @@ async def _run_agent_supervised(
             await client.disconnect()
         except Exception:
             pass
+        from bobi.metrics.runtime import finish_metrics_session
+
+        finish_metrics_session(
+            name,
+            status="completed" if result.success else "failed",
+            error_kind=result.error_kind or ("agent_error" if result.error else ""),
+        )
 
     return result
 
@@ -624,6 +708,11 @@ def run_phase_blocking(
             **({"model": model} if model else {}),
             **({"effort": effort} if effort else {}),
         },
+        run_key=run_key,
+        routing=RoutingContext(
+            name, "subagent_phase", normalize_brain_kind(session_brain_label()),
+            model, False, prompt, role, False, repo_path=cwd, run_key=run_key, phase=phase,
+        ),
     )
 
     ok = session.start(startup_prompt=prompt, timeout=effective_timeout)
@@ -888,6 +977,7 @@ def run_persistent_agent(
     _cfg = _load_team_config()
     merged_mcp = mcp_servers if mcp_servers is not None else (
         _cfg.mcp_servers if _cfg else None)
+    explicit_model = bool(model)
     model = _resolve_launch_model(role, explicit=model, cfg=_cfg)
     effort = _resolve_launch_effort(role, explicit=effort, cfg=_cfg)
 
@@ -909,6 +999,10 @@ def run_persistent_agent(
         role=role,
         subscribe=subscribe,
         fresh=fresh,
+        routing=RoutingContext(
+            name, "subagent_persistent", normalize_brain_kind(session_brain_label()),
+            model, explicit_model, task, role, fresh, repo_path=cwd,
+        ),
     )
 
     ok = session.start(startup_prompt=task, timeout=timeout)
@@ -1855,9 +1949,6 @@ def _start_event_subscription(session_name: str, extra_subscribe: list[str],
 
     cfg = Config.load(project_path)
     es_url = cfg.event_server_url
-    state = load_deployment_state(project_path, session_name)
-    es_key = state.get("api_key", "")
-    es_deployment = state.get("deployment_id", "")
     cursor_path = session_cursor_path(project_path, session_name)
     controller = LiveSubscription(session_name)
 
@@ -2196,6 +2287,11 @@ def _start_event_subscription(session_name: str, extra_subscribe: list[str],
         elif result == "connected":
             log.info("Connected to existing local event server on port %d", es_port)
 
+    # Launching our own new local broker retires the previous process's
+    # transport state. Read after startup so we do not PUT a captured stale id.
+    state = load_deployment_state(project_path, session_name)
+    es_key = state.get("api_key", "")
+    es_deployment = state.get("deployment_id", "")
     # Registration order closes the boot-overwrite window (#952). The lock is
     # taken BEFORE the controller is published, so a reload POST arriving in
     # this window finds the controller and BLOCKS until the boot's own
@@ -2325,6 +2421,15 @@ def _run_agent_entry(args: dict) -> None:
             f"(no package/agent.yaml) — refusing to run with an unverified "
             f"identity."
         )
+    # The spawner already merged the runtime .env into this environment; the
+    # same load the CLI runs records any routing config a provider launch
+    # withheld and the .env could not restore, so routing says why it is off.
+    from bobi.config import load_dotenv
+    try:
+        load_dotenv(project_root)
+    except Exception as e:  # noqa: BLE001 - the spawner tolerated this .env too
+        log.warning("Could not load runtime .env from %s (%s); routing cannot "
+                    "say why it is off.", project_root, e)
     pin_brain_from_root(project_root, os.environ)
 
     # Re-render the team's global instructions (#779) at child entry, the

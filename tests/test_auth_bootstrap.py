@@ -302,6 +302,30 @@ def test_read_until_url_scrapes_oauth_url():
     )
 
 
+@pytest.mark.parametrize("terminator", ["\x1b\\", "\x07"])
+def test_read_until_url_scrapes_an_osc8_hyperlinked_oauth_url(terminator):
+    """Claude Code prints the sign-in URL as an OSC 8 hyperlink whose text is
+    the URL again. Stripping the escapes alone glued the two copies together
+    behind an ``8;;`` fragment."""
+    import pty
+
+    url = "https://claude.com/cai/oauth/authorize?code=true&client_id=abc&state=xyz"
+    sample = (
+        "Opening browser to sign in\r\n"
+        "If the browser didn't open, visit: "
+        f"\x1b]8;;{url}{terminator}\x1b[94m{url}\x1b[0m\x1b]8;;{terminator}\r\n"
+        "Paste code here if prompted > "
+    )
+    master, slave = pty.openpty()
+    os.write(slave, sample.encode())
+    try:
+        scraped = ab._read_until_url(master, timeout=5)
+    finally:
+        os.close(slave)
+        os.close(master)
+    assert scraped == url
+
+
 def test_read_until_url_times_out():
     import pty
 

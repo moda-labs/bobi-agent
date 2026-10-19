@@ -452,6 +452,64 @@ def agent(ctx, name):
     root = _bind_agent_runtime(name)
     ctx.obj = {"agent": name, "root": root}
 
+@main.command("admin")
+@click.argument("metrics_command", type=click.Choice([
+    "metrics_summary", "metrics_session", "metrics_turn",
+]))
+@click.option("--url", envvar="BOBI_ADMIN_URL", required=True,
+              help="Worker base URL.")
+@click.option("--fleet", envvar="BOBI_FLEET", required=True)
+@click.option("--instance", envvar="BOBI_INSTANCE", required=True)
+@click.option("--token", envvar="FLEET_OPERATOR_TOKEN", required=True,
+              help="Operator token; prefer the environment variable.")
+@click.option("--args", "raw_args", default="{}", show_default=True,
+              help="JSON object passed to the Admin command.")
+@click.option("--wait/--no-wait", default=False,
+              help="Poll until the command resolves or the timeout expires.")
+@click.option("--timeout", type=click.FloatRange(min=0.1), default=10.0,
+              show_default=True)
+@click.option("--json", "json_output", is_flag=True,
+              help="Print the complete JSON envelope.")
+def admin_command(metrics_command, url, fleet, instance, token, raw_args,
+                  wait, timeout, json_output):
+    """Query one deployed instance through the authenticated Admin API.
+
+    \b
+    Exit codes: 0 success (or submitted, without --wait);
+    1 the command failed (status "error") or the request was rejected;
+    2 --wait timed out before the command resolved.
+    """
+    from bobi.admin_client import AdminClientError, run_admin_command
+
+    try:
+        args = json.loads(raw_args)
+    except json.JSONDecodeError as exc:
+        raise click.UsageError(f"--args must be valid JSON: {exc.msg}") from None
+    if not isinstance(args, dict):
+        raise click.UsageError("--args must decode to a JSON object")
+    try:
+        result = run_admin_command(
+            base_url=url,
+            token=token,
+            fleet=fleet,
+            instance=instance,
+            alias=metrics_command,
+            args=args,
+            wait=wait,
+            timeout=timeout,
+        )
+    except AdminClientError as exc:
+        raise click.ClickException(str(exc)) from None
+    if json_output:
+        click.echo(json.dumps(result, sort_keys=True))
+    else:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    status = result.get("status")
+    if status == "error":
+        raise SystemExit(1)
+    if wait and status != "done":
+        raise SystemExit(2)
+
 
 def _active_service_manager(agent: str | None = None) -> str | None:
     from bobi.service_manager import active_manager
@@ -2133,6 +2191,127 @@ def subagents_cancel(ref):
         click.echo(f"Cancelled {ref}")
     else:
         click.echo(f"No running sub-agent for {ref}")
+
+
+@agent.group("metrics")
+def metrics():
+    """Inspect and reconcile the selected agent's local metrics state."""
+    pass
+
+
+@metrics.command("status")
+@click.option("--json", "json_output", is_flag=True, help="Print JSON output.")
+def metrics_status(json_output):
+    """Show collector, storage, and reconciliation health."""
+    root = _detect_project_root()
+    metrics_root = root / "state" / "metrics"
+    db_path = metrics_root / "metrics.db"
+    health_path = metrics_root / "collector.state.json"
+    health = {}
+    try:
+        health = json.loads(health_path.read_text())
+    except (OSError, ValueError, TypeError):
+        pass
+    result = {
+        "mode": os.environ.get("BOBI_METRICS_MODE", "disabled"),
+        "database": {
+            "path": str(db_path),
+            "ready": db_path.exists(),
+            "bytes": db_path.stat().st_size if db_path.exists() else 0,
+        },
+        "collector": health or {
+            "status": "not_running",
+            "role": "standby",
+            "db_ready": db_path.exists(),
+        },
+    }
+    if db_path.exists():
+        from bobi.metrics.store import connect, integrity_check
+
+        conn = connect(db_path, readonly=True)
+        try:
+            result["database"]["integrity"] = integrity_check(conn)
+            result["projection"] = {
+                str(row["projection_state"]): int(row["count"])
+                for row in conn.execute(
+                    "SELECT projection_state,COUNT(*) AS count FROM raw_events "
+                    "GROUP BY projection_state"
+                )
+            }
+            result["reconciliation"] = {
+                "exact_measurements": int(conn.execute(
+                    "SELECT COUNT(*) FROM usage_measurements WHERE is_estimated=0"
+                ).fetchone()[0]),
+                "estimated_measurements": int(conn.execute(
+                    "SELECT COUNT(*) FROM usage_measurements WHERE is_estimated=1"
+                ).fetchone()[0]),
+                "uncovered_turns": int(conn.execute(
+                    "SELECT COUNT(*) FROM turns AS t WHERE NOT EXISTS ("
+                    "SELECT 1 FROM usage_measurements AS u "
+                    "WHERE u.turn_id=t.turn_id AND u.scope='turn' "
+                    "AND u.is_estimated=0)"
+                ).fetchone()[0]),
+            }
+        finally:
+            conn.close()
+    if json_output:
+        click.echo(json.dumps(result, sort_keys=True))
+        return
+    click.echo(f"mode:       {result['mode']}")
+    click.echo(f"database:   {'ready' if db_path.exists() else 'missing'}")
+    click.echo(f"collector:  {result['collector'].get('status', 'unknown')}")
+    if result.get("reconciliation"):
+        click.echo(
+            "uncovered:  "
+            f"{result['reconciliation']['uncovered_turns']} turn(s)"
+        )
+
+
+@metrics.command("reconcile")
+@click.option("--turn-id", default="", help="Reconcile one Bobi turn ID.")
+@click.option("--wait", is_flag=True, help="Wait for collector projection.")
+@click.option("--timeout", default=60.0, type=float, show_default=True)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="With --turn-id: take the turn's process as gone even if it looks alive. "
+    "Only for a process you know has exited; on a running turn this records a partial turn.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Print JSON output.")
+def metrics_reconcile(turn_id, wait, timeout, force, json_output):
+    """Recover exact usage from retained Claude/Codex transcripts."""
+    from bobi.metrics.providers import ProviderContractError
+    from bobi.metrics.reconcile import (
+        ReconciliationError,
+        TurnStillRunning,
+        reconcile_missing,
+        reconcile_turn,
+    )
+
+    if force and not turn_id:
+        raise click.UsageError("--force needs --turn-id")
+    root = _detect_project_root()
+    try:
+        result = (
+            reconcile_turn(root, turn_id, wait=wait, timeout=timeout, force=force)
+            if turn_id
+            else reconcile_missing(root, wait=wait, timeout=timeout, terminal_only=True)
+        )
+    except TurnStillRunning as exc:
+        hint = f" {exc.hint}" if exc.hint and not force else ""
+        raise click.ClickException(f"{exc}.{hint}") from None
+    except (ReconciliationError, ProviderContractError, OSError) as exc:
+        raise click.ClickException(str(exc)) from None
+    rendered = json.dumps(result, sort_keys=True)
+    if json_output:
+        click.echo(rendered)
+    else:
+        waiting = int(result.get("turns_waiting") or 0)
+        click.echo(
+            f"{result['status']}: recovered "
+            f"{result.get('exact_measurements_recovered', 0)} exact measurement(s)"
+            + (f"; {waiting} turn(s) still waiting for their events" if waiting else "")
+        )
 
 
 # `otel` is registered directly on the `agent` group, the `subagents` pattern

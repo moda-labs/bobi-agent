@@ -1,0 +1,769 @@
+"""Single-winner collector for durable metrics ingestion and projection."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import sqlite3
+import threading
+import time
+from pathlib import Path
+
+from bobi.fsutil import atomic_write_json, try_file_lock
+from bobi.metrics.producer import process_start_token
+from bobi.metrics.projection import project_pending
+from bobi.metrics.spool import SpoolCorruptionError, iter_frames
+from bobi.metrics.store import (
+    StageResult,
+    connect,
+    cursor_offset,
+    migrate,
+    stage_frames,
+)
+
+log = logging.getLogger(__name__)
+
+
+_SEGMENT_OWNER = re.compile(r"(?:producer|reconciler)-(\d+)-")
+# producer-<pid>-<uuid7>-<process start value>; older ids end at the UUID.
+_PRODUCER_ID = re.compile(
+    r"producer-(\d+)-(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-(\d+)$)?"
+)
+
+
+def project_all(conn: sqlite3.Connection) -> dict[str, int]:
+    """Project every pending raw event, in batches."""
+    projection = {"selected": 0, "projected": 0, "deferred": 0, "quarantined": 0}
+    while True:
+        batch = project_pending(conn)
+        for key in projection:
+            projection[key] += batch[key]
+        if batch["selected"] == 0:
+            break
+    return {key: projection[key] for key in ("projected", "deferred", "quarantined")}
+
+
+# A fully imported segment is retired only once it has been quiet this long.
+# A reconciler segment has no other end marker; for a producer segment it is a
+# margin on top of writer_finished.
+_RETIRE_AFTER_SECONDS = 5 * 60
+# A background reconciliation pass stops after this long and resumes next cycle,
+# so spool import never waits long behind it.
+RECONCILE_BUDGET_SECONDS = 5.0
+
+
+def _retirable(conn: sqlite3.Connection, spool_root: Path, segment: Path) -> bool:
+    """True for an imported segment nothing will append to again.
+
+    A reconciler writes and closes its segment within one call, so age alone
+    decides; a producer segment also needs writer_finished.
+    """
+    match = _SEGMENT_OWNER.match(segment.parent.name)
+    if not match:
+        return False
+    try:
+        if time.time() - segment.stat().st_mtime < _RETIRE_AFTER_SECONDS:
+            return False
+    except OSError:
+        return False
+    if segment.parent.name.startswith("reconciler-"):
+        return True
+    return writer_finished(conn, spool_root, segment.parent.name)
+
+
+def writer_finished(
+    conn: sqlite3.Connection,
+    spool_root: Path,
+    producer_id: str,
+    *,
+    assume_exited: bool = False,
+) -> bool:
+    """True once the runtime writer *producer_id* is gone and every complete
+    frame it spooled is imported.
+
+    This is the one test that a writer is done, for spool retirement, for the
+    background reconciliation pass and for a manual reconcile.
+    ``assume_exited`` skips only the liveness half, for an operator who knows
+    the process is gone. Liveness is read before the spool: a writer seen gone
+    appends nothing after, so a spool with no complete frame past its cursor
+    then holds all of its events, and an incomplete last frame is a torn
+    write that will never be finished.
+    """
+    if not (assume_exited or producer_exited(producer_id)):
+        return False
+    return not _has_unimported_frames(conn, spool_root / producer_id)
+
+
+def _has_unimported_frames(conn: sqlite3.Connection, directory: Path) -> bool:
+    """True when a segment in *directory* has a complete frame past its cursor.
+
+    A directory that is gone was retired after a full import. A segment that
+    cannot be read counts as unimported, so a writer is never taken as done
+    on a guess; a corrupt frame never imports, so it does not hold the writer.
+    """
+    try:
+        segments = sorted(directory.glob("*.telemetry"))
+    except OSError:
+        return True
+    for segment in segments:
+        try:
+            size = segment.stat().st_size
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if _frame_unimported(conn, segment, size):
+            return True
+    return False
+
+
+def _frame_unimported(conn: sqlite3.Connection, segment: Path, limit: int) -> bool:
+    """True when *segment* has a complete frame past its cursor that starts
+    before byte *limit*. A segment that cannot be read counts as unimported."""
+    start = cursor_offset(conn, segment)
+    if start >= limit:
+        return False
+    try:
+        frame = next(iter(iter_frames(segment, start)), None)
+    except (FileNotFoundError, SpoolCorruptionError):
+        # A corrupt or unreadable frame stops the collector at its cursor for
+        # good, and is reported in corrupt_segments; it and what follows will
+        # never import.
+        return False
+    except OSError:
+        return True
+    return frame is not None and frame.offset < limit
+
+
+def _runtime_segments(spool_root: Path) -> list[Path]:
+    """Every runtime writer's segment, without listing reconciler directories.
+
+    What a reconciler wrote never bounds another turn's window, and a pass
+    adds one reconciler directory per turn it recovers."""
+    # os.scandir, not Path.iterdir: this runs before every turn a pass may
+    # decide, and the reconciler directories it skips grow with the pass.
+    segments: list[Path] = []
+    try:
+        with os.scandir(spool_root) as entries:
+            directories = [entry.path for entry in entries
+                           if not entry.name.startswith("reconciler-") and entry.is_dir()]
+    except OSError:
+        return []
+    for directory in directories:
+        try:
+            with os.scandir(directory) as entries:
+                segments.extend(Path(entry.path) for entry in entries
+                                if entry.name.endswith(".telemetry"))
+        except OSError:
+            continue
+    return sorted(segments)
+
+
+def spool_sizes(spool_root: Path) -> dict[Path, int]:
+    """The current size of every runtime writer's segment (see
+    _runtime_segments)."""
+    sizes: dict[Path, int] = {}
+    for segment in _runtime_segments(spool_root):
+        try:
+            sizes[segment] = segment.stat().st_size
+        except OSError:
+            continue
+    return sizes
+
+
+def imported_through(conn: sqlite3.Connection, sizes: dict[Path, int]) -> bool:
+    """True once every complete frame that started before the recorded size
+    of its segment (see spool_sizes) is imported."""
+    return not any(_frame_unimported(conn, segment, size) for segment, size in sizes.items())
+
+
+def producer_exited(producer_id: str) -> bool:
+    """True only when the runtime process that writes as *producer_id* is gone.
+
+    It is gone when no process holds its pid, or when the process holding the
+    pid has another start value than the one the producer recorded in its id
+    (see process_start_token), which is what a pid reused after a container
+    restart looks like. Both values come from the same kernel field, so a
+    wall-clock step changes neither. An id without a start value (written
+    before it was recorded, or where it could not be read) is checked by pid
+    alone: a reused pid then reads as alive, and so does a pid this process
+    may not signal or an id that names no pid; each only delays what waits on
+    it, and a manual reconcile can be forced.
+
+    Every writer of a spool must share this process's pid namespace.
+    """
+    match = _PRODUCER_ID.match(producer_id)
+    if not match:
+        return False
+    pid = int(match.group(1))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass
+    if match.group(2) is None:
+        return False
+    current = process_start_token(pid)
+    return current is not None and current != int(match.group(2))
+
+
+def _retire_segment(conn: sqlite3.Connection, segment: Path) -> dict[str, int]:
+    """Delete a retirable segment, and its directory once no segment is left.
+
+    Its events are already in ``raw_events``. Returns the drop and writer-error
+    counts from the producer's health file when the directory goes, so the
+    collector can keep them.
+    """
+    segment.unlink()
+    conn.execute("DELETE FROM spool_cursors WHERE segment_path=?", (str(segment),))
+    conn.commit()
+    if any(segment.parent.glob("*.telemetry")):
+        return {}
+    counts: dict[str, int] = {}
+    try:
+        data = json.loads((segment.parent / "health.json").read_text())
+        counts = {
+            "telemetry_events_dropped": int(data.get("telemetry_events_dropped") or 0),
+            "writer_errors": int(data.get("writer_errors") or 0),
+        }
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    for leftover in segment.parent.iterdir():
+        leftover.unlink()
+    segment.parent.rmdir()
+    return counts
+
+
+class MetricsCollector:
+    def __init__(self, db_path: Path | str) -> None:
+        self.db_path = Path(db_path)
+        self.lock_path = self.db_path.with_name("collector")
+
+    def collect_segment(self, segment_path: Path | str) -> dict[str, int | str]:
+        """Import and project one segment, or return standby without waiting."""
+        with try_file_lock(self.lock_path) as acquired:
+            if not acquired:
+                return {"role": "standby", "staged": 0, "projected": 0}
+            return self.collect_segment_locked(segment_path)
+
+    def collect_segment_locked(
+        self, segment_path: Path | str
+    ) -> dict[str, int | str]:
+        """Import one segment while the caller holds the collector lock."""
+        conn = connect(self.db_path)
+        try:
+            migrate(conn)
+            stage_error = None
+            try:
+                stage = self._stage_segment(
+                    conn, Path(segment_path), cursor_offset(conn, segment_path)
+                )
+            except SpoolCorruptionError as exc:
+                stage = StageResult(0, 0)
+                stage_error = exc
+            projection = project_all(conn)
+            if stage_error is not None:
+                raise stage_error
+            return {
+                "role": "active",
+                "staged": stage.staged,
+                "conflicts": stage.conflicts,
+                **projection,
+            }
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _stage_segment(conn, segment_path: Path, start: int) -> StageResult:
+        staged = conflicts = 0
+        batch = []
+        batch_started_ns = time.perf_counter_ns()
+
+        def flush() -> None:
+            nonlocal staged, conflicts
+            result = stage_frames(conn, segment_path=segment_path, frames=batch)
+            staged += result.staged
+            conflicts += result.conflicts
+
+        frames = iter(iter_frames(segment_path, start))
+        while True:
+            try:
+                frame = next(frames)
+            except StopIteration:
+                break
+            except Exception:
+                if batch:
+                    flush()
+                raise
+            batch.append(frame)
+            deadline_reached = (
+                time.perf_counter_ns() - batch_started_ns >= 25_000_000
+            )
+            if len(batch) < 500 and not deadline_reached:
+                continue
+            flush()
+            batch = []
+            batch_started_ns = time.perf_counter_ns()
+        if batch:
+            flush()
+        return StageResult(staged, conflicts)
+
+    def prepare(self) -> str:
+        """Create/migrate the read model under the non-blocking collector lock."""
+        with try_file_lock(self.lock_path) as acquired:
+            if not acquired:
+                return "standby"
+            self.prepare_locked()
+            return "active"
+
+    def prepare_locked(self) -> None:
+        conn = connect(self.db_path)
+        try:
+            migrate(conn)
+        finally:
+            conn.close()
+
+
+class MetricsCollectorService:
+    """Supervisor-owned background importer with a bounded shutdown drain."""
+
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        poll_interval: float = 0.1,
+        reconcile_interval: float = 60.0,
+    ) -> None:
+        self.root = Path(root).resolve()
+        self.metrics_root = self.root / "state" / "metrics"
+        self.spool_root = self.metrics_root / "spool"
+        self.db_path = self.metrics_root / "metrics.db"
+        self.health_path = self.metrics_root / "collector.state.json"
+        # Counters that must outlive one cycle and a restart.
+        self._lasting = self._load_lasting_counters()
+        # One warning per segment and error type; repeats go to debug.
+        self._reported_failures: set[tuple[str, str]] = set()
+        self._retired_since_publish = False
+        self.collector = MetricsCollector(self.db_path)
+        self.poll_interval = poll_interval
+        self.reconcile_interval = reconcile_interval
+        self._last_reconcile = time.monotonic()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="bobi-metrics-collector",
+        )
+        self._started = False
+        self._health_lock = threading.Lock()
+        self._last_health_write = 0.0
+        self._health: dict[str, object] = {
+            "status": "starting",
+            "role": "standby",
+            "db_ready": False,
+            "spool_bytes": 0,
+            "uncommitted_spool_bytes": 0,
+            "import_lag_ms": None,
+            "last_success_at_us": None,
+            "last_error": None,
+            "rejected_events": 0,
+            "quarantined_events": 0,
+            "telemetry_events_dropped": 0,
+            "producer_writer_errors": 0,
+            "producer_count": 0,
+            "last_reconciliation_at_us": None,
+            "reconciliation_errors": 0,
+            "reconciliation_retry_exhausted_turns": 0,
+            "reconciliation_waiting_turns": 0,
+            "uncovered_turns": 0,
+            **self._lasting,
+        }
+
+    _LASTING_COUNTERS = (
+        "conflicting_events", "last_conflict_at_us",
+        "retired_producer_events_dropped", "retired_producer_writer_errors",
+        "torn_tail_bytes",
+    )
+
+    def _load_lasting_counters(self) -> dict[str, int | None]:
+        lasting: dict[str, int | None] = {
+            "conflicting_events": 0, "last_conflict_at_us": None,
+            "retired_producer_events_dropped": 0, "retired_producer_writer_errors": 0,
+            "torn_tail_bytes": 0,
+        }
+        try:
+            saved = json.loads(self.health_path.read_text())
+        except (OSError, ValueError):
+            return lasting
+        if isinstance(saved, dict):
+            for key in self._LASTING_COUNTERS:
+                if type(saved.get(key)) is int and saved[key] >= 0:
+                    lasting[key] = saved[key]
+        return lasting
+
+    def start(self) -> None:
+        if not self._started:
+            self._thread.start()
+            self._started = True
+
+    def stop(self, *, timeout: float = 5.0) -> bool:
+        if not self._started:
+            return True
+        self._stop.set()
+        self._thread.join(timeout=timeout)
+        return not self._thread.is_alive()
+
+    def health(self) -> dict[str, object]:
+        with self._health_lock:
+            return dict(self._health)
+
+    def collect_once(self) -> dict[str, int | str]:
+        with try_file_lock(self.collector.lock_path) as acquired:
+            if not acquired:
+                return self._empty_result("standby")
+            return self._collect_once_locked()
+
+    @staticmethod
+    def _empty_result(role: str) -> dict[str, int | str]:
+        return {
+            "role": role,
+            "staged": 0,
+            "projected": 0,
+            "deferred": 0,
+            "quarantined": 0,
+            "corrupt_segments": 0,
+        }
+
+    def _collect_once_locked(self, *, maintenance: bool = True) -> dict[str, int | str]:
+        """One cycle: one connection, one migrate, then only the segments with
+        bytes past their cursor. A segment that fails, for any reason, is
+        counted and skipped so it cannot stop the ones after it.
+
+        Without *maintenance* it only imports runtime writers' segments and
+        projects: no migrate, no retirement and no reconciler segments, for
+        the imports a reconciliation makes before it decides a turn. The next
+        maintenance cycle imports what reconcilers wrote.
+        """
+        totals: dict[str, int | str] = {
+            **self._empty_result("active"), "conflicts": 0, "failed_segments": 0,
+        }
+        conn = connect(self.db_path)
+        try:
+            if maintenance:
+                migrate(conn)
+            cursors = {
+                str(row["segment_path"]): int(row["committed_offset"])
+                for row in conn.execute(
+                    "SELECT segment_path, committed_offset FROM spool_cursors")
+            }
+            segments = (sorted(self.spool_root.glob("*/*.telemetry")) if maintenance
+                        else _runtime_segments(self.spool_root))
+            for segment in segments:
+                try:
+                    size = segment.stat().st_size
+                except OSError:
+                    continue
+                start = cursors.get(str(segment), 0)
+                if start >= size:
+                    if maintenance and _retirable(conn, self.spool_root, segment):
+                        self._retire(conn, segment)
+                    continue
+                try:
+                    stage = self.collector._stage_segment(conn, segment, start)
+                except SpoolCorruptionError:
+                    log.debug("metrics: corrupt spool segment isolated: %s",
+                              segment, exc_info=True)
+                    totals["corrupt_segments"] = int(totals["corrupt_segments"]) + 1
+                    continue
+                except Exception as exc:
+                    self._report_failure(segment, exc)
+                    totals["failed_segments"] = int(totals["failed_segments"]) + 1
+                    totals["failure"] = type(exc).__name__
+                    continue
+                totals["staged"] = int(totals["staged"]) + stage.staged
+                totals["conflicts"] = int(totals["conflicts"]) + stage.conflicts
+                if maintenance and _retirable(conn, self.spool_root, segment):
+                    # A dead writer's incomplete last frame will never be
+                    # finished: count its bytes and retire the segment.
+                    torn = size - cursor_offset(conn, segment)
+                    if torn > 0:
+                        log.warning("metrics: dropped %d torn bytes at the end of %s", torn, segment)
+                        self._lasting["torn_tail_bytes"] = int(self._lasting["torn_tail_bytes"] or 0) + torn
+                    self._retire(conn, segment)
+                if stage.conflicts:
+                    self._lasting["conflicting_events"] = (
+                        int(self._lasting["conflicting_events"] or 0) + stage.conflicts)
+                    self._lasting["last_conflict_at_us"] = time.time_ns() // 1000
+            for key, value in project_all(conn).items():
+                totals[key] = int(totals[key]) + value
+        finally:
+            conn.close()
+        return totals
+
+    def import_locked(self) -> dict[str, int | str]:
+        """Import and project what is spooled, nothing else (no migrate, no
+        retirement), while the caller holds the collector lock: what a
+        reconciliation decides from must be imported first."""
+        return self._collect_once_locked(maintenance=False)
+
+    def import_and_save_locked(self) -> dict[str, int | str]:
+        """import_locked for a caller that took the collector lock outside
+        the collector's own loop (a manual reconcile with no collector
+        running). The lasting counters are read under the lock, so they
+        include what the last collector saved, and what this import adds to
+        them (a conflicting event) is merged into the saved health state, so
+        the next collector reads it back on start."""
+        self._lasting = self._load_lasting_counters()
+        before = dict(self._lasting)
+        result = self.import_locked()
+        if self._lasting != before:
+            self._save_lasting()
+        return result
+
+    def _save_lasting(self) -> None:
+        """Merge the lasting counters into the saved health state; every
+        other field stays as the last collector published it."""
+        try:
+            saved = json.loads(self.health_path.read_text())
+        except (OSError, ValueError):
+            saved = {}
+        if not isinstance(saved, dict):
+            saved = {}
+        saved.update(self._lasting)
+        try:
+            atomic_write_json(self.health_path, saved, indent=None, sort_keys=True)
+        except OSError:
+            log.warning("metrics: could not save collector counters to %s",
+                        self.health_path, exc_info=True)
+
+    def _take_over(self) -> None:
+        """Become the active collector: state the previous one saved wins over
+        whatever this instance read when it started on standby."""
+        self._lasting = self._load_lasting_counters()
+        self._set_health(role="active", **self._lasting)
+
+    def _report_failure(self, segment: Path, exc: Exception) -> None:
+        key = (str(segment), type(exc).__name__)
+        if key in self._reported_failures:
+            log.debug("metrics: spool segment still failing: %s", segment, exc_info=True)
+            return
+        self._reported_failures.add(key)
+        log.warning("metrics: spool segment skipped until it imports: %s",
+                    segment, exc_info=True)
+
+    def _retire(self, conn: sqlite3.Connection, segment: Path) -> None:
+        try:
+            counts = _retire_segment(conn, segment)
+        except (OSError, sqlite3.Error):
+            log.debug("metrics: could not retire spool segment %s", segment, exc_info=True)
+            return
+        self._lasting["retired_producer_events_dropped"] = int(
+            self._lasting["retired_producer_events_dropped"] or 0
+        ) + counts.get("telemetry_events_dropped", 0)
+        self._lasting["retired_producer_writer_errors"] = int(
+            self._lasting["retired_producer_writer_errors"] or 0
+        ) + counts.get("writer_errors", 0)
+        if counts:
+            # The producer's own file is gone; these counts now live only here.
+            self._retired_since_publish = True
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with try_file_lock(self.collector.lock_path) as acquired:
+                if not acquired:
+                    try:
+                        self._refresh_health(self._empty_result("standby"))
+                    except Exception as exc:
+                        # An unreadable read model must not end the thread that takes over.
+                        log.debug("metrics: standby health refresh failed", exc_info=True)
+                        self._set_health(status="degraded", last_error=type(exc).__name__)
+                    self._stop.wait(self.poll_interval)
+                    continue
+                self._take_over()
+                while not self._stop.is_set():
+                    self._cycle_locked()
+                    self._stop.wait(self.poll_interval)
+                # Import anything producers flushed while shutdown propagated.
+                self._cycle_locked()
+                self._set_health(status="stopped")
+                self._publish_health(force=True)
+                break
+        self._set_health(status="stopped")
+
+    def _cycle_locked(self) -> None:
+        try:
+            result = self._collect_once_locked()
+            if time.monotonic() - self._last_reconcile >= self.reconcile_interval:
+                result = self._reconcile_locked(result)
+            self._refresh_health(result)
+        except Exception as exc:
+            log.debug("metrics: collector cycle failed", exc_info=True)
+            self._set_health(
+                status="degraded",
+                last_error=type(exc).__name__,
+                rejected_events=int(self.health()["rejected_events"]) + 1,
+            )
+            self._publish_health()
+
+    def _reconcile_locked(
+        self, result: dict[str, int | str]
+    ) -> dict[str, int | str]:
+        from bobi.metrics.reconcile import reconcile_missing
+
+        errors = int(self.health()["reconciliation_errors"])
+        try:
+            # Imports wait while the pass holds the lock, so the pass imports
+            # before each turn: a turn is never decided without the rows
+            # (the next turn's start among them) that were already spooled.
+            reconciliation = reconcile_missing(
+                self.root, collect=False, terminal_only=True,
+                track_attempts=True, budget_seconds=RECONCILE_BUDGET_SECONDS,
+                import_spool=self.import_locked,
+            )
+            errors += int(reconciliation["errors"])
+            self._set_health(
+                reconciliation_retry_exhausted_turns=reconciliation.get("retry_exhausted_turns", 0),
+                reconciliation_waiting_turns=reconciliation.get("turns_waiting", 0),
+            )
+        except Exception:
+            log.debug("metrics: scheduled reconciliation failed", exc_info=True)
+            errors += 1
+        result = self._collect_once_locked()
+        uncovered = 0
+        if self.db_path.exists():
+            conn = connect(self.db_path, readonly=True)
+            try:
+                uncovered = int(conn.execute(
+                    "SELECT COUNT(*) FROM turns AS t WHERE NOT EXISTS ("
+                    "SELECT 1 FROM usage_measurements AS u WHERE u.turn_id=t.turn_id "
+                    "AND u.scope='turn') AND t.ended_at_us IS NOT NULL"
+                ).fetchone()[0])
+            finally:
+                conn.close()
+        self._last_reconcile = time.monotonic()
+        self._set_health(
+            last_reconciliation_at_us=time.time_ns() // 1000,
+            reconciliation_errors=errors,
+            uncovered_turns=uncovered,
+        )
+        return result
+
+    def _refresh_health(self, result: dict[str, int | str]) -> None:
+        now_us = time.time_ns() // 1000
+        segments = list(self.spool_root.glob("*/*.telemetry"))
+        spool_bytes = 0
+        uncommitted_spool_bytes = 0
+        oldest_uncommitted_ns: int | None = None
+        cursors: dict[str, int] = {}
+        if self.db_path.exists():
+            conn = connect(self.db_path, readonly=True)
+            try:
+                try:
+                    cursors = {
+                        str(row["segment_path"]): int(row["committed_offset"])
+                        for row in conn.execute(
+                            "SELECT segment_path, committed_offset FROM spool_cursors"
+                        )
+                    }
+                except sqlite3.OperationalError:
+                    cursors = {}
+            finally:
+                conn.close()
+        for segment in segments:
+            try:
+                stat = segment.stat()
+            except OSError:
+                continue
+            spool_bytes += stat.st_size
+            pending = max(0, stat.st_size - cursors.get(str(segment), 0))
+            if pending:
+                uncommitted_spool_bytes += pending
+                oldest_uncommitted_ns = (
+                    stat.st_mtime_ns
+                    if oldest_uncommitted_ns is None
+                    else min(oldest_uncommitted_ns, stat.st_mtime_ns)
+                )
+
+        drops = writer_errors = producers = 0
+        for health_path in self.spool_root.glob("*/health.json"):
+            try:
+                data = json.loads(health_path.read_text())
+            except (OSError, ValueError, TypeError):
+                continue
+            producers += 1
+            drops += int(data.get("telemetry_events_dropped") or 0)
+            writer_errors += int(data.get("writer_errors") or 0)
+
+        quarantined = 0
+        if self.db_path.exists():
+            conn = connect(self.db_path, readonly=True)
+            try:
+                try:
+                    quarantined = int(conn.execute(
+                        "SELECT COUNT(*) FROM raw_events "
+                        "WHERE projection_state='quarantined'"
+                    ).fetchone()[0])
+                except sqlite3.OperationalError:
+                    quarantined = 0
+            finally:
+                conn.close()
+        corrupt_segments = int(result.get("corrupt_segments", 0))
+        failed_segments = int(result.get("failed_segments", 0))
+        conflicts = int(result.get("conflicts", 0))
+        drops += int(self._lasting["retired_producer_events_dropped"] or 0)
+        writer_errors += int(self._lasting["retired_producer_writer_errors"] or 0)
+        self._set_health(
+            status=(
+                "degraded"
+                if corrupt_segments or failed_segments
+                else "running" if result["role"] == "active" else "standby"
+            ),
+            role=result["role"],
+            db_ready=self.db_path.exists(),
+            spool_bytes=spool_bytes,
+            uncommitted_spool_bytes=uncommitted_spool_bytes,
+            import_lag_ms=(
+                max(0.0, (time.time_ns() - oldest_uncommitted_ns) / 1_000_000)
+                if oldest_uncommitted_ns is not None else 0.0
+            ),
+            last_success_at_us=now_us,
+            last_error=(
+                "SpoolCorruptionError" if corrupt_segments
+                else str(result.get("failure") or "SegmentImportError") if failed_segments
+                else "ConflictingEvent" if conflicts else None
+            ),
+            rejected_events=corrupt_segments + failed_segments + conflicts,
+            quarantined_events=quarantined,
+            telemetry_events_dropped=drops,
+            producer_writer_errors=writer_errors,
+            producer_count=producers,
+            **self._lasting,
+        )
+        # A conflict is rare and worth keeping: write it now, not on the
+        # once-a-second schedule.
+        self._publish_health(force=bool(conflicts) or self._retired_since_publish)
+        self._retired_since_publish = False
+
+    def _set_health(self, **updates: object) -> None:
+        with self._health_lock:
+            self._health.update(updates)
+
+    def _publish_health(self, *, force: bool = False) -> None:
+        if self.health()["role"] != "active":
+            return
+        now = time.monotonic()
+        if not force and now - self._last_health_write < 1.0:
+            return
+        try:
+            atomic_write_json(
+                self.health_path,
+                self.health(),
+                indent=None,
+                sort_keys=True,
+            )
+            self._last_health_write = now
+        except Exception:
+            log.debug("metrics: collector health write failed", exc_info=True)

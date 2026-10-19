@@ -33,6 +33,12 @@ def _launch_admission_defaults() -> dict:
 # `${{` keeps templates intact during both scanning and interpolation.
 _ENV_VAR_RE = re.compile(r"\$\{(?!\{)([^}]+)\}")
 _DOTENV_LOADED: dict[str, str] = {}
+_PROVIDER_CLEARED_ENV = "BOBI_INTERNAL_PROVIDER_CLEARED_ENV"
+# Variables a provider launch withheld from this process that its runtime .env
+# could not restore (the parent had them as real process env, this process
+# belongs to an agent without them, or they were removed since), so routing can
+# say why it is off instead of silently doing nothing.
+_UNRESTORED_PROVIDER_ENV: set[str] = set()
 
 # The shared moda-hosted event server. Mirrors provision-instance.sh's default
 # so every surface (setup, Slack manifest, deploy) agrees on where instances
@@ -98,13 +104,39 @@ def write_env_file(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(f"{k}={v}" for k, v in sorted(values.items())) + "\n")
 
 
+def _restore_provider_env(env: dict[str, str]) -> list[str]:
+    """Make sanitizer-created blanks eligible for trusted runtime restoration.
+
+    Returns the names the marker listed. A listed name that is absent rather
+    than blank was withheld further up and never restored, so it stays in the
+    marker: a child launched with *env* then still knows why it lacks it."""
+    withheld = [name for name in env.pop(_PROVIDER_CLEARED_ENV, "").split(",") if name]
+    carried = [name for name in withheld if name not in env]
+    for name in withheld:
+        if env.get(name) == "":
+            env.pop(name)
+    if carried:
+        env[_PROVIDER_CLEARED_ENV] = ",".join(carried)
+    return withheld
+
 def load_dotenv(project_path: Path) -> None:
     """Load the selected runtime's .env into os.environ."""
     from bobi import paths
-    for key, value in parse_env_file(paths.env_path(project_path)).items():
+    from bobi.metrics.router import EXPERIMENT_CONFIG_ENV
+
+    values = parse_env_file(paths.env_path(project_path))
+    withheld = _restore_provider_env(os.environ)
+    for key, value in values.items():
         if key not in os.environ:
             os.environ[key] = value
             _DOTENV_LOADED[key] = value
+    unrestored = [name for name in withheld if not os.environ.get(name)]
+    _UNRESTORED_PROVIDER_ENV.update(unrestored)
+    if EXPERIMENT_CONFIG_ENV in unrestored:
+        # A child launched from here inherits the reason routing is off.
+        os.environ[_PROVIDER_CLEARED_ENV] = EXPERIMENT_CONFIG_ENV
+    else:
+        os.environ.pop(_PROVIDER_CLEARED_ENV, None)
 
 
 def project_env(project_path: Path) -> dict[str, str]:

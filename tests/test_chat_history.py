@@ -351,3 +351,49 @@ class TestFindClaudeTranscript:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
 
         assert chat_history.find_claude_transcript("sess-3") == good
+
+
+class TestWindowedReadReport:
+    """A windowed read stops at the file's last bytes, a time limit, or the entry
+    limit; a caller that asks is told when one of them cut the window short."""
+
+    WINDOW = {"after_us": 1_000_000, "before_us": 5_000_000}
+
+    def _transcript(self, tmp_path, monkeypatch, filler_lines=0):
+        rows = [{"type": "user", "timestamp": "1970-01-01T00:00:01.100Z", "message": {"content": "First prompt"}},
+                {"type": "assistant", "timestamp": "1970-01-01T00:00:01.800Z", "message": {"content": "Done."}}]
+        rows += [{"type": "assistant", "timestamp": "1970-01-01T00:10:00Z", "message": {"content": "y" * 100}}
+                 for _ in range(filler_lines)]
+        path = tmp_path / "s1.jsonl"
+        _write_jsonl(path, rows)
+        monkeypatch.setattr(chat_history, "find_claude_transcript", lambda session_id: path)
+        return path
+
+    def _read(self, **kwargs):
+        report = {}
+        entries = chat_history.read_transcript_detail("s1", brain="claude", report=report, **kwargs)
+        return [entry["text"] for entry in entries], report
+
+    def test_a_whole_window_is_not_cut(self, tmp_path, monkeypatch):
+        self._transcript(tmp_path, monkeypatch, filler_lines=50)
+        assert self._read(**self.WINDOW) == (["First prompt", "Done."], {"cut": None})
+        assert self._read() [1] == {"cut": None}
+
+    def test_a_window_past_the_byte_limit_is_cut(self, tmp_path, monkeypatch):
+        self._transcript(tmp_path, monkeypatch, filler_lines=50)
+        monkeypatch.setattr(chat_history, "_WINDOW_READ_BYTES", 2000)
+        assert self._read(**self.WINDOW) == ([], {"cut": "bytes"})
+
+    def test_a_window_past_the_time_limit_is_cut(self, tmp_path, monkeypatch):
+        self._transcript(tmp_path, monkeypatch, filler_lines=50)
+        monkeypatch.setattr(chat_history, "_WINDOW_READ_SECONDS", 0.0)
+        assert self._read(**self.WINDOW) == ([], {"cut": "time"})
+
+    def test_a_window_past_the_entry_limit_is_cut(self, tmp_path, monkeypatch):
+        self._transcript(tmp_path, monkeypatch)
+        assert self._read(limit=1, **self.WINDOW) == (["Done."], {"cut": "entries"})
+
+    def test_callers_that_do_not_ask_get_the_same_entries(self, tmp_path, monkeypatch):
+        self._transcript(tmp_path, monkeypatch, filler_lines=50)
+        monkeypatch.setattr(chat_history, "_WINDOW_READ_BYTES", 2000)
+        assert chat_history.read_transcript_detail("s1", brain="claude", **self.WINDOW) == []

@@ -50,11 +50,27 @@ log = logging.getLogger(__name__)
 # ``discord:<application_id>:dm:<channel_id>``.
 LOGIN_CHANNEL_ENV = "BOBI_LOGIN_CHANNEL"
 
-# ANSI escape sequences. codex/claude colorize their login output, and a color
-# code (e.g. ESC[94m) sits directly before the one-time code — which breaks a
-# ``\b`` anchor in the code regex (the trailing 'm' touches the code with no word
-# boundary). Strip these before matching the URL/code.
-_ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+# ANSI escape sequences. codex/claude colorize their login output, and modern
+# CLIs (like Claude Code) emit OSC 8 terminal hyperlinks
+# (\x1b]8;;url\x1b\text\x1b]8;;\x1b\). If unhandled or partially stripped,
+# OSC 8 sequences duplicate the URL and leave trailing control fragments (e.g. "8;;").
+_OSC8_LINK_RE = re.compile(r"\x1b\]8;[^\x1b\x07;]*;([^\x1b\x07]+)(?:\x1b\\|\x07)")
+_OSC_RE = re.compile(r"\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)")
+_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_FE_ESCAPE_RE = re.compile(r"\x1b[@-Z\\-_]")
+
+
+def _clean_terminal_output(text: str) -> str:
+    """Strip ANSI and OSC terminal sequences while preserving hyperlink URLs."""
+    # Expand OSC 8 hyperlinks so the target URL is preserved with boundary spaces
+    text = _OSC8_LINK_RE.sub(r" \1 ", text)
+    # Strip any remaining OSC sequences (closing \x1b]8;;\x1b\, title sets, etc.)
+    text = _OSC_RE.sub(" ", text)
+    # Strip CSI sequences (colors, cursor movements, screen clears)
+    text = _CSI_RE.sub("", text)
+    # Strip 2-character Fe escape sequences
+    text = _FE_ESCAPE_RE.sub("", text)
+    return text
 
 
 @dataclass(frozen=True)
@@ -285,11 +301,11 @@ def _scrape_login(
         if not chunk:
             break
         buf += chunk.decode("utf-8", "replace")
-        clean = _ANSI_RE.sub("", buf)
+        clean = _clean_terminal_output(buf)
         if url is None:
             m = spec.url_re.search(clean)
             if m:
-                url = m.group(0)
+                url = m.group(0).rstrip(";,. ")
         if spec.code_re is not None and code is None:
             m = spec.code_re.search(clean)
             if m:

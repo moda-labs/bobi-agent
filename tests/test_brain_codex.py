@@ -96,6 +96,157 @@ async def test_turn_converts_messages_and_captures_thread():
     assert result.costs[0].input_tokens == 1002
     assert result.costs[0].cached_input_tokens == 1000
     assert s._thread_id == "th-1"
+    assert result.tool_executions[0].tool_name == "edit_file"
+    assert result.tool_executions[0].tool_kind == "file_edit"
+    assert result.tool_executions[0].status == "completed"
+    assert result.invocations[0].model == "codex"
+
+
+@pytest.mark.asyncio
+async def test_turn_captures_started_and_completed_tool_timing():
+    events = [
+        {"type": "thread.started", "thread_id": "th-tools"},
+        {"type": "turn.started"},
+        {"type": "item.started", "item": {"id": "tool-1", "type": "command_execution"}},
+        {"type": "item.completed", "item": {
+            "id": "tool-1", "type": "command_execution", "status": "completed",
+            "command": "secret content is never copied to metrics",
+        }},
+        {"type": "turn.completed", "turn_id": "turn-tools", "usage": {
+            "input_tokens": 10, "output_tokens": 2,
+        }},
+    ]
+    session = _CodexSession(
+        cwd="/w", instructions="", runner=_runner_of(events)
+    )
+    await session.query("go")
+
+    result = (await _drain(session))[-1]
+
+    assert result.provider_turn_id == "turn-tools"
+    assert len(result.tool_executions) == 1
+    tool = result.tool_executions[0]
+    assert tool.provider_tool_call_id == "tool-1"
+    assert tool.tool_name == "shell"
+    assert tool.ended_at_us >= tool.started_at_us
+
+
+@pytest.mark.asyncio
+async def test_turn_deltas_persistent_thread_usage():
+    first_events = [
+        {"type": "thread.started", "thread_id": "th-delta"},
+        {"type": "turn.completed", "usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 20,
+            "output_tokens": 10,
+            "reasoning_output_tokens": 4,
+        }},
+    ]
+    session = _CodexSession(
+        cwd="/w", instructions="", runner=_runner_of(first_events)
+    )
+    await session.query("first")
+    first = (await _drain(session))[-1]
+
+    session._runner = _runner_of([
+        {"type": "turn.completed", "usage": {
+            "input_tokens": 175,
+            "cached_input_tokens": 55,
+            "output_tokens": 16,
+            "reasoning_output_tokens": 5,
+        }},
+    ])
+    await session.query("second")
+    second = (await _drain(session))[-1]
+
+    assert first.usage[0].input_tokens == 100
+    assert second.usage[0].input_tokens == 75
+    assert second.usage[0].cache_read_input_tokens == 35
+    assert second.usage[0].uncached_input_tokens == 40
+    assert second.usage[0].output_tokens == 6
+    assert second.usage[0].reasoning_output_tokens == 1
+
+
+@pytest.mark.asyncio
+async def test_resumed_thread_omits_ambiguous_first_cumulative_total():
+    session = _CodexSession(
+        cwd="/w",
+        instructions="",
+        resume="th-resumed",
+        runner=_runner_of([{"type": "turn.completed", "usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 20,
+            "output_tokens": 10,
+        }}]),
+    )
+    await session.query("first")
+    first = (await _drain(session))[-1]
+
+    session._runner = _runner_of([{"type": "turn.completed", "usage": {
+        "input_tokens": 140,
+        "cached_input_tokens": 50,
+        "output_tokens": 13,
+    }}])
+    await session.query("second")
+    second = (await _drain(session))[-1]
+
+    assert first.usage == []
+    assert first.costs == []
+    assert second.usage[0].input_tokens == 40
+    assert second.usage[0].cache_read_input_tokens == 30
+    assert second.usage[0].uncached_input_tokens == 10
+    assert second.usage[0].output_tokens == 3
+
+
+@pytest.mark.asyncio
+async def test_resume_in_a_new_process_reports_only_the_new_turn(tmp_path):
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    before = _CodexSession(cwd="/w", instructions="", runner=_runner_of([
+        {"type": "thread.started", "thread_id": "th-saved"},
+        {"type": "turn.completed", "usage": {
+            "input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10,
+        }},
+    ]))
+    await before.query("first")
+    first = (await _drain(before))[-1]
+
+    after = _CodexSession(cwd="/w", instructions="", resume="th-saved",
+                          runner=_runner_of([{"type": "turn.completed", "usage": {
+                              "input_tokens": 140, "cached_input_tokens": 50,
+                              "output_tokens": 13,
+                          }}]))
+    await after.query("second")
+    resumed = (await _drain(after))[-1]
+
+    assert first.usage[0].input_tokens == 100
+    assert resumed.usage[0].input_tokens == 40
+    assert resumed.usage[0].cache_read_input_tokens == 30
+    assert resumed.usage[0].output_tokens == 3
+    assert resumed.costs == [resumed.usage[0].legacy_cost()]
+
+
+@pytest.mark.asyncio
+async def test_resume_after_a_first_turn_with_no_usage_counts_the_resumed_turn(tmp_path):
+    from bobi import paths
+
+    paths.bind_root(tmp_path)
+    failed = _CodexSession(cwd="/w", instructions="", runner=_runner_of([
+        {"type": "thread.started", "thread_id": "th-failed"},
+        {"type": "turn.failed", "error": {"message": "boom"}},
+    ]))
+    await failed.query("first")
+    await _drain(failed)
+
+    after = _CodexSession(cwd="/w", instructions="", resume="th-failed",
+                          runner=_runner_of([{"type": "turn.completed", "usage": {
+                              "input_tokens": 140, "cached_input_tokens": 0, "output_tokens": 13,
+                          }}]))
+    await after.query("second")
+    resumed = (await _drain(after))[-1]
+
+    assert resumed.usage[0].input_tokens == 140
 
 
 @pytest.mark.asyncio
@@ -262,6 +413,47 @@ async def test_spawn_codex_accepts_large_ndjson_events(tmp_path):
     assert events[0]["type"] == "item.completed"
     assert events[0]["item"]["text"] == "x" * 70000
     assert events[1]["type"] == "turn.completed"
+
+
+@pytest.mark.asyncio
+async def test_spawn_codex_scrubs_metrics_routing_secrets(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "private-config")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "private-policy-key")
+    script = (
+        "import json, os\n"
+        "names = ['BOBI_METRICS_EXPERIMENT_JSON', 'TYPESAFE_API_KEY']\n"
+        "print(json.dumps({'type': 'env', 'present': "
+        "[name for name in names if name in os.environ], "
+        "'marker': os.environ.get('BOBI_INTERNAL_PROVIDER_CLEARED_ENV', '')}), flush=True)\n"
+    )
+
+    events = [
+        event async for event in _spawn_codex(
+            [sys.executable, "-c", script], str(tmp_path)
+        )
+    ]
+
+    # Absent, and named so a `bobi` child restores them or records why not.
+    assert events == [{"type": "env", "present": [],
+                       "marker": "BOBI_METRICS_EXPERIMENT_JSON,TYPESAFE_API_KEY"}]
+
+
+@pytest.mark.asyncio
+async def test_spawn_codex_puts_user_bin_dirs_on_path(monkeypatch, tmp_path):
+    bin_dir = tmp_path / "user-bin"
+    monkeypatch.setenv("XDG_BIN_HOME", str(bin_dir))
+    script = (
+        "import json, os\n"
+        "print(json.dumps({'type': 'env', 'path': os.environ['PATH'].split(os.pathsep)}), flush=True)\n"
+    )
+
+    events = [
+        event async for event in _spawn_codex(
+            [sys.executable, "-c", script], str(tmp_path)
+        )
+    ]
+
+    assert str(bin_dir) in events[0]["path"]
 
 
 @pytest.mark.asyncio

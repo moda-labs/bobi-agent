@@ -40,6 +40,7 @@ import collections
 import dataclasses
 import logging
 import math
+import os
 import signal
 import subprocess
 import sys
@@ -236,7 +237,8 @@ class Supervisor:
                  now_fn=time.time, sleep_fn=time.sleep,
                  spawn_fn=None, health_fn=None, announce_fn=None,
                  load_fn=None,
-                 observer: SupervisorObserver | None = None):
+                 observer: SupervisorObserver | None = None,
+                 collector_owner: bool = False):
         self.start_args = list(start_args)
         self.config = config
         self.project_root = project_root
@@ -247,6 +249,10 @@ class Supervisor:
         self._load_fn = load_fn or self._default_load_fn
         self._announce_fn = announce_fn
         self._observer = observer or _NULL_OBSERVER
+        # True only when this process runs the metrics collector. The manager
+        # skips its own collector when told the supervisor owns it, so the
+        # claim must never outlive a collector that failed or never started.
+        self._collector_owner = collector_owner
         self._budget = RestartBudget(config.max_restarts, config.restart_window,
                                      config.backoff)
         self._proc = None
@@ -297,7 +303,12 @@ class Supervisor:
             *self.start_args,
         ]
         log.info("supervisor: spawning manager child: %s", " ".join(cmd))
-        return subprocess.Popen(cmd)
+        env = os.environ.copy()
+        if self._collector_owner:
+            env["BOBI_METRICS_COLLECTOR_OWNER"] = "supervisor"
+        else:
+            env.pop("BOBI_METRICS_COLLECTOR_OWNER", None)
+        return subprocess.Popen(cmd, env=env)
 
     def _port_file(self) -> Path:
         return paths.state_path(self.project_root) / "manager-health.port"
