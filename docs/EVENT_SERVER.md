@@ -208,8 +208,16 @@ platform's tenancy unit (Slack team id). The agent echoes it back verbatim -
 `bobi reply <conversation>` or `POST /channels/send`
 `{conversation, text, mode: post|update|final, edit_ref?, files?}` - and the gateway
 parses it to address the platform send. Text is raw markdown; formatting is the
-gateway's job (Slack: native `markdown_text`), and `mode: final` resolves a response
-context (edit `edit_ref` when given, else post, then clear the typing indicator).
+gateway's job, and `mode: final` resolves a response context (edit `edit_ref` when
+given, else post, then clear the typing indicator). Slack gets native `markdown_text`,
+except a message holding a GFM table (#1123): that goes out as Block Kit blocks, the
+prose as `markdown` blocks around a `table` block whose columns all wrap, with a
+`text` fallback carrying the prose and the table rows. Slack takes one table per
+message, so `chunkForChannel` splits a multi-table reply into one message per table
+(`maxTablesPerMessage`). A table Slack cannot hold (over 100 rows, 20 columns or
+10,000 cell characters, a row wider than its header, or a table inside a list or
+quote) goes out as `markdown_text`, and so does any message whose blocks Slack
+rejects: it is resent once as `markdown_text` (`event-server/core/src/markdown-tables.ts`).
 `POST /channels/typing` sets/clears the thinking indicator and `GET /channels/history`
 reads a conversation's messages; both share the send path's auth and tenancy
 boundary. Channel capabilities (edit, typing, files, length budget) are declared per

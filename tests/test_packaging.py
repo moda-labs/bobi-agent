@@ -880,12 +880,14 @@ def _write_failed_target_probe(
                 (dist / "local.meta.json").write_text(json.dumps({{
                     "inputs": {{
                         "node_modules/@chat-adapter/slack/index.js": {{}},
+                        "node_modules/marked/lib/marked.esm.js": {{}},
                         "node_modules/ws/index.js": {{}},
                     }},
                     "outputs": {{"dist/local.js": {{
                         "imports": [],
                         "inputs": {{
                             "node_modules/@chat-adapter/slack/index.js": {{}},
+                            "node_modules/marked/lib/marked.esm.js": {{}},
                             "node_modules/ws/index.js": {{}},
                         }},
                     }}}},

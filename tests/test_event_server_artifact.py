@@ -66,6 +66,7 @@ def _write_bundle_and_metafile(
             "bytes": 1,
             "imports": [],
         },
+        "node_modules/marked/lib/marked.esm.js": {"bytes": 1, "imports": []},
         "node_modules/ws/lib/websocket.js": {"bytes": 1, "imports": []},
     }
     if extra_input:
