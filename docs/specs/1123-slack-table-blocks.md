@@ -1,6 +1,6 @@
 # 1123 - Send Slack Markdown tables as Block Kit tables that wrap
 
-Status: **draft, waiting for Gate 1 (Zach)**. Nothing is built.
+Status: **approved at Gate 1 by Zach on 2026-10-19**, with the recommended answer to both questions ([comment](https://github.com/moda-labs/bobi-agent/pull/1128#issuecomment-6273694587)); D11 and D12 record them.
 Issue: [#1123](https://github.com/moda-labs/bobi-agent/issues/1123), filed by Luke on 2026-10-13.
 Base: `main` @ `6ed28a54`. Code citations are `path:line` at that commit.
 Slack behaviour verified 2026-10-16 against docs.slack.dev and the live Slack API (§3).
@@ -14,7 +14,7 @@ Every other message goes out exactly as it does today.
 
 Slack allows one table per message.
 So a reply with several tables goes out as several messages, in source order, one table each.
-That is the behaviour change readers will notice besides wrapping, and Q1 asks you to confirm it.
+That is the behaviour change readers will notice besides wrapping (D11).
 
 The message's fallback `text` carries the prose plus the table as plain rows.
 That makes `bobi read-conversation` show table rows that it omits today.
@@ -26,7 +26,7 @@ The change lives in the Slack adapter and the shared chunker.
 It adds one dependency, the `marked` Markdown parser, which has no dependencies of its own, so the wheel's dependency audit gains one entry.
 There is no `core.ts` logic change and no change to the `/channels/send` wire format.
 
-**Needed from Zach:** approve the design and answer Q1 and Q2 in §10.
+Gate 1 settled both open questions: multi-table replies split into one message per table (D11), and the live checks post test messages as the eng-team bot in C0BAEN48KQR (D12).
 
 ## 2. Root cause, confirmed
 
@@ -250,6 +250,8 @@ moda-agents' standup skill still tells agents "Slack does not wrap table columns
 | D8 | Splitting is a chunker capability; conversion is adapter-local. | One chunker and one send loop, with the limit declared next to Slack's other limits. |
 | D9 | No feature flag. | D6 covers rejections, and a bad render rolls back with the previous release and Worker version. |
 | D10 | The cut rule in §4.6. | Cutting immediately before each table would strand a section's heading and takeaway at the bottom of the previous message. |
+| D11 | A reply with several tables becomes one message per table, in source order (§4.6). | Every table wraps, including the multi-table roadmap-pm standup. A top-level standup with four tables becomes four top-level posts, so four notifications, four threads and one returned `ts`. Keeping one `markdown_text` message would have left those tables unwrapped. |
+| D12 | The live checks (§7 step 5) post test messages as the eng-team bot in its status channel, C0BAEN48KQR. | That bot is the only Slack credential available here, and there is no `SLACK_TEST_CHANNEL` or dev-workspace soak config. |
 
 ## 5. Issue requirements, and where this spec settles them
 
@@ -304,7 +306,7 @@ moda-agents' standup skill still tells agents "Slack does not wrap table columns
    A table reply arrives as blocks with the §4.7 `text`, and a two-table reply arrives as two posts in order.
    Readback is proven by the live step, because the stub serves a fixed thread.
 4. **Packaging.** `tests/integration/test_packaged_event_server.py` builds the wheel with the new dependency and passes the audit.
-5. **Live check, posting to Slack (Q2).**
+5. **Live check, posting to Slack (D12).**
    - `blocks.validate` on generated payloads runs once as proof on the PR, and the same check joins the gated live suite (`tests/integration/test_slack_live.py:155`).
      No CI job carries a Slack token, so a separate gated test would only ever skip.
    - Post one-table and two-table replies.
@@ -326,29 +328,27 @@ moda-agents' standup skill still tells agents "Slack does not wrap table columns
 4. Add the `maxTablesPerMessage` capability, the table pre-split and the cross-piece cap in `chunkForChannel`.
 5. Return `{blocks, text}` from `slackContent` when converting, and add the §4.9 resend and logging to `send` and `update`.
 6. Update `skills/bobi.md`, `docs/EVENT_SERVER.md` and the `channels.ts` module comment.
-7. Run the vitest and Python suites, then the live checks that Q2 allows.
+7. Run the vitest and Python suites, then the live checks in C0BAEN48KQR (D12).
 
 ## 9. Risks
 
 | Code | Risk | Mitigation |
 |---|---|---|
-| R1 | How it looks cannot be proven without a real post: wrap widths on desktop and mobile, the table sitting between its markdown blocks, empty cells, emoji and mentions. Third-party guides claim tables always render at the bottom of a message, which contradicts what Slack stores for its own conversion (§2). | Live check (§7 step 5, Q2) before merge. |
+| R1 | How it looks cannot be proven without a real post: wrap widths on desktop and mobile, the table sitting between its markdown blocks, empty cells, emoji and mentions. Third-party guides claim tables always render at the bottom of a message, which contradicts what Slack stores for its own conversion (§2). | Live check (§7 step 5, D12) before merge. |
 | R2 | `marked` and Slack's Markdown translator may disagree about what counts as a table. | A disagreement can surface as `only_one_table_allowed`, which the safety net resends as `markdown_text` (§4.9). A row-width mismatch is refused before sending (§4.4). |
 | R3 | Slack does not say how it counts the 10,000 characters. | We count cell source, which is never less than the visible text, so a link-heavy table falls back slightly early instead of being rejected. |
 | R4 | Link unfurls may differ between `markdown_text` and blocks messages. | The live diff in §7 step 5; only messages with a table are affected. |
 | R5 | Bundle growth in the Worker and in the wheel's local server. | One dependency-free package; the PR reports the measured size. |
-| R6 | Splitting adds messages and notifications, which Slack calls a last resort, and posts them 300 ms apart against a channel limit of about one per second. | Only replies with two or more tables split, the 8-message cap bounds a burst, and Q1 lets you choose the other trade-off. |
+| R6 | Splitting adds messages and notifications, which Slack calls a last resort, and posts them 300 ms apart against a channel limit of about one per second. | Only replies with two or more tables split, and the 8-message cap bounds a burst (D11). |
 | R7 | A reference link whose definition sits in another piece does not resolve after a split. | Rare in agent output; the link then renders as its literal text. |
 
-## 10. Gate 1 questions
+## 10. Gate 1 decisions
 
-**Q1. Should multi-table replies become one message per table, so every table wraps? Recommended: yes.**
-Saying no keeps such replies as one `markdown_text` message that does not wrap.
-That leaves the reported case unfixed, since the roadmap-pm standup carries up to four project tables in one post.
-Saying yes turns a top-level standup into up to four top-level posts: four notifications, four threads, and one returned `ts` (§4.6).
-Whether today's single-message standup is accepted by Slack at all is unverified (F4); Luke can confirm from the Oct 13 post, and the live check settles it.
+Zach approved the spec on 2026-10-19 and took the recommended answer to both open questions.
 
-**Q2. OK to post test messages as the eng-team bot in its status channel, C0BAEN48KQR? Recommended: yes.**
-The live checks in §7 step 5 need real posts, and that bot is the only Slack credential available here.
-There is no `SLACK_TEST_CHANNEL` or dev-workspace soak config.
-Without either, the PR ships with `blocks.validate` and stub evidence only, and rendering is first seen at the post-roll check.
+**Q1. Should multi-table replies become one message per table, so every table wraps?** Yes (D11).
+Such a reply splits into one message per table, in source order, with the cut rule in §4.6.
+Whether today's single-message standup is accepted by Slack at all was unverified (F4); the live check settles it.
+
+**Q2. OK to post test messages as the eng-team bot in its status channel, C0BAEN48KQR?** Yes (D12).
+The live checks in §7 step 5 post there.
