@@ -14,7 +14,7 @@ POST). This reconciler reads it and closes the gaps:
   2. crashed — a live status with a dead pid → mark ``crashed`` and emit
      ``agent/session.failed`` so the launcher's thread is closed instead of
      hanging on a never-arriving completion.
-  3. timed out — past its deadline (+ grace) with the pid still alive → cancel
+  3. timed out - past its deadline (+ grace) with the pid still alive → cancel
      it, mark ``failed``, emit ``agent/session.failed``. The deadline is the
      later of the run-level ``started_at + timeout`` and the ``deadline_at`` a
      workflow runner arms before each drain from that step's own budget

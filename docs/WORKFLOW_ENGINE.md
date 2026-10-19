@@ -241,8 +241,9 @@ running, so a resume begun just under the deadline still gets a full fresh
 budget. Worst case for one prompt step is therefore
 `max_turns × (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by the
 agent finishing. The dead-man reconciler is the outer net: each restart re-arms
-the run's `deadline_at` from the step's `timeout`, so a manager restart closes
-a restarted drain only once it outlives its own step budget plus the grace.
+the run's `deadline_at` to `max(step.timeout, run timeout)` from that moment,
+so a manager restart closes a restarted drain only once it outlives that
+budget plus the grace.
 
 ### Route step
 

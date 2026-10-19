@@ -1069,9 +1069,10 @@ async def _run_workflow_async(
 
         Nothing here interrupts a running drain, so the dead-man reconciler is
         the only wall clock; it must judge the drain in flight by its own
-        step's budget. The run's ``timeout`` is a floor, so a step that
-        declares a shorter budget is never closed sooner than the run-level
-        deadline would have closed it.
+        step's budget. The run's ``timeout`` is a floor: every drain gets at
+        least the budget the run was launched with, so a step declaring a
+        shorter one (the 1800s default) is not judged more strictly than the
+        run as a whole.
         """
         return time.time() + max(step.timeout, timeout)
 
