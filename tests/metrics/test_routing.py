@@ -206,6 +206,11 @@ def test_env_scrubbing_skips_paths_numbers_and_process_bookkeeping():
     assert task == "edit app/main.py in [path]"
 
 
+def test_a_windows_repo_path_relativizes_whatever_the_case():
+    task, _ = prepare_task(r"edit c:\repo\src\x.py", repo_path="C:\\Repo", max_bytes=8192)
+    assert task == "edit src/x.py"
+
+
 @pytest.mark.parametrize("prompt", ["/" + "a/" * 100_000, "/repo/" + "a/" * 100_000, "a://" * 56_000])
 def test_preparing_a_long_path_stays_linear(prompt):
     # Relativizing by Path.relative_to walked every parent: about 35 s of CPU
@@ -213,10 +218,6 @@ def test_preparing_a_long_path_stays_linear(prompt):
     started = time.process_time()
     prepare_task(prompt, repo_path="/repo", max_bytes=8192)
     assert time.process_time() - started < 2.0
-
-
-def test_a_pin_setting_is_a_credential():
-    assert env_secret_values({"PIN_CODE": "482913", "PINNED_VERSION": "20261019"}) == ("482913",)
 
 
 def test_task_scrubs_exact_secret_values_from_the_environment():

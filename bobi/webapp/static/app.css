@@ -1173,7 +1173,7 @@
   color: #ffffff !important;
 }
 .transcript .sph-desc {
-  color: #94a3b8 !important;
+  color: var(--slab-muted) !important;
 }
 .transcript .sph-count-pill {
   background: color-mix(in srgb, var(--bobi-clay) 20%, transparent) !important;
@@ -2408,7 +2408,7 @@ table.runs { width: 100%; border-collapse: collapse; }
 }
 .transcript .status-badge.running {
   background: color-mix(in srgb, var(--bobi-acc) 20%, transparent) !important;
-  color: #a5b4fc !important;
+  color: var(--slab-accent) !important;
   border: 1px solid color-mix(in srgb, var(--bobi-acc) 40%, transparent) !important;
 }
 .transcript .status-badge.error,
@@ -2426,7 +2426,7 @@ table.runs { width: 100%; border-collapse: collapse; }
   border-bottom: 1px solid #28354d !important;
 }
 .transcript .detail-nav-tabs .tab {
-  color: #94a3b8 !important;
+  color: var(--slab-muted) !important;
   border-bottom: 2px solid transparent;
 }
 .transcript .detail-nav-tabs .tab:hover {
@@ -2515,7 +2515,7 @@ table.runs { width: 100%; border-collapse: collapse; }
 
 .transcript .metrics-table th {
   background: #1a2234 !important;
-  color: #94a3b8 !important;
+  color: var(--slab-muted) !important;
   font-family: var(--font-mono);
   font-size: 11px !important;
   font-weight: 600 !important;
@@ -2649,9 +2649,9 @@ table.runs { width: 100%; border-collapse: collapse; }
   transition: all var(--dur-fast, 120ms) var(--ease, ease);
 }
 .td-id-chip:hover {
-  border-color: var(--bobi-acc);
+  border-color: var(--bobi-clay);
   background: var(--surface-card, #ffffff);
-  color: var(--bobi-acc);
+  color: var(--text-highlight);
 }
 .td-head-session {
   display: inline-flex;
