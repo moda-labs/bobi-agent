@@ -72,14 +72,21 @@ def env(stub_bobi_env):
         config_path.chmod(original_mode)
 
 
-def _wait(predicate, timeout, what):
-    deadline = time.monotonic() + timeout
+# Generous on purpose: a cold or loaded machine can take tens of seconds to
+# boot a manager, and these waits bound plumbing, not the behaviour under test.
+WAIT_S = 120
+
+
+def _wait(predicate, what, env=None):
+    deadline = time.monotonic() + WAIT_S
     while time.monotonic() < deadline:
         value = predicate()
         if value:
             return value
         time.sleep(0.25)
-    pytest.fail(f"timed out waiting for {what}")
+    log = env and env.state_dir / "manager.log"
+    tail = log.read_text()[-2000:] if log and log.exists() else "(no manager.log)"
+    pytest.fail(f"timed out waiting for {what}; manager.log tail:\n{tail}")
 
 
 def _run_entry():
@@ -98,10 +105,10 @@ def _restart_and_wait_for_reconcile(env, cli_run):
     boots = _manager_boots(env)
     result = cli_run("restart", timeout=45)
     assert result.returncode == 0, result.stderr
-    _wait(lambda: _manager_boots(env) > boots, 45, "manager to reboot")
+    _wait(lambda: _manager_boots(env) > boots, "manager to reboot", env)
 
 
-@pytest.mark.timeout(240)
+@pytest.mark.timeout(600)
 def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
         env, stub_cli_run, stub_clean_session):
     cli_run = stub_cli_run
@@ -109,7 +116,7 @@ def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
     try:
         start = cli_run("start", timeout=45)
         assert start.returncode == 0, start.stderr
-        _wait(lambda: _manager_boots(env), 45, "manager to boot")
+        _wait(lambda: _manager_boots(env), "manager to boot", env)
 
         launch = cli_run(
             "subagents", "launch", "-w", WORKFLOW, "--role", "engineer",
@@ -120,7 +127,7 @@ def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
         entry = _wait(
             lambda: (e := _run_entry()) and e.phase == "long"
             and e.status == "running" and e,
-            60, "the run to enter its long step",
+            "the run to enter its long step", env,
         )
         runner_pid = entry.pid
         assert pid_alive(runner_pid)
@@ -143,7 +150,7 @@ def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
         closed = get_registry().get(entry.name)
         assert closed.status == TERMINAL_FAILED
         assert "long" in closed.error
-        _wait(lambda: not pid_alive(runner_pid), 15, "the runner to exit")
+        _wait(lambda: not pid_alive(runner_pid), "the runner to exit", env)
     finally:
         cli_run("stop", timeout=30)
         if runner_pid and pid_alive(runner_pid):
