@@ -2439,7 +2439,7 @@ export function mountMetrics(element, { api, name, session = "" }) {
 
         <div class="jev-tab-pane pane-guide" id="jev-pane-guide" hidden>
           <h4>Configure routing</h4>
-          <p class="jev-form-hint">Saved to agent environment (<code>run/.env</code>). Test Routing uses it at once; restart the agent to apply it to production sessions.</p>
+          <p class="jev-form-hint">Saved to agent environment (<code>run/.env</code>). New sessions use it at once; running sessions keep their model.</p>
           <div class="jev-editor-grid">
             <div class="jev-form-group">
               <label class="jev-field-label" for="jev-config-mode">Routing mode</label>

@@ -1113,12 +1113,10 @@ def _saved_experiment(root):
     import json
 
     from bobi.metrics.router import (DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, ExperimentConfig,
-                                     routing_config_source)
+                                     config_value, routing_config_source)
 
     saved = routing_config_source(root)
-    raw = saved.get(EXPERIMENT_CONFIG_ENV, "").strip() or saved.get(DISABLED_EXPERIMENT_CONFIG_ENV, "").strip()
-    if (raw.startswith("'") and raw.endswith("'")) or (raw.startswith('"') and raw.endswith('"')):
-        raw = raw[1:-1].strip()
+    raw = config_value(saved, EXPERIMENT_CONFIG_ENV) or config_value(saved, DISABLED_EXPERIMENT_CONFIG_ENV)
     if not raw:
         raise ValueError("configure a JEV policy before simulating routing")
     return ExperimentConfig.from_mapping(json.loads(raw))
@@ -1531,7 +1529,7 @@ class LocalRuntime(TeamRuntime):
         from bobi.metrics.policies.typesafe import DEFAULT_ENDPOINT
         from bobi.metrics.policy import POLICY_CREDENTIAL_ENV, POLICY_NAME
         from bobi.metrics.router import (DISABLED_EXPERIMENT_CONFIG_ENV, EXPERIMENT_CONFIG_ENV, SHORT_DEFAULTS,
-                                         ExperimentConfig, load_experiment, routing_config_source)
+                                         ExperimentConfig, config_value, load_experiment, routing_config_source)
         from bobi.prompts.resolver import discover_roles
         from bobi.chat_history import safe_name
         from bobi.costs import native_models
@@ -1557,8 +1555,8 @@ class LocalRuntime(TeamRuntime):
 
         # The same source routing reads, so the page shows what runs.
         saved = routing_config_source(root)
-        raw_key = EXPERIMENT_CONFIG_ENV if saved.get(EXPERIMENT_CONFIG_ENV, "").strip() else DISABLED_EXPERIMENT_CONFIG_ENV
-        raw_val = saved.get(raw_key, "").strip()
+        raw_key = EXPERIMENT_CONFIG_ENV if config_value(saved, EXPERIMENT_CONFIG_ENV) else DISABLED_EXPERIMENT_CONFIG_ENV
+        raw_val = config_value(saved, raw_key)
 
         config_error = ""
         try:

@@ -957,7 +957,7 @@ class TestRunWorkflow:
             StepDef(name="build", prompt="build", agent="engineer"),
         ])
         if explicit_model:
-            def no_policy(*args):
+            def no_policy(*args, **kwargs):
                 raise AssertionError("explicit model must bypass policy loading")
             monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", no_policy)
         assert self._mock_asyncio_run(wf, task="t", repo="r", cwd=str(tmp_path), run_key="run-1", model=explicit_model)
@@ -988,7 +988,7 @@ class TestRunWorkflow:
         assert run.status == ("failed" if retry else "waiting")
         assert runtime.close(timeout=2)
         runtime = MetricsRuntime(tmp_path, mode="enabled")
-        def no_policy(*args):
+        def no_policy(*args, **kwargs):
             raise AssertionError("workflow resume must reuse checkpoint")
         monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", no_policy)
         if retry:

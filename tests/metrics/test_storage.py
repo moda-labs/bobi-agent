@@ -386,6 +386,28 @@ def test_only_one_background_service_owns_the_collector_lock(tmp_path):
     assert second.stop(timeout=2)
 
 
+def test_a_standby_collector_survives_an_unreadable_read_model(tmp_path):
+    from bobi.fsutil import try_file_lock
+
+    service = MetricsCollectorService(tmp_path, poll_interval=0.01)
+    service.metrics_root.mkdir(parents=True)
+    service.db_path.write_bytes(b"not a database" * 100)
+    with try_file_lock(service.collector.lock_path) as acquired:
+        assert acquired
+        service.start()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and service.health()["status"] == "starting":
+            time.sleep(0.01)
+        assert service._thread.is_alive()
+        assert service.health()["status"] == "degraded"
+    # The lock holder is gone: the standby takes over instead of having died.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and service.health()["role"] != "active":
+        time.sleep(0.01)
+    assert service.health()["role"] == "active"
+    assert service.stop(timeout=2)
+
+
 def test_collector_failure_is_health_only(monkeypatch, tmp_path):
     service = MetricsCollectorService(tmp_path)
     monkeypatch.setattr(
@@ -2870,6 +2892,20 @@ def test_reconciling_a_large_backlog_costs_little_more_than_the_recovery_itself(
         result = call()
         return time.process_time() - started, result
 
+    # Spool listings per pass: one before every turn is the regression this
+    # test exists for, and it may cost wait time that CPU time does not show.
+    import bobi.metrics.reconcile as reconcile_module
+
+    listings = []
+    original_spool_sizes = reconcile_module.spool_sizes
+    monkeypatch.setattr(reconcile_module, "spool_sizes",
+                        lambda *args: listings.append(1) or original_spool_sizes(*args))
+
+    def scans(call):
+        listings.clear()
+        result = timed(call)
+        return result, len(listings)
+
     # The recovery alone, with no import or spool scan between turns.
     baseline, result = timed(lambda: reconcile_missing(
         copies["baseline"], collect=False, terminal_only=True, import_spool=lambda: None))
@@ -2877,12 +2913,12 @@ def test_reconciling_a_large_backlog_costs_little_more_than_the_recovery_itself(
     # Importing what the recovery spooled, which a background pass also does.
     imported, _ = timed(MetricsCollectorService(copies["baseline"]).collect_once)
     # The bare manual command, no collector running.
-    manual, result = timed(lambda: reconcile_missing(root, collect=False, terminal_only=True))
+    (manual, result), manual_scans = scans(lambda: reconcile_missing(root, collect=False, terminal_only=True))
     assert (result["turns_reconciled"], result["errors"]) == (turns, 0)
     # One background pass with a budget that does not cut it short.
     monkeypatch.setattr(collector_module, "RECONCILE_BUDGET_SECONDS", 600.0)
     service = MetricsCollectorService(copies["pass"])
-    background, _ = timed(lambda: service._reconcile_locked(service._empty_result("active")))
+    (background, _), background_scans = scans(lambda: service._reconcile_locked(service._empty_result("active")))
     assert service.health()["reconciliation_errors"] == 0
     conn = connect(service.db_path, readonly=True)
     try:
@@ -2891,6 +2927,8 @@ def test_reconciling_a_large_backlog_costs_little_more_than_the_recovery_itself(
     finally:
         conn.close()
 
+    # A listing (and import) per writer at most, never one per turn.
+    assert manual_scans <= writers + 2 and background_scans <= writers + 2, (manual_scans, background_scans)
     assert manual <= 1.5 * baseline + 1.0, (manual, baseline)
     assert background <= 1.5 * baseline + imported + 1.0, (background, baseline, imported)
 

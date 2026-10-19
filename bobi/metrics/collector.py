@@ -574,7 +574,12 @@ class MetricsCollectorService:
         while not self._stop.is_set():
             with try_file_lock(self.collector.lock_path) as acquired:
                 if not acquired:
-                    self._refresh_health(self._empty_result("standby"))
+                    try:
+                        self._refresh_health(self._empty_result("standby"))
+                    except Exception as exc:
+                        # An unreadable read model must not end the thread that takes over.
+                        log.debug("metrics: standby health refresh failed", exc_info=True)
+                        self._set_health(status="degraded", last_error=type(exc).__name__)
                     self._stop.wait(self.poll_interval)
                     continue
                 self._take_over()

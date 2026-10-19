@@ -1828,6 +1828,9 @@ class TestRoutingConfig:
         policy = {**concise_config(), "control_model": "sonnet"}
         monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", f"{quote}{json.dumps(policy)}{quote}")
         assert _saved_experiment(bobi_install.repo_path).control_model == "sonnet"
+        # The editor shows the same policy, so a save keeps it rather than starting over.
+        config = _client().get(f"/api/agents/{bobi_install.agent_name}/metrics/jev-config").json()
+        assert json.loads(config["raw_json"])["control_model"] == "sonnet"
 
     def test_jev_config_offers_native_models_and_names_unusable_policy(self, bobi_install):
         from bobi import paths

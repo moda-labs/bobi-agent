@@ -69,7 +69,7 @@ _URL_USERINFO = re.compile(r"(?i)(?<![a-z0-9+.\-])([a-z][a-z0-9+.-]{0,31}://)[^/
 # Env-name segments that mark a credential, for scrubbing its exact value.
 _SECRET_ENV_SEGMENTS = frozenset({
     "KEY", "APIKEY", "TOKEN", "SECRET", "PASS", "PASSWORD", "PASSWD", "PWD",
-    "CREDENTIAL", "CREDENTIALS", "AUTH", "COOKIE", "PRIVATE",
+    "CREDENTIAL", "CREDENTIALS", "AUTH", "COOKIE", "PRIVATE", "PIN",
 })
 # Process bookkeeping whose names look like credentials but whose values do not.
 _NOT_SECRET_ENV = frozenset({"PWD", "OLDPWD", "XAUTHORITY"})

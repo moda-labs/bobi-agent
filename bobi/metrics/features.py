@@ -11,6 +11,17 @@ _ABSOLUTE_PATH = re.compile(
 )
 
 
+def _relative_to(path, root):
+    """``path.relative_to(root)``, or None, in time linear in the path's parts:
+    ``relative_to`` walks every parent, which is quadratic on a long path."""
+    if type(path) is not type(root):
+        return None
+    fold = str.casefold if isinstance(root, PureWindowsPath) else str
+    if [fold(part) for part in path.parts[:len(root.parts)]] != [fold(part) for part in root.parts]:
+        return None
+    return type(path)(*path.parts[len(root.parts):])
+
+
 def prepare_task(prompt: str, *, repo_path: str, max_bytes: int,
                  secrets: tuple[str, ...] = ()) -> tuple[str, int]:
     """The task text a policy may receive: memory removed, the runtime's own
@@ -33,11 +44,9 @@ def prepare_task(prompt: str, *, repo_path: str, max_bytes: int,
         value = match.group("quoted") or match.group()
         quote = match.group("quote") or ""
         path = PureWindowsPath(value) if PureWindowsPath(value).is_absolute() else PurePosixPath(value)
-        if root and ".." not in path.parts:
-            try:
-                return quote + path.relative_to(root).as_posix() + quote
-            except ValueError:
-                pass
+        relative = _relative_to(path, root) if root and ".." not in path.parts else None
+        if relative is not None:
+            return quote + relative.as_posix() + quote
         redactions += 1
         return quote + "[path]" + quote
 

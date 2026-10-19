@@ -245,11 +245,17 @@ def routing_config_source(root=None) -> Mapping[str, str]:
     return os.environ
 
 
+def config_value(values: Mapping[str, str], key: str) -> str:
+    """A routing config value as set: a deployment env (Docker --env-file, a
+    hand-set variable) may keep the quotes that parse_env_file strips."""
+    value = str(values.get(key, "")).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1].strip()
+    return value
+
+
 def load_experiment(env: Mapping[str, str] | None = None) -> ExperimentConfig | None:
-    values = os.environ if env is None else env
-    encoded = str(values.get(EXPERIMENT_CONFIG_ENV, "")).strip()
-    if (encoded.startswith("'") and encoded.endswith("'")) or (encoded.startswith('"') and encoded.endswith('"')):
-        encoded = encoded[1:-1].strip()
+    encoded = config_value(os.environ if env is None else env, EXPERIMENT_CONFIG_ENV)
     if not encoded:
         return None
     try:

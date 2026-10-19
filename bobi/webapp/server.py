@@ -163,7 +163,7 @@ def build_app(*, token: str, runtime: TeamRuntime | None = None) -> FastAPI:
         status = 404 if exc.code in {"unknown_session", "unknown_turn"} else 503 if exc.code in {
             "metrics_busy", "metrics_not_ready", "metrics_unsupported",
         } else 400 if exc.code in {"query_too_large", "query_too_slow"
-        } else 409 if exc.code == "config_environment_override" else 500 if exc.code == "config_write_failed" else 504 if exc.code in {"policy_timeout", "model_timeout"} else 502 if exc.code.startswith("policy_") or exc.code == "model_run_failed" else 400
+        } else 500 if exc.code == "config_write_failed" else 504 if exc.code in {"policy_timeout", "model_timeout"} else 502 if exc.code.startswith("policy_") or exc.code == "model_run_failed" else 400
         headers = {"Cache-Control": "no-store"}
         if status == 503:
             headers["Retry-After"] = "1"

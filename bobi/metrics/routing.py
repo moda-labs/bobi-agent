@@ -12,7 +12,8 @@ from bobi.metrics.events import uuid7
 from bobi.metrics.features import build_features
 from bobi.metrics.policies.typesafe import TypeSafePolicy
 from bobi.metrics.policy import PolicyRequest, call_policy, policy_breaker
-from bobi.metrics.router import EXPERIMENT_CONFIG_ENV, RouterDecision, load_experiment, routing_config_source
+from bobi.metrics.router import (EXPERIMENT_CONFIG_ENV, RouterDecision, config_value, load_experiment,
+                                 routing_config_source)
 from bobi.metrics.runtime import MetricsRuntime, current_runtime, get_runtime
 from bobi.sdk import load_session_brain, load_session_id, load_session_model, load_session_route, save_session_route
 
@@ -164,7 +165,7 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
             return fallback
         source = routing_config_source(runtime.root)
         if not runtime.enabled:
-            if source.get(EXPERIMENT_CONFIG_ENV):
+            if config_value(source, EXPERIMENT_CONFIG_ENV):
                 stage = "metrics"
                 raise RuntimeError("routing requires available telemetry")
             return fallback
@@ -221,7 +222,10 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
         if not ctx.prompt.strip() or (not ctx.fresh and ctx.existing_transcript):
             return fallback
         stage = "policy"
-        policy = TypeSafePolicy(policy_config)
+        from bobi.config import project_env
+
+        # Read with the config: a key saved to run/.env after start applies too.
+        policy = TypeSafePolicy(policy_config, api_key=project_env(runtime.root).get(policy_config.credential_env, ""))
         stage = "routing"
         started = time.monotonic()
         model = config.control_model
@@ -229,7 +233,6 @@ async def resolve_route(ctx: RoutingContext, *, runtime: MetricsRuntime | None =
                                        "mode": policy_config.mode, "egress": policy_config.prompt_egress}
         secrets: tuple[str, ...] = ()
         if policy_config.prompt_egress != "none":
-            from bobi.config import project_env
             from bobi.redact import env_secret_values
 
             # The runtime's own credentials never leave in the task text, whatever their shape.

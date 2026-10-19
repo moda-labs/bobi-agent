@@ -3,6 +3,7 @@
 import asyncio
 import httpx
 import json
+import os
 import pytest
 
 from bobi.brain.base import ERROR_KIND_AUTHENTICATION, ERROR_KIND_MAX_TURNS
@@ -203,6 +204,19 @@ def test_env_scrubbing_skips_paths_numbers_and_process_bookkeeping():
     task, _ = prepare_task("edit /repo/app/main.py in /application", repo_path="/repo", max_bytes=8192,
                            secrets=env_secret_values(env))
     assert task == "edit app/main.py in [path]"
+
+
+@pytest.mark.parametrize("prompt", ["/" + "a/" * 100_000, "/repo/" + "a/" * 100_000, "a://" * 56_000])
+def test_preparing_a_long_path_stays_linear(prompt):
+    # Relativizing by Path.relative_to walked every parent: about 35 s of CPU
+    # here, inside the session's event loop, before the policy deadline began.
+    started = time.process_time()
+    prepare_task(prompt, repo_path="/repo", max_bytes=8192)
+    assert time.process_time() - started < 2.0
+
+
+def test_a_pin_setting_is_a_credential():
+    assert env_secret_values({"PIN_CODE": "482913", "PINNED_VERSION": "20261019"}) == ("482913",)
 
 
 def test_task_scrubs_exact_secret_values_from_the_environment():
@@ -534,6 +548,28 @@ def test_a_saved_routing_config_reaches_the_next_session_without_a_restart(monke
         env_file.write_text("BOBI_METRICS_EXPERIMENT_JSON=\nBOBI_METRICS_EXPERIMENT_DISABLED_JSON="
                             + json.dumps(configured(mode="enforce")) + "\n")
         assert asyncio.run(resolve_route(replace(context(), session_name="next"), runtime=runtime)).model == "configured"
+    finally:
+        assert runtime.close(timeout=2)
+
+
+def test_a_policy_key_saved_after_start_reaches_the_next_session(monkeypatch, tmp_path):
+    # The editor tells the operator to add the key to run/.env; the process
+    # environment was loaded before that and never sees it.
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.setattr("bobi.brain.session_brain_label", lambda: "codex")
+    keys = []
+
+    async def decide(self, request, *, timeout_s):
+        keys.append(self.api_key if self.api_key is not None else os.environ.get(self.credential_env, ""))
+        return PolicyResult("cheap", 1.0, None, request.pinned_version, None, None)
+
+    monkeypatch.setattr(TypeSafePolicy, "decide", decide)
+    runtime = MetricsRuntime(tmp_path, mode="enabled")
+    try:
+        (tmp_path / ".env").write_text("TYPESAFE_API_KEY=saved-key\nBOBI_METRICS_EXPERIMENT_JSON="
+                                       + json.dumps(configured(mode="enforce")) + "\n")
+        assert asyncio.run(resolve_route(context(), runtime=runtime)).model == "cheap"
+        assert keys == ["saved-key"]
     finally:
         assert runtime.close(timeout=2)
 
@@ -1010,7 +1046,7 @@ def test_routing_misconfiguration_records_safe_fallback(monkeypatch, tmp_path, c
     if fault == "long_form":
         raw = {"variants": [{"variant_id": "secret-long-form-canary"}], "policy": {}}
     if fault == "adapter":
-        monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", lambda config: (
+        monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", lambda config, **kwargs: (
             _ for _ in ()).throw(ValueError("secret-adapter-canary")))
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", "secret-json-canary" if fault == "json" else json.dumps(raw))
     ctx = context()
@@ -1159,7 +1195,7 @@ def test_sticky_route_reuses_model_without_policy(monkeypatch, tmp_path):
     checkpoint = {"brain": "codex-test", "decision": asdict(routed.decision)}
     assert runtime.close(timeout=2)
     runtime = MetricsRuntime(tmp_path, mode="enabled")
-    def no_policy(*args):
+    def no_policy(*args, **kwargs):
         raise AssertionError("sticky reuse must not load policy")
     monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", no_policy)
     try:
@@ -1570,8 +1606,8 @@ def test_route_executes_and_projects_a_scripted_turn(bobi_install, monkeypatch, 
     server_state["fault"] = fault
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-only-key")
 
-    def local_policy(config):
-        policy = TypeSafePolicy(config)
+    def local_policy(config, **kwargs):
+        policy = TypeSafePolicy(config, **kwargs)
         policy.endpoint = endpoint
         return policy
 
@@ -1614,7 +1650,7 @@ def test_route_executes_and_projects_a_scripted_turn(bobi_install, monkeypatch, 
             runtime = MetricsRuntime(root, mode="enabled")
             monkeypatch.setattr("bobi.metrics.runtime._runtime", runtime)
 
-            def no_policy(config):
+            def no_policy(config, **kwargs):
                 raise AssertionError("resume must not load a policy")
 
             monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", no_policy)
@@ -1916,7 +1952,7 @@ async def test_session_policy_reaches_construction_and_projection(bobi_install, 
         assert json.loads(row["metadata_json"])["policy"]["status"] == "decided"
     save_session_id("agent", "provider-session", model="cheap", root=runtime.root)
     runtime = MetricsRuntime(bobi_install.state_dir.parent, mode="enabled")
-    def no_policy(*args):
+    def no_policy(*args, **kwargs):
         raise AssertionError("resumed Session must not load policy")
     monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", no_policy)
     def resumable(name, model):
@@ -1945,7 +1981,7 @@ async def test_session_explicit_model_bypasses_policy(bobi_install, monkeypatch,
     monkeypatch.setenv("BOBI_METRICS_EXPERIMENT_JSON", json.dumps(configured(entry_points=[entry_point])))
     runtime = MetricsRuntime(bobi_install.state_dir.parent, mode="enabled")
     monkeypatch.setattr("bobi.metrics.routing.get_runtime", lambda: runtime)
-    def no_policy(*args):
+    def no_policy(*args, **kwargs):
         raise AssertionError("explicit model must not load policy")
     monkeypatch.setattr("bobi.metrics.routing.TypeSafePolicy", no_policy)
     routing_context = replace(context(), entry_point=entry_point,
