@@ -128,6 +128,8 @@ def live_env(tmp_path_factory):
         project=project,
         channel=channel,
         team_id=team_id,
+        token=token,
+        root_ts=root_ts,
         es_url=es_url,
         marker=marker,
         thread=f"slack:{team_id}:channel:{channel}:thread:{root_ts}",
@@ -149,6 +151,23 @@ def live(live_env, monkeypatch):
 
 def _thread_messages(env) -> list[dict]:
     return channels_history(env.project, env.thread)
+
+
+def _stored_thread(env) -> list[dict]:
+    """The thread as Slack stores it, blocks included - the gateway's
+    readback returns text only, and the blocks are what #1123 changes."""
+    resp = httpx.post(
+        "https://slack.com/api/conversations.replies",
+        headers={"Authorization": f"Bearer {env.token}"},
+        data={"channel": env.channel, "ts": env.root_ts, "limit": 200},
+        timeout=15,
+    ).json()
+    assert resp.get("ok"), f"conversations.replies failed: {resp.get('error')}"
+    return resp["messages"]
+
+
+def _tables(msg: dict) -> list[dict]:
+    return [b for b in msg.get("blocks", []) if b.get("type") == "table"]
 
 
 class TestLiveSlackGateway:
@@ -267,3 +286,82 @@ class TestLiveSlackGateway:
         assert len(msgs) > 1, "over-budget reply should span multiple messages"
         for m in msgs:
             assert "(truncated)" not in m["text"]
+
+    def test_table_reply_arrives_as_a_wrapping_table(self, live):
+        """#1123: real Slack accepts the blocks a table reply now goes out
+        as, and stores the table between its prose with every column
+        wrapped. Readback carries the table rows, which Slack's own
+        markdown_text conversion leaves out of the message text."""
+        token = f"table-{live.marker}"
+        long_cell = ("a long cell of fifteen to twenty words that would widen "
+                     "the whole table instead of wrapping inside its column")
+        reply = (
+            f"Table soak {token}\n\n"
+            "| Ticket | What changed | Owner |\n"
+            "|:---|:---|--:|\n"
+            "| [PR #1128](https://github.com/moda-labs/bobi-agent/pull/1128) "
+            f"| **Shipped** {long_cell} | :white_check_mark: |\n"
+            "| MOD-404 · MOD-406 · PR #1114 | `code`, _italic_, ~~strike~~ | |\n\n"
+            "After the table."
+        )
+        from bobi.cli import main
+        result = CliRunner().invoke(main, ["reply", live.thread, reply])
+        assert result.exit_code == 0, result.output
+
+        def stored():
+            return next((m for m in _stored_thread(live)
+                         if token in m.get("text", "") and _tables(m)), None)
+
+        msg = _wait_for(stored)
+        assert msg, f"table reply {token} never appeared with a table block"
+        tables = _tables(msg)
+        assert len(tables) == 1
+        assert tables[0]["column_settings"] == [
+            {"is_wrapped": True, "align": "left"},
+            {"is_wrapped": True, "align": "left"},
+            {"is_wrapped": True, "align": "right"},
+        ]
+        types = [b["type"] for b in msg["blocks"]]
+        assert 0 < types.index("table") < len(types) - 1, types
+        assert len(tables[0]["rows"]) == 3
+
+        def read_back():
+            return next((m for m in _thread_messages(live)
+                         if token in m["text"]), None)
+
+        readback = _wait_for(read_back)
+        assert readback, f"{token} missing from bobi readback"
+        # Slack stores `text` with newlines turned into spaces whenever a
+        # message has blocks, and wraps bare URLs in <>, so assert content,
+        # not layout.
+        text = readback["text"]
+        assert "Ticket | What changed | Owner" in text
+        assert "PR #1128 (<https://github.com/moda-labs/bobi-agent/pull/1128>)" in text
+        assert f"Shipped {long_cell} | :white_check_mark:" in text
+        assert "MOD-404 · MOD-406 · PR #1114 | code, italic, strike" in text
+
+    def test_two_table_reply_arrives_as_one_message_per_table(self, live):
+        """#1123: a two-table reply arrives as two messages in source order,
+        each holding one wrapping table."""
+        token = f"tables-{live.marker}"
+        reply = (
+            f"**Alpha {token}**\n\n| A | x |\n|---|---|\n| 1 | 2 |\n\n"
+            f"---\n\n**Beta {token}**\n\n| B | y |\n|---|---|\n| 3 | 4 |"
+        )
+        from bobi.cli import main
+        result = CliRunner().invoke(main, ["reply", live.thread, reply])
+        assert result.exit_code == 0, result.output
+
+        def both():
+            msgs = [m for m in _stored_thread(live) if token in m.get("text", "")]
+            return msgs if len(msgs) == 2 else None
+
+        msgs = _wait_for(both)
+        assert msgs, f"two-table reply {token} did not arrive as two messages"
+        msgs.sort(key=lambda m: float(m["ts"]))
+        assert f"Alpha {token}" in msgs[0]["text"]
+        assert f"Beta {token}" in msgs[1]["text"]
+        for m in msgs:
+            tables = _tables(m)
+            assert len(tables) == 1
+            assert all(c == {"is_wrapped": True} for c in tables[0]["column_settings"])

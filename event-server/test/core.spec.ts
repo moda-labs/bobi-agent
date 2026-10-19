@@ -2819,6 +2819,322 @@ describe("handleChannelsSend", () => {
 	});
 });
 
+describe("handleChannelsSend: Slack tables as Block Kit (#1123)", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	// Captures every Slack Web API call. `respond` lets a test fail a
+	// specific call (by method and attempt) to drive the safety net.
+	function stubSlack(respond?: (method: string, body: Record<string, unknown>, n: number) => unknown) {
+		const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+		let posts = 0;
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL, init?: RequestInit) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: "T1", bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			const method = u.slice(u.lastIndexOf("/") + 1);
+			const body = decodeSlackBody(init);
+			calls.push({ method, body });
+			if (u.includes("getUploadURLExternal")) {
+				return fetchOk(200, { ok: true, upload_url: "https://slack.test/upload", file_id: "F1" });
+			}
+			const custom = respond?.(method, body, calls.filter((c) => c.method === method).length);
+			if (custom) return fetchOk(200, custom);
+			if (method === "chat.postMessage") posts++;
+			return fetchOk(200, { ok: true, ts: method === "chat.update" ? body.ts : `200.${posts}`, files: [{ id: "F1" }] });
+		}));
+		return calls;
+	}
+
+	async function seed(store: ReturnType<typeof createMockStorage>) {
+		await handleSlackWorkspaceRegister(store, { workspace_id: "T1", bot_token: "xoxb-A", bot_id: "B1" }, "bubA");
+	}
+
+	const blocksOf = (body: Record<string, unknown>) =>
+		JSON.parse(String(body.blocks)) as Array<Record<string, unknown>>;
+	const sends = (calls: Array<{ method: string; body: Record<string, unknown> }>) =>
+		calls.filter((c) => c.method === "chat.postMessage" || c.method === "chat.update");
+
+	const TABLE_REPLY = [
+		"Standup for **Oct 13**.",
+		"",
+		"| Ticket | What changed |",
+		"|:---|:-:|",
+		"| [MOD-404](https://linear.app/x/MOD-404) | **Shipped** the long cell that needs to wrap |",
+		"| <@U123> | :tada: done |",
+		"",
+		"Next steps follow.",
+	].join("\n");
+
+	const twoTables = (a: string, b: string) => [
+		`**${a}**`, "", `| ${a} | x |`, "|---|---|", "| 1 | 2 |", "",
+		"---", "", `**${b}**`, "", `| ${b} | y |`, "|---|---|", "| 3 | 4 |",
+	].join("\n");
+
+	it("posts a one-table reply as markdown, table and markdown blocks with a fallback text", async () => {
+		const store = createMockStorage();
+		const calls = stubSlack();
+		await seed(store);
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", text: TABLE_REPLY,
+		}, "bubA");
+		expect(result.status).toBe(200);
+		const posts = calls.filter((c) => c.method === "chat.postMessage");
+		expect(posts).toHaveLength(1);
+		const body = posts[0].body;
+		// markdown_text cannot be combined with blocks (markdown_text_conflict).
+		expect(body.markdown_text).toBeUndefined();
+		expect(body).toMatchObject({ channel: "C9", thread_ts: "12.34" });
+		expect(blocksOf(body)).toEqual([
+			{ type: "markdown", text: "Standup for **Oct 13**." },
+			{
+				type: "table",
+				column_settings: [{ is_wrapped: true, align: "left" }, { is_wrapped: true, align: "center" }],
+				rows: [
+					[
+						{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "Ticket" }] }] },
+						{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "text", text: "What changed" }] }] },
+					],
+					[
+						{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [
+							{ type: "link", url: "https://linear.app/x/MOD-404", text: "MOD-404" },
+						] }] },
+						{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [
+							{ type: "text", text: "Shipped", style: { bold: true } },
+							{ type: "text", text: " the long cell that needs to wrap" },
+						] }] },
+					],
+					[
+						{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [{ type: "user", user_id: "U123" }] }] },
+						{ type: "rich_text", elements: [{ type: "rich_text_section", elements: [
+							{ type: "emoji", name: "tada" }, { type: "text", text: " done" },
+						] }] },
+					],
+				],
+			},
+			{ type: "markdown", text: "Next steps follow." },
+		]);
+		// Readback and notifications carry the rows (bobi read-conversation
+		// prints `text`); Slack's own conversion leaves them out.
+		expect(body.text).toBe([
+			"Standup for **Oct 13**.",
+			"",
+			"Ticket | What changed",
+			"MOD-404 (https://linear.app/x/MOD-404) | Shipped the long cell that needs to wrap",
+			"<@U123> | :tada: done",
+			"",
+			"Next steps follow.",
+		].join("\n"));
+	});
+
+	it("sends a reply without a table exactly as before", async () => {
+		const store = createMockStorage();
+		const calls = stubSlack();
+		await seed(store);
+		await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text: "a | b\n\nno table here" }, "bubA");
+		const posts = sends(calls);
+		expect(posts).toHaveLength(1);
+		expect(posts[0].body.markdown_text).toBe("a | b\n\nno table here");
+		expect(posts[0].body.blocks).toBeUndefined();
+		expect(posts[0].body.text).toBeUndefined();
+	});
+
+	it("splits a two-table reply into one message per table, in order, returning the first ts", async () => {
+		const store = createMockStorage();
+		const calls = stubSlack();
+		await seed(store);
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", text: twoTables("Alpha", "Beta"),
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect((result.body as Record<string, unknown>).ts).toBe("200.1");
+		const posts = sends(calls);
+		expect(posts).toHaveLength(2);
+		const [first, second] = posts.map((p) => blocksOf(p.body));
+		expect(first.map((b) => b.type)).toEqual(["markdown", "table"]);
+		expect(first[0]).toEqual({ type: "markdown", text: "**Alpha**" });
+		// The cut falls before the divider, so the second message opens with
+		// the divider and heading that lead into its table.
+		expect(second.map((b) => b.type)).toEqual(["markdown", "table"]);
+		expect(second[0]).toEqual({ type: "markdown", text: "---\n\n**Beta**" });
+		for (const p of posts) expect(p.body.thread_ts).toBe("12.34");
+	});
+
+	it("converts a placeholder edit (final with edit_ref) through chat.update", async () => {
+		const store = createMockStorage();
+		const calls = stubSlack();
+		await seed(store);
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", text: TABLE_REPLY, mode: "final", edit_ref: "12.99",
+		}, "bubA");
+		expect(result.status).toBe(200);
+		const updates = calls.filter((c) => c.method === "chat.update");
+		expect(updates).toHaveLength(1);
+		expect(updates[0].body.ts).toBe("12.99");
+		expect(updates[0].body.markdown_text).toBeUndefined();
+		expect(blocksOf(updates[0].body).map((b) => b.type)).toEqual(["markdown", "table", "markdown"]);
+	});
+
+	it("converts the placeholder text of a --file --edit reply", async () => {
+		const store = createMockStorage();
+		const calls = stubSlack();
+		await seed(store);
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", text: TABLE_REPLY, mode: "final", edit_ref: "12.99",
+			files: [{ name: "out.png", content_b64: btoa("png") }],
+		}, "bubA");
+		expect(result.status).toBe(200);
+		expect(calls[0].method).toBe("chat.update");
+		expect(blocksOf(calls[0].body).map((b) => b.type)).toEqual(["markdown", "table", "markdown"]);
+		expect(calls.some((c) => c.method === "files.completeUploadExternal")).toBe(true);
+	});
+
+	it("converts a streaming update with one table, but not with two", async () => {
+		const store = createMockStorage();
+		let calls = stubSlack();
+		await seed(store);
+		await handleChannelsSend(store, {
+			conversation: "slack:T1:dm:D7", text: TABLE_REPLY, mode: "update", edit_ref: "12.99",
+		}, "bubA");
+		expect(calls.filter((c) => c.method === "chat.update")).toHaveLength(1);
+		expect(blocksOf(calls[0].body).map((b) => b.type)).toEqual(["markdown", "table", "markdown"]);
+
+		calls = stubSlack();
+		const text = twoTables("A", "B");
+		await handleChannelsSend(store, {
+			conversation: "slack:T1:dm:D7", text, mode: "update", edit_ref: "12.99",
+		}, "bubA");
+		// A streaming rewrite never multiplies messages, so it cannot split.
+		expect(sends(calls)).toHaveLength(1);
+		expect(calls[0].body.markdown_text).toBe(text);
+		expect(calls[0].body.blocks).toBeUndefined();
+	});
+
+	it("sends an over-limit table as today's markdown_text", async () => {
+		const store = createMockStorage();
+		const calls = stubSlack();
+		await seed(store);
+		const rows = Array.from({ length: 100 }, (_, i) => `| r${i} | v |`);
+		const text = ["| k | v |", "|---|---|", ...rows].join("\n"); // 101 rows with the header
+		await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text }, "bubA");
+		const posts = sends(calls);
+		expect(posts).toHaveLength(1);
+		expect(posts[0].body.markdown_text).toBe(text);
+		expect(posts[0].body.blocks).toBeUndefined();
+	});
+
+	for (const error of ["invalid_blocks", "invalid_blocks_format", "msg_blocks_too_long"]) {
+		it(`resends a post once as markdown_text when Slack rejects the blocks (${error})`, async () => {
+			const store = createMockStorage();
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			const calls = stubSlack((method, body) =>
+				method === "chat.postMessage" && body.blocks ? { ok: false, error, errors: ["bad"] } : undefined);
+			await seed(store);
+			const result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text: TABLE_REPLY }, "bubA");
+			expect(result.status).toBe(200);
+			expect((result.body as Record<string, unknown>).ts).toBe("200.1");
+			const posts = sends(calls);
+			expect(posts).toHaveLength(2);
+			expect(posts[0].body.blocks).toBeDefined();
+			expect(posts[1].body.markdown_text).toBe(TABLE_REPLY);
+			expect(posts[1].body.blocks).toBeUndefined();
+			// The log names Slack's error and never echoes cell text.
+			const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+			expect(logged).toContain(error);
+			expect(logged).not.toContain("Shipped");
+		});
+	}
+
+	it("resends a rejected placeholder edit once as markdown_text", async () => {
+		const store = createMockStorage();
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		const calls = stubSlack((method, body) =>
+			method === "chat.update" && body.blocks ? { ok: false, error: "invalid_blocks" } : undefined);
+		await seed(store);
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", text: TABLE_REPLY, mode: "final", edit_ref: "12.99",
+		}, "bubA");
+		expect(result.status).toBe(200);
+		const updates = calls.filter((c) => c.method === "chat.update");
+		expect(updates).toHaveLength(2);
+		expect(updates[1].body).toMatchObject({ ts: "12.99", markdown_text: TABLE_REPLY });
+	});
+
+	it("resends a rejected follow-up piece without reporting a partial delivery", async () => {
+		const store = createMockStorage();
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		const calls = stubSlack((method, body, n) =>
+			method === "chat.postMessage" && n === 2 && body.blocks ? { ok: false, error: "invalid_blocks" } : undefined);
+		await seed(store);
+		const text = twoTables("A", "B");
+		const result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text }, "bubA");
+		expect(result.status).toBe(200);
+		const posts = sends(calls);
+		expect(posts).toHaveLength(3);
+		expect(posts[1].body.blocks).toBeDefined();
+		expect(String(posts[2].body.markdown_text)).toContain("| B | y |");
+	});
+
+	it("reports a partial delivery when a later piece fails with a non-block error", async () => {
+		const store = createMockStorage();
+		const calls = stubSlack((method, _body, n) =>
+			method === "chat.postMessage" && n === 2 ? { ok: false, error: "ratelimited" } : undefined);
+		await seed(store);
+		const result = await handleChannelsSend(store, {
+			conversation: "slack:T1:channel:C9:thread:12.34", text: twoTables("A", "B"), mode: "final",
+		}, "bubA");
+		expect(result.status).toBe(502);
+		const body = result.body as Record<string, unknown>;
+		expect(body.ts).toBe("200.1");
+		expect(String(body.error)).toBe(
+			"chunk 2/2 failed after partial delivery (do not resend; the reply is partially visible): ratelimited");
+		expect(sends(calls)).toHaveLength(2);
+		expect(calls[calls.length - 1].method).toBe("assistant.threads.setStatus");
+	});
+
+	it("surfaces the error when the markdown_text resend fails too", async () => {
+		const store = createMockStorage();
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		const calls = stubSlack((method, body) => {
+			if (method !== "chat.postMessage") return undefined;
+			return body.blocks ? { ok: false, error: "invalid_blocks" } : { ok: false, error: "ratelimited" };
+		});
+		await seed(store);
+		const result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text: TABLE_REPLY }, "bubA");
+		expect(result.status).toBe(502);
+		expect((result.body as Record<string, string>).error).toBe("ratelimited");
+		expect(sends(calls)).toHaveLength(2);
+	});
+
+	it("never resends after a network error, which may follow a delivered post", async () => {
+		const store = createMockStorage();
+		let attempts = 0;
+		vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+			const u = String(url);
+			if (u.includes("/auth.test")) return fetchOk(200, { ok: true, team_id: "T1", bot_id: "B1" });
+			if (u.includes("/bots.info")) return fetchOk(200, { ok: true, bot: { app_id: "A1" } });
+			attempts++;
+			throw new TypeError("fetch failed");
+		}));
+		await seed(store);
+		const result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text: TABLE_REPLY }, "bubA");
+		expect(result.status).toBe(502);
+		expect((result.body as Record<string, string>).error).toContain("fetch failed");
+		expect(attempts).toBe(1);
+	});
+
+	for (const error of ["ratelimited", "internal_error", "fatal_error", "channel_not_found"]) {
+		it(`never resends on ${error}`, async () => {
+			const store = createMockStorage();
+			const calls = stubSlack((method) => (method === "chat.postMessage" ? { ok: false, error } : undefined));
+			await seed(store);
+			const result = await handleChannelsSend(store, { conversation: "slack:T1:dm:D7", text: TABLE_REPLY }, "bubA");
+			expect(result.status).toBe(502);
+			expect((result.body as Record<string, string>).error).toBe(error);
+			expect(sends(calls)).toHaveLength(1);
+		});
+	}
+});
+
 describe("handleChannelsTyping", () => {
 	function stubSlackApi(teamId: string) {
 		const calls: Array<{ url: string; body: Record<string, unknown> }> = [];

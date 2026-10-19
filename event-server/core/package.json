@@ -23,10 +23,12 @@
 		"./adapters/github": "./src/adapters/github.ts",
 		"./adapters/payload": "./src/adapters/payload.ts",
 		"./gateway/discord": "./src/gateway/discord.ts",
-		"./gateway/slack-socket": "./src/gateway/slack-socket.ts"
+		"./gateway/slack-socket": "./src/gateway/slack-socket.ts",
+		"./markdown-tables": "./src/markdown-tables.ts"
 	},
 	"dependencies": {
-		"@chat-adapter/slack": "^4.30.0"
+		"@chat-adapter/slack": "^4.30.0",
+		"marked": "^18.1.1"
 	},
 	"devDependencies": {
 		"typescript": "^5.7.2"

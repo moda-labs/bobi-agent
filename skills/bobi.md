@@ -145,6 +145,14 @@ bobi read-conversation <conversation> [-n 50] [--json-output]
 Use `bobi reply` and `bobi read-conversation` for Slack and any other
 chat channel delivered through the channel gateway.
 
+Tables in a Slack reply are sent as native Slack tables that wrap long cells.
+Slack takes one table per message, so each extra table in one reply arrives as
+its own message: prefer one table per reply, and give each extra table its own
+heading. Keep tables to about five columns. A table inside a list or quote does
+not wrap, and neither does a row with more cells than its header: inside a table
+write links as `[label](url)`, since the `|` in Slack's `<url|label>` splits a
+cell.
+
 Run `stop` and `restart` only from a shell outside the target runtime. Bobi
 refuses either command when the caller is a descendant of that runtime's
 manager, and prints the exact external command to run instead.

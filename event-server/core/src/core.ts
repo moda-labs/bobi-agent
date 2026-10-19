@@ -2186,7 +2186,8 @@ function decodeOutboundFiles(raw: unknown): OutboundFile[] | null {
 // scope.
 //
 // Text arrives as raw markdown — formatting is the gateway's job (the Slack
-// adapter delivers it natively via markdown_text). Modes:
+// adapter delivers it natively via markdown_text, or as Block Kit blocks
+// with a wrapping table when it holds one, #1123). Modes:
 //   post    post a new message
 //   update  edit the message named by edit_ref (e.g. a placeholder)
 //   final   resolve the response context: edit edit_ref when given, else

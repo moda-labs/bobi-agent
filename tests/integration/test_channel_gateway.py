@@ -207,6 +207,80 @@ class TestReplyEndToEnd:
         assert statuses[0]["body"]["status"] == ""
         assert statuses[0]["body"]["thread_ts"] == "100.000"
 
+    def test_reply_with_table_posts_wrapping_table_blocks(self, gateway):
+        """#1123: a reply holding a GFM table reaches Slack as blocks - the
+        prose as markdown blocks around a table block whose every column
+        wraps - plus a text fallback carrying the rows, never markdown_text."""
+        _project, stub, _es_url, _bubble = gateway
+        from bobi.cli import main
+
+        reply = (
+            "Standup:\n\n"
+            "| Ticket | What changed |\n"
+            "|---|:-:|\n"
+            "| [MOD-404](https://linear.app/x/MOD-404) | **Shipped** a long cell |\n\n"
+            "Done."
+        )
+        result = CliRunner().invoke(main, [
+            "reply", "slack:T_GW:channel:C_GW:thread:100.000", reply,
+        ])
+        assert result.exit_code == 0, result.output
+
+        posts = stub.named("chat.postMessage")
+        assert len(posts) == 1
+        body = posts[0]["body"]
+        assert "markdown_text" not in body
+        assert body["thread_ts"] == "100.000"
+        blocks = json.loads(body["blocks"])
+        assert [b["type"] for b in blocks] == ["markdown", "table", "markdown"]
+        assert blocks[0] == {"type": "markdown", "text": "Standup:"}
+        table = blocks[1]
+        assert table["column_settings"] == [
+            {"is_wrapped": True}, {"is_wrapped": True, "align": "center"},
+        ]
+        assert table["rows"][1] == [
+            {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": [
+                {"type": "link", "url": "https://linear.app/x/MOD-404", "text": "MOD-404"},
+            ]}]},
+            {"type": "rich_text", "elements": [{"type": "rich_text_section", "elements": [
+                {"type": "text", "text": "Shipped", "style": {"bold": True}},
+                {"type": "text", "text": " a long cell"},
+            ]}]},
+        ]
+        assert body["text"] == (
+            "Standup:\n\n"
+            "Ticket | What changed\n"
+            "MOD-404 (https://linear.app/x/MOD-404) | Shipped a long cell\n\n"
+            "Done."
+        )
+
+    def test_reply_with_two_tables_posts_one_message_per_table(self, gateway):
+        """#1123: Slack takes one table per message, so a two-table reply
+        becomes two posts in source order, the second opening with the
+        divider and heading that lead into its table."""
+        _project, stub, _es_url, _bubble = gateway
+        from bobi.cli import main
+
+        reply = (
+            "**Alpha**\n\n| A | x |\n|---|---|\n| 1 | 2 |\n\n"
+            "---\n\n**Beta**\n\n| B | y |\n|---|---|\n| 3 | 4 |"
+        )
+        result = CliRunner().invoke(main, [
+            "reply", "slack:T_GW:channel:C_GW:thread:100.000", reply,
+        ])
+        assert result.exit_code == 0, result.output
+
+        posts = stub.named("chat.postMessage")
+        assert len(posts) == 2
+        first, second = (json.loads(p["body"]["blocks"]) for p in posts)
+        assert first[0] == {"type": "markdown", "text": "**Alpha**"}
+        assert first[1]["rows"][0][0]["elements"][0]["elements"] == [
+            {"type": "text", "text": "A"}]
+        assert second[0] == {"type": "markdown", "text": "---\n\n**Beta**"}
+        assert second[1]["rows"][0][0]["elements"][0]["elements"] == [
+            {"type": "text", "text": "B"}]
+        assert all(p["body"]["thread_ts"] == "100.000" for p in posts)
+
     def test_reply_edit_updates_placeholder(self, gateway):
         _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main

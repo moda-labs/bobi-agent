@@ -11,8 +11,10 @@
  * The Slack adapter is built on the Chat SDK's api module
  * (@chat-adapter/slack/api) - the same package whose webhook parser serves
  * inbound (adapters/chat-sdk-slack.ts). Outbound text arrives as markdown and
- * is delivered natively via Slack's `markdown_text`, so callers never convert
- * client-side.
+ * callers never convert client-side. Slack delivers it natively via
+ * `markdown_text`, except a message holding a GFM table: that goes out as
+ * Block Kit blocks with a wrapping `table` block (markdown-tables.ts, #1123),
+ * one table per message.
  */
 import {
 	postSlackMessage,
@@ -24,6 +26,7 @@ import {
 	type SlackMessageOptions,
 } from "@chat-adapter/slack/api";
 import type { Conversation } from "./conversation.js";
+import { convertSlackTables, splitAtTables } from "./markdown-tables.js";
 
 export interface CredentialSpec {
 	env: string;
@@ -84,6 +87,11 @@ export interface ChannelCapabilities {
 	maxLength: number;
 	lengthUnit: "chars" | "utf16";
 	messageWindow?: { hours: number; outsideWindow: "template" | "blocked" };
+	/**
+	 * Tables one message may carry. Set, it makes chunkForChannel split a
+	 * reply between tables (#1123); unset, tables are never a split reason.
+	 */
+	maxTablesPerMessage?: number;
 }
 
 /**
@@ -142,6 +150,8 @@ export interface ChannelAdapter {
 const TRUNCATION_MARKER = "\n_(truncated)_";
 /** Runaway guard: past this many chunks the tail is truncated with the marker. */
 const MAX_CHUNKS = 8;
+/** Replies up to this many budgets long are split at tables (#1123). */
+const TABLE_SPLIT_BUDGETS = 2;
 /** Appended to a chunk that splits inside a code fence, so it renders closed. */
 const FENCE_CLOSE = "\n```";
 
@@ -214,60 +224,77 @@ function fenceStateAfter(s: string, open: string): string {
 }
 
 /**
- * Split over-budget text into channel-sized chunks at natural boundaries:
+ * Split text into channel-sized chunks. On a channel that caps tables per
+ * message, a reply with more tables is first cut into pieces between tables
+ * (splitAtTables); then each over-budget piece splits at natural boundaries:
  * paragraph break, then line break, then a hard (surrogate-safe) cut. A split
  * inside a code fence closes the fence at the chunk end and reopens it (with
  * its info string) at the start of the next chunk, so every chunk renders.
- * Within-budget text comes back as a single chunk, byte-identical.
+ * The chunk cap counts across all pieces. Within-budget text that needs no
+ * table cut comes back as a single chunk, byte-identical.
  */
 export function chunkForChannel(text: string, caps: ChannelCapabilities): string[] {
-	if (unitLength(text, caps) <= caps.maxLength) return [text];
+	// Lexing cost grows faster than length on crafted input, so a reply past
+	// two messages' budget is never split at tables; each chunk of it still
+	// converts when it holds one table.
+	const maxTables = caps.maxTablesPerMessage;
+	const pieces = maxTables !== undefined && unitLength(text, caps) <= TABLE_SPLIT_BUDGETS * caps.maxLength
+		? splitAtTables(text, maxTables)
+		: [text];
+	if (pieces.length === 1 && unitLength(text, caps) <= caps.maxLength) return [text];
 
 	const chunks: string[] = [];
-	let remaining = text;
-	let reopen = ""; // fence header carried into the next chunk
+	for (let p = 0; p < pieces.length; p++) {
+		let remaining = pieces[p];
+		let reopen = ""; // fence header carried into the next chunk
+		for (;;) {
+			const prefix = reopen ? reopen + "\n" : "";
+			if (chunks.length === MAX_CHUNKS - 1) {
+				// Chunk-count guard hit: everything left, later pieces included,
+				// becomes the last chunk instead of unbounded follow-ups.
+				chunks.push(guardedTail([prefix + remaining, ...pieces.slice(p + 1)].join("\n\n"), caps));
+				return chunks;
+			}
+			if (unitLength(prefix, caps) + unitLength(remaining, caps) <= caps.maxLength) {
+				chunks.push(prefix + remaining);
+				break;
+			}
+			// Reserve room for the prefix and a possible fence close so the chunk
+			// never overshoots the hard limit (over-reserving costs a few chars).
+			const avail = Math.max(
+				1, caps.maxLength - unitLength(prefix, caps) - unitLength(FENCE_CLOSE, caps));
+			const windowEnd = unitIndex(remaining, avail, caps);
+			const window = remaining.slice(0, windowEnd);
 
-	while (chunks.length < MAX_CHUNKS - 1) {
-		const prefix = reopen ? reopen + "\n" : "";
-		if (unitLength(prefix, caps) + unitLength(remaining, caps) <= caps.maxLength) {
-			chunks.push(prefix + remaining);
-			return chunks;
+			// Natural boundaries, but never a blank chunk: a cut that leaves only
+			// whitespace (e.g. leading newlines) would fail the whole send.
+			let cut = window.lastIndexOf("\n\n");
+			if (cut <= 0 || !window.slice(0, cut).trim()) cut = window.lastIndexOf("\n");
+			if (cut <= 0 || !window.slice(0, cut).trim()) cut = windowEnd; // hard split, surrogate-safe
+
+			const head = remaining.slice(0, cut);
+			remaining = remaining.slice(cut).replace(/^\n+/, "");
+
+			reopen = fenceStateAfter(head, reopen);
+			let chunk = prefix + head;
+			if (reopen) chunk += FENCE_CLOSE;
+			chunks.push(chunk);
 		}
-		// Reserve room for the prefix and a possible fence close so the chunk
-		// never overshoots the hard limit (over-reserving costs a few chars).
-		const avail = Math.max(
-			1, caps.maxLength - unitLength(prefix, caps) - unitLength(FENCE_CLOSE, caps));
-		const windowEnd = unitIndex(remaining, avail, caps);
-		const window = remaining.slice(0, windowEnd);
-
-		// Natural boundaries, but never a blank chunk: a cut that leaves only
-		// whitespace (e.g. leading newlines) would fail the whole send.
-		let cut = window.lastIndexOf("\n\n");
-		if (cut <= 0 || !window.slice(0, cut).trim()) cut = window.lastIndexOf("\n");
-		if (cut <= 0 || !window.slice(0, cut).trim()) cut = windowEnd; // hard split, surrogate-safe
-
-		const head = remaining.slice(0, cut);
-		remaining = remaining.slice(cut).replace(/^\n+/, "");
-
-		reopen = fenceStateAfter(head, reopen);
-		let chunk = prefix + head;
-		if (reopen) chunk += FENCE_CLOSE;
-		chunks.push(chunk);
 	}
-
-	// Chunk-count guard hit: truncate the tail instead of posting unbounded
-	// follow-ups for pathological input, keeping any open fence closed so the
-	// final chunk still renders.
-	const prefix = reopen ? reopen + "\n" : "";
-	let tail = truncateForChannel(prefix + remaining, caps);
-	if (fenceStateAfter(tail, "")) {
-		tail = truncateForChannel(
-			prefix + remaining,
-			{ ...caps, maxLength: caps.maxLength - unitLength(FENCE_CLOSE, caps) },
-		) + FENCE_CLOSE;
-	}
-	chunks.push(tail);
 	return chunks;
+}
+
+/**
+ * The last chunk under the chunk-count guard: truncated with the marker when
+ * over budget, keeping any open fence closed so it still renders.
+ */
+function guardedTail(rest: string, caps: ChannelCapabilities): string {
+	const tail = truncateForChannel(rest, caps);
+	if (!fenceStateAfter(tail, "")) return tail;
+	return truncateForChannel(
+		rest,
+		{ ...caps, maxLength: caps.maxLength - unitLength(FENCE_CLOSE, caps) },
+	) + FENCE_CLOSE;
 }
 
 function slackError(err: unknown): string {
@@ -295,10 +322,48 @@ function toConversationMessage(raw: Record<string, unknown>): ConversationMessag
 	return entry;
 }
 
-// Message body for a Slack post/update. Raw markdown goes out as Slack's
-// native `markdown_text` (AST-rendered by Slack, 12k budget).
-function slackContent(text: string): Pick<SlackMessageOptions, "markdownText"> {
-	return { markdownText: text };
+// Slack allows one table block per message (Slack's Block Kit guidance), so
+// a multi-table reply is split between tables by chunkForChannel (#1123).
+const SLACK_MAX_TABLES = 1;
+
+// Errors meaning Slack refused the blocks before posting anything, so a
+// resend cannot duplicate a message (#1123).
+const SLACK_BLOCK_ERRORS = new Set(["invalid_blocks", "invalid_blocks_format", "msg_blocks_too_long"]);
+
+type SlackContent = Pick<SlackMessageOptions, "markdownText" | "blocks" | "text">;
+
+/**
+ * Deliver one Slack post or update. Raw markdown goes out as Slack's native
+ * `markdown_text` (AST-rendered by Slack, 12k budget), unless it holds a
+ * table that converts: then it goes out as blocks with a text fallback. If
+ * Slack rejects those blocks, the same message goes out as `markdown_text`,
+ * today's payload, and the rejection is logged without any message text.
+ * Every other error surfaces unchanged and is never resent.
+ */
+async function deliverSlack(
+	text: string,
+	call: (content: SlackContent) => Promise<{ id: string }>,
+): Promise<SendResult> {
+	const tables = convertSlackTables(text, SLACK_MAX_TABLES);
+	if (tables.kind === "fallback") console.log(`slack: table sent as markdown_text: ${tables.reason}`);
+	try {
+		if (tables.kind === "blocks") {
+			try {
+				return { ok: true, ts: (await call({ blocks: tables.blocks, text: tables.text })).id };
+			} catch (err) {
+				if (!(err instanceof SlackApiError) || !SLACK_BLOCK_ERRORS.has(String(err.response?.error))) throw err;
+				console.warn(
+					`slack: ${err.method} rejected table blocks (${String(err.response?.error)}; `
+					+ `errors=${JSON.stringify(err.response?.errors ?? [])}; `
+					+ `messages=${JSON.stringify(err.response?.response_metadata?.messages ?? [])}); `
+					+ "resending as markdown_text",
+				);
+			}
+		}
+		return { ok: true, ts: (await call({ markdownText: text })).id };
+	} catch (err) {
+		return { ok: false, error: slackError(err) };
+	}
 }
 
 const slackAdapter: ChannelAdapter = {
@@ -318,6 +383,7 @@ const slackAdapter: ChannelAdapter = {
 			// declare that unit so chunking keeps the proven behavior.
 			maxLength: 12000,
 			lengthUnit: "utf16",
+			maxTablesPerMessage: SLACK_MAX_TABLES,
 		},
 		credentials: [
 			{ env: "SLACK_BOT_TOKEN", secret: true, label: "Bot User OAuth Token" },
@@ -330,33 +396,23 @@ const slackAdapter: ChannelAdapter = {
 	},
 
 	async send(token, conv, text) {
-		try {
-			const posted = await postSlackMessage({
-				apiUrl: slackApiUrl(),
-				token,
-				channel: conv.chatId,
-				...(conv.threadId ? { threadTs: conv.threadId } : {}),
-				...slackContent(text),
-			});
-			return { ok: true, ts: posted.id };
-		} catch (err) {
-			return { ok: false, error: slackError(err) };
-		}
+		return deliverSlack(text, (content) => postSlackMessage({
+			apiUrl: slackApiUrl(),
+			token,
+			channel: conv.chatId,
+			...(conv.threadId ? { threadTs: conv.threadId } : {}),
+			...content,
+		}));
 	},
 
 	async update(token, conv, messageId, text) {
-		try {
-			const posted = await updateSlackMessage({
-				apiUrl: slackApiUrl(),
-				token,
-				channel: conv.chatId,
-				ts: messageId,
-				...slackContent(text),
-			});
-			return { ok: true, ts: posted.id };
-		} catch (err) {
-			return { ok: false, error: slackError(err) };
-		}
+		return deliverSlack(text, (content) => updateSlackMessage({
+			apiUrl: slackApiUrl(),
+			token,
+			channel: conv.chatId,
+			ts: messageId,
+			...content,
+		}));
 	},
 
 	// Slack's "typing" is the assistant thread status ("is thinking..."),
