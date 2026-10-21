@@ -448,6 +448,22 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - baohua's PRD approval stays director-judged, as it is today.
   - Setup's Slack-only "ask first" proposes and does not act until then.
 
+- **Q13:** What is the migration path for consumers on bobi 0.58 or lower who
+  rely on multi-step workflows? At least one production deployment uses them
+  heavily: routing, role switching between steps, handoff contracts, and
+  tooling that reads run records directly. Phase 3 (deletion, plus the
+  install-time refusal) would break them on upgrade. Q4's "no deprecation
+  window" assumed outside users were unknown, which is no longer true.
+  Options:
+  - (a) hold Phase 3 until a migration is proven: a ported multi-step flow
+    replayed on skills, with matching outputs, plus a published migration
+    guide;
+  - (b) keep the engine frozen indefinitely and delete only our own packs'
+    workflows;
+  - (c) ship Phase 3 with a deprecation window.
+
+  Recommendation: (a). Phases 1–2 do not affect these consumers and go ahead.
+
 ## Phases
 
 ### Phase 1 — bobi-agent: add the replacements, migrate in-repo packs (no engine deletion)
@@ -764,7 +780,7 @@ alongside Phase 1.
 ### Phase 3 — bobi-agent: delete the step machine and gate surface (load-bearing; strictest gate)
 
 Code may be developed during Phase 2's soak. Release N+1 is cut only after
-Phase 2's amendment.
+Phase 2's amendment. **Blocked on Q13** until it carries a decision.
 
 - [ ] `orchestrator.py`: delete the multi-step parts listed in Relevant files.
   - Keep: the single-prompt `run_workflow`, turn-cap resume (with the nudge
