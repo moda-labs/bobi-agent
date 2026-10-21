@@ -1,7 +1,7 @@
 # Retire multi-step YAML workflows: team behavior moves to skill files
 
-> **Status:** Draft
-> **Tracking issue:** moda-labs/bobi-agent#{N} · **Created:** 2026-10-19 · **Last amended:** — (see Amendments)
+> **Status:** In review
+> **Tracking issue:** moda-labs/bobi-agent#1129 · **Created:** 2026-10-19 · **Last amended:** — (see Amendments)
 >
 > Markers: `[ ]` idle · `[wip]` in progress · `[x]` done · `[f]` failed/blocked (always with a note)
 
@@ -599,8 +599,8 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - A merge-queue merge may carry the queue bot as `sender`, so it would not
     count (unverified).
   - Deterministic steps belong in rule `action:`s or scripts.
-- [ ] File the follow-up issue for a structured Slack approval signal, and
-  link it here.
+- [x] File the follow-up issue for a structured Slack approval signal:
+  moda-labs/bobi-agent#1130.
 - [ ] Update the tests Phase 1 breaks (Relevant files). The engine tests keep
   covering the engine with fixture workflows, not pack files.
 
