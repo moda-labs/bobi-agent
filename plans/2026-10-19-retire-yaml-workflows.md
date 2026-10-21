@@ -115,7 +115,7 @@ Renaming the "workflow" identifiers is out of scope.
 | Slack notify steps | The skill posts with `bobi reply` (`cli.py:1601`) |
 | Handoff files | The worker reports in its thread/PR; the director reads the thread |
 
-**Approval** (Zach: Q9 2026-10-20, Q12 2026-10-21): GitHub only.
+**Approval** (Zach: Q9 2026-10-20, Q12 2026-10-20): GitHub only.
 - **The signal.** The bot opens its proposal as a **spec PR** on head branch
   `spec/<issue>`. Approval is either one counted as below:
   - an approving review (`pull_request_review`, `action: submitted`,
@@ -133,9 +133,18 @@ Renaming the "workflow" identifiers is out of scope.
     not.
   - Validate forbids `allow_self_authored` on approval rules, so a bot merging
     its own spec PR is never approval.
-- **Dedupe.** Approval launches use `run_key: issue-${{input.issue}}`, parsed
-  from the `spec/<issue>` branch. Two approvals of one spec therefore make
-  one implement run.
+- **Dedupe.** Approval launches use `run_key: issue-${{input.issue}}-implement`
+  with `fresh: true` and `once: true`. `once` refuses the key if a run with it
+  is active **or has completed**, using the existing finding-replay ledger
+  check (`subagent.py:1467`).
+  - Approve-then-merge, two approvals, and a webhook redelivery each make one
+    implement run.
+  - The implement run never resumes the planning transcript.
+  - `issue` is set by the reactor only when `head_branch` fully matches
+    `spec/([1-9][0-9]*)`.
+- **The spec PR is opened from a dedicated `spec/<n>` worktree** that the
+  implement run never uses, so the co-firing cleanup can't delete a live
+  worktree.
 - **Never approval:** text in an issue, PR, email or chat. **Slack approval
   is deferred** to a follow-up issue for a structured, thread-scoped signal.
 - **What the framework guarantees** (stated in `SECURITY.md`): a `$approver`
@@ -153,10 +162,23 @@ Renaming the "workflow" identifiers is out of scope.
 
 **Multi-rule matching.** `reactor.process` stops at the first matching rule
 (`reactor.py:250-283`), so one `pull_request closed` event could not drive both
-cleanup and approval. `process()` now evaluates every matching launch and
-action rule, each with its own dedup key. `suppress` and `dedup_only` keep
-first-match precedence. This is load-bearing and gets the strictest gate in
-Phase 1.
+cleanup and approval. New semantics, load-bearing, with the strictest gate in
+Phase 1:
+- Rules are evaluated in order. If the **first** matching rule is `suppress`
+  or `dedup_only`, behave exactly as today and stop.
+- Otherwise fire every matching launch or action rule, and ignore any later
+  `suppress`/`dedup_only` match; validate warns on that ordering.
+- A cooldown hit or a self-authored skip skips that rule only (`continue`, not
+  `return`).
+- Each dedup key is namespaced by the rule's `id`, else its action name, else
+  its index. Today it is `self.workflow` (`reactor.py:117`), which every adhoc
+  rule would share.
+- `process()` returns `dispatched` if anything fired, else `deduped` if any
+  rule deduped, else `None`.
+- No event in a shipped pack matches two rules today (verified 2026-10-20).
+  But overlay rules append after base rules (`compose.py:681`), so an overlay
+  rule shadowed under first-match starts firing. Phase 2 checks every overlay
+  for this.
 
 **Alternatives rejected** (2026-10-19/20, see Questionables):
 - Keep `await` gates.
@@ -393,7 +415,7 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - Approval launches only via a `$approver`-matched rule on the webhook's
     structured `sender`.
   - The approval itself is an approving review or a merge of the bot's
-    `spec/` PR. That shape was tightened by re-review on 2026-10-21: a bot or
+    `spec/` PR. That shape was tightened by re-review on 2026-10-20: a bot or
     non-approver merge does not count.
   - Text is never approval.
 - **Q10:** Where does the Phase 3 hard error fire? There is no `bobi validate`
@@ -413,12 +435,15 @@ and the native actions move into `bobi/workflow/cleanup.py`.
     completed-in-period refusal (`subagent.py:1314,1466`) against it.
   - Without this, a reactor-supplied run key skips that refusal, and every
     periodic rule would share `adhoc-<bucket>`.
+  - Accepted loss: a director's manual launch of the same skill is no longer
+    period-guarded. The workflow-level period covered it (`subagent.py:1314`).
+    The skill's own first step checks for this week's post.
 - **Q12:** Slack approval: (a) build a structured, thread-scoped signal (a ✅
   reaction on the bot's proposal) now, or (b) GitHub-only now, with Slack
   deferred? Recommendation: (b). Re-review showed a `user_id` match fires on
   every approver message, and baohua's PRD approval is already director-judged
   today.
-  **Decision (2026-10-21, Zach):** GitHub-only.
+  **Decision (2026-10-20, Zach):** GitHub-only.
   - The Slack signal is a follow-up issue.
   - baohua's PRD approval stays director-judged, as it is today.
   - Setup's Slack-only "ask first" proposes and does not act until then.
@@ -428,10 +453,12 @@ and the native actions move into `bobi/workflow/cleanup.py`.
 ### Phase 1 — bobi-agent: add the replacements, migrate in-repo packs (no engine deletion)
 
 **Rule keys** (`reactor.py`, `validate.py`, `config.py`, `subagent.py`):
-- [ ] **Multi-rule matching (load-bearing).** `process()` evaluates every
-  matching launch and action rule, each with its own dedup key. `suppress` and
-  `dedup_only` keep first-match precedence. A self-authored skip skips that
-  rule only, not the event.
+- [ ] **Multi-rule matching (load-bearing)**, exactly as specified in
+  Solution: first-match `suppress`/`dedup_only` precedence, every other match
+  fires, per-rule `continue`, dedup keys namespaced by id / action / index,
+  and the return values.
+- [ ] The drain tags an action-only fire "action run", not "workflow launched"
+  (`drain.py:432`).
 - [ ] `AutoDispatchRule.workflow` becomes optional.
 - [ ] Add `action: <name>`, valid only without `workflow:`, `task:` and
   `role:`.
@@ -448,8 +475,14 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   a second run in the bucket, including after the first has completed.
 - [ ] Add `timeout: <seconds>`, passed to the launch.
 - [ ] Add `run_key: <template>`, rendered from allow-listed fields.
-  `issue-${{input.issue}}` uses `issue`, parsed from a `spec/<n>` head branch
-  on bot-authored PRs.
+  - `EventReactor._dispatch` sets `input_fields.issue` only when
+    `head_branch` fully matches `spec/([1-9][0-9]*)`.
+  - A `run_key` or `task` reference that resolves to empty refuses the launch
+    and publishes `auto_dispatch.failed`. `variables.py:53` resolves a
+    missing key to `""`, which would otherwise fail open.
+- [ ] Add `fresh: true` (wipe the saved transcript) and `once: true` (refuse
+  the key if a run with it is active or completed, via the finding-replay
+  ledger check).
 - [ ] Add the match operand `{prefix: "<s>"}` for string fields.
 - [ ] Add `approvers: {github: [logins]}` on `AgentConfig`, passed into
   `EventReactor.from_config`; an overlay's list replaces the base's.
@@ -512,13 +545,15 @@ and the native actions move into `bobi/workflow/cleanup.py`.
     `review_state: approved`) and `github.pull_request` closed with
     `merged: true`. Both match `pr_author: $self`,
     `head_branch: {prefix: "spec/"}` and `sender: $approver`. Both launch
-    implement with `run_key: issue-${{input.issue}}`, `timeout: 10800` and
-    `Approved by ${{input.sender}}`.
-  - **PR closed** → `action: cleanup_worktree` with `pr_author: $self`. It
-    co-fires with the merge-approval rule (multi-rule matching).
+    implement with `run_key: issue-${{input.issue}}-implement`, `fresh: true`,
+    `once: true`, `timeout: 10800` and `Approved by ${{input.sender}}`.
+  - **PR closed** → `action: cleanup_worktree` with `pr_author: $self` and
+    `allow_self_authored: true`, because the bot merges its own implement
+    PRs. It co-fires with the merge-approval rule.
   - **Approvers:** `approvers: {github: []}` in the pack, empty by default.
 - [ ] The issue-lifecycle skill opens its spec/plan PR on branch
-  `spec/<issue-number>`.
+  `spec/<issue-number>`, from a dedicated worktree that the implement run
+  never uses.
 - [ ] Director `ROLE.md`:
   - The routing table names skills.
   - Launch examples use `--role engineer --task "Read package/context/skills/…"`,
@@ -561,6 +596,8 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - The approver stamp is a forgeable convention.
   - Director-initiated launches remain model discretion.
   - Slack approval does not exist yet.
+  - A merge-queue merge may carry the queue bot as `sender`, so it would not
+    count (unverified).
   - Deterministic steps belong in rule `action:`s or scripts.
 - [ ] File the follow-up issue for a structured Slack approval signal, and
   link it here.
@@ -601,9 +638,23 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - an approver-sender event carrying a `bubble_id`;
   - an empty `approvers:`.
 
-  An approver's approval of `spec/<n>` launches `issue-<n>` with the stamp,
-  and a second approval of the same spec launches nothing new. Mutant: make
-  `$approver` always true, or drop the `bubble_id` check → a case fails.
+  An approver's approval of `spec/<n>` launches `issue-<n>-implement`
+  (fresh) with the stamp. Each of these launches nothing new, even when sent
+  **after the first implement run completed**:
+  - a second approval;
+  - a subsequent merge;
+  - a redelivered webhook.
+
+  A `spec/abc` branch launches nothing and publishes `auto_dispatch.failed`.
+  Mutant: make `$approver` always true, drop the `bubble_id` check, or drop
+  `once` → a case fails.
+- [ ] Mutation — multi-rule edge cases:
+  - Two adhoc rules matching one event both launch; their keys are
+    namespaced.
+  - A cooldown hit on rule 1 still lets rule 2 fire.
+  - A first-match `suppress` stops everything.
+
+  Mutant: namespace by `workflow`, or `return` on cooldown → a case fails.
 - [ ] Mutation — validate: each listed check fires, including a
   `${{input.title}}` template and `allow_self_authored` with `$approver`. It
   is a warning in `validate_config` and an error in `bobi agents install`.
@@ -677,6 +728,9 @@ alongside Phase 1.
     task says to run the `moda:build` skill on the plan path. "continue plan"
     is the same, with the plan's markers as state.
   - Set `approvers:` (Zach).
+- [ ] Check every overlay for a rule shadowed under first-match that would
+  start firing under multi-rule matching (overlay rules append after base
+  rules, `compose.py:681`).
 - [ ] Delete `workflows/` and the `-w` monitor entries in `gtm-team`,
   `market-research` and `support-manager`, and add a README note (Q4).
 - [ ] Bump every changed pack's version.
