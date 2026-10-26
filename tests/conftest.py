@@ -39,6 +39,7 @@ os.environ["PYTHONPATH"] = _existing_pythonpath
 os.environ["PYTHONSAFEPATH"] = "1"
 
 import asyncio
+import threading
 
 import pytest
 
@@ -146,6 +147,53 @@ def _reset_paths_root():
         os.environ.pop("BOBI_ROOT", None)
     else:
         os.environ["BOBI_ROOT"] = env_before
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_metrics_producer():
+    """No test may leave a metrics producer thread running (conftest invariant).
+
+    An enabled ``MetricsRuntime`` starts a ``MetricsProducer`` thread that
+    rewrites its health file about once a second, through the process-wide
+    ``Path.write_text`` and ``os.replace``, until the runtime is closed. Left
+    running, it keeps writing inside every later test, and a test that spies on
+    either call counts the stray write as its own. That is how the 2026-10-24
+    nightly failed ``test_state_writes_never_expose_partial_json``: two
+    publications where the registry made one, the second in another test's
+    spool directory.
+
+    The process-wide runtime that product code starts on its own
+    (``get_runtime``) has no owner in the test, so it is reset here, like the
+    bound root above. A test closes any other runtime it opens before its
+    teardown ends, in a ``finally`` or a fixture finalizer: a close at the end
+    of the body is skipped when an earlier assertion fails. A producer still
+    running after that fails the test, and is closed first so the leak cannot
+    reach the next one.
+    """
+    before = set(threading.enumerate())
+    yield
+    from bobi.metrics import runtime
+
+    runtime.reset_runtime_for_tests()
+    leaked = [
+        producer for thread in threading.enumerate()
+        if thread not in before
+        and (producer := _metrics_producer(thread)) is not None
+    ]
+    for producer in leaked:
+        producer.close()
+    assert not leaked, (
+        f"test left {len(leaked)} MetricsProducer thread(s) running; "
+        "close each MetricsRuntime it opens in a finally or a fixture finalizer"
+    )
+
+
+def _metrics_producer(thread):
+    """The ``MetricsProducer`` whose writer loop *thread* runs, or None."""
+    run = getattr(thread, "_target", None)  # CPython drops it once run() returns
+    if getattr(run, "__qualname__", "") == "MetricsProducer._run":
+        return run.__self__
+    return None
 
 
 @pytest.fixture(autouse=True)

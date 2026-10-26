@@ -96,13 +96,15 @@ class TestAtomicWriteText:
         """
         seen = []
         real = os.replace
+        target = tmp_path / "state.json"
 
         def capture(src, dst):
-            seen.append(str(src))
+            # Other threads in the process replace their own files.
+            if str(dst) == str(target):
+                seen.append(str(src))
             real(src, dst)
 
         monkeypatch.setattr(os, "replace", capture)
-        target = tmp_path / "state.json"
         atomic_write_text(target, "a")
         atomic_write_text(target, "b")
         assert len(set(seen)) == 2
