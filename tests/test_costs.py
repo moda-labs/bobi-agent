@@ -101,6 +101,21 @@ class TestPriceTable:
         assert cost == pytest.approx(expected)
         assert cache_write_prices("gateway", "claude-opus-5-5[1m]") == (5.0, 8.0)
 
+    def test_codex_cache_writes_bill_at_openais_30_minute_rate(self):
+        # Codex usage never says which retention a write used, so a turn's list
+        # price bills its writes at cache_write_5m, OpenAI's 30-minute rate.
+        from bobi.metrics.providers import codex_usage
+        from bobi.metrics.query import _list_price
+
+        usage = codex_usage({"input_tokens": 1_000, "cached_input_tokens": 200,
+                             "cache_write_input_tokens": 500, "output_tokens": 10}, model="gpt-6-astra")
+        rates = OFFICIAL_PRICES["openai:gpt-6-astra"]
+        assert rates["cache_write_1h"] > rates["cache_write_5m"]
+        expected = (300 * rates["input"] + 200 * rates["cache_read"] + 500 * rates["cache_write_5m"]
+                    + 10 * rates["output"]) / 1_000_000
+        row = usage.to_measurement_payload(measurement_id="m1", turn_id="t1", observed_at_us=0)
+        assert _list_price(row) == pytest.approx(expected)
+
     def test_cache_writes_without_an_official_entry_use_the_published_multipliers(self):
         assert cache_write_prices("anthropic", "claude-3-5-haiku") == pytest.approx((1.0, 1.6))
         assert cache_write_prices("openai", "gpt-5.1-codex") == (1.25, 1.25)

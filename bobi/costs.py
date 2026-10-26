@@ -174,7 +174,8 @@ def _lookup_prices(provider: str, model: str) -> tuple[float, float, float] | No
 
 
 def cache_write_prices(provider: str, model: str) -> tuple[float, float] | None:
-    """Per-MTok ``(5-minute, 1-hour)`` cache-write rates, or None when unpriced.
+    """Per-MTok ``(5-minute, 1-hour)`` cache-write rates (OpenAI's 30-minute and
+    12-hour ones for official OpenAI entries), or None when unpriced.
 
     Official entries carry both rates. Otherwise Anthropic models use the
     published multipliers (1.25x and 2x input) and other vendors bill cache

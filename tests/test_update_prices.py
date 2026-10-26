@@ -120,12 +120,25 @@ def test_openai_page_reads_every_standard_table_and_both_cache_writes():
     assert prices["openai:o1-pro"]["cache_read"] == 150.0
     # Every row of both tables.
     assert len(prices) == 36
+    # A sub-heading inside the section does not end it.
+    assert update_prices.parse_openai(OPENAI.replace("pricing data\n", "pricing data\n\n#### Standard\n", 1)) == prices
 
 
-def test_openai_cache_writes_of_an_unknown_retention_are_refused():
-    # Billing these as plain input would hide the surcharge; refuse instead.
+@pytest.mark.parametrize("old, new", [
+    # A cache-write retention the price file has no field for.
+    ("Short context 12h write", "Short context 24h write"),
+    # Renamed cache-write columns: billing those writes as plain input would hide the surcharge.
+    (" write |", " cache |"),
+    # A row whose cells no longer line up with the header.
+    ("| gpt-5 | $1.25 |", "| gpt-5 | $1.25 | $1.25 |"),
+    # One model at two prices.
+    ("| gpt-5.4-mini |", "| gpt-5.4 |"),
+])
+def test_openai_tables_that_cannot_be_read_safely_are_refused(old, new):
+    page = OPENAI.replace(old, new)
+    assert page != OPENAI
     with pytest.raises(ValueError, match="layout may have changed"):
-        update_prices.parse_openai(OPENAI.replace("Short context 12h write", "Short context 24h write"))
+        update_prices.parse_openai(page)
 
 
 def test_build_refuses_a_page_that_no_longer_parses():

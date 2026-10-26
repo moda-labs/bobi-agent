@@ -64,6 +64,14 @@ def _usd(cell: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
+def _rows(table: list[list[str]]) -> list[list[str]]:
+    """A table's data rows; a row whose cells do not line up with the header cannot be read."""
+    for row in table[1:]:
+        if len(row) != len(table[0]):
+            raise ValueError(f"pricing table row does not match its header; layout may have changed: {row}")
+    return table[1:]
+
+
 def _column(header: list[str], *words: str) -> int:
     for index, name in enumerate(header):
         if all(word in name.lower() for word in words):
@@ -76,7 +84,7 @@ def parse_anthropic(markdown: str) -> dict[str, dict[str, float]]:
     table = next((t for t in _tables(markdown) if any("base input" in cell.lower() for cell in t[0])), None)
     if table is None:
         raise ValueError("Anthropic page has no model pricing table")
-    header, rows = table[0], table[1:]
+    header, rows = table[0], _rows(table)
     columns = {"input": _column(header, "base input"), "cache_write_5m": _column(header, "5m"),
                "cache_write_1h": _column(header, "1h"), "cache_read": _column(header, "hit"),
                "output": _column(header, "output")}
@@ -114,27 +122,32 @@ def parse_openai(markdown: str) -> dict[str, dict[str, float]]:
 
     Models with a long-context tier are listed with "Short context ..." and
     "Long context ..." columns, including both cache writes; the rest sit in a
-    plain Input / Output / Cached input table with no cache-write surcharge."""
+    plain Input / Output / Cached input table with no cache-write surcharge.
+    A table with any other columns is a layout change."""
     section = markdown.split("### Standard pricing data", 1)
     if len(section) < 2:
         raise ValueError("OpenAI page has no standard pricing table")
+    plain, tiered = {*OPENAI_RATES.values()}, {*OPENAI_RATES.values(), *OPENAI_WRITES.values()}
     prices = {}
-    # The section ends at the next heading; the batch, flex and fast tables follow it.
-    for header, *rows in _tables(re.split(r"^#", section[1], maxsplit=1, flags=re.M)[0]):
-        # Exact labels: "input" is also a word of "cached input".
+    # The section ends at the next heading of its level or above; the batch, flex and fast tables follow it.
+    for table in _tables(re.split(r"^#{1,3} ", section[1], maxsplit=1, flags=re.M)[0]):
+        header, rows = table[0], _rows(table)
+        # Exact labels: "input" is also a word of "cached input". Long-context columns are not read.
         labels = [re.sub(r"^short context ", "", name.lower()) for name in header]
-        wanted = {**OPENAI_RATES, **(OPENAI_WRITES if any("write" in label for label in labels) else {})}
-        missing = [label for label in wanted.values() if label not in labels]
-        if missing:
-            raise ValueError(f"pricing table has no {', '.join(missing)} column; layout may have changed: {header}")
+        if {label for label in labels[1:] if not label.startswith("long context ")} not in (plain, tiered):
+            raise ValueError(f"OpenAI pricing table has unexpected columns; layout may have changed: {header}")
+        columns = {key: labels.index(label) for key, label in {**OPENAI_RATES, **OPENAI_WRITES}.items()
+                   if label in labels}
         for row in rows:
             model = re.sub(r"\s*\(.*?\)\s*", "", row[0]).strip().lower()
-            values = {key: _usd(row[labels.index(label)]) for key, label in wanted.items()}
+            values = {key: _usd(row[index]) for key, index in columns.items()}
             if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]*", model) or values["input"] is None or values["output"] is None:
                 continue
             # A "-" or a missing column means no discount (cached reads) or no surcharge (cache writes).
-            prices[f"openai:{model}"] = {key: values["input"] if values.get(key) is None else values[key]
-                                         for key in (*OPENAI_RATES, *OPENAI_WRITES)}
+            entry = {key: values["input"] if values.get(key) is None else values[key]
+                     for key in (*OPENAI_RATES, *OPENAI_WRITES)}
+            if prices.setdefault(f"openai:{model}", entry) != entry:
+                raise ValueError(f"OpenAI lists {model} at two different prices; layout may have changed")
     return prices
 
 
