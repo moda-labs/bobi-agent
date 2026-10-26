@@ -303,11 +303,13 @@ Start `bobi app start`, open the installed agent, and select **metrics & routing
   normalisation) has no list price and renders as token volume; no family
   name is guessed. Estimates bill cache reads at the cached rate and cache
   writes at their own rate: 5-minute writes at 1.25x input and 1-hour writes at
-  2x on Claude (the official 5m/1h columns), the published cache-write rate or
-  plain input on OpenAI. Checked against 25 Claude turns of a live agent, these
-  estimates equal Claude Code's own reported cost on 24; the remaining turn
-  differs because Claude Code prices Sonnet 5.5 cache reads at $0.20 where the
-  official page lists $0.10.
+  2x on Claude (the official 5m/1h columns), the published 30-minute write rate
+  or plain input on OpenAI. OpenAI's 12-hour write rate is kept in the 1-hour
+  field, but Codex usage does not say which retention a write used, so Codex
+  writes always bill at the 30-minute rate. Checked against 25 Claude turns of
+  a live agent, these estimates equal Claude Code's own reported cost on 24;
+  the remaining turn differs because Claude Code prices Sonnet 5.5 cache reads
+  at $0.20 where the official page lists $0.10.
 - A **routed turn** is one whose latest decision is an enforced policy pick
   with no fallback. Shadow turns and fallback turns (including the turns after
   a picked model failed and the session reran on the control model) ran the

@@ -20,7 +20,9 @@ log = logging.getLogger(__name__)
 # bobi/model_prices.json. scripts/update_prices.py regenerates that file from
 # the Anthropic and OpenAI pricing pages; a weekly CI job opens a PR when
 # they change. Each entry carries input, cache_read, cache_write_5m,
-# cache_write_1h and output rates.
+# cache_write_1h and output rates. OpenAI sells 30-minute and 12-hour cache
+# writes instead: cache_write_5m holds the 30-minute rate, cache_write_1h the
+# 12-hour one.
 def _official_prices() -> dict[str, dict[str, float]]:
     try:
         return json.loads(Path(__file__).with_name("model_prices.json").read_text())["models"]

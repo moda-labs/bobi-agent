@@ -2,7 +2,7 @@
 """Refresh bobi/model_prices.json from the official Anthropic and OpenAI pricing pages.
 
 Both vendors publish their pricing page as Markdown; this reads the standard
-(non-batch) per-model table from each and writes USD per million tokens:
+(non-batch) per-model tables from each and writes USD per million tokens:
 
     input, cache_read, cache_write_5m, cache_write_1h, output
 
@@ -30,9 +30,10 @@ from pathlib import Path
 ANTHROPIC_URL = "https://platform.claude.com/docs/en/about-claude/pricing.md"
 OPENAI_URL = "https://developers.openai.com/api/docs/pricing.md"
 OUTPUT = Path(__file__).resolve().parent.parent / "bobi" / "model_prices.json"
-# A parse that misses any of these means the page layout changed.
+# A parse that misses any of these means the page layout changed. Each of the
+# two OpenAI standard tables holds one: gpt-5.4 the tiered one, gpt-5 and o3 the plain one.
 REQUIRED = ("anthropic:claude-sonnet-4-5", "anthropic:claude-haiku-4-5", "anthropic:claude-opus-4-5",
-            "openai:gpt-5", "openai:o3")
+            "openai:gpt-5.4", "openai:gpt-5", "openai:o3")
 
 
 def _fetch(url: str) -> str:
@@ -98,27 +99,42 @@ def parse_anthropic(markdown: str) -> dict[str, dict[str, float]]:
     return prices
 
 
+# OpenAI column labels, without the "Short context " prefix of tiered tables.
+# OpenAI sells cache writes at two retentions and the price file has a field
+# for each, named for Anthropic's: the 30-minute write is cache_write_5m and the
+# 12-hour write cache_write_1h. bobi/costs.py bills a write at cache_write_1h
+# only when usage reports it as a 1-hour write, which Codex usage never does,
+# so Codex cache writes cost the 30-minute rate.
+OPENAI_RATES = {"input": "input", "cache_read": "cached input", "output": "output"}
+OPENAI_WRITES = {"cache_write_5m": "30m write", "cache_write_1h": "12h write"}
+
+
 def parse_openai(markdown: str) -> dict[str, dict[str, float]]:
-    """The standard (not batch) table; short-context columns."""
+    """Every table of the standard (not batch) section, at short-context rates.
+
+    Models with a long-context tier are listed with "Short context ..." and
+    "Long context ..." columns, including both cache writes; the rest sit in a
+    plain Input / Output / Cached input table with no cache-write surcharge."""
     section = markdown.split("### Standard pricing data", 1)
     if len(section) < 2:
         raise ValueError("OpenAI page has no standard pricing table")
-    table = _tables(section[1])[0]
-    header, rows = table[0], table[1:]
-    i_in = _column(header, "short", "input")
-    i_read = _column(header, "short", "cached")
-    i_write = _column(header, "short", "cache writes")
-    i_out = _column(header, "short", "output")
     prices = {}
-    for row in rows:
-        model = re.sub(r"\s*\(.*?\)\s*", "", row[0]).strip().lower()
-        input_price, output_price = _usd(row[i_in]), _usd(row[i_out])
-        if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]*", model) or input_price is None or output_price is None:
-            continue
-        # A "-" means no discount (cached reads) or no surcharge (cache writes).
-        write = _usd(row[i_write]) or input_price
-        prices[f"openai:{model}"] = {"input": input_price, "cache_read": _usd(row[i_read]) or input_price,
-                                     "cache_write_5m": write, "cache_write_1h": write, "output": output_price}
+    # The section ends at the next heading; the batch, flex and fast tables follow it.
+    for header, *rows in _tables(re.split(r"^#", section[1], maxsplit=1, flags=re.M)[0]):
+        # Exact labels: "input" is also a word of "cached input".
+        labels = [re.sub(r"^short context ", "", name.lower()) for name in header]
+        wanted = {**OPENAI_RATES, **(OPENAI_WRITES if any("write" in label for label in labels) else {})}
+        missing = [label for label in wanted.values() if label not in labels]
+        if missing:
+            raise ValueError(f"pricing table has no {', '.join(missing)} column; layout may have changed: {header}")
+        for row in rows:
+            model = re.sub(r"\s*\(.*?\)\s*", "", row[0]).strip().lower()
+            values = {key: _usd(row[labels.index(label)]) for key, label in wanted.items()}
+            if not re.fullmatch(r"[a-z0-9][a-z0-9.\-]*", model) or values["input"] is None or values["output"] is None:
+                continue
+            # A "-" or a missing column means no discount (cached reads) or no surcharge (cache writes).
+            prices[f"openai:{model}"] = {key: values["input"] if values.get(key) is None else values[key]
+                                         for key in (*OPENAI_RATES, *OPENAI_WRITES)}
     return prices
 
 
