@@ -1114,5 +1114,6 @@ def observe_workflow_step(
 def reset_runtime_for_tests() -> None:
     global _runtime
     if _runtime is not None:
+        atexit.unregister(_runtime.close)
         _runtime.close()
     _runtime = None

@@ -66,6 +66,20 @@ def test_producer_writes_on_background_thread(tmp_path):
     assert [record.event.producer_sequence for record in iter_frames(segment)] == [1]
 
 
+def test_the_conftest_leak_guard_sees_a_running_producer(tmp_path):
+    """tests/conftest.py finds a leaked producer by its writer thread. If that
+    stops matching, every leak would pass unseen; this fails instead."""
+    from tests.conftest import _metrics_producer
+
+    producer = MetricsProducer(tmp_path / "segment.telemetry")
+    producer.start()
+    try:
+        assert producer in map(_metrics_producer, threading.enumerate())
+    finally:
+        # The guard cannot close a producer it cannot see.
+        assert producer.close(timeout=2) is True
+
+
 def test_producer_rejects_events_before_start_and_after_close(tmp_path):
     producer = MetricsProducer(tmp_path / "segment.telemetry")
     assert producer.try_emit(_producer_event(1)) is False
@@ -2035,11 +2049,26 @@ def _dead_pid():
     return process.pid
 
 
-def _dead_runtime(monkeypatch, root):
-    """A runtime whose process has since died, as after a SIGKILL."""
-    with monkeypatch.context() as patch:
-        patch.setattr("bobi.metrics.runtime.os.getpid", _dead_pid)
-        return MetricsRuntime(root, mode="enabled")
+@pytest.fixture
+def opened_runtimes():
+    """Runtimes a test leaves open while it runs, as a killed writer leaves its
+    own, closed at teardown pass or fail so no producer thread outlives the test."""
+    runtimes = []
+    yield runtimes
+    for runtime in runtimes:
+        runtime.close()
+
+
+@pytest.fixture
+def dead_runtime(monkeypatch, opened_runtimes):
+    """Build a runtime whose process has since died, as after a SIGKILL."""
+    def build(root):
+        with monkeypatch.context() as patch:
+            patch.setattr("bobi.metrics.runtime.os.getpid", _dead_pid)
+            runtime = MetricsRuntime(root, mode="enabled")
+        opened_runtimes.append(runtime)
+        return runtime
+    return build
 
 
 def _turn_usage(root):
@@ -2096,7 +2125,7 @@ def test_a_turn_running_past_an_hour_is_left_to_its_live_writer(monkeypatch, tmp
         conn.close()
 
 
-def test_a_turn_whose_writer_died_is_reconciled_at_once(monkeypatch, tmp_path):
+def test_a_turn_whose_writer_died_is_reconciled_at_once(monkeypatch, tmp_path, dead_runtime):
     from bobi.sdk import save_session_id
 
     started = time.time_ns() // 1000 - _MINUTE_US
@@ -2105,7 +2134,7 @@ def test_a_turn_whose_writer_died_is_reconciled_at_once(monkeypatch, tmp_path):
                                   for index in (1, 2)))
     monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
     save_session_id("agent", "crashed", root=tmp_path)
-    runtime = _dead_runtime(monkeypatch, tmp_path)
+    runtime = dead_runtime(tmp_path)
     turn = runtime.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
     _flush(runtime)
     service = MetricsCollectorService(tmp_path, reconcile_interval=0)
@@ -2127,19 +2156,24 @@ def test_a_turn_whose_writer_is_unknown_is_not_taken_as_abandoned(monkeypatch, t
         reconcile_turn(tmp_path, "turn-unowned")
 
 
-def _reused_pid_runtime(monkeypatch, root):
-    """A runtime from a previous container life whose pid this process now
-    holds, as after a restart in a fresh pid namespace: same pid, another
+@pytest.fixture
+def reused_pid_runtime(monkeypatch, opened_runtimes):
+    """Build a runtime from a previous container life whose pid this process
+    now holds, as after a restart in a fresh pid namespace: same pid, another
     process start value."""
     from bobi.metrics.producer import process_start_token
 
-    with monkeypatch.context() as patch:
-        patch.setattr("bobi.metrics.runtime.process_start_token",
-                      lambda pid: process_start_token(pid) - 1)
-        return MetricsRuntime(root, mode="enabled")
+    def build(root):
+        with monkeypatch.context() as patch:
+            patch.setattr("bobi.metrics.runtime.process_start_token",
+                          lambda pid: process_start_token(pid) - 1)
+            runtime = MetricsRuntime(root, mode="enabled")
+        opened_runtimes.append(runtime)
+        return runtime
+    return build
 
 
-def test_a_reused_pid_reads_as_another_process(monkeypatch, tmp_path):
+def test_a_reused_pid_reads_as_another_process(tmp_path, reused_pid_runtime):
     from bobi.metrics.collector import producer_exited
     from bobi.metrics.events import uuid7
     from bobi.metrics.producer import process_start_token
@@ -2149,7 +2183,7 @@ def test_a_reused_pid_reads_as_another_process(monkeypatch, tmp_path):
     live = MetricsRuntime(tmp_path, mode="disabled").producer_id
     assert live.endswith(f"-{start}")
     assert producer_exited(live) is False
-    assert producer_exited(_reused_pid_runtime(monkeypatch, tmp_path).producer_id) is True
+    assert producer_exited(reused_pid_runtime(tmp_path).producer_id) is True
     # An id without a start value can only be checked by its pid.
     assert producer_exited(f"producer-{os.getpid()}-{uuid7()}") is False
     assert producer_exited(f"producer-{os.getpid()}-z") is False
@@ -2200,7 +2234,7 @@ def test_a_wall_clock_step_does_not_make_a_live_writer_read_as_gone(monkeypatch,
         conn.close()
 
 
-def test_a_corrupt_frame_does_not_hold_back_a_dead_writers_turn(monkeypatch, tmp_path):
+def test_a_corrupt_frame_does_not_hold_back_a_dead_writers_turn(monkeypatch, tmp_path, dead_runtime):
     from click.testing import CliRunner
 
     from bobi.cli import metrics
@@ -2213,7 +2247,7 @@ def test_a_corrupt_frame_does_not_hold_back_a_dead_writers_turn(monkeypatch, tmp
     monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
     monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
     save_session_id("agent", "corrupt", root=tmp_path)
-    crashed = _dead_runtime(monkeypatch, tmp_path)
+    crashed = dead_runtime(tmp_path)
     turn = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
     _flush(crashed)
     crashed.close()
@@ -2230,7 +2264,7 @@ def test_a_corrupt_frame_does_not_hold_back_a_dead_writers_turn(monkeypatch, tmp
     assert _turn_usage(tmp_path)[turn.turn_id] == ("claude_transcript", 200)
 
 
-def _crash_before_restart(monkeypatch, root, started):
+def _crash_before_restart(monkeypatch, reused_pid_runtime, root, started):
     """Turn A makes two calls in the previous life, then that process is killed."""
     from bobi.sdk import save_session_id
 
@@ -2239,16 +2273,17 @@ def _crash_before_restart(monkeypatch, root, started):
                                   for index in (1, 2)))
     monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
     save_session_id("agent", "restart", root=root)
-    previous_life = _reused_pid_runtime(monkeypatch, root)
+    previous_life = reused_pid_runtime(root)
     turn_a = previous_life.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
     _flush(previous_life)
     previous_life.close()
     return transcript, turn_a
 
 
-def test_a_turn_cut_off_by_a_restart_is_reconciled_although_its_pid_is_reused(monkeypatch, tmp_path):
+def test_a_turn_cut_off_by_a_restart_is_reconciled_although_its_pid_is_reused(
+        monkeypatch, tmp_path, reused_pid_runtime):
     now = time.time_ns() // 1000
-    transcript, turn_a = _crash_before_restart(monkeypatch, tmp_path, now - 10 * _MINUTE_US)
+    transcript, turn_a = _crash_before_restart(monkeypatch, reused_pid_runtime, tmp_path, now - 10 * _MINUTE_US)
     # The next life holds the same pid, resumes the session and runs turn B.
     b_start = now - _MINUTE_US
     with transcript.open("a") as handle:
@@ -2270,12 +2305,13 @@ def test_a_turn_cut_off_by_a_restart_is_reconciled_although_its_pid_is_reused(mo
     assert usage[turn_b.turn_id][1] == 200
 
 
-def test_a_turn_cut_off_by_a_restart_reconciles_by_hand(monkeypatch, tmp_path):
+def test_a_turn_cut_off_by_a_restart_reconciles_by_hand(monkeypatch, tmp_path, reused_pid_runtime):
     from click.testing import CliRunner
 
     from bobi.cli import metrics
 
-    _transcript, turn_a = _crash_before_restart(monkeypatch, tmp_path, time.time_ns() // 1000 - _MINUTE_US)
+    _transcript, turn_a = _crash_before_restart(monkeypatch, reused_pid_runtime, tmp_path,
+                                                time.time_ns() // 1000 - _MINUTE_US)
     MetricsCollectorService(tmp_path).collect_once()
     monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
 
@@ -2331,7 +2367,8 @@ def test_a_turn_whose_writer_looks_alive_reconciles_only_when_forced(monkeypatch
     assert _turn_usage(tmp_path)[turn.turn_id] == ("claude_transcript", 200)
 
 
-def test_a_writer_that_ends_its_turn_and_exits_after_the_import_keeps_its_own_calls(monkeypatch, tmp_path):
+def test_a_writer_that_ends_its_turn_and_exits_after_the_import_keeps_its_own_calls(
+        monkeypatch, tmp_path, dead_runtime):
     from bobi.brain.base import BrainToolExecution
     from bobi.sdk import save_session_id
 
@@ -2340,7 +2377,7 @@ def test_a_writer_that_ends_its_turn_and_exits_after_the_import_keeps_its_own_ca
     monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
     save_session_id("agent", "worker", root=tmp_path)
     # The pid is already dead, so the worker reads as exited from the start.
-    worker = _dead_runtime(monkeypatch, tmp_path)
+    worker = dead_runtime(tmp_path)
     service = MetricsCollectorService(tmp_path, reconcile_interval=0)
     turn = worker.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
     _flush(worker)
@@ -2373,7 +2410,7 @@ def test_a_writer_that_ends_its_turn_and_exits_after_the_import_keeps_its_own_ca
     assert _turn_usage(tmp_path)[turn.turn_id][1] == 300
 
 
-def test_a_dead_turn_stops_at_the_next_turn_of_its_resumed_provider_session(monkeypatch, tmp_path):
+def test_a_dead_turn_stops_at_the_next_turn_of_its_resumed_provider_session(monkeypatch, tmp_path, dead_runtime):
     from bobi.sdk import save_session_id
 
     now = time.time_ns() // 1000
@@ -2387,7 +2424,7 @@ def test_a_dead_turn_stops_at_the_next_turn_of_its_resumed_provider_session(monk
     save_session_id("agent", "shared", root=tmp_path)
 
     # The first process dies mid-turn; a new one resumes the same provider session.
-    crashed = _dead_runtime(monkeypatch, tmp_path)
+    crashed = dead_runtime(tmp_path)
     turn_a = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
     _flush(crashed)
     runtime = MetricsRuntime(tmp_path, mode="enabled")
@@ -2415,7 +2452,7 @@ def test_a_dead_turn_stops_at_the_next_turn_of_its_resumed_provider_session(monk
         turn_a.turn_id: 200, turn_b.turn_id: 100, turn_c.turn_id: 300}
 
 
-def test_a_dead_turn_stops_at_a_resumed_turn_that_is_still_running(monkeypatch, tmp_path):
+def test_a_dead_turn_stops_at_a_resumed_turn_that_is_still_running(monkeypatch, tmp_path, dead_runtime):
     from bobi.sdk import save_session_id
 
     now = time.time_ns() // 1000
@@ -2427,7 +2464,7 @@ def test_a_dead_turn_stops_at_a_resumed_turn_that_is_still_running(monkeypatch, 
     monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
     save_session_id("agent", "shared", root=tmp_path)
 
-    crashed = _dead_runtime(monkeypatch, tmp_path)
+    crashed = dead_runtime(tmp_path)
     turn_a = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
     _flush(crashed)
     # The new process resumes the saved provider session; its first turn has no end yet.
@@ -2444,7 +2481,7 @@ def test_a_dead_turn_stops_at_a_resumed_turn_that_is_still_running(monkeypatch, 
     assert turn_b.turn_id not in usage
 
 
-def test_a_dead_turn_leaves_the_first_call_of_a_resumed_turn_to_it(monkeypatch, tmp_path):
+def test_a_dead_turn_leaves_the_first_call_of_a_resumed_turn_to_it(monkeypatch, tmp_path, dead_runtime):
     from bobi.sdk import save_session_id
 
     now = time.time_ns() // 1000
@@ -2455,7 +2492,7 @@ def test_a_dead_turn_leaves_the_first_call_of_a_resumed_turn_to_it(monkeypatch, 
     transcript.write_text("".join(_claude_call("shared", message_id, at) for message_id, at in calls))
     monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
     save_session_id("agent", "shared", root=tmp_path)
-    crashed = _dead_runtime(monkeypatch, tmp_path)
+    crashed = dead_runtime(tmp_path)
     turn_a = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
     _flush(crashed)
     runtime = MetricsRuntime(tmp_path, mode="enabled")
@@ -2479,7 +2516,7 @@ def test_a_dead_turn_leaves_the_first_call_of_a_resumed_turn_to_it(monkeypatch, 
     assert sum(output for _source, output in usage.values()) == 400
 
 
-def test_a_dead_codex_turn_keeps_its_own_snapshot_not_the_next_turns(monkeypatch, tmp_path):
+def test_a_dead_codex_turn_keeps_its_own_snapshot_not_the_next_turns(monkeypatch, tmp_path, dead_runtime):
     from bobi.sdk import save_session_id
 
     def line(at_us, payload, kind="event_msg"):
@@ -2502,7 +2539,7 @@ def test_a_dead_codex_turn_keeps_its_own_snapshot_not_the_next_turns(monkeypatch
         + snapshot(b_start + 3_000_000, 1500, 150))
     monkeypatch.setattr("bobi.metrics.reconcile.find_codex_rollout", lambda _session_id: rollout)
     save_session_id("agent", "thread", root=tmp_path)
-    crashed = _dead_runtime(monkeypatch, tmp_path)
+    crashed = dead_runtime(tmp_path)
     turn_a = crashed.begin_turn("agent", provider="openai", brain="codex", started_at_us=a_start)
     _flush(crashed)
     runtime = MetricsRuntime(tmp_path, mode="enabled")
@@ -2522,7 +2559,7 @@ def test_a_dead_codex_turn_keeps_its_own_snapshot_not_the_next_turns(monkeypatch
         conn.close()
 
 
-def test_a_turn_leaves_the_last_call_of_an_unreconciled_previous_turn_to_it(monkeypatch, tmp_path):
+def test_a_turn_leaves_the_last_call_of_an_unreconciled_previous_turn_to_it(monkeypatch, tmp_path, dead_runtime):
     from bobi.sdk import save_session_id
 
     now = time.time_ns() // 1000
@@ -2534,7 +2571,7 @@ def test_a_turn_leaves_the_last_call_of_an_unreconciled_previous_turn_to_it(monk
     transcript.write_text("".join(_claude_call("shared", message_id, at) for message_id, at in calls))
     monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
     save_session_id("agent", "shared", root=tmp_path)
-    crashed = _dead_runtime(monkeypatch, tmp_path)
+    crashed = dead_runtime(tmp_path)
     turn_a = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=a_start)
     _flush(crashed)
     runtime = MetricsRuntime(tmp_path, mode="enabled")
@@ -2587,7 +2624,7 @@ def test_a_late_transcript_line_stays_with_the_turn_whose_stream_recorded_it(mon
     assert transcript_rows == {previous.turn_id: 200, following.turn_id: 100}
 
 
-def test_turns_still_running_cannot_starve_a_newer_dead_turn(monkeypatch, tmp_path):
+def test_turns_still_running_cannot_starve_a_newer_dead_turn(monkeypatch, tmp_path, dead_runtime):
     from bobi.sdk import save_session_id
 
     runtime = MetricsRuntime(tmp_path, mode="enabled")
@@ -2602,7 +2639,7 @@ def test_turns_still_running_cannot_starve_a_newer_dead_turn(monkeypatch, tmp_pa
     transcript.write_text(_claude_call("crashed", "msg-1", started + 1_000_000))
     monkeypatch.setattr("bobi.metrics.reconcile.find_claude_transcript", lambda _session_id: transcript)
     save_session_id("agent", "crashed", root=tmp_path)
-    crashed = _dead_runtime(monkeypatch, tmp_path)
+    crashed = dead_runtime(tmp_path)
     turn = crashed.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
     _flush(crashed)
     MetricsCollectorService(tmp_path, reconcile_interval=0).collect_once()
@@ -2802,7 +2839,7 @@ def test_a_turn_whose_calls_wait_for_their_step_reconciles_by_hand_when_forced(m
     assert _turn_usage(tmp_path)[turn.turn_id][1] == 100
 
 
-def _dead_turn_left_in_the_spool(monkeypatch, tmp_path):
+def _dead_turn_left_in_the_spool(monkeypatch, dead_runtime, tmp_path):
     """A dead writer's two-call turn whose events no collector has imported."""
     from bobi.sdk import save_session_id
 
@@ -2814,7 +2851,7 @@ def _dead_turn_left_in_the_spool(monkeypatch, tmp_path):
     monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
     save_session_id("agent", "spooled", root=tmp_path)
     MetricsCollectorService(tmp_path).collect_once()  # the read model exists
-    writer = _dead_runtime(monkeypatch, tmp_path)
+    writer = dead_runtime(tmp_path)
     turn = writer.begin_turn("agent", provider="anthropic", brain="claude", started_at_us=started)
     _flush(writer)
     writer.close()
@@ -2933,12 +2970,12 @@ def test_reconciling_a_large_backlog_costs_little_more_than_the_recovery_itself(
     assert background <= 1.5 * baseline + imported + 1.0, (background, baseline, imported)
 
 
-def test_a_manual_reconcile_with_no_collector_running_imports_the_spool_itself(monkeypatch, tmp_path):
+def test_a_manual_reconcile_with_no_collector_running_imports_the_spool_itself(monkeypatch, tmp_path, dead_runtime):
     from click.testing import CliRunner
 
     from bobi.cli import metrics
 
-    turn = _dead_turn_left_in_the_spool(monkeypatch, tmp_path)
+    turn = _dead_turn_left_in_the_spool(monkeypatch, dead_runtime, tmp_path)
 
     result = CliRunner().invoke(metrics, ["reconcile", "--wait", "--json"])
 
@@ -2947,12 +2984,12 @@ def test_a_manual_reconcile_with_no_collector_running_imports_the_spool_itself(m
     assert _turn_usage(tmp_path)[turn.turn_id] == ("claude_transcript", 200)
 
 
-def test_a_manual_import_keeps_the_conflicts_it_sees_in_collector_health(monkeypatch, tmp_path):
+def test_a_manual_import_keeps_the_conflicts_it_sees_in_collector_health(monkeypatch, tmp_path, dead_runtime):
     from click.testing import CliRunner
 
     from bobi.cli import metrics
 
-    turn = _dead_turn_left_in_the_spool(monkeypatch, tmp_path)
+    turn = _dead_turn_left_in_the_spool(monkeypatch, dead_runtime, tmp_path)
     service = MetricsCollectorService(tmp_path)
     original = _session_event("producer-1-a", 1, "s1")
     with SpoolWriter(service.spool_root / "producer-1-a" / "1.telemetry") as writer:
@@ -2978,12 +3015,12 @@ def test_a_manual_import_keeps_the_conflicts_it_sees_in_collector_health(monkeyp
     assert MetricsCollectorService(tmp_path).health()["conflicting_events"] == 3
 
 
-def test_a_manual_reconcile_waits_for_a_busy_collector_and_only_so_long(monkeypatch, tmp_path):
+def test_a_manual_reconcile_waits_for_a_busy_collector_and_only_so_long(monkeypatch, tmp_path, dead_runtime):
     from click.testing import CliRunner
 
     from bobi.cli import metrics
 
-    turn = _dead_turn_left_in_the_spool(monkeypatch, tmp_path)
+    turn = _dead_turn_left_in_the_spool(monkeypatch, dead_runtime, tmp_path)
     service = MetricsCollectorService(tmp_path)
     runner = CliRunner()
     held = threading.Event()
@@ -3022,7 +3059,7 @@ def test_a_manual_reconcile_waits_for_a_busy_collector_and_only_so_long(monkeypa
 
 
 def test_a_dead_turn_reconciled_while_the_next_turn_waits_for_import_keeps_only_its_calls(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, dead_runtime):
     from bobi.sdk import save_session_id
 
     t1_start = time.time_ns() // 1000 - 10 * _MINUTE_US
@@ -3043,7 +3080,7 @@ def test_a_dead_turn_reconciled_while_the_next_turn_waits_for_import_keeps_only_
         waiting.close()
     save_session_id("director", "director", root=tmp_path)
     # T1 logs three calls, then its process is killed.
-    crashed = _dead_runtime(monkeypatch, tmp_path)
+    crashed = dead_runtime(tmp_path)
     turn_1 = crashed.begin_turn("director", provider="anthropic", brain="claude", started_at_us=t1_start)
     _flush(crashed)
     crashed.close()
@@ -3092,7 +3129,7 @@ def test_a_dead_turn_reconciled_while_the_next_turn_waits_for_import_keeps_only_
         conn.close()
 
 
-def _two_dead_writers_one_with_a_frame_from_a_newer_build(monkeypatch, tmp_path):
+def _two_dead_writers_one_with_a_frame_from_a_newer_build(monkeypatch, dead_runtime, tmp_path):
     """Two dead writers with a two-call turn each; the first writer's segment
     also holds a checksum-valid frame with a top-level field this build does
     not know, as a newer build writes it and an older one reads it after a
@@ -3111,7 +3148,7 @@ def _two_dead_writers_one_with_a_frame_from_a_newer_build(monkeypatch, tmp_path)
         transcripts[name].write_text("".join(
             _claude_call(name, f"{name}-{index}", started + index * 1_000_000) for index in (1, 2)))
         save_session_id(name, name, root=tmp_path)
-        writer = _dead_runtime(monkeypatch, tmp_path)
+        writer = dead_runtime(tmp_path)
         turns.append(writer.begin_turn(name, provider="anthropic", brain="claude", started_at_us=started))
         _flush(writer)
         writer.close()
@@ -3130,8 +3167,8 @@ def _two_dead_writers_one_with_a_frame_from_a_newer_build(monkeypatch, tmp_path)
     return turns
 
 
-def test_a_frame_from_a_newer_build_does_not_stop_the_background_pass(monkeypatch, tmp_path):
-    turns = _two_dead_writers_one_with_a_frame_from_a_newer_build(monkeypatch, tmp_path)
+def test_a_frame_from_a_newer_build_does_not_stop_the_background_pass(monkeypatch, tmp_path, dead_runtime):
+    turns = _two_dead_writers_one_with_a_frame_from_a_newer_build(monkeypatch, dead_runtime, tmp_path)
     service = MetricsCollectorService(tmp_path)
     service.collect_once()
     _run_scheduled_pass(service)
@@ -3141,12 +3178,12 @@ def test_a_frame_from_a_newer_build_does_not_stop_the_background_pass(monkeypatc
     assert service.health()["reconciliation_errors"] == 0
 
 
-def test_a_frame_from_a_newer_build_does_not_crash_a_manual_reconcile(monkeypatch, tmp_path):
+def test_a_frame_from_a_newer_build_does_not_crash_a_manual_reconcile(monkeypatch, tmp_path, dead_runtime):
     from click.testing import CliRunner
 
     from bobi.cli import metrics
 
-    first, second = _two_dead_writers_one_with_a_frame_from_a_newer_build(monkeypatch, tmp_path)
+    first, second = _two_dead_writers_one_with_a_frame_from_a_newer_build(monkeypatch, dead_runtime, tmp_path)
     monkeypatch.setattr("bobi.cli._detect_project_root", lambda: tmp_path)
     MetricsCollectorService(tmp_path).collect_once()
     runner = CliRunner()

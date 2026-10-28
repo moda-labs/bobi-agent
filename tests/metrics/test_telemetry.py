@@ -576,7 +576,6 @@ def test_rejected_session_event_is_retried_on_the_next_turn(tmp_path):
 def test_runtime_replaces_same_process_root_and_forked_singletons(
     monkeypatch, tmp_path
 ):
-    metrics_runtime.reset_runtime_for_tests()
     monkeypatch.setenv("BOBI_METRICS_MODE", "disabled")
     first = metrics_runtime.get_runtime(tmp_path / "one")
     second = metrics_runtime.get_runtime(tmp_path / "two")
@@ -588,11 +587,9 @@ def test_runtime_replaces_same_process_root_and_forked_singletons(
     forked = metrics_runtime.get_runtime(tmp_path / "two")
     assert forked is not second
     assert forked.pid == first.pid + 1
-    metrics_runtime.reset_runtime_for_tests()
 
 
 def test_unbound_runtime_never_reuses_an_agent_runtime(monkeypatch, tmp_path):
-    metrics_runtime.reset_runtime_for_tests()
     monkeypatch.setenv("BOBI_METRICS_MODE", "disabled")
     active = metrics_runtime.get_runtime(tmp_path / "agent")
     monkeypatch.setattr("bobi.paths.bound_root", lambda: None)
@@ -601,7 +598,18 @@ def test_unbound_runtime_never_reuses_an_agent_runtime(monkeypatch, tmp_path):
 
     assert unbound is not active
     assert unbound.mode == "disabled"
+
+
+def test_a_reset_runtime_is_not_kept_alive_until_exit(monkeypatch, tmp_path):
+    import gc
+    import weakref
+
+    monkeypatch.setenv("BOBI_METRICS_MODE", "disabled")
+    runtime = weakref.ref(metrics_runtime.get_runtime(tmp_path))
     metrics_runtime.reset_runtime_for_tests()
+    gc.collect()
+
+    assert runtime() is None
 
 
 @pytest.mark.parametrize("step_type", ["route", "action", "notify", "await"])
@@ -640,7 +648,6 @@ def test_deterministic_workflow_steps_project_without_a_turn(tmp_path, step_type
 async def test_shadow_metrics_match_the_legacy_session_cost_writer(
     bobi_install, monkeypatch
 ):
-    metrics_runtime.reset_runtime_for_tests()
     monkeypatch.setenv("BOBI_METRICS_MODE", "enabled")
     usage = BrainUsage(
         model="claude-test",
