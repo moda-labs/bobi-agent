@@ -81,7 +81,7 @@ Fleet audit, 2026-10-14, run records on every Fly box (records reach back to
 
 1. **Phase 1, bobi-agent: additive.**
    - Add the rule keys, the `$approver` match and co-firing `action:` rules.
-   - Make `-w` optional.
+   - Make `-w` optional for packs with no `workflows/`.
    - Migrate the `eng-team` and `personal-assistant` packs to skills.
    - Make `bobi setup` author skills.
    - Deprecate the engine: a warning, the docs, and a freeze.
@@ -94,10 +94,11 @@ Fleet audit, 2026-10-14, run records on every Fly box (records reach back to
      criterion.
 
 **The compatibility rule for release N:** a pack that installed on the previous
-release still installs and behaves the same. Rules without a new key match, dedupe
-and render exactly as today. Install errors apply only where a rule could not have
-launched before. An unknown key is ignored today, so an old pack may already carry
-one, and that case gets a warning.
+release and declares none of the new keys still installs and behaves the same. Its
+rules match, dedupe and render exactly as today. Bobi ignores unknown keys today, so
+an old pack may already carry one by accident. That case must not fail install unless
+the rule involved uses `$approver`, and the release notes say these keys now take
+effect.
 
 **The engine freeze:** the engine accepts security and crash fixes only.
 Workflows, `await` gates, the console gate UI and the three run admin verbs all
@@ -171,6 +172,7 @@ cleanup and approval. New semantics, with the strictest gate in Phase 1 (Q13):
   evaluation. A launch rule never co-fires with another launch rule.
 - `action:` rules listed after that rule therefore do not fire, so eng-team lists
   cleanup first.
+- A cooldown hit or self-authored skip on an `action:` rule skips only that rule.
 - `process()` returns what that rule returns today. If it returns `None`, or no
   such rule matched, and an action fired, it returns the new value `"action"`, so
   the drain can tag the event.
@@ -351,11 +353,12 @@ and the native actions move into `bobi/workflow/cleanup.py`.
 - **Q7:** Make `--workflow` optional? #852 had marked it not needed.
   Recommendation: only for packs with no `workflows/`.
   **Decision (2026-11-02, Claude, after re-review):** optional only when the
-  installed package has no `workflows/`. For those teams a required `-w` is
-  ceremony. In a pack with workflows, a director that omits `-w` would otherwise
-  skip routing and any `await` gate without an error, so the error stays there.
-  The same condition applies to the builtin `adhoc` menu entry and the
-  `prompts/base.md` launch text.
+  installed package has no `workflows/`, as a CLI convenience. In a pack with
+  workflows, a director that omits `-w` would otherwise skip routing and any `await`
+  gate without an error, so the error stays there. Shipped roles and
+  `prompts/base.md` teach an explicit `-w adhoc`, which works in every pack, so an
+  overlay that keeps one workflow of its own can still launch workers. The builtin
+  `adhoc` menu entry appears only for packs with no `workflows/`.
 - **Q8:** Who may approve in the shipped packs? Options: (a) platform-enforced /
   (b) model-enforced / (c) keep an operator gate. Recommendation: (a).
   **Decision (2026-10-20, Zach):** platform-enforced.
@@ -402,9 +405,9 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - The template allow-list applies to adapter sources (`_EVENT_TYPE_SHAPES`,
     including the qualified `github/github.issues` form), not custom events, whose
     fields have no other route into an adhoc run.
-  - On a `task:` it is a warning. On a `run_key:`, or on a `$approver` rule, it is
-    an install error, because those are new and an approved run must not carry
-    event text.
+  - On a `$approver` rule it is an install error, because an approved run must not
+    carry event text. On an adapter-source `run_key:` it is a warning plus a refusal
+    at launch, so a stale key cannot crash-loop a pack. On a `task:` it is a warning.
   - Accepted risk: a pack can still template event text into an existing `task:`,
     with a warning. `SECURITY.md` says so. Shipped packs, setup output and
     moda-agents packs must produce no auto_dispatch warnings.
@@ -423,8 +426,11 @@ and the native actions move into `bobi/workflow/cleanup.py`.
 - [ ] **Co-firing `action:` rules (load-bearing)**, exactly as specified in
   Solution: non-action rules unchanged, the new return value, and the dedup key
   order.
-- [ ] The drain tags an `"action"` result "action run", not "workflow launched"
-  (`drain.py:432`).
+- [ ] The drain tags an `"action"` result `[AUTO-ACTION: <name> ran, no worker
+  launched - no action needed unless a person asked for something]`, not "workflow
+  launched" (`drain.py:432`).
+- [ ] A rule using `$self` logs one error at startup if the bot's login did not
+  resolve, because the rule then silently never matches (`reactor.py:72-73`).
 - [ ] `AutoDispatchRule.workflow` becomes optional.
 - [ ] Add `action: <name>`, valid only without `workflow:`, `task:` and
   `role:`.
@@ -444,7 +450,9 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - `EventReactor._dispatch` sets `input_fields.issue` only when
     `head_branch` fully matches `spec/([1-9][0-9]*)`.
   - A rendered `run_key` must fully match `[A-Za-z0-9._-]+`, because it reaches
-    the session name and worktree path.
+    the session name and worktree path. An adapter-source `run_key` referencing a
+    field outside the allow-list is refused at launch (Q12). Either refusal publishes
+    `auto_dispatch.failed`.
   - On a rule with `run_key:`, a `run_key` or `task` reference that resolves to
     empty refuses the launch and publishes `auto_dispatch.failed`. `variables.py:53`
     resolves a missing key to `""`, which would otherwise fail open. Rules without
@@ -452,7 +460,9 @@ and the native actions move into `bobi/workflow/cleanup.py`.
 - [ ] Add `fresh: true` (wipe the saved transcript) and `once: true` (refuse
   the key if a run with it is active or completed, via the finding-replay
   ledger check). `once` ignores `fresh`, unlike that check today
-  (`subagent.py:1469`), because approval rules set both.
+  (`subagent.py:1469`), because approval rules set both. A `once` refusal is a logged
+  no-op with no `auto_dispatch.failed`, because approve-then-merge reaches it
+  normally.
 - [ ] Add the match operand `{prefix: "<s>"}` for string fields.
 - [ ] Add `approvers: {github: [logins]}` on `AgentConfig`, passed into
   `EventReactor.from_config`; an overlay's list replaces the base's.
@@ -462,18 +472,17 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - An empty or missing list matches nothing.
 - [ ] Validate (Q12). **Errors in `bobi agents install`, warnings at startup**
   (`required=False`, as with `validate.py:194-199`):
-  - an unknown `action:` on a rule with no `workflow:`;
+  - an unknown `action:` on a rule with no `workflow:`, `suppress` or `dedup_only`;
   - `$approver` with no `approvers:`;
   - `allow_self_authored` on a rule using `$approver`;
-  - an allow-list violation in an adapter-source `run_key:`, or in the `task:` or
-    `run_key:` of a `$approver` rule.
+  - an allow-list violation in the `task:` or `run_key:` of a `$approver` rule.
 - [ ] Validate (Q12). **Warnings only, in both places:**
   - a launching rule (`workflow: adhoc` or omitted, and no `action:`, `suppress`
     or `dedup_only`) with no `role:`;
   - `action:` combined with `workflow:`, `task:` or `role:`: the `action:` is
     ignored and the rule behaves as today;
   - `period:` without `id:`: the `period:` is ignored;
-  - an allow-list violation in an adapter-source `task:`.
+  - an allow-list violation in an adapter-source `task:` or `run_key:`.
 - [ ] The allow-list: `number`, `pr_number`, `issue`, `repo`, `url`, `review_id`,
   `comment_id`, `thread_ts`, `channel`. `sender` is allowed only on `$approver`
   rules. Never `title`, `head_branch`, `*_body` or `text`.
@@ -495,9 +504,9 @@ and the native actions move into `bobi/workflow/cleanup.py`.
 **CLI and prompts:**
 - [ ] `-w` becomes optional and defaults to `adhoc` only when the installed package
   has no `workflows/` (Q7). Otherwise the error stays (`cli.py:4001`, 4206).
-- [ ] `prompts/base.md`: on the same condition, launches stop teaching
-  `-w <workflow>`. Keep the "Handoff files" section, because the engine still runs
-  other packs.
+- [ ] `prompts/base.md`: launch examples lead with `-w adhoc` for skill runs, and
+  `-w <workflow>` remains for packs with workflows. Keep the "Handoff files" section,
+  because the engine still runs other packs.
 - [ ] `prompts/setup.md:134` stops requiring `workflows/adhoc.yaml`.
 - [ ] For a pack with no `workflows/`, `doctor._check_workflows`, `workflows list`,
   the director menu and `overview._workflow_count` list the builtin `adhoc`, so it
@@ -548,11 +557,14 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   never uses.
 - [ ] Director `ROLE.md`:
   - The routing table names skills.
-  - Launch examples use `--role engineer --task "Read package/context/skills/…"`,
+  - Launch examples use `-w adhoc --role engineer --task "Read package/context/skills/…"`,
     with run-key conventions `issue-<n>`, `<pr>-review-<id>`,
     `<pr>-conflict`, `<pr>-ci`.
   - Status comes from threads, not handoffs (55, 132, 199, 222, 249).
   - Never launch post-approval work without the reactor's approval stamp.
+  - The annotation section (129) explains the `AUTO-ACTION` tag, that a closed PR by
+    someone other than the bot now arrives untagged and needs no worker, and that an
+    approve-then-merge can read "workflow launched" for a run that already exists.
 - [ ] Engineer `ROLE.md`:
   - Replace the handoff-file sections (102-116, 460-591) with: report in the
     thread/PR.
@@ -590,7 +602,12 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - close any parked gate runs before moving to the new pack version, because
     their workflow file no longer exists there;
   - overlay rules and monitors naming a deleted workflow must change;
+  - an overlay rule on `github.pull_request` closed starts firing, because the base
+    cleanup rule is now an `action:` and no longer stops evaluation;
   - an unpinned `from:` picks up the new pack on an older bobi, so pin or upgrade.
+- [ ] Release notes for N state what can reach any pack: `run_key:`, `period:`,
+  `timeout:`, `once:` and `fresh:` now take effect if a rule already carries them, and
+  a launch rule with no `workflow:` now launches adhoc instead of failing.
 - [ ] `docs/SECURITY.md` 120-125, worded exactly as the Solution's "What the
   framework guarantees":
   - A `$approver` rule launches only on an approver's webhook event.
@@ -622,7 +639,12 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   scratch home.
 - [ ] Mutation — co-firing: a merged bot spec PR, merged by an approver, fires
   **both** cleanup and approval, and a `suppress` rule listed before the action
-  stops it. Mutant: stop evaluation at the action rule → the test fails.
+  stops it. An `action:` rule listed after a launch rule does not fire. An `action:`
+  rule without `allow_self_authored` meeting the bot's own event is skipped, and a later
+  rule still fires. Mutant: stop evaluation at the action rule, or stop at its skip → a
+  case fails.
+- [ ] Mutation — action result: an action-only event returns `"action"`, reaches the
+  director, and carries the `AUTO-ACTION` tag. Mutant: return `None` → the test fails.
 - [ ] Mutation — action:
   - A closed-PR event on an `action:` rule removes the worktree, launches
     **0** sessions, and publishes `agent/auto_dispatch.action`.
@@ -669,13 +691,17 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   template field is missing, launches nothing and publishes `auto_dispatch.failed`.
   A rule without `run_key:` and a missing `task:` field still launches. Mutant: drop
   the character check, or refuse empties on every rule → a case fails.
-- [ ] Mutation — `once` with `fresh`: a redelivered approval, after the first
-  implement run completed, launches nothing. Mutant: honor `fresh` in `once` → the
-  test fails.
+- [ ] Mutation — `once` with `fresh`: after the first implement run completed, a merge
+  event, and an approval redelivered to a new reactor instance, launch nothing and
+  publish no `auto_dispatch.failed`. Both use real admission, because a redelivery to the
+  same reactor stops at its in-memory cooldown. Mutant: honor `fresh` in `once` → the test
+  fails.
 - [ ] Mutation — validate: each listed check has its stated severity in
   `bobi agents install` and `validate_config`. That covers `${{input.title}}` on
   `task:` for `github.issues` and `github/github.issues` (warning), on a `$approver`
-  rule (error), and raw `${{input.text}}` on a Slack rule (warning). A custom-event
+  rule (error), and raw `${{input.text}}` on a Slack rule (warning). A stale
+  `action: opened` on a `dedup_only` rule and a `run_key: ${{input.title}}` on a
+  `github.*` rule install without error. A custom-event
   `${{input.title}}` produces no such warning. Mutant: delete each check, or apply
   the allow-list to custom events → a test fails.
 - [ ] Mutation — compatibility: a fixture pack with a multi-role workflow using route
@@ -741,8 +767,10 @@ alongside Phase 1.
   - The single next role is the engineer.
   - Its task holds the triage file path, labelled untrusted.
   - The engineer skill posts the report where the director's rules say.
-- [ ] baohua `marketing.due` → `workflow: adhoc`, `role: marketing`,
-  `period: weekly`, `task: Read package/context/skills/marketing-review/SKILL.md …`.
+- [ ] baohua `marketing.due` → `id: weekly-marketing`, `workflow: adhoc`,
+  `role: marketing`, `period: weekly`,
+  `task: Read package/context/skills/marketing-review/SKILL.md …`. Assert that a second
+  event in the week is refused on the migrated rule, which keeps the #1016 guard.
   Re-key `marketing-review/SKILL.md` 8, 104, 184 off workflow stages and
   handoffs.
 - [ ] baohua `prd-draft` / `prd-design` → pm skills. The engineer design step
@@ -801,7 +829,7 @@ alongside Phase 1.
 - **Bug, failing test first:** the fork-PR cleanup. It deletes the local
   worktree on `main`, so the test must fail there.
 - **New behavior, plain assertions:** the rule `period:`, `timeout:` and
-  `run_key:`; `-w` defaulting to adhoc; setup emitting skills.
+  `run_key:`; setup emitting skills.
 - **Negative, security and compatibility claims, mutation proof:**
   - co-firing `action:` rules, with first-match kept for every other rule;
   - the approver-match cases, injected approval, single-role chaining;
