@@ -1,4 +1,4 @@
-# Retire multi-step YAML workflows: team behavior moves to skill files
+# Move shipped teams onto skill files and deprecate the multi-step workflow engine
 
 > **Status:** In review
 > **Tracking issue:** moda-labs/bobi-agent#1129 · **Created:** 2026-10-19 · **Last amended:** — (see Amendments)
@@ -7,21 +7,25 @@
 
 ## Purpose
 
-Every run becomes one prompt: the builtin `adhoc` run, given a task that names a
-skill file. Team behavior lives in `context/skills/<name>/SKILL.md` (prose,
-edited like any prompt) instead of a second control-flow language.
+Every team Bobi ships, and every team `bobi setup` authors, runs one prompt: the
+builtin `adhoc` run, given a task that names a skill file. Team behavior lives in
+`context/skills/<name>/SKILL.md` (prose, edited like any prompt) instead of a
+second control-flow language.
 
-The step machine is deleted: route, await/resume gates, notify, native-action
-steps, handoff contracts, role switching between steps, and checkpoints. What
-the engine did that prose cannot do safely moves to a few small `auto_dispatch`
-rule keys:
+What the engine did that prose cannot do safely moves to a few small
+`auto_dispatch` rule keys:
 - `action:` for deterministic, no-model work;
 - `period:` for once-per-period dedupe;
 - `timeout:` for run duration;
 - `run_key:` for stable run identities;
 - the `$approver` sender match (GitHub only) for human approval.
 
-This finishes what `plans/2026-07-26-checklist-execution-model.md` (#852, now
+**The engine stays, frozen and deprecated.** Teams with bespoke workflows keep
+working on this release, unchanged. Deleting the engine is separate work, gated
+on proving that a demanding outside workflow can run as a skill and on helping
+those teams migrate: moda-labs/bobi-agent#1137.
+
+This continues what `plans/2026-07-26-checklist-execution-model.md` (#852, now
 Linear MOD-284) froze but never deleted. Its Phase 4 trial never ran; the fleet
 has since run that experiment informally (see Problem).
 
@@ -65,6 +69,13 @@ Fleet audit, 2026-10-14, run records on every Fly box (records reach back to
   names `await` gates as the defense for high-stakes actions. `SECURITY.md:172`
   says bobi has no sender-identity model. Any replacement must not let a
   thread participant or injected text produce an approval.
+- At least one production team outside this repo depends on the engine heavily:
+  routing, role switching between steps, handoff contracts, and tooling that
+  reads run records directly. It pins bobi and does not inherit from a shipped
+  pack, so changes to our packs do not reach it, but changes to install and
+  validation do. It reinstalls its pack with `bobi agents install` on every
+  boot, under `set -e`, so a new install error is a crash loop rather than a
+  failed image build.
 
 ## Solution
 
@@ -73,6 +84,7 @@ Fleet audit, 2026-10-14, run records on every Fly box (records reach back to
    - Make `-w` optional.
    - Migrate the `eng-team` and `personal-assistant` packs to skills.
    - Make `bobi setup` author skills.
+   - Deprecate the engine: a warning, the docs, and a freeze.
    - Fix the fork-branch cleanup bug.
    - Release N.
 2. **Phase 2, moda-agents.**
@@ -80,29 +92,16 @@ Fleet audit, 2026-10-14, run records on every Fly box (records reach back to
    - Delete the workflows of the three packs nothing deploys.
    - Close the parked gate runs, roll the fleet, and hold a 7-day stop
      criterion.
-3. **Phase 3, bobi-agent: delete.**
-   - Remove the step machine and the gate surface.
-   - `bobi agents install` refuses a pack with `workflows/` or a non-adhoc
-     `workflow:`.
-   - A running team whose installed package still has them logs an error and
-     ignores them; it never refuses to start (see `validate.py:194-199` on
-     upgrade outages).
-   - Legacy `waiting` / `resuming` records load as `cancelled`.
-   - The admin verbs are removed with a `SUPERVISOR_VERSION` bump and a
-     migration note.
-   - Release N+1.
-4. **Phase 4: roll and verify.**
 
-**Kept:**
-- `WorkflowRun` as the run record and the launch path.
-- Run-key dedupe.
-- `variables.resolve`, used by `${{input.task}}` and `task:` templates.
-- `triggers.builtin_adhoc_workflow`.
-- The runs view and `cleanup.py`.
+**The compatibility rule for release N:** a pack that installed on the previous
+release still installs and runs. Install errors apply only to the new keys,
+which an older pack cannot use. Everything else is a warning.
 
-Renaming the "workflow" identifiers is out of scope.
+**The engine freeze:** the engine accepts security and crash fixes only.
+Workflows, `await` gates, the console gate UI and the three run admin verbs all
+keep working, and `-w <name>` still launches a pack's workflow.
 
-**How each feature is replaced:**
+**How each shipped-team feature is replaced:**
 
 | Engine feature | Replacement |
 |---|---|
@@ -115,7 +114,7 @@ Renaming the "workflow" identifiers is out of scope.
 | Slack notify steps | The skill posts with `bobi reply` (`cli.py:1601`) |
 | Handoff files | The worker reports in its thread/PR; the director reads the thread |
 
-**Approval** (Zach: Q9 2026-10-20, Q12 2026-10-20): GitHub only.
+**Approval** (Zach: Q8 2026-10-20, Q10 2026-10-20): GitHub only.
 - **The signal.** The bot opens its proposal as a **spec PR** on head branch
   `spec/<issue>`. Approval is either one counted as below:
   - an approving review (`pull_request_review`, `action: submitted`,
@@ -180,14 +179,15 @@ Phase 1:
   rule shadowed under first-match starts firing. Phase 2 checks every overlay
   for this.
 
-**Alternatives rejected** (2026-10-19/20, see Questionables):
-- Keep `await` gates.
+**Alternatives rejected** (see Questionables):
+- Delete the engine in this initiative: it breaks a production outside team.
+- Hold the pack migration until outside teams have moved: nothing about our
+  packs depends on them.
+- Keep `await` gates in shipped packs.
 - Single-step pack templates.
 - A first-class `--skill` flag with native skill rendering.
 - `pr-closed` as a model session.
-- A deprecation window.
 - Model-enforced approval.
-- A hard startup refusal.
 - Slack `user_id: $approver` matching: it fires on every approver message,
   including "no, stop", and tags them all "no action needed" before the
   director sees them (`drain.py:431`).
@@ -196,31 +196,14 @@ Phase 1:
 
 ### Existing (verified 2026-10-20)
 
-**Engine — `bobi/workflow/`**
-- `orchestrator.py` (2,078). Multi-step-only parts to delete:
-  - `remind_workflow` 115-155, `try_resume_for_event` 205-253,
-    `resume_workflow` 497-623.
-  - Checkpoint adoption 391-427, `_exhaust_step`/`_checkpoint` 1070-1114.
-  - Route/action/notify/await branches 1134-1273.
-  - Agent/model switching between steps 1296-1412.
-  - Handoff retry and capture 1589-1641, `brief_undelivered` 1658-1676.
-  - Notify, and the native-action registry 1943-1951, inside 1823-2040.
-  - Handoff read/validate 2047-2078.
-  - Handoff wording 797-799 and the turn-cap nudge 178-187.
-  - **Moves, not deletes:** `_remote_matches_slug` (1823),
-    `_resolve_repo_root` (1844), `_cleanup_worktree_action` (~1899), and the
-    registry move to `cleanup.py` in Phase 1. Load path: a fresh launch keeps
-    the session name and ignores the saved transcript (673).
-- `schema.py` (300): `GATE_VERDICT*`, `HandoffContract`, route/await/notify/action
-  fields, `steps_fingerprint`, back-edge validation, `Workflow.period` /
-  `period_run_key` (123-152, the logic moves to the rule).
-- `state.py` (269):
-  - Delete `claim` 98-147, `close` 150-176, `find_waiting` 179-203, and the
-    `.resuming.json` handling 65-68.
-  - Multi-step-only fields: `suspended_at_step`, `await_event`,
-    `checkpoint_step`, `checkpoint_fingerprint`.
-- `variables.py` (201): keep `resolve` (31); delete the condition parser
-  (77-201).
+**Engine — `bobi/workflow/`** (stays; only these change)
+- `orchestrator.py`: `_remote_matches_slug` (1823), `_resolve_repo_root` (1844),
+  `_cleanup_worktree_action` (~1899) and the native-action registry (1943-1951)
+  move to `cleanup.py`. The engine's action step imports them from there.
+- `schema.py`: `Workflow.period` / `period_run_key` (123-152) stay for engine
+  packs. The rule gets its own `period:`.
+- `variables.py:53`: a missing key resolves to `""`, so rule templates need the
+  fail-closed check in Phase 1.
 - `cleanup.py` (255): `pr_merge_state`, `cleanup_worktree`,
   `_find_worktrees_for_branch` (matches on branch name only, which is the
   fork bug).
@@ -239,42 +222,18 @@ passed to `EventReactor.from_config` (`subagent.py:2364`), and an overlay's
 - `_build_task` 397-404.
 
 **CLI and launch**
-- `bobi/cli.py`:
-  - `GATE_VERDICTS` 26-29.
-  - `workflows status` 2992-2995, `workflows resume` 3000-3099.
-  - `-w required=True` 4001, guard 4206, `--timeout` 4030.
-  - `_require_step_roles` 4127-4159, `--wait` suspended branch 4365-4372.
-  - `install` 929, `reply` 1601.
-- `bobi/subagent.py`:
-  - `_workflow_period_key` 832-845, rand key 859-866.
-  - `validate_workflow_inputs` 876-901, session name 1281.
-  - `_admit` waiting/resuming 1490-1562, `collect["suspended"]` 1659-1700.
+- `bobi/cli.py`: `-w required=True` 4001, guard 4206, `--timeout` 4030,
+  `install` 929, `reply` 1601.
+- `bobi/subagent.py`: rand key 859-866, session name 1281, the completed-in-period
+  refusal 1314 and 1466, the finding-replay ledger check 1467.
 - `bobi/launch_lineage.py` 6-7, 70-71, 92-94, 364-373: the adhoc exemption
-  from the self-recursion check; the depth cap stays.
-- `bobi/reconcile.py` 52-56, 201: timeout cancel.
+  from the self-recursion check, and the depth cap chained handoffs must fit.
 
-**Console**
-- `bobi/webapp/run_actions.py` (185).
-- `server.py` 306-335.
-- `runtime.py` 867-907, 2155-2178.
-- `event_bus.py` 471-486.
-- `runs.py` 32-53, 172-187, 232-237, 526-532.
-- `overview.py:88` `_workflow_count`.
-- `static/views/composer.js`.
-- `static/views/agent.js` 201, 472, 504, 523, 548-552, 634-707, 815-945,
-  1024-1026.
+**Console:** `overview.py:88` `_workflow_count`.
 
-**Admin protocol**
-- `bobi/supervisor/admin.py` 60-67, 80, 740-772.
-- `bobi/supervisor/snapshot.py:36` (`SUPERVISOR_VERSION = "0.4.0"`).
-- `event-server/worker/src/fleet.ts` 370-372, `event-server/worker/test/fleet.spec.ts`
-  190-192.
-
-**Validation, doctor, metrics**
-- `bobi/validate.py`: auto_dispatch checks ~194-209, `_check_workflow_effort`
-  407-445.
+**Validation and doctor**
+- `bobi/validate.py`: auto_dispatch checks ~194-209.
 - `bobi/doctor.py:363` `_check_workflows`.
-- `bobi/metrics/runtime.py:1102`.
 
 **Setup**
 - `bobi/setup/authoring.py` 311-318, 393, 402-490, 699-728.
@@ -290,7 +249,7 @@ passed to `EventReactor.from_config` (`subagent.py:2364`), and an overlay's
 **Event adapters**
 - `event-server/core/src/adapters/github.ts` 28-29 (`sender`), 55-60
   (`head_branch`, no `head.repo`), 73.
-- `chat-sdk-slack.ts:161` (`user_id`): not used for approval (Q12).
+- `chat-sdk-slack.ts:161` (`user_id`): not used for approval (Q10).
 - `bobi/events/drain.py:431`: the "AUTO-DISPATCHED … no action needed" tag.
 - `.github/workflows/team-packages.yml` 11-16: publishes `teams-latest/` pack
   assets on every push to main. `compose.py` 111-180 fetches base packs from
@@ -312,15 +271,9 @@ passed to `EventReactor.from_config` (`subagent.py:2364`), and an overlay's
 
 **Docs**
 - `agents/registry.yaml`.
-- `docs/WORKFLOW_ENGINE.md`, `docs/RUN_RESUME.md`,
-  `docs/specs/987-awaiting-action-reply-box.md`.
-- `docs/RUNS_VIEW.md`, `docs/RUN_DRILLDOWNS.md`, `docs/MONITORS.md`.
-- `docs/ADMIN_PROTOCOL.md` 25-45 (breaking-change rule), 164-178, 344-375,
-  611-616.
+- `docs/WORKFLOW_ENGINE.md`, `docs/MONITORS.md`.
 - `docs/SECURITY.md` 120-125, 172.
-- `skills/create-agent.md`, `skills/bobi.md`, `README.md`, `DESIGN.md`,
-  `CLAUDE.md` (reference list, design rule 2).
-- `docs/design-system/SKILL.md:24`, `components/product/GateApproval.*`.
+- `skills/create-agent.md`, `skills/bobi.md`, `README.md`, `DESIGN.md`.
 
 **Tests that Phase 1 breaks** (they read the deleted pack files or assert
 workflow names):
@@ -331,9 +284,6 @@ workflow names):
 - `test_pr_feedback_dispatch_hygiene.py:147`,
   `test_decision_log_prompts.py` 170-214.
 - `test_pack_routing_validation.py:174`, `e2e/test_setup_ui.py:112`.
-
-**Tests that Phase 3 breaks:** listed in Notes, plus `test_install.py` 133, 147
-and `fleet.spec.ts`.
 
 **moda-agents** (`origin/main`)
 - `agents/baohua/`:
@@ -358,33 +308,31 @@ and `fleet.spec.ts`.
 - moda-agents `agents/baohua/context/skills/{report-investigation,prd-draft,prd-design}/SKILL.md`.
   `weekly-marketing` reuses the existing `marketing-review` skill.
 - moda-agents `scripts/fleet_run_audit.py`: the 2026-10-14 probe, committed so
-  the Phase 2 and Phase 4 gates can run.
+  the Phase 2 gate can run.
 
 No new framework module. The rule keys extend `reactor.py` and `validate.py`,
 and the native actions move into `bobi/workflow/cleanup.py`.
 
 ## Questionables
 
-- **Q1:** Delete approval gates, or keep `await`? Recommendation: delete.
-  **Decision (2026-10-19, Zach):** delete. 16 runs are parked and none was
-  ever answered. The console gate composer, the three admin verbs,
-  `docs/RUN_RESUME.md` and design rule 2's gate wording all go. Approval
-  identity is in Q9.
-- **Q2:** End state? Recommendation: only the builtin `adhoc`.
-  **Decision (2026-10-19, Zach):** only the builtin `adhoc`. Packs ship no
-  `workflows/`, and behavior is a skill named in the task. Renaming the
+- **Q1:** Should shipped packs and setup keep approval gates? Recommendation:
+  no.
+  **Decision (2026-10-19, Zach):** no. 16 runs are parked and none was ever
+  answered. The gate machinery itself goes with the engine (#1137). Approval
+  identity is in Q8.
+- **Q2:** End state for shipped teams? Recommendation: only the builtin `adhoc`.
+  **Decision (2026-10-19, Zach):** only the builtin `adhoc`. Shipped packs carry
+  no `workflows/`, and behavior is a skill named in the task. Renaming the
   "workflow" identifiers is deferred.
 - **Q3:** Where does `pr-closed` cleanup live? Recommendation: a reactor
   action.
   **Decision (2026-10-19, Zach):** a reactor `action:`. Issue closing relies on
   `Closes #N`, and the engineer ROLE gains that instruction. The Slack notify
   is dropped.
-- **Q4:** The undeployed moda-agents packs and outside users? Recommendation:
-  delete those workflows and refuse them explicitly.
+- **Q4:** The undeployed moda-agents packs? Recommendation: delete their
+  workflows.
   **Decision (2026-10-19, Zach):** delete the 20 workflow files and the
-  monitors that launch them, leaving a README note. Outside packs get an
-  explicit error that links the migration section. There is no deprecation
-  window. Q10 refines where that error fires.
+  monitors that launch them, leaving a README note.
 - **Q5:** Re-run #852's A/B trial? Recommendation: no.
   **Decision (2026-10-19, Claude):** no. Production already prefers `adhoc`
   (100 of ~110 eng-team runs in 30 days), roadmap-pm runs on a skill, and the
@@ -399,18 +347,12 @@ and the native actions move into `bobi/workflow/cleanup.py`.
     untrusted, and never pasted inbound text.
   - Round trips chain back the same way (engineer → pm in `prd-*`).
   - The director's former delivery step folds into the last worker.
-- **Q7:** Remove three admin verbs under an "additive-only" protocol?
-  Recommendation: yes, via the documented breaking-change path.
-  **Decision (2026-10-19, Claude):** yes. `ADMIN_PROTOCOL.md:31-33` allows a
-  breaking change with a `SUPERVISOR_VERSION` bump (0.4.0 → 0.5.0) and a
-  migration note.
-- **Q8:** Make `--workflow` optional? #852 had marked it not needed.
+- **Q7:** Make `--workflow` optional? #852 had marked it not needed.
   Recommendation: yes.
-  **Decision (2026-10-19, Claude):** yes. With `adhoc` the only workflow, a
-  required `-w` is ceremony; `-w adhoc` keeps working.
-- **Q9:** Who may approve, now that gates are gone? Options: (a)
-  platform-enforced / (b) model-enforced / (c) keep an operator gate.
-  Recommendation: (a).
+  **Decision (2026-10-19, Claude):** yes. For shipped teams a required `-w` is
+  ceremony. `-w adhoc` and `-w <pack workflow>` keep working.
+- **Q8:** Who may approve in the shipped packs? Options: (a) platform-enforced /
+  (b) model-enforced / (c) keep an operator gate. Recommendation: (a).
   **Decision (2026-10-20, Zach):** platform-enforced.
   - Approval launches only via a `$approver`-matched rule on the webhook's
     structured `sender`.
@@ -418,16 +360,9 @@ and the native actions move into `bobi/workflow/cleanup.py`.
     `spec/` PR. That shape was tightened by re-review on 2026-10-20: a bot or
     non-approver merge does not count.
   - Text is never approval.
-- **Q10:** Where does the Phase 3 hard error fire? There is no `bobi validate`
-  command; `validate_config` is the startup preflight (`service.py:273-278`).
-  Recommendation: refuse at install/compose, and only error-log at startup.
-  **Decision (2026-10-20, Claude):** as recommended. A deploy fails at image
-  build (`bobi agents install`), while a team already installed keeps running
-  and logs one error naming the ignored files. This honors Q4's explicit
-  error without turning an upgrade into an outage.
-- **Q11:** Keep `period:` dedupe once workflow files are gone? baohua's
-  `weekly-marketing` is the only production user, and it guards the #1016
-  double-publish. Recommendation: move `period:` onto the rule.
+- **Q9:** Keep `period:` dedupe for skill runs? baohua's `weekly-marketing` is
+  the only production user, and it guards the #1016 double-publish.
+  Recommendation: add `period:` to the rule.
   **Decision (2026-10-20, Claude; corrected after re-review):** a rule-level
   `period:`.
   - `launch_agent` gains `period=`.
@@ -438,7 +373,7 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - Accepted loss: a director's manual launch of the same skill is no longer
     period-guarded. The workflow-level period covered it (`subagent.py:1314`).
     The skill's own first step checks for this week's post.
-- **Q12:** Slack approval: (a) build a structured, thread-scoped signal (a ✅
+- **Q10:** Slack approval: (a) build a structured, thread-scoped signal (a ✅
   reaction on the bot's proposal) now, or (b) GitHub-only now, with Slack
   deferred? Recommendation: (b). Re-review showed a `user_id` match fires on
   every approver message, and baohua's PRD approval is already director-judged
@@ -447,26 +382,26 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - The Slack signal is a follow-up issue.
   - baohua's PRD approval stays director-judged, as it is today.
   - Setup's Slack-only "ask first" proposes and does not act until then.
-
-- **Q13:** What is the migration path for consumers on bobi 0.58 or lower who
-  rely on multi-step workflows? At least one production deployment uses them
-  heavily: routing, role switching between steps, handoff contracts, and
-  tooling that reads run records directly. Phase 3 (deletion, plus the
-  install-time refusal) would break them on upgrade. Q4's "no deprecation
-  window" assumed outside users were unknown, which is no longer true.
-  Options:
-  - (a) hold Phase 3 until a migration is proven: a ported multi-step flow
-    replayed on skills, with matching outputs, plus a published migration
-    guide;
-  - (b) keep the engine frozen indefinitely and delete only our own packs'
-    workflows;
-  - (c) ship Phase 3 with a deprecation window.
-
-  Recommendation: (a). Phases 1–2 do not affect these consumers and go ahead.
+- **Q11:** What happens to teams with bespoke multi-step workflows? Options:
+  (a) hold all of this until a migration is proven; (b) keep the engine frozen
+  indefinitely; (c) delete on a deprecation window; (d) move shipped teams now,
+  keep the engine, and delete it only after a proven port and migration.
+  Recommendation: (d).
+  **Decision (2026-11-02, Zach):** (d). This plan ends with the engine frozen
+  and deprecated. #1137 runs the port test first, then migration and deletion.
+  If the test fails, the engine stays frozen.
+- **Q12:** Where do the new validations fire, given that outside teams may run
+  `bobi agents install` at boot? Recommendation: install errors only for the new
+  keys, warnings for everything else.
+  **Decision (2026-11-02, Claude):** as recommended. A check on an existing key
+  could turn an upgrade into a crash loop. The `github.*` template allow-list is
+  therefore a warning, and it never applies to other event sources, whose fields
+  have no other route into an adhoc run. Shipped packs must produce no warnings,
+  which a test enforces.
 
 ## Phases
 
-### Phase 1 — bobi-agent: add the replacements, migrate in-repo packs (no engine deletion)
+### Phase 1 — bobi-agent: add the replacements, migrate in-repo packs, deprecate the engine
 
 **Rule keys** (`reactor.py`, `validate.py`, `config.py`, `subagent.py`):
 - [ ] **Multi-rule matching (load-bearing)**, exactly as specified in
@@ -486,7 +421,7 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - Every outcome publishes `agent/auto_dispatch.action`, with `status`,
     `branch` and `paths_removed`.
   - The dedup namespace defaults to the action name.
-- [ ] Add `period: daily|weekly`, valid only with an `id:` (Q11).
+- [ ] Add `period: daily|weekly`, valid only with an `id:` (Q9).
   `launch_agent(period=)`: admission derives `<rule id>-<bucket>` and refuses
   a second run in the bucket, including after the first has completed.
 - [ ] Add `timeout: <seconds>`, passed to the launch.
@@ -506,23 +441,24 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - It matches only when `source == "github"` and the event has no
     `bubble_id`.
   - An empty or missing list matches nothing.
-- [ ] Validate, as **warnings at startup** (`required=False`, as with
-  `validate.py:194-199`) and **errors in `bobi agents install`**:
+- [ ] Validate new keys (Q12). **Errors in `bobi agents install`, warnings at
+  startup** (`required=False`, as with `validate.py:194-199`):
   - an unknown `action:`;
   - `action:` combined with `workflow:`, `task:` or `role:`;
-  - a launching rule (`workflow:` adhoc or omitted) with no `role:`;
   - `period:` without `id:`;
   - `$approver` with no `approvers:`;
-  - `allow_self_authored` on a rule using `$approver`;
-  - `task:` or `run_key:` templates referencing anything outside the
-    allow-list: `number`, `pr_number`, `issue`, `repo`, `url`, `review_id`,
-    `comment_id`, `thread_ts`, `channel`. `sender` is allowed only on
-    `$approver` rules. Never `title`, `head_branch`, `*_body` or `text`.
+  - `allow_self_authored` on a rule using `$approver`.
+- [ ] Validate existing keys (Q12). **Warnings only, in both places:**
+  - an adhoc rule (`workflow: adhoc` or omitted) with no `role:`;
+  - on `github.*` rules only, `task:` or `run_key:` templates referencing
+    anything outside the allow-list: `number`, `pr_number`, `issue`, `repo`,
+    `url`, `review_id`, `comment_id`, `thread_ts`, `channel`. `sender` is allowed
+    only on `$approver` rules. Never `title`, `head_branch`, `*_body` or `text`.
 
 **Native actions** (`cleanup.py`):
 - [ ] Move the registry, `_remote_matches_slug`, `_resolve_repo_root` and
   `_cleanup_worktree_action` into `cleanup.py`. The orchestrator imports them
-  until Phase 3.
+  from there.
 - [ ] **Bug fix, failing test first:** a merged **fork** PR whose `head_branch`
   equals a local bot branch deletes that worktree and branch.
   - `pr_merge_state` returns `head.repo.full_name`.
@@ -533,13 +469,26 @@ and the native actions move into `bobi/workflow/cleanup.py`.
 
 **CLI and prompts:**
 - [ ] `-w` becomes optional and defaults to `adhoc` (`cli.py:4001`, 4206).
-- [ ] `prompts/base.md`: launches no longer teach `-w <workflow>`. Keep the
-  "Handoff files" section until Phase 3, because the engine still runs other
-  packs.
+- [ ] `prompts/base.md`: launches no longer teach `-w <workflow>` as the default.
+  Keep the "Handoff files" section, because the engine still runs other packs.
 - [ ] `prompts/setup.md:134` stops requiring `workflows/adhoc.yaml`.
 - [ ] `doctor._check_workflows`, `workflows list`, the director menu, and
   `overview._workflow_count` all list the builtin `adhoc`, so a pack with no
   `workflows/` reads as healthy.
+
+**Engine deprecation:**
+- [ ] A pack shipping any `workflows/` file gets one warning, naming the files and
+  linking the migration section, from `bobi agents install`, manager startup and
+  `doctor`. It never refuses, and the workflows still run.
+- [ ] `docs/WORKFLOW_ENGINE.md`: a deprecation banner stating the freeze (security
+  and crash fixes only), a link to #1137, and a "Migrating to skills" section with
+  the feature table and these traps:
+  - a `task:` written as context for an engine step becomes the instruction in an
+    adhoc run;
+  - chained roles must fit `max_launch_depth`, so merge roles that carry no
+    separate permissions;
+  - tooling that filters run records on `workflow_name` must move to a `run_key`
+    prefix.
 
 **eng-team pack:**
 - [ ] Turn the prompts of `issue-lifecycle`, `build-failure`, `merge-conflict`
@@ -598,7 +547,7 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - `authoring.py` emits a skill plus a rule, never `workflows/`.
   - The "ask" leash, for a team with a GitHub repo, emits the spec-PR approval
     rules and asks for approver logins. Without a repo, it emits skill text
-    that proposes and does not act (Q12), and the setup UI says so.
+    that proposes and does not act (Q10), and the setup UI says so.
   - `actions.py` stops requiring `adhoc.yaml`.
   - Update the copy in `app.js` 807-810 and 1947, and in `DESIGN.md`.
 - [ ] Docs:
@@ -606,6 +555,15 @@ and the native actions move into `bobi/workflow/cleanup.py`.
     keys, `approvers:`.
   - `skills/bobi.md`, `README.md`, and `docs/MONITORS.md` (the monitor →
     adhoc + skill example).
+- [ ] Release notes for N state what is not drop-in for a team using the shipped
+  packs:
+  - `approvers:` is empty by default, so spec-PR approval launches nothing until
+    it is set, and the old gate flow is replaced by the spec-PR flow;
+  - close any parked gate runs before moving to the new pack version, because
+    their workflow file no longer exists there;
+  - overlay rules and monitors naming a deleted workflow must change;
+  - an overlay rule shadowed under first-match now fires;
+  - an unpinned `from:` picks up the new pack on an older bobi, so pin or upgrade.
 - [ ] `docs/SECURITY.md` 120-125, worded exactly as the Solution's "What the
   framework guarantees":
   - A `$approver` rule launches only on an approver's webhook event.
@@ -615,10 +573,11 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - A merge-queue merge may carry the queue bot as `sender`, so it would not
     count (unverified).
   - Deterministic steps belong in rule `action:`s or scripts.
+  - `await` gates still exist for teams on the deprecated engine.
 - [x] File the follow-up issue for a structured Slack approval signal:
   moda-labs/bobi-agent#1130.
-- [ ] Update the tests Phase 1 breaks (Relevant files). The engine tests keep
-  covering the engine with fixture workflows, not pack files.
+- [ ] Update the tests Phase 1 breaks (Relevant files). The engine tests stay and
+  cover the engine with fixture workflows, not pack files.
 
 **Validation gate**
 
@@ -671,10 +630,21 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - A first-match `suppress` stops everything.
 
   Mutant: namespace by `workflow`, or `return` on cooldown → a case fails.
-- [ ] Mutation — validate: each listed check fires, including a
-  `${{input.title}}` template and `allow_self_authored` with `$approver`. It
-  is a warning in `validate_config` and an error in `bobi agents install`.
-  Mutant: delete each check → its test fails.
+- [ ] Mutation — validate: each new-key check is an error in `bobi agents install`
+  and a warning in `validate_config`. Each existing-key check, including a
+  `${{input.title}}` template on a `github.*` rule, is a warning in both. Mutant:
+  delete each check → its test fails.
+- [ ] Mutation — compatibility: a fixture pack with a multi-role workflow using
+  route steps and handoffs, dispatched from a custom event whose `task:` templates
+  non-GitHub fields including `title`, installs with no error on the release N
+  wheel and runs to completion on the stub brain. Its run record keeps `run_id`,
+  `run_key`, `status`, `started_at` and `workflow_name`. Mutant: apply the template
+  allow-list to all sources, or make it an install error → the test fails.
+- [ ] Mutation — deprecation: that fixture gets the warning from install, startup
+  and `doctor`, and a shipped pack gets none. Mutant: make the warning raise, or
+  delete it → the test fails.
+- [ ] Plain — shipped packs: `eng-team` and `personal-assistant` produce no
+  validation warnings.
 - [ ] Plain — period: two sequential `marketing.due` events in one ISO week,
   the second arriving **after the first run completed**, launch one run. Two
   periodic rules in the same week do not collide.
@@ -732,7 +702,7 @@ alongside Phase 1.
   - Drop the dead `max_turns: 800` comment.
   - Set `approvers: {github: [<Luke's login>]}` for the inherited
     issue-lifecycle approval.
-  - PRD approval in Slack stays director-judged (Q12), and `ROLE.md` says it
+  - PRD approval in Slack stays director-judged (Q10), and `ROLE.md` says it
     is not a framework gate.
 - [ ] `zachs-personal-assistant`: bump to `from: personal-assistant@<new>` and
   bump its own version.
@@ -753,8 +723,8 @@ alongside Phase 1.
 - [ ] Commit `scripts/fleet_run_audit.py`. It prints, per box: the
   `package/workflows/` presence, run counts by workflow and status since a
   date, and the `waiting` count.
-- [ ] Close the 16 parked approval runs with the console Close action (still in
-  release N), reason "gates retired — plans/2026-10-19-retire-yaml-workflows.md".
+- [ ] Close the 16 parked approval runs with the console Close action, reason
+  "shipped packs moved off gates — plans/2026-10-19-retire-yaml-workflows.md".
 - [ ] Deploy with `deploy-agent-teams -f rebuild=true`.
 
 **Validation gate**
@@ -774,127 +744,8 @@ alongside Phase 1.
     report arrived.
 
   Each run id is noted with where a human saw the result. If a migrated flow
-  fails where its workflow had completed, halt and amend. **Release N+1 is not
-  cut without that amendment.**
-
-### Phase 3 — bobi-agent: delete the step machine and gate surface (load-bearing; strictest gate)
-
-Code may be developed during Phase 2's soak. Release N+1 is cut only after
-Phase 2's amendment. **Blocked on Q13** until it carries a decision.
-
-- [ ] `orchestrator.py`: delete the multi-step parts listed in Relevant files.
-  - Keep: the single-prompt `run_workflow`, turn-cap resume (with the nudge
-    no longer naming handoffs), drain, the honest terminal `finally`, and
-    model routing on the launch.
-  - Remove the handoff wording at 797-799.
-- [ ] `schema.py`: reduce to `Workflow` (name, trigger, description, one
-  `StepDef`: prompt/model/effort/max_turns/timeout). The period logic now lives
-  on the rule; `load_workflow` loads only the builtin.
-- [ ] `variables.py`: keep `resolve`.
-- [ ] `state.py`:
-  - Delete `claim`, `close`, `find_waiting`, `.resuming.json` handling and the
-    multi-step-only fields; `from_dict` ignores legacy keys.
-  - A legacy `waiting` / `resuming` record loads as `cancelled`, with error
-    "approval gates removed in bobi <N+1>". It is rewritten via
-    `fsutil.atomic_write_json` under `ledger_lock`.
-- [ ] Refuse a pack shipping `workflows/` (any file) or a non-adhoc
-  `workflow:`:
-  - In `bobi agents install` and compose: a hard error linking the migration
-    section.
-  - At manager startup: one error log naming the ignored files, then the
-    team continues (Q10).
-- [ ] `cli.py`: delete `workflows resume`, `GATE_VERDICTS`, `_require_step_roles`
-  and the `--wait` suspended branch. `workflows status` drops the await fields.
-- [ ] `subagent.py`: delete `validate_workflow_inputs`, the waiting/resuming
-  admission and `collect["suspended"]`. Move `_workflow_period_key` onto the
-  rule path. Delete the legacy phase `_build_prompt` (99-111) if nothing
-  single-prompt calls it.
-- [ ] `launch_lineage.py`: delete the self-recursion check, which is dead once
-  everything is adhoc. The depth cap of 8 stays.
-- [ ] Console:
-  - Delete `run_actions.py`, the three routes, and the runtime/event_bus
-    run-action methods.
-  - Delete the `composer.js` gate mode, plus the awaiting tab, Close button and
-    gate detail lines in `agent.js`.
-  - `runs.py`: delete `AWAITING_ACTION`.
-- [ ] Admin protocol:
-  - Remove the three verbs from **both** `admin.py` and `fleet.ts`, and update
-    `fleet.spec.ts`.
-  - `SUPERVISOR_VERSION` → 0.5.0.
-  - `ADMIN_PROTOCOL.md`: delete the run commands and `not_waiting`, add a
-    migration note, and update the "nine commands" count in `CLAUDE.md`.
-- [ ] `prompts/base.md`: delete the "Handoff files" section.
-  `metrics/runtime.py`: write only `prompt` steps.
-  `reconcile.py` 52-56: drop the waiting comment.
-- [ ] Tests:
-  - Delete `test_workflow_route_resume.py`, `test_webapp_resume.py`,
-    `test_webapp_composer.py` and `integration/test_gate_verdict_resume.py`.
-  - Delete `integration/test_pr_closed_cleanup.py`; Phase 1's reactor test
-    replaces it.
-  - Delete the notify-step cases in `test_notify_step.py`. Keep its Slack
-    formatter cases only if the formatter has another caller.
-  - Trim the mixed files listed in Notes, plus `test_install.py` 133 and 147.
-  - Replace the integration `two-step.yaml` fixture with a single-step one.
-- [ ] Design system:
-  - `docs/design-system/SKILL.md` rule 2 and `CLAUDE.md`'s copy: "an approval
-    request names the action and where to answer it; never a toast".
-  - Retire `components/product/GateApproval.*`.
-- [ ] Docs:
-  - Delete `docs/RUN_RESUME.md` and `docs/specs/987-awaiting-action-reply-box.md`.
-  - Rewrite `docs/WORKFLOW_ENGINE.md` as a short doc on runs and dispatch:
-    adhoc, `task:` templates, the rule keys, `approvers:`, skills, and the
-    migration section the errors link to.
-  - Update `docs/RUNS_VIEW.md`, `docs/RUN_DRILLDOWNS.md`, `docs/SECURITY.md`
-    and `CLAUDE.md`'s reference list.
-
-**Validation gate**
-
-- [ ] Absence:
-  - `grep -rnE "find_waiting|resume_workflow|remind_workflow|try_resume_for_event|evaluate_condition|HandoffContract|GATE_VERDICT|_execute_notify_step|\"(resume|remind|close)_run\"" bobi/ event-server/worker/src/`
-    prints nothing.
-  - `test -e bobi/webapp/run_actions.py` fails.
-- [ ] Mutation — install refusal: `bobi agents install` of a pack with
-  `workflows/x.yaml` fails and names the migration section. Mutant: delete the
-  guard → the test fails.
-- [ ] Mutation — non-adhoc rule: an install with `workflow: issue-lifecycle` on
-  a rule fails. Mutant: delete the guard → the test fails.
-- [ ] Mutation — startup tolerance: a manager whose installed package still has
-  `workflows/` starts, and logs one error. Mutant: make the check raise → the
-  test fails.
-- [ ] Mutation — legacy record: a legacy `waiting` record (the fleet shape)
-  loads as `cancelled` and is rewritten on disk. Mutant: skip the mapping →
-  the test sees `waiting`.
-- [ ] Mutation — admin parity: `tests/test_admin_command_parity.py` and the
-  Worker `fleet.spec.ts` are green. Mutant: re-add `close_run` to `fleet.ts`
-  only → parity fails.
-- [ ] Mutation — console: `e2e/test_webapp_ui.py` renders a legacy cancelled run
-  with no Approve, Reject or Close control and no awaiting tab. Mutant:
-  restore the composer gate mode → the test fails.
-- [ ] Report `wc -l bobi/workflow/*.py` before and after in the PR.
-- [ ] `pytest tests/ -q` is green (full suite: Node 20, plus
-  `cd event-server && npm ci`), and so is the Worker suite (Node 22).
-- [ ] Real flow in an isolated `BOBI_HOME`, on the N+1 wheel:
-  - eng-team installs.
-  - A closed-PR event prunes the worktree.
-  - An issue-assigned event runs the skill (claude leg).
-  - The `bobi app` agent page loads.
-- [ ] Release N+1, per the runbook.
-
-### Phase 4 — Roll N+1 and verify
-
-- [ ] moda-agents: pin N+1, roll the teams (`-f rebuild=true`), and deploy the
-  hosted console separately.
-- [ ] Mark `plans/2026-07-26-checklist-execution-model.md` Superseded, pointing
-  here (a status amendment). Comment on Linear MOD-284.
-
-**Validation gate**
-
-- [ ] `scripts/fleet_run_audit.py`: no record on any box reads `waiting` or
-  `resuming`, and every run started after the roll is `adhoc`.
-- [ ] `bobi_fleet_status`: every instance is live on N+1, with supervisor
-  0.5.0.
-- [ ] The hosted console agent page loads for every instance, with no awaiting
-  tab and no 4xx/5xx in its network log.
+  fails where its workflow had completed, halt and amend. **The deletion work in
+  #1137 does not start without that amendment.**
 
 ## Proof of work
 
@@ -902,29 +753,22 @@ Phase 2's amendment. **Blocked on Q13** until it carries a decision.
   worktree on `main`, so the test must fail there.
 - **New behavior, plain assertions:** the rule `period:`, `timeout:` and
   `run_key:`; `-w` defaulting to adhoc; setup emitting skills.
-- **Negative, security and absence claims, mutation proof:**
+- **Negative, security and compatibility claims, mutation proof:**
   - multi-rule matching with `suppress` precedence;
   - the approver-match cases, injected approval, single-role chaining;
   - branch-argument refusal;
-  - task-template field restriction, off-thread action;
-  - install refusal and startup tolerance;
-  - legacy-record mapping, admin parity in both lists;
-  - no gate control rendering, and the engine-symbol grep.
+  - validation severity, off-thread action;
+  - a bespoke workflow pack still installing and running, and its deprecation
+    warning.
 
   Each names its mutant in its gate.
-- **Suites:**
-  - Phases 1 and 3: unit plus integration.
-  - Phase 3 also runs the full `pytest tests/ -q`, the Worker suite and
-    `e2e/test_webapp_ui.py`.
+- **Suites:** Phase 1 runs unit plus integration.
 - **Real-Claude e2e is required in Phase 1** for the three `[stub]+[claude]`
   tests: skill following, injection refusal, single-role chaining. Whether a
   real session follows a skill and resists injected approval only the real
   brain can show.
-
-  Phase 3's deletion is brain-agnostic: stub plus the real-flow check are
-  enough.
-- **Phase 2's day-7 amendment replaces #852's A/B trial (Q5)**, and it gates
-  release N+1.
+- **Phase 2's day-7 amendment replaces #852's A/B trial (Q5)**, and it gates the
+  deletion work in #1137.
 
 ## Lane map (only if fanned out)
 
@@ -936,18 +780,6 @@ Phase 2's amendment. **Blocked on Q13** until it carries a decision.
 
 ## Notes
 
-- **Mixed test files to trim in Phase 3** (multi-step cases only):
-  - `test_orchestrator.py`: drop the route/await/handoff/resume/QA/gate
-    classes; keep single-step, honest terminal, period and worktree.
-  - `test_workflow_state.py`: `find_waiting` and `claim`.
-  - `integration/test_workflow_orchestrator.py`.
-  - `test_cli.py` 288-334 and ~679.
-  - `test_subagent.py` 1072-1092, 1280, 1619, 1770.
-  - `test_webapp_runs.py` 139-203, 380-385.
-  - `e2e/test_webapp_ui.py` 2304, 2427-2548.
-  - `test_setup_authoring.py` 709, 786.
-  - `metrics/test_routing.py` 1432, 1451.
-  - `test_hosted_single_agent_view.py` 160-198.
 - **Ordering:**
   - moda-agents consumes released PyPI bobi, plus base packs fetched from
     release assets (`compose.py` 111-180). Overlays pin bases exactly
@@ -955,8 +787,6 @@ Phase 2's amendment. **Blocked on Q13** until it carries a decision.
     moves.
   - Release N must carry the migrated base packs and the engine support for
     `action:` and no-`-w` launches.
-  - N+1 refuses `workflows/` at install, so it must not reach moda-agents
-    before Phase 2 lands.
 - **Observed, not investigated:**
   - personal-assistant has not run since 2026-08-27.
   - About 25 records on eng-team and baohua read `running`. A `/proc` scan
@@ -965,6 +795,7 @@ Phase 2's amendment. **Blocked on Q13** until it carries a decision.
 
   Neither is in scope.
 - **Non-goals:**
+  - deleting the engine, the gate UI or the run admin verbs (#1137);
   - renaming `workflow_name`, the `workflows` CLI group, or `state/workflow/`;
   - native per-brain skill rendering;
   - a `--skill` flag;
