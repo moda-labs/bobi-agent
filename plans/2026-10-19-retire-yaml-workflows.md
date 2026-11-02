@@ -80,7 +80,7 @@ Fleet audit, 2026-10-14, run records on every Fly box (records reach back to
 ## Solution
 
 1. **Phase 1, bobi-agent: additive.**
-   - Add the rule keys, the `$approver` match and multi-rule matching.
+   - Add the rule keys, the `$approver` match and co-firing `action:` rules.
    - Make `-w` optional.
    - Migrate the `eng-team` and `personal-assistant` packs to skills.
    - Make `bobi setup` author skills.
@@ -94,8 +94,10 @@ Fleet audit, 2026-10-14, run records on every Fly box (records reach back to
      criterion.
 
 **The compatibility rule for release N:** a pack that installed on the previous
-release still installs and runs. Install errors apply only to the new keys,
-which an older pack cannot use. Everything else is a warning.
+release still installs and behaves the same. Rules without a new key match, dedupe
+and render exactly as today. Install errors apply only where a rule could not have
+launched before. An unknown key is ignored today, so an old pack may already carry
+one, and that case gets a warning.
 
 **The engine freeze:** the engine accepts security and crash fixes only.
 Workflows, `await` gates, the console gate UI and the three run admin verbs all
@@ -159,28 +161,27 @@ keep working, and `-w <name>` still launches a pack's workflow.
   proposes and does not act until the Slack follow-up ships. This is
   documented in `skills/create-agent.md`.
 
-**Multi-rule matching.** `reactor.process` stops at the first matching rule
+**Co-firing `action:` rules.** `reactor.process` stops at the first matching rule
 (`reactor.py:250-283`), so one `pull_request closed` event could not drive both
-cleanup and approval. New semantics, load-bearing, with the strictest gate in
-Phase 1:
-- Rules are evaluated in order. If the **first** matching rule is `suppress`
-  or `dedup_only`, behave exactly as today and stop.
-- Otherwise fire every matching launch or action rule, and ignore any later
-  `suppress`/`dedup_only` match; validate warns on that ordering.
-- A cooldown hit or a self-authored skip skips that rule only (`continue`, not
-  `return`).
-- Each dedup key is namespaced by the rule's `id`, else its action name, else
-  its index. Today it is `self.workflow` (`reactor.py:117`), which every adhoc
-  rule would share.
-- `process()` returns `dispatched` if anything fired, else `deduped` if any
-  rule deduped, else `None`.
-- No event in a shipped pack matches two rules today (verified 2026-10-20).
-  But overlay rules append after base rules (`compose.py:681`), so an overlay
-  rule shadowed under first-match starts firing. Phase 2 checks every overlay
-  for this.
+cleanup and approval. New semantics, with the strictest gate in Phase 1 (Q13):
+- Rules are evaluated in order. A matching `action:` rule fires and evaluation
+  continues. Its cooldown is its own.
+- The first matching rule without `action:` behaves exactly as today, including
+  its `suppress`, `dedup_only`, cooldown and self-authored returns, and stops
+  evaluation. A launch rule never co-fires with another launch rule.
+- `action:` rules listed after that rule therefore do not fire, so eng-team lists
+  cleanup first.
+- `process()` returns what that rule returns today. If it returns `None`, or no
+  such rule matched, and an action fired, it returns the new value `"action"`, so
+  the drain can tag the event.
+- Dedup keys use `dedup_namespace`, then a non-adhoc `workflow` (both as today),
+  then `id`, then the action name, then the rule index. Only `action:` and adhoc
+  rules get a new key, so shared-namespace and same-workflow dedupe is unchanged.
 
 **Alternatives rejected** (see Questionables):
 - Delete the engine in this initiative: it breaks a production outside team.
+- Fire every matching rule: it changes behavior for packs that rely on
+  first-match order (Q13).
 - Hold the pack migration until outside teams have moved: nothing about our
   packs depends on them.
 - Keep `await` gates in shipped packs.
@@ -348,9 +349,13 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - Round trips chain back the same way (engineer → pm in `prd-*`).
   - The director's former delivery step folds into the last worker.
 - **Q7:** Make `--workflow` optional? #852 had marked it not needed.
-  Recommendation: yes.
-  **Decision (2026-10-19, Claude):** yes. For shipped teams a required `-w` is
-  ceremony. `-w adhoc` and `-w <pack workflow>` keep working.
+  Recommendation: only for packs with no `workflows/`.
+  **Decision (2026-11-02, Claude, after re-review):** optional only when the
+  installed package has no `workflows/`. For those teams a required `-w` is
+  ceremony. In a pack with workflows, a director that omits `-w` would otherwise
+  skip routing and any `await` gate without an error, so the error stays there.
+  The same condition applies to the builtin `adhoc` menu entry and the
+  `prompts/base.md` launch text.
 - **Q8:** Who may approve in the shipped packs? Options: (a) platform-enforced /
   (b) model-enforced / (c) keep an operator gate. Recommendation: (a).
   **Decision (2026-10-20, Zach):** platform-enforced.
@@ -391,24 +396,34 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   and deprecated. #1137 runs the port test first, then migration and deletion.
   If the test fails, the engine stays frozen.
 - **Q12:** Where do the new validations fire, given that outside teams may run
-  `bobi agents install` at boot? Recommendation: install errors only for the new
-  keys, warnings for everything else.
-  **Decision (2026-11-02, Claude):** as recommended. A check on an existing key
-  could turn an upgrade into a crash loop. The `github.*` template allow-list is
-  therefore a warning, and it never applies to other event sources, whose fields
-  have no other route into an adhoc run. Shipped packs must produce no warnings,
-  which a test enforces.
+  `bobi agents install` at boot? Recommendation: an install error only where a rule
+  could not have launched before, and a warning otherwise.
+  **Decision (2026-11-02, Claude, tightened after re-review):** as recommended.
+  - The template allow-list applies to adapter sources (`_EVENT_TYPE_SHAPES`,
+    including the qualified `github/github.issues` form), not custom events, whose
+    fields have no other route into an adhoc run.
+  - On a `task:` it is a warning. On a `run_key:`, or on a `$approver` rule, it is
+    an install error, because those are new and an approved run must not carry
+    event text.
+  - Accepted risk: a pack can still template event text into an existing `task:`,
+    with a warning. `SECURITY.md` says so. Shipped packs, setup output and
+    moda-agents packs must produce no auto_dispatch warnings.
+- **Q13:** How should one event drive both cleanup and approval? Options: (a) fire
+  every matching rule; (b) only `action:` rules co-fire. Recommendation: (b).
+  **Decision (2026-11-02, Claude, after re-review):** (b). Option (a) would launch
+  two runs where a pack relies on a specific rule before a catch-all, let a catch-all
+  fire on the bot's own event after an earlier self-authored skip, and fire a later
+  rule on a cooldown hit. No shipped flow needs two launches from one event.
 
 ## Phases
 
 ### Phase 1 — bobi-agent: add the replacements, migrate in-repo packs, deprecate the engine
 
 **Rule keys** (`reactor.py`, `validate.py`, `config.py`, `subagent.py`):
-- [ ] **Multi-rule matching (load-bearing)**, exactly as specified in
-  Solution: first-match `suppress`/`dedup_only` precedence, every other match
-  fires, per-rule `continue`, dedup keys namespaced by id / action / index,
-  and the return values.
-- [ ] The drain tags an action-only fire "action run", not "workflow launched"
+- [ ] **Co-firing `action:` rules (load-bearing)**, exactly as specified in
+  Solution: non-action rules unchanged, the new return value, and the dedup key
+  order.
+- [ ] The drain tags an `"action"` result "action run", not "workflow launched"
   (`drain.py:432`).
 - [ ] `AutoDispatchRule.workflow` becomes optional.
 - [ ] Add `action: <name>`, valid only without `workflow:`, `task:` and
@@ -428,12 +443,16 @@ and the native actions move into `bobi/workflow/cleanup.py`.
 - [ ] Add `run_key: <template>`, rendered from allow-listed fields.
   - `EventReactor._dispatch` sets `input_fields.issue` only when
     `head_branch` fully matches `spec/([1-9][0-9]*)`.
-  - A `run_key` or `task` reference that resolves to empty refuses the launch
-    and publishes `auto_dispatch.failed`. `variables.py:53` resolves a
-    missing key to `""`, which would otherwise fail open.
+  - A rendered `run_key` must fully match `[A-Za-z0-9._-]+`, because it reaches
+    the session name and worktree path.
+  - On a rule with `run_key:`, a `run_key` or `task` reference that resolves to
+    empty refuses the launch and publishes `auto_dispatch.failed`. `variables.py:53`
+    resolves a missing key to `""`, which would otherwise fail open. Rules without
+    `run_key:` keep today's behavior (`tests/test_reactor.py:661-680`).
 - [ ] Add `fresh: true` (wipe the saved transcript) and `once: true` (refuse
   the key if a run with it is active or completed, via the finding-replay
-  ledger check).
+  ledger check). `once` ignores `fresh`, unlike that check today
+  (`subagent.py:1469`), because approval rules set both.
 - [ ] Add the match operand `{prefix: "<s>"}` for string fields.
 - [ ] Add `approvers: {github: [logins]}` on `AgentConfig`, passed into
   `EventReactor.from_config`; an overlay's list replaces the base's.
@@ -441,40 +460,48 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - It matches only when `source == "github"` and the event has no
     `bubble_id`.
   - An empty or missing list matches nothing.
-- [ ] Validate new keys (Q12). **Errors in `bobi agents install`, warnings at
-  startup** (`required=False`, as with `validate.py:194-199`):
-  - an unknown `action:`;
-  - `action:` combined with `workflow:`, `task:` or `role:`;
-  - `period:` without `id:`;
+- [ ] Validate (Q12). **Errors in `bobi agents install`, warnings at startup**
+  (`required=False`, as with `validate.py:194-199`):
+  - an unknown `action:` on a rule with no `workflow:`;
   - `$approver` with no `approvers:`;
-  - `allow_self_authored` on a rule using `$approver`.
-- [ ] Validate existing keys (Q12). **Warnings only, in both places:**
-  - an adhoc rule (`workflow: adhoc` or omitted) with no `role:`;
-  - on `github.*` rules only, `task:` or `run_key:` templates referencing
-    anything outside the allow-list: `number`, `pr_number`, `issue`, `repo`,
-    `url`, `review_id`, `comment_id`, `thread_ts`, `channel`. `sender` is allowed
-    only on `$approver` rules. Never `title`, `head_branch`, `*_body` or `text`.
+  - `allow_self_authored` on a rule using `$approver`;
+  - an allow-list violation in an adapter-source `run_key:`, or in the `task:` or
+    `run_key:` of a `$approver` rule.
+- [ ] Validate (Q12). **Warnings only, in both places:**
+  - a launching rule (`workflow: adhoc` or omitted, and no `action:`, `suppress`
+    or `dedup_only`) with no `role:`;
+  - `action:` combined with `workflow:`, `task:` or `role:`: the `action:` is
+    ignored and the rule behaves as today;
+  - `period:` without `id:`: the `period:` is ignored;
+  - an allow-list violation in an adapter-source `task:`.
+- [ ] The allow-list: `number`, `pr_number`, `issue`, `repo`, `url`, `review_id`,
+  `comment_id`, `thread_ts`, `channel`. `sender` is allowed only on `$approver`
+  rules. Never `title`, `head_branch`, `*_body` or `text`.
 
 **Native actions** (`cleanup.py`):
 - [ ] Move the registry, `_remote_matches_slug`, `_resolve_repo_root` and
   `_cleanup_worktree_action` into `cleanup.py`. The orchestrator imports them
-  from there.
+  from there, and `native_action_required_inputs` stays importable from it
+  (`subagent.py:880`).
 - [ ] **Bug fix, failing test first:** a merged **fork** PR whose `head_branch`
   equals a local bot branch deletes that worktree and branch.
   - `pr_merge_state` returns `head.repo.full_name`.
-  - Cleanup skips unless it equals `repo`. A null `head.repo` (a deleted
-    fork) also skips.
+  - Cleanup skips unless it equals `repo`, compared case-insensitively. A null
+    `head.repo` (a deleted fork) also skips.
+  - A skip still returns `merged_live`, because a bespoke workflow can route on it.
 - [ ] Refuse a `head_branch` that starts with `-` or contains `..`, and pass
   `--` before the branch argument in `git branch -D`.
 
 **CLI and prompts:**
-- [ ] `-w` becomes optional and defaults to `adhoc` (`cli.py:4001`, 4206).
-- [ ] `prompts/base.md`: launches no longer teach `-w <workflow>` as the default.
-  Keep the "Handoff files" section, because the engine still runs other packs.
+- [ ] `-w` becomes optional and defaults to `adhoc` only when the installed package
+  has no `workflows/` (Q7). Otherwise the error stays (`cli.py:4001`, 4206).
+- [ ] `prompts/base.md`: on the same condition, launches stop teaching
+  `-w <workflow>`. Keep the "Handoff files" section, because the engine still runs
+  other packs.
 - [ ] `prompts/setup.md:134` stops requiring `workflows/adhoc.yaml`.
-- [ ] `doctor._check_workflows`, `workflows list`, the director menu, and
-  `overview._workflow_count` all list the builtin `adhoc`, so a pack with no
-  `workflows/` reads as healthy.
+- [ ] For a pack with no `workflows/`, `doctor._check_workflows`, `workflows list`,
+  the director menu and `overview._workflow_count` list the builtin `adhoc`, so it
+  reads as healthy. A pack with workflows keeps today's output.
 
 **Engine deprecation:**
 - [ ] A pack shipping any `workflows/` file gets one warning, naming the files and
@@ -514,7 +541,7 @@ and the native actions move into `bobi/workflow/cleanup.py`.
     `once: true`, `timeout: 10800` and `Approved by ${{input.sender}}`.
   - **PR closed** → `action: cleanup_worktree` with `pr_author: $self` and
     `allow_self_authored: true`, because the bot merges its own implement
-    PRs. It co-fires with the merge-approval rule.
+    PRs. It is listed first and co-fires with the merge-approval rule.
   - **Approvers:** `approvers: {github: []}` in the pack, empty by default.
 - [ ] The issue-lifecycle skill opens its spec/plan PR on branch
   `spec/<issue-number>`, from a dedicated worktree that the implement run
@@ -555,6 +582,7 @@ and the native actions move into `bobi/workflow/cleanup.py`.
     keys, `approvers:`.
   - `skills/bobi.md`, `README.md`, and `docs/MONITORS.md` (the monitor →
     adhoc + skill example).
+  - `CLAUDE.md`: the `docs/WORKFLOW_ENGINE.md` reference notes the deprecation.
 - [ ] Release notes for N state what is not drop-in for a team using the shipped
   packs:
   - `approvers:` is empty by default, so spec-PR approval launches nothing until
@@ -562,7 +590,6 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   - close any parked gate runs before moving to the new pack version, because
     their workflow file no longer exists there;
   - overlay rules and monitors naming a deleted workflow must change;
-  - an overlay rule shadowed under first-match now fires;
   - an unpinned `from:` picks up the new pack on an older bobi, so pin or upgrade.
 - [ ] `docs/SECURITY.md` 120-125, worded exactly as the Solution's "What the
   framework guarantees":
@@ -574,8 +601,14 @@ and the native actions move into `bobi/workflow/cleanup.py`.
     count (unverified).
   - Deterministic steps belong in rule `action:`s or scripts.
   - `await` gates still exist for teams on the deprecated engine.
+  - The template allow-list only warns on an existing `task:`, so a pack can still
+    put event text into a task.
 - [x] File the follow-up issue for a structured Slack approval signal:
   moda-labs/bobi-agent#1130.
+- [ ] `bobi/brain/stub.py`: add a directive that writes a step's handoff file, so a
+  required handoff can run in a child process on the stub brain. The existing test
+  monkeypatches `_read_handoff` (`integration/test_pr_closed_cleanup.py:187`), which
+  cannot reach one.
 - [ ] Update the tests Phase 1 breaks (Relevant files). The engine tests stay and
   cover the engine with fixture workflows, not pack files.
 
@@ -587,9 +620,9 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   `BOBI_HOME`. There, `bobi agent <name> doctor`'s `workflows` line is ok and
   lists the builtin `adhoc`; the credential checks are out of scope in a
   scratch home.
-- [ ] Mutation — multi-rule: a merged bot spec PR, merged by an approver,
-  fires **both** cleanup and approval, and a `suppress` rule still stops later
-  rules. Mutant: restore first-match `return` → the test fails.
+- [ ] Mutation — co-firing: a merged bot spec PR, merged by an approver, fires
+  **both** cleanup and approval, and a `suppress` rule listed before the action
+  stops it. Mutant: stop evaluation at the action rule → the test fails.
 - [ ] Mutation — action:
   - A closed-PR event on an `action:` rule removes the worktree, launches
     **0** sessions, and publishes `agent/auto_dispatch.action`.
@@ -623,33 +656,49 @@ and the native actions move into `bobi/workflow/cleanup.py`.
   A `spec/abc` branch launches nothing and publishes `auto_dispatch.failed`.
   Mutant: make `$approver` always true, drop the `bubble_id` check, or drop
   `once` → a case fails.
-- [ ] Mutation — multi-rule edge cases:
-  - Two adhoc rules matching one event both launch; their keys are
-    namespaced.
-  - A cooldown hit on rule 1 still lets rule 2 fire.
-  - A first-match `suppress` stops everything.
+- [ ] Mutation — first-match kept:
+  - A specific launch rule followed by a catch-all launches one run.
+  - A self-authored skip on rule 1 does not let rule 2 fire.
+  - A cooldown hit on rule 1 does not let rule 2 fire.
+  - Two `dedup_only` rules sharing a `dedup_namespace` still collapse.
+  - Two adhoc rules with different `id`s get different dedup keys.
 
-  Mutant: namespace by `workflow`, or `return` on cooldown → a case fails.
-- [ ] Mutation — validate: each new-key check is an error in `bobi agents install`
-  and a warning in `validate_config`. Each existing-key check, including a
-  `${{input.title}}` template on a `github.*` rule, is a warning in both. Mutant:
-  delete each check → its test fails.
-- [ ] Mutation — compatibility: a fixture pack with a multi-role workflow using
-  route steps and handoffs, dispatched from a custom event whose `task:` templates
-  non-GitHub fields including `title`, installs with no error on the release N
-  wheel and runs to completion on the stub brain. Its run record keeps `run_id`,
-  `run_key`, `status`, `started_at` and `workflow_name`. Mutant: apply the template
-  allow-list to all sources, or make it an install error → the test fails.
+  Mutant: continue past a non-action match, or drop `dedup_namespace` from the key
+  order → a case fails.
+- [ ] Mutation — run key: a `run_key` rendering to `../x`, or a `run_key:` rule whose
+  template field is missing, launches nothing and publishes `auto_dispatch.failed`.
+  A rule without `run_key:` and a missing `task:` field still launches. Mutant: drop
+  the character check, or refuse empties on every rule → a case fails.
+- [ ] Mutation — `once` with `fresh`: a redelivered approval, after the first
+  implement run completed, launches nothing. Mutant: honor `fresh` in `once` → the
+  test fails.
+- [ ] Mutation — validate: each listed check has its stated severity in
+  `bobi agents install` and `validate_config`. That covers `${{input.title}}` on
+  `task:` for `github.issues` and `github/github.issues` (warning), on a `$approver`
+  rule (error), and raw `${{input.text}}` on a Slack rule (warning). A custom-event
+  `${{input.title}}` produces no such warning. Mutant: delete each check, or apply
+  the allow-list to custom events → a test fails.
+- [ ] Mutation — compatibility: a fixture pack with a multi-role workflow using route
+  steps and required handoffs, dispatched from a custom event whose `task:` templates
+  `title` and one optional missing field, plus a specific rule before a catch-all,
+  installs with no error on the release N wheel. It launches one run, which completes
+  on the stub brain, and the `task:` renders with the field empty. Its run record keeps
+  `run_id`, `run_key`, `status`, `started_at` and `workflow_name`. Mutant: make any
+  check on its keys an install error, or refuse the empty field → the test fails.
 - [ ] Mutation — deprecation: that fixture gets the warning from install, startup
   and `doctor`, and a shipped pack gets none. Mutant: make the warning raise, or
   delete it → the test fails.
-- [ ] Plain — shipped packs: `eng-team` and `personal-assistant` produce no
-  validation warnings.
+- [ ] Plain — no auto_dispatch warnings, scoped to those checks, from `eng-team`,
+  `personal-assistant` and `bobi setup` output.
 - [ ] Plain — period: two sequential `marketing.due` events in one ISO week,
   the second arriving **after the first run completed**, launch one run. Two
   periodic rules in the same week do not collide.
-- [ ] Plain — `-w`: `subagents launch --role engineer --task t` (no `-w`)
-  launches adhoc; `-w adhoc` still works.
+- [ ] Mutation — `-w`:
+  - With no `workflows/`, `subagents launch --role engineer --task t` launches adhoc,
+    and `-w adhoc` still works.
+  - With `workflows/`, omitting `-w` errors, and the menu has no added `adhoc` entry.
+
+  Mutant: drop the package check → a case fails.
 - [ ] e2e `[stub]+[claude]`, **claude leg required**:
   - Use the `dual_brain_env` shape (`tests/integration/conftest.py:426`) with
     a minimal pack: eng-team's issue-assigned rule plus the issue-lifecycle
@@ -714,9 +763,6 @@ alongside Phase 1.
     task says to run the `moda:build` skill on the plan path. "continue plan"
     is the same, with the plan's markers as state.
   - Set `approvers:` (Zach).
-- [ ] Check every overlay for a rule shadowed under first-match that would
-  start firing under multi-rule matching (overlay rules append after base
-  rules, `compose.py:681`).
 - [ ] Delete `workflows/` and the `-w` monitor entries in `gtm-team`,
   `market-research` and `support-manager`, and add a README note (Q4).
 - [ ] Bump every changed pack's version.
@@ -726,6 +772,9 @@ alongside Phase 1.
 - [ ] Close the 16 parked approval runs with the console Close action, reason
   "shipped packs moved off gates — plans/2026-10-19-retire-yaml-workflows.md".
 - [ ] Deploy with `deploy-agent-teams -f rebuild=true`.
+- [ ] Add a dated amendment to `plans/2026-07-26-checklist-execution-model.md`: its
+  Phase 4 trial will not run (Q5), and engine deletion moved to #1137. Comment on
+  Linear MOD-284.
 
 **Validation gate**
 
@@ -733,7 +782,7 @@ alongside Phase 1.
   `git grep -nE 'subagents launch.*(-w|--workflow) ' agents/` names only
   `adhoc`.
 - [ ] Every moda-agents pack installs into a scratch `BOBI_HOME` on release N
-  (the image build does this).
+  (the image build does this), with no auto_dispatch warnings.
 - [ ] `scripts/fleet_run_audit.py --since <roll date>`: no box has
   `package/workflows/`, and there are 0 `waiting` runs.
 - [ ] **Stop criterion, day 7 after the roll.** Zach, or the landing session,
@@ -754,10 +803,10 @@ alongside Phase 1.
 - **New behavior, plain assertions:** the rule `period:`, `timeout:` and
   `run_key:`; `-w` defaulting to adhoc; setup emitting skills.
 - **Negative, security and compatibility claims, mutation proof:**
-  - multi-rule matching with `suppress` precedence;
+  - co-firing `action:` rules, with first-match kept for every other rule;
   - the approver-match cases, injected approval, single-role chaining;
   - branch-argument refusal;
-  - validation severity, off-thread action;
+  - validation severity, run-key rendering, the `-w` condition, off-thread action;
   - a bespoke workflow pack still installing and running, and its deprecation
     warning.
 
