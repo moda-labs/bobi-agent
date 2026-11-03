@@ -9,6 +9,8 @@ and cursor; only the sleep-cycle subprocess is captured.
 import asyncio
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -286,7 +288,7 @@ class TestTwoAgentsOneProjectsTree:
         assert [p.name for p in paths.state_path(alfred.root).iterdir()
                 if p.name.startswith("owned_transcripts")] == []
 
-        # An index in progress holds a write transaction; neither may wait on it.
+        # An index that has not spilled to disk yet must not hold either of these up.
         writer = history.sqlite3.connect(str(history._db_path()), timeout=0)
         writer.execute("INSERT INTO conversations (session_id) VALUES ('in-progress')")
         try:
@@ -296,6 +298,52 @@ class TestTwoAgentsOneProjectsTree:
             writer.rollback()
             writer.close()
         assert history._read_owned() == {"old", "new"}
+
+    def test_seed_recovers_a_database_left_by_a_killed_indexer(self, agents):
+        alfred, _, _ = agents
+        alfred.bind()
+        db = history._db_path()
+        conn = history.sqlite3.connect(str(db))
+        history._init_db(conn)
+        conn.execute("INSERT INTO conversations (session_id, cwd) VALUES ('old', ?)",
+                     (str(alfred.root),))
+        conn.commit()
+        conn.close()
+        # Enough uncommitted data to spill to disk, so the kill leaves a hot journal.
+        writer = subprocess.Popen([sys.executable, "-c", f"""
+import sqlite3, time
+c = sqlite3.connect({str(db)!r})
+for i in range(400):
+    c.execute("INSERT INTO messages (session_id, type, content) VALUES ('old', 'user', ?)", ("x" * 4000,))
+print("held", flush=True)
+time.sleep(60)
+"""], stdout=subprocess.PIPE, text=True)
+        assert writer.stdout.readline().strip() == "held"
+        writer.kill()
+        writer.wait()
+        assert Path(f"{db}-journal").stat().st_size > 0
+
+        assert history._owned_sessions() == {"old"}
+        history.record_owned_session("new")
+        assert history._read_owned() == {"old", "new"}
+
+    def test_seed_treats_only_a_missing_table_as_nothing_to_claim(self, agents):
+        """The first claim saves the seed, so a misread here would last forever."""
+        alfred, _, _ = agents
+        alfred.bind()
+        history._db_path().touch()
+        assert history._owned_sessions() == set()
+
+        conn = history.sqlite3.connect(str(history._db_path()))
+        history._init_db(conn)
+        conn.execute("BEGIN EXCLUSIVE")
+        try:
+            with pytest.raises(history.sqlite3.OperationalError, match="locked"):
+                history.record_owned_session("new")
+        finally:
+            conn.rollback()
+            conn.close()
+        assert history._read_owned() is None
 
     def test_index_totals_exclude_other_agents_rows(self, agents):
         alfred, _, projects = agents

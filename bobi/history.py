@@ -129,7 +129,9 @@ def _seed_owned_sessions() -> set[str]:
                      if _transcript_cwd(f) == root)
 
     if _db_path().exists():
-        conn = sqlite3.connect(f"{_db_path().as_uri()}?mode=ro", uri=True)
+        # Not mode=ro: a killed indexer can leave a journal only a writable
+        # connection can roll back, and nothing here could then ever succeed.
+        conn = sqlite3.connect(str(_db_path()))
         try:
             rows = conn.execute("SELECT session_id, cwd FROM conversations").fetchall()
         except sqlite3.OperationalError as e:
