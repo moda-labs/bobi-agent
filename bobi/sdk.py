@@ -639,7 +639,7 @@ class SessionRegistry:
                 continue
             try:
                 entry = SessionEntry.from_dict(json.loads(state.read_text()))
-            except (json.JSONDecodeError, TypeError):
+            except (OSError, ValueError, TypeError, AttributeError):
                 continue
             result.append(self._reap_if_dead(entry) if reap_dead else entry)
         return result

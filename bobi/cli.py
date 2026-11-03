@@ -2847,15 +2847,16 @@ def ingest_token_revoke(token_id):
 @transcript.command("index")
 @click.option("--project", default=None, help="Filter to project (substring match on path)")
 def transcript_index(project):
-    """Index conversation JSONL files into searchable SQLite.
+    """Index this agent's conversation JSONL files into searchable SQLite.
 
     Scans the Claude Code transcript roots — $CLAUDE_CONFIG_DIR/projects when
-    set, then ~/.claude/projects — for */*.jsonl and indexes messages into a
-    local SQLite database for fast searching.
+    set, then ~/.claude/projects — for */*.jsonl and indexes the messages of
+    sessions this agent ran into a local SQLite database for fast searching.
+    Other sessions under those roots are skipped.
 
     Usage:
-        bobi agent eng transcript index                # index all projects
-        bobi agent eng transcript index --project foo  # index only projects matching "foo"
+        bobi agent eng transcript index                # index this agent's sessions
+        bobi agent eng transcript index --project foo  # only those in projects matching "foo"
     """
     from .history import index as do_index
     click.echo("Indexing conversations...")
