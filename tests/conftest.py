@@ -64,6 +64,29 @@ def _isolate_environ():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_user_home(request, monkeypatch, tmp_path_factory):
+    """Unit tests never write to the developer's real home (conftest invariant).
+
+    ``render_team_instructions`` writes ``~/AGENTS.md`` and each brain's global
+    instructions file, and any test that reaches a process bootstrap calls it.
+    Unredirected, a unit run put Bobi's communication style into every Claude
+    Code and Codex session on the machine, and replaced a symlinked target with
+    a regular file (#1143).
+
+    Unsetting the brain config dirs sends them to their defaults under the
+    temporary ``HOME``, so a test that sets only ``HOME`` still sees one home.
+    Subprocesses inherit all three. Integration and e2e tests may drive a real
+    brain, which needs the developer's credentials, and opt out.
+    """
+    p = str(request.fspath)
+    if "/integration/" in p or "/e2e/" in p:
+        return
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("user-home")))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_outbound_operator_alert(monkeypatch):
     """No test may post to the operator alert channel (conftest invariant).
 
