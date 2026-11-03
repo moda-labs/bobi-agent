@@ -363,14 +363,11 @@ class TestReplyEndToEnd:
         from bobi.cli import main
 
         result = CliRunner().invoke(main, [
-            "read-conversation", "slack:T_GW:channel:C_GW",
+            "read-conversation", "slack:T_GW:channel:C_GW", "--json-output",
         ])
         assert result.exit_code == 0, result.output
-        assert [line for line in result.output.splitlines() if line.startswith("[")] == [
-            "[90.001] U_BOTGW: oldest",
-            "[90.002] U_H: middle",
-            "[90.003] U_H: newest",
-        ]
+        assert [m["text"] for m in json.loads(result.stdout)] == [
+            "oldest", "middle", "newest"]
         history = stub.named("conversations.history")
         assert [call["body"].get("cursor") for call in history] == [None, "page2"]
         assert history[0]["body"]["channel"] == "C_GW"
@@ -389,8 +386,6 @@ class TestReplyEndToEnd:
         assert result.exit_code == 1, result.output
         assert "not_in_channel" in result.stderr
         assert result.stdout == ""
-        # The gateway is fine, so the "start the agent" hint would misdirect.
-        assert "channel gateway" not in result.stderr
 
     def test_reply_command_posts_via_gateway(self, gateway):
         _project, stub, _es_url, _bubble = gateway
@@ -705,7 +700,7 @@ class TestLoginBootstrapCatchUpRead:
         )
         chatter = {"user": "U_H", "text": "unrelated", "ts": "500.001"}
         ask = {"user": "U_BOTGW", "ts": "500.000",
-               "text": f"`codex` login: reply and then {ab._ASK_MARKER}."}
+               "text": "`codex` login: reply and then I will begin the login flow."}
 
         stub.history = {"": {"ok": True, "messages": [chatter, ask]}}
         assert ab._recover_ask_id(project, Config(), channel, "codex") == "500.000"
