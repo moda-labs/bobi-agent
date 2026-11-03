@@ -226,7 +226,8 @@ reads a conversation's messages; both share the send path's auth and tenancy
 boundary. A history read the platform refuses answers 502 with the platform's error,
 never an empty list (Slack refuses with HTTP 200 and `ok:false`, so the adapter checks).
 A Slack ref with no thread reads the channel's history, following Slack's cursor past
-its 200-per-request ceiling up to the endpoint's cap of 1000 messages.
+its 200-per-request ceiling up to the endpoint's cap of 1000 messages. Discord reads
+stop at Discord's 100-per-request ceiling.
 Channel capabilities (edit, typing, files, length budget) are declared per
 adapter in `event-server/core/src/channels.ts` (`ChannelDescriptor`); degradation is the
 gateway's job, not the caller's. On a channel that cannot edit, an `update` or
