@@ -231,6 +231,9 @@ class TestTwoAgentsOneProjectsTree:
         assert "eng note" not in task
         assert "stranger note" not in task
         assert history.session_messages("eng-manager") == []
+        # The first claim saves the seed, bad registry files included.
+        history.record_owned_session("next")
+        assert "next" in history._read_owned()
 
     def test_new_agent_in_a_shared_repo_claims_only_its_own_session(self, agents):
         """Working-directory claims preserve an old database; a new agent has none."""
