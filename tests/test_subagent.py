@@ -1405,7 +1405,7 @@ class TestRunAgentEntryRootBinding:
         assert get_process_brain_model() == ""
 
     @pytest.mark.timeout(120)
-    def test_suite_leaves_the_developers_home_untouched(self, tmp_path):
+    def test_rendering_leaves_the_developers_home_untouched(self, tmp_path):
         """The two tests above render instructions for each brain, through the
         real child entry. Run them as a developer would, with HOME and both
         brain config dirs pointing somewhere watchable: nothing may land there
@@ -1414,11 +1414,12 @@ class TestRunAgentEntryRootBinding:
         """
         developer_home = tmp_path / "developer"
         developer_home.mkdir()
+        basetemp = tmp_path / "pytest"
         cls = "tests/test_subagent.py::TestRunAgentEntryRootBinding"
         result = subprocess.run(
             [
                 sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                f"--basetemp={tmp_path / 'pytest'}",
+                f"--basetemp={basetemp}",
                 f"{cls}::test_sets_process_brain_from_passed_root",
                 f"{cls}::test_clears_stale_process_brain_when_passed_root_has_default_brain",
             ],
@@ -1434,6 +1435,9 @@ class TestRunAgentEntryRootBinding:
 
         assert result.returncode == 0, result.stdout + result.stderr
         assert list(developer_home.rglob("*")) == []
+        # Rendering still happened, in the per-test homes. Without this, moving
+        # the render out of the child entry would leave this test green.
+        assert len(list(basetemp.glob("user-home[0-9]*/AGENTS.md"))) == 2
 
     @patch("bobi.subagent.run_persistent_agent")
     def test_unreadable_runtime_env_does_not_kill_the_child(self, mock_spawn, tmp_path,
