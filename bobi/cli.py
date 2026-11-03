@@ -1656,9 +1656,14 @@ def reply(conversation, text, edit_ref, file_path, title):
 def read_conversation(conversation, limit, as_json):
     """Read the messages of a conversation (e.g. the Slack thread it anchors).
 
+    A ref with no thread reads the channel's history. Exits 1 if the platform
+    refuses the read, e.g. the bot is not in the channel, so an empty result
+    means there are no messages.
+
     Usage:
         bobi read-conversation slack:T0952RZRZ0X:channel:C123:thread:171.42
         bobi read-conversation slack:T0952RZRZ0X:dm:D456:thread:171.42 --json-output
+        bobi read-conversation slack:T0952RZRZ0X:channel:C123
     """
     _parse_conversation_or_exit(conversation)
     _read_conversation(conversation, limit, as_json)

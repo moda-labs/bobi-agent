@@ -3251,6 +3251,23 @@ describe("handleChannelsHistory", () => {
 		expect(body.messages.map((m) => m.ts)).toEqual(["1.0", "2.0"]);
 	});
 
+	// #1140: Slack refuses with HTTP 200 and {ok:false}, so "no access" must not
+	// read as "no messages" on either ref shape.
+	it.each([
+		"slack:T1:channel:C9",
+		"slack:T1:channel:C9:thread:12.34",
+	])("a read Slack refuses is an error: %s", async (ref) => {
+		const store = createMockStorage();
+		stubReplies("T1", [{ ok: false, error: "not_in_channel" }]);
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsHistory(store, ref, 100, "bubA");
+		expect(result.status).toBe(502);
+		const body = result.body as Record<string, unknown>;
+		expect(body.ok).toBe(false);
+		expect(body.error).toContain("not_in_channel");
+		expect(body).not.toHaveProperty("messages");
+	});
+
 	it("rejects missing/invalid conversation", async () => {
 		const store = createMockStorage();
 		let result = await handleChannelsHistory(store, "", 100, "bubA");

@@ -1063,7 +1063,9 @@ def _recover_ask_id(project_path: Path, cfg: Config, channel: LoginChannel,
     kind's newer ask and post this login's device URL into its thread.
 
     Returns None when the transport has no usable history - which is NOT the
-    same answer as "", "I looked and there is no ask".
+    same answer as "", "I looked and there is no ask". A read the platform
+    refuses is neither: GatewayError propagates and fails the run with the
+    marker intact, as a failed post into a stored thread does.
     """
     if _skip_history(channel, "Ask-id recovery"):
         return None

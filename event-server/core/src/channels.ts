@@ -22,6 +22,7 @@ import {
 	uploadSlackFiles,
 	fetchSlackThreadReplies,
 	callSlackApi,
+	assertSlackOk,
 	SlackApiError,
 	type SlackMessageOptions,
 } from "@chat-adapter/slack/api";
@@ -440,6 +441,10 @@ const slackAdapter: ChannelAdapter = {
 				channel: conv.chatId,
 				limit: Math.min(limit, 200),
 			}, { apiUrl: slackApiUrl(), token });
+			// callSlackApi throws only on a non-2xx status, and Slack refuses a
+			// read (not_in_channel, channel_not_found) as HTTP 200 with
+			// {ok: false, error}. Unchecked, a refusal reads as an empty channel.
+			assertSlackOk("conversations.history", raw);
 			const rows = (raw.messages as Array<Record<string, unknown>> | undefined) ?? [];
 			// conversations.history returns newest-first; deliver oldest-first
 			// to match the thread-replies ordering.

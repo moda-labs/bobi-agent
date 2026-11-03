@@ -223,7 +223,9 @@ rejects is resent once as `markdown_text`. Conversion lives in
 spaces, so `bobi read-conversation` shows such a message on one line.
 `POST /channels/typing` sets/clears the thinking indicator and `GET /channels/history`
 reads a conversation's messages; both share the send path's auth and tenancy
-boundary. Channel capabilities (edit, typing, files, length budget) are declared per
+boundary. A history read the platform refuses answers 502 with the platform's error,
+never an empty list (Slack refuses with HTTP 200 and `ok:false`, so the adapter checks).
+Channel capabilities (edit, typing, files, length budget) are declared per
 adapter in `event-server/core/src/channels.ts` (`ChannelDescriptor`); degradation is the
 gateway's job, not the caller's. On a channel that cannot edit, an `update` or
 `final` becomes a follow-up post — and when that send also carries `files`, the
