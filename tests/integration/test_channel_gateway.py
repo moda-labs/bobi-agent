@@ -389,6 +389,8 @@ class TestReplyEndToEnd:
         assert result.exit_code == 1, result.output
         assert "not_in_channel" in result.stderr
         assert result.stdout == ""
+        # The gateway is fine, so the "start the agent" hint would misdirect.
+        assert "channel gateway" not in result.stderr
 
     def test_reply_command_posts_via_gateway(self, gateway):
         _project, stub, _es_url, _bubble = gateway

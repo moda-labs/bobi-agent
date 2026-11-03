@@ -26,6 +26,10 @@ class GatewayError(RuntimeError):
     """A gateway request failed - carries a human-readable reason."""
 
 
+class ChannelPlatformError(GatewayError):
+    """The gateway is fine: the chat platform refused or failed the call."""
+
+
 def _request(project_path: Path | None, method: str, path: str,
              payload: dict | None = None, *, timeout: float = 30.0) -> dict:
     """Send a bubble-signed request to the gateway and return the JSON body.
@@ -54,7 +58,12 @@ def _request(project_path: Path | None, method: str, path: str,
             f"HTTP {exc.status_code}" if exc.status_code is not None
             else "invalid response"
         )
-        raise GatewayError(
+        # The gateway reports a platform failure as a JSON 502. A 502 with no
+        # JSON error came from a proxy in front of it, so it says nothing about
+        # the platform.
+        from_platform = exc.status_code == 502 and exc.detail
+        error_type = ChannelPlatformError if from_platform else GatewayError
+        raise error_type(
             f"Gateway {method} {path.split('?')[0]} failed: {detail}"
         ) from exc
 

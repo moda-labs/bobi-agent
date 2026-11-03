@@ -1520,18 +1520,21 @@ def _parse_conversation_or_exit(conversation):
 
 def _gateway_call(fn, *args, **kwargs):
     """Run a gateway client call, exiting with its message on failure."""
-    from .events.gateway import GatewayError
+    from .events.gateway import ChannelPlatformError, GatewayError
 
     try:
         return fn(*args, **kwargs)
     except GatewayError as e:
         click.echo(str(e), err=True)
-        click.echo(
-            "(replies go through the event server's channel gateway; make "
-            "sure the agent is started so the server is running and its "
-            "chat workspace is registered)",
-            err=True,
-        )
+        # A platform refusal already names its cause (not_in_channel), and
+        # restarting a healthy server would not fix it.
+        if not isinstance(e, ChannelPlatformError):
+            click.echo(
+                "(replies go through the event server's channel gateway; make "
+                "sure the agent is started so the server is running and its "
+                "chat workspace is registered)",
+                err=True,
+            )
         sys.exit(1)
 
 
@@ -1651,7 +1654,8 @@ def reply(conversation, text, edit_ref, file_path, title):
 
 @main.command("read-conversation")
 @click.argument("conversation")
-@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
+@click.option("--limit", "-n", default=100,
+              help="Max messages to fetch (default: 100, at most 1000)")
 @click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
 def read_conversation(conversation, limit, as_json):
     """Read the messages of a conversation (e.g. the Slack thread it anchors).
