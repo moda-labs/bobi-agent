@@ -119,17 +119,27 @@ def _seed_owned_sessions() -> set[str]:
             owned.add(entry.session_id)
         if entry.cwd and isinstance(entry.cwd, str):
             # Claude records the resolved path; the registry may hold a symlink.
-            cwds.update((entry.cwd, str(Path(entry.cwd).resolve())))
+            try:
+                cwds.update((entry.cwd, str(Path(entry.cwd).resolve())))
+            except (OSError, RuntimeError, ValueError):
+                continue
 
     for projects in _projects_dirs():
         owned.update(f.stem for f in (projects / project_slug(root)).glob("*.jsonl")
                      if _transcript_cwd(f) == root)
 
     if _db_path().exists():
-        conn = sqlite3.connect(str(_db_path()))
-        _init_db(conn)
-        rows = conn.execute("SELECT session_id, cwd FROM conversations").fetchall()
-        conn.close()
+        conn = sqlite3.connect(f"{_db_path().as_uri()}?mode=ro", uri=True)
+        try:
+            rows = conn.execute("SELECT session_id, cwd FROM conversations").fetchall()
+        except sqlite3.OperationalError as e:
+            # Only an empty database means "nothing to claim". A locked one must
+            # raise: the first claim saves this result for good.
+            if "no such table" not in str(e):
+                raise
+            rows = []
+        finally:
+            conn.close()
         owned.update(sid for sid, cwd in rows if cwd in cwds)
     return owned
 

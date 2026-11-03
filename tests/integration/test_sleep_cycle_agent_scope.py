@@ -219,8 +219,12 @@ class TestTwoAgentsOneProjectsTree:
         (registry / "mgr.id").write_text("rotated\n")
         # A bad file must cost only itself, not every later ownership read.
         (registry / "bad.id").write_bytes(b"\xff\xfe")
+        loop = alfred.root.parent / "loop"
+        loop.symlink_to(loop)
         for name, content in (("bad-shape", b"[]"), ("bad-bytes", b"\xff\xfe"),
-                              ("bad-types", b'{"name": "x", "session_id": 5, "cwd": []}')):
+                              ("bad-types", b'{"name": "x", "session_id": 5, "cwd": []}'),
+                              ("bad-loop", json.dumps({"name": "x", "cwd": str(loop)}).encode()),
+                              ("bad-nul", json.dumps({"name": "x", "cwd": "a\0b"}).encode())):
             (registry / name).mkdir()
             (registry / name / "state.json").write_bytes(content)
 
@@ -274,13 +278,23 @@ class TestTwoAgentsOneProjectsTree:
         _transcript(projects, str(alfred.root), "old", "old note")
         alfred.bind()
         history.index()
+        db_before = history._db_path().stat().st_mtime_ns
         history.search("note")
         history.conversations()
         history.messages_since(0)
+        assert history._db_path().stat().st_mtime_ns == db_before
         assert [p.name for p in paths.state_path(alfred.root).iterdir()
                 if p.name.startswith("owned_transcripts")] == []
 
-        history.record_owned_session("new")
+        # An index in progress holds a write transaction; neither may wait on it.
+        writer = history.sqlite3.connect(str(history._db_path()), timeout=0)
+        writer.execute("INSERT INTO conversations (session_id) VALUES ('in-progress')")
+        try:
+            assert history._owned_sessions() == {"old"}
+            history.record_owned_session("new")
+        finally:
+            writer.rollback()
+            writer.close()
         assert history._read_owned() == {"old", "new"}
 
     def test_index_totals_exclude_other_agents_rows(self, agents):
@@ -321,7 +335,9 @@ class TestRealClaudeSessionIsOwned:
                 await session.query("Say ok.")
                 async for msg in session.receive_response():
                     if isinstance(msg, AssistantText):
-                        owned_before_result.update(history._owned_sessions())
+                        # The saved list only: reads fall back to the seed, which
+                        # finds this transcript without any claim having happened.
+                        owned_before_result.update(history._read_owned() or ())
                     elif isinstance(msg, TurnResult):
                         return msg.session_id
             finally:
