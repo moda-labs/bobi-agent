@@ -40,6 +40,10 @@ def projects_dir(tmp_path, monkeypatch):
     db_path = tmp_path / "history.db"
     monkeypatch.setattr(history, "_projects_dirs", lambda: [pdir])
     monkeypatch.setattr(history, "_db_path", lambda: db_path)
+    # These tests are about indexing, not ownership (integration/
+    # test_sleep_cycle_agent_scope.py): the agent owns every transcript here.
+    monkeypatch.setattr(history, "_owned_sessions",
+                        lambda: {f.stem for f in pdir.rglob("*.jsonl")})
     return pdir
 
 
@@ -1040,6 +1044,11 @@ class TestIndexHonorsClaudeConfigDir:
     the sleep-cycle delta. These drive the real ``_projects_dirs`` wiring
     rather than the isolation seam the other tests patch.
     """
+
+    @pytest.fixture(autouse=True)
+    def _agent_owns_every_transcript(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(history, "_owned_sessions",
+                            lambda: {f.stem for f in tmp_path.rglob("*.jsonl")})
 
     def _seed(self, base: Path, session_id: str, text: str) -> Path:
         project = base / "projects" / "proj"

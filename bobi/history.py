@@ -13,6 +13,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from bobi.fsutil import atomic_write_text, file_lock
 from bobi.timeutil import now_iso
 
 
@@ -32,6 +33,86 @@ def _projects_dirs() -> list[Path]:
 def _db_path() -> Path:
     from bobi import paths
     return paths.state_dir() / "history.db"
+
+
+def _owned_path() -> Path:
+    return _db_path().with_name("owned_transcripts.txt")
+
+
+def _render_owned(session_ids: set[str]) -> str:
+    return "".join(f"{session_id}\n" for session_id in sorted(session_ids))
+
+
+def _owned_sessions() -> set[str]:
+    """The Claude session ids this agent ran itself (#1142).
+
+    The projects tree belongs to the OS user, not the agent, so agents sharing a
+    user share it. A path cannot separate them either: a worker runs in the repo
+    it works on, which another agent or a person may also be working in. Only
+    the id the brain reports to the session that launched it is exact.
+    """
+    path = _owned_path()
+    try:
+        return set(path.read_text().split())
+    except FileNotFoundError:
+        pass
+    with file_lock(path):
+        if path.exists():
+            return set(path.read_text().split())
+        owned = _seed_owned_sessions()
+        atomic_write_text(path, _render_owned(owned))
+    return owned
+
+
+def _seed_owned_sessions() -> set[str]:
+    """Best-effort ownership for sessions that predate the record.
+
+    Runs once, on the first read after upgrade. Past session ids were overwritten
+    on rotation, so this also claims sessions by working directory: the runtime
+    root and every cwd the session registry remembers. That is coarser than the
+    record: a cwd another agent also used is claimed too. It only ever applies
+    to pre-upgrade sessions.
+    """
+    from bobi.usage_backfill import _project_slug
+
+    state = _db_path().parent
+    owned: set[str] = set()
+    cwds = {str(state.parent)}
+    for id_file in state.glob("sessions/*.id"):
+        owned.update(id_file.read_text().split())
+    for entry_file in state.glob("sessions/*/state.json"):
+        try:
+            entry = json.loads(entry_file.read_text())
+        except (OSError, ValueError):
+            continue
+        if entry.get("session_id"):
+            owned.add(entry["session_id"])
+        if entry.get("cwd"):
+            cwds.add(entry["cwd"])
+
+    slugs = {_project_slug(cwd) for cwd in cwds}
+    for projects in _projects_dirs():
+        for slug in slugs:
+            owned.update(f.stem for f in (projects / slug).glob("*.jsonl"))
+    # Rows can outlive the transcript files Claude Code expires.
+    if _db_path().exists():
+        conn = sqlite3.connect(str(_db_path()))
+        _init_db(conn)
+        rows = conn.execute("SELECT session_id, project FROM conversations").fetchall()
+        conn.close()
+        owned.update(sid for sid, project in rows if _project_slug(project) in slugs)
+    return owned
+
+
+def record_owned_session(session_id: str) -> None:
+    """Claim *session_id* for this agent, so its transcript gets indexed."""
+    if not session_id or session_id in _owned_sessions():
+        return
+    path = _owned_path()
+    with file_lock(path):
+        owned = set(path.read_text().split())
+        if session_id not in owned:
+            atomic_write_text(path, _render_owned(owned | {session_id}))
 
 
 def _init_db(conn: sqlite3.Connection):
@@ -326,8 +407,15 @@ def _index_file(conn: sqlite3.Connection, file_path: Path) -> int:
 
 
 def index(project_filter: str | None = None) -> dict:
-    """Index all conversation JSONL files. Returns stats."""
+    """Index this agent's conversation JSONL files. Returns stats.
+
+    A file nobody has claimed yet is left unread, not indexed and filtered
+    later. The sleep cycle's cursor is a row id, and a session's first lines
+    reach disk before its id reaches bobi: indexing them early would give them
+    ids below a cursor that has already moved on, and they would never be read.
+    """
     _db_path().parent.mkdir(parents=True, exist_ok=True)
+    owned = _owned_sessions()
     conn = sqlite3.connect(str(_db_path()))
     _init_db(conn)
 
@@ -350,7 +438,8 @@ def index(project_filter: str | None = None) -> dict:
             if project_filter and project_filter not in project_dir.name:
                 continue
             for f in project_dir.glob("*.jsonl"):
-                files.append(f)
+                if f.stem in owned:
+                    files.append(f)
 
     total_new = 0
     files_processed = 0
@@ -412,8 +501,9 @@ def search(query: str, limit: int = 20, project: str | None = None) -> list[dict
         JOIN messages m ON m.id = messages_fts.msg_id
         LEFT JOIN conversations c ON c.session_id = m.session_id
         WHERE messages_fts MATCH ?
+          AND m.session_id IN (SELECT value FROM json_each(?))
     """
-    params: list = [fts_query]
+    params: list = [fts_query, json.dumps(sorted(_owned_sessions()))]
 
     if project:
         sql += " AND c.project LIKE ?"
@@ -436,10 +526,10 @@ def conversations(limit: int = 20, project: str | None = None) -> list[dict]:
     conn = sqlite3.connect(str(_db_path()))
     conn.row_factory = sqlite3.Row
 
-    sql = "SELECT * FROM conversations"
-    params: list = []
+    sql = "SELECT * FROM conversations WHERE session_id IN (SELECT value FROM json_each(?))"
+    params: list = [json.dumps(sorted(_owned_sessions()))]
     if project:
-        sql += " WHERE project LIKE ?"
+        sql += " AND project LIKE ?"
         params.append(f"%{project}%")
     sql += " ORDER BY started_at DESC LIMIT ?"
     params.append(limit)
@@ -469,8 +559,11 @@ def session_messages(session_id: str) -> list[dict]:
 def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
     """Return indexed messages with ``id > cursor``, oldest-first by row id.
 
-    The delta the sleep cycle (#456) ingests each run, across *all*
-    sessions. Keyed on the table's unique autoincrement ``messages.id`` — NOT a
+    The delta the sleep cycle (#456) ingests each run, across all of this
+    agent's sessions. Rows another agent's session left in a database indexed
+    before #1142 are skipped; ids stay monotonic across them, so a cursor from
+    before the fix stays valid and a foreign stretch cannot park it. Keyed on
+    the table's unique autoincrement ``messages.id`` — NOT a
     message ``timestamp`` (non-unique across tool-call tie-rows, sometimes
     empty) and NOT ``conversations.started_at`` (write-once, so a long-lived
     director/manager would never be re-selected). ``id`` is a true consumption
@@ -491,6 +584,7 @@ def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
     sql = """
         SELECT * FROM messages
         WHERE id > ?
+          AND session_id IN (SELECT value FROM json_each(?))
           AND session_id NOT LIKE 'curator-%-curator'
           AND session_id NOT IN (""" + _sleep_cycle_echo_session_sql() + """)
           AND content NOT LIKE 'You are the **sleep cycle** for this agent team.%'
@@ -502,7 +596,7 @@ def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
             AND content LIKE '%## Available workflows%'
           )
     """
-    params: list = [int(cursor)]
+    params: list = [int(cursor), json.dumps(sorted(_owned_sessions()))]
     if excluded_session_ids:
         placeholders = ",".join("?" for _ in excluded_session_ids)
         sql += f" AND session_id NOT IN ({placeholders})"

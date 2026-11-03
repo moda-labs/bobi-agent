@@ -128,6 +128,19 @@ def _delta_text(event: Any) -> str:
     return ""
 
 
+def _record_owned_session(session_id: Any) -> None:
+    """Claim a session for this agent's history; never fail the turn over it.
+
+    A failed write costs nothing lasting: every later turn records again.
+    """
+    from bobi import history
+
+    try:
+        history.record_owned_session(str(session_id or ""))
+    except Exception:
+        log.warning("Could not record owned session %s", session_id, exc_info=True)
+
+
 class _ClaudeSession:
     """A :class:`BrainSession` backed by one ``ClaudeSDKClient``."""
 
@@ -236,6 +249,7 @@ class _ClaudeSession:
             ResultMessage,
             ServerToolResultBlock,
             ServerToolUseBlock,
+            SystemMessage,
             TextBlock,
             ToolResultBlock,
             ToolUseBlock,
@@ -250,6 +264,7 @@ class _ClaudeSession:
             if isinstance(item, type)
         )
         user_message_type = UserMessage if isinstance(UserMessage, type) else ()
+        system_message_type = SystemMessage if isinstance(SystemMessage, type) else ()
 
         assistant_error_kind = ""
         assistant_error_message = ""
@@ -295,7 +310,12 @@ class _ClaudeSession:
                 completed_tool_ids.append(tool_id)
 
         async for msg in self._client.receive_response():
-            if isinstance(msg, AssistantMessage):
+            if isinstance(msg, system_message_type) and msg.subtype == "init":
+                # At the start of the turn, not the end: a worker killed during
+                # its only turn never reaches a result, and its work must still
+                # count as this agent's.
+                _record_owned_session(msg.data.get("session_id"))
+            elif isinstance(msg, AssistantMessage):
                 observed_at_us = time.time_ns() // 1000
                 text_parts = [
                     b.text for b in msg.content if isinstance(b, TextBlock)
@@ -395,6 +415,8 @@ class _ClaudeSession:
                         finish_tool(block, observed_at_us)
                 last_event_us = observed_at_us
             elif isinstance(msg, ResultMessage):
+                # Again here: a missed init must not silently cost the session.
+                _record_owned_session(getattr(msg, "session_id", ""))
                 observed_at_us = time.time_ns() // 1000
                 cumulative_usage = getattr(msg, "model_usage", None)
                 cumulative_cost = getattr(msg, "total_cost_usd", 0.0) or 0.0
