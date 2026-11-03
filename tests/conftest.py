@@ -65,21 +65,28 @@ def _isolate_environ():
 
 @pytest.fixture(autouse=True)
 def _isolate_user_home(request, monkeypatch, tmp_path_factory):
-    """Unit tests never write to the developer's real home (conftest invariant).
+    """Tests never write to the developer's real home (conftest invariant).
 
     ``render_team_instructions`` writes ``~/AGENTS.md`` and each brain's global
-    instructions file, and any test that reaches a process bootstrap calls it.
-    Unredirected, a unit run put Bobi's communication style into every Claude
-    Code and Codex session on the machine, and replaced a symlinked target with
-    a regular file (#1143).
+    instructions file, and strips its block from the files only other brains
+    load. Any test that reaches a process bootstrap calls it. Unredirected, a
+    unit run put Bobi's communication style into every Claude Code and Codex
+    session on the machine and replaced a symlinked target with a regular file
+    (#1143), and a stub-brain integration run emptied a real host's Claude
+    instructions (#1147).
 
     Unsetting the brain config dirs sends them to their defaults under the
     temporary ``HOME``, so a test that sets only ``HOME`` still sees one home.
-    Subprocesses inherit all three. Integration and e2e tests may drive a real
-    brain, which needs the developer's credentials, and opt out.
+    Subprocesses inherit all three, but this runs per test: a module-scoped
+    fixture runs first, so one that boots an agent still reaches the real home.
+
+    Two kinds of test keep the real home. Those marked ``claude``, ``live`` or
+    ``docker`` may need the developer's credentials, and e2e tests need the
+    browsers Playwright installs there.
     """
-    p = str(request.fspath)
-    if "/integration/" in p or "/e2e/" in p:
+    if "/e2e/" in str(request.fspath) or any(
+        request.node.get_closest_marker(m) for m in ("claude", "live", "docker")
+    ):
         return
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("user-home")))
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)

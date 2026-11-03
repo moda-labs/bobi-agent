@@ -4,14 +4,22 @@ Subsystem → integration test mapping. Every major subsystem must have ≥1
 integration test that runs in CI. Two gating mechanisms, easy to conflate:
 
 - **Marker `claude`**: the whole file needs the `claude` CLI. CI's
-  `integration-fast` job deselects these (`-m "not claude and not docker"`);
+  `integration-fast` job deselects these
+  (`-m "not claude and not docker and not live"`);
   they run locally only — there is no CI job with a claude CLI (see the
   note at the bottom of `ci.yml`).
 - **dual-brain**: the file binds `bobi_env` to `dual_brain_env` and runs
   every test twice — a `[stub]` leg that always runs (including in
-  `integration-fast`) and a `[claude]` leg gated by a *skipif* on the CLI
-  being installed, not by the marker. `-m "not claude"` does NOT deselect
-  the `[claude]` legs; they skip in CI because the CLI is absent.
+  `integration-fast`) and a `[claude]` leg gated by `requires_claude`. A
+  conftest hook turns that gate into the `claude` and `live` markers, so
+  `-m "not claude"` deselects the `[claude]` legs too.
+
+**Your real home:** tests marked `claude`, `live` or `docker` keep your real
+`HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` because they may need your
+credentials, so a real-brain boot still writes to your global instruction
+files. Every other test here gets a temporary home (`_isolate_user_home` in
+`tests/conftest.py`), except `test_service_systemd.py`, which cannot and so
+stays off developer machines.
 
 | Subsystem | Integration Test File(s) | Tests | Marker | Coverage |
 |-----------|--------------------------|-------|--------|----------|
@@ -27,7 +35,7 @@ integration test that runs in CI. Two gating mechanisms, easy to conflate:
 | **kb** | `test_kb.py` | 17 | — | Full: create, add, search, FTS, hybrid, sidecar |
 | **monitors** | `test_event_server.py` (scheduler), `test_monitor_scheduler.py` | 1+18 | — | Full: registry loading, scheduler lifecycle, command/check/notify, dedup, state persistence |
 | **setup** | `test_setup_flow.py` | 1 | claude | Good: full create flow |
-| **service** | `test_service_systemd.py` | 4 | — (skips off Linux or without a systemd user instance) | Good: `install-service` under the host's real systemd user instance: cgroup placement, restart after SIGKILL, direct-manager sweep, uninstall. launchd is unit-tested only |
+| **service** | `test_service_systemd.py` | 4 | — (runs in CI or with `BOBI_TEST_SYSTEMD=1`; skips off Linux or without a systemd user instance) | Good: `install-service` under the host's real systemd user instance: cgroup placement, restart after SIGKILL, direct-manager sweep, uninstall. launchd is unit-tested only |
 
 ## Maintenance
 

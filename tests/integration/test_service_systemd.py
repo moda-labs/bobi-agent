@@ -15,6 +15,11 @@ everywhere else. The agent lives in a temporary BOBI_HOME and runs the stub
 brain. The unit name is fixed (``bobi.service``), so the module also skips
 when the host already has one rather than replace a real service.
 
+It needs the host's real home: systemd reads the unit from there and hands the
+manager its own HOME, out of reach of any test fixture, so the manager renders
+instructions into that home like any boot (#1147). The module therefore runs
+only where the home is disposable: in CI, or with ``BOBI_TEST_SYSTEMD=1``.
+
 To run it from macOS, use any Linux host with systemd as PID 1 and a
 lingering user, e.g. a privileged container booted with ``/sbin/init``.
 """
@@ -49,6 +54,8 @@ def _user_systemd_ok() -> bool:
 
 
 pytestmark = [
+    pytest.mark.skipif(not (os.environ.get("CI") or os.environ.get("BOBI_TEST_SYSTEMD")),
+                       reason="writes to the real home; runs in CI or with BOBI_TEST_SYSTEMD=1"),
     pytest.mark.skipif(not _user_systemd_ok(),
                        reason="needs Linux with a systemd user instance"),
     pytest.mark.skipif(UNIT_PATH.exists(),
