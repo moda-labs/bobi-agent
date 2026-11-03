@@ -4179,6 +4179,17 @@ describe("discord app registration and outbound send", () => {
 		expect(messages.map((m) => m.ts)).toEqual(["m1", "m2"]);
 	});
 
+	it("a history read Discord refuses is an error", async () => {
+		const store = createMockStorage();
+		stubDiscordApi();
+		await register(store);
+		vi.stubGlobal("fetch", vi.fn(async () => fetchOk(403, { message: "Missing Access" })));
+
+		const res = await handleChannelsHistory(store, DC_CONV, 10, "bubA");
+		expect(res.status).toBe(502);
+		expect((res.body as Record<string, unknown>).error).toContain("Missing Access");
+	});
+
 	// Multipart upload stub: verifies the token like stubDiscordApi, records
 	// each multipart message post's payload_json + file-part count, and fails
 	// the batch at `failOn` (1-based) with a Discord error body.
