@@ -132,7 +132,6 @@ class _ClaudeSession:
     """A :class:`BrainSession` backed by one ``ClaudeSDKClient``."""
 
     provider = "anthropic"
-    _recorded_session_id = ""
 
     def __init__(self, options: Any, provider: str = "anthropic") -> None:
         self._options = options
@@ -141,6 +140,7 @@ class _ClaudeSession:
         # "gateway", not real Anthropic spend).
         self.provider = provider
         self._client = self._new_client()
+        self._recorded_session_id = ""
         self._model_usage_baseline: dict[str, dict[str, Any]] = {}
         self._total_cost_baseline = 0.0
         resume = getattr(options, "resume", None)

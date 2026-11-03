@@ -920,6 +920,7 @@ def _claude_session_over(messages, *, provider="anthropic"):
     """A _ClaudeSession whose underlying SDK client is swapped for a fake."""
     sess = _ClaudeSession.__new__(_ClaudeSession)
     sess._client = _FakeSDKClient(messages)
+    sess._recorded_session_id = ""
     sess.provider = provider
     return sess
 

@@ -179,9 +179,15 @@ class TestTwoAgentsOneProjectsTree:
         """No record exists yet on upgrade: the seed must not drop own memory."""
         alfred, eng, projects = agents
         worker_cwd = "/srv/work/alfred-repo"
+        # The registry can hold a symlink; Claude records the resolved path.
+        linked_repo = alfred.root.parent / "linked-repo"
+        linked_repo.mkdir()
+        repo_link = alfred.root.parent / "repo-link"
+        repo_link.symlink_to(linked_repo)
         sessions = {
             "old-manager": (str(alfred.root), "old manager note"),
             "old-worker": (worker_cwd, "old worker note"),
+            "linked-worker": (str(linked_repo), "linked worker note"),
             "rotated": ("/srv/work/alfred-rotated", "rotated note"),
             "eng-manager": (str(eng.root), "eng note"),
             "stranger": ("/srv/work/unrelated", "stranger note"),
@@ -206,16 +212,21 @@ class TestTwoAgentsOneProjectsTree:
         (registry / "wf-run").mkdir()
         (registry / "wf-run" / "state.json").write_text(json.dumps(
             {"name": "wf-run", "session_id": "", "cwd": worker_cwd}))
+        (registry / "wf-link").mkdir()
+        (registry / "wf-link" / "state.json").write_text(json.dumps(
+            {"name": "wf-link", "session_id": "", "cwd": str(repo_link)}))
         # Current id of a session whose cwd no registry entry records.
         (registry / "mgr.id").write_text("rotated\n")
         # A bad file must cost only itself, not every later ownership read.
         (registry / "bad.id").write_bytes(b"\xff\xfe")
-        for name, content in (("bad-shape", b"[]"), ("bad-bytes", b"\xff\xfe")):
+        for name, content in (("bad-shape", b"[]"), ("bad-bytes", b"\xff\xfe"),
+                              ("bad-types", b'{"name": "x", "session_id": 5, "cwd": []}')):
             (registry / name).mkdir()
             (registry / name / "state.json").write_bytes(content)
 
         task = alfred.sleep_cycle_task()
-        for own in ("old manager note", "old worker note", "rotated note", "unindexed note"):
+        for own in ("old manager note", "old worker note", "linked worker note",
+                    "rotated note", "unindexed note"):
             assert own in task
         assert "eng note" not in task
         assert "stranger note" not in task
@@ -240,6 +251,34 @@ class TestTwoAgentsOneProjectsTree:
         assert "my first note" in task
         assert "other agent note" not in task
         assert "a person's own session" not in task
+
+    def test_agents_whose_names_share_a_project_directory_stay_apart(self, agents):
+        """Claude names both of these directories ...-eng-team-run."""
+        _, eng, projects = agents
+        lookalike = Agent(eng.root.parent.parent / "eng_team" / "run")
+        dashed = Agent(eng.root.parent.parent / "eng-team" / "run")
+        assert project_slug(lookalike.root) == project_slug(dashed.root)
+        _transcript(projects, str(dashed.root), "dashed-manager", "dashed note")
+
+        lookalike.bind()
+        assert history._owned_sessions() == set()
+        dashed.bind()
+        assert history._owned_sessions() == {"dashed-manager"}
+
+    def test_reading_writes_nothing_and_the_first_claim_saves_the_seed(self, agents):
+        """A read run as root must not leave a lock the agent cannot open."""
+        alfred, _, projects = agents
+        _transcript(projects, str(alfred.root), "old", "old note")
+        alfred.bind()
+        history.index()
+        history.search("note")
+        history.conversations()
+        history.messages_since(0)
+        assert [p.name for p in paths.state_path(alfred.root).iterdir()
+                if p.name.startswith("owned_transcripts")] == []
+
+        history.record_owned_session("new")
+        assert history._read_owned() == {"old", "new"}
 
     def test_index_totals_exclude_other_agents_rows(self, agents):
         alfred, _, projects = agents
