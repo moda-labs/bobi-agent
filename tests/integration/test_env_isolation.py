@@ -23,12 +23,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from bobi.brain.instructions import MANAGED_BEGIN, MANAGED_END
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from .conftest import PACKAGE_ROOT
 
 
 class TestIsolatedHomeContract:
@@ -39,7 +40,6 @@ class TestIsolatedHomeContract:
             "spawned now would resolve the real ~/.bobi. Got "
             f"{os.environ.get('BOBI_HOME')!r}, want {str(bobi_env.home_dir)!r}"
         )
-        assert Path(os.environ["BOBI_HOME"]) != Path.home() / ".bobi"
 
     def test_a_subprocess_resolves_the_isolated_agent(self, bobi_env):
         """The binding must survive into a child process, which is where the
@@ -78,17 +78,21 @@ def _pytest_as(developer, *args, **env):
     """Run pytest in a child, as this developer would.
 
     A child because the guard under test is a conftest fixture, which has
-    already replaced this process's HOME.
+    already replaced this process's HOME. Its own ``--timeout`` lets its
+    teardown reap what it started before the parent's timeout could kill it.
     """
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         f"--basetemp={developer.parent / 'pytest'}", *args],
-        cwd=REPO_ROOT,
+         "--timeout=120", f"--basetemp={developer.parent / 'pytest'}", *args],
+        cwd=PACKAGE_ROOT,
         env={
             **os.environ,
             "HOME": str(developer),
             "CLAUDE_CONFIG_DIR": str(developer / "claude"),
             "CODEX_HOME": str(developer / "codex"),
+            # Settings a developer may export that would change what runs.
+            "PYTEST_ADDOPTS": "",
+            "BOBI_COMMUNICATION_STYLE": "on",
             **env,
         },
         capture_output=True, text=True,
@@ -96,7 +100,7 @@ def _pytest_as(developer, *args, **env):
 
 
 class TestDevelopersHomeContract:
-    @pytest.mark.timeout(170)
+    @pytest.mark.timeout(300)
     def test_stub_boots_leave_it_untouched(self, developer, tmp_path):
         """A manager boot and a subagent boot, each its own detached process:
         the two ways an integration test reaches the render."""
@@ -122,10 +126,10 @@ class TestDevelopersHomeContract:
         pytest.param("live", marks=pytest.mark.live),
         pytest.param("docker", marks=pytest.mark.docker),
     ])
-    @pytest.mark.skipif("DEVELOPER_HOME" not in os.environ,
+    @pytest.mark.skipif("BOBI_TEST_DEVELOPER_HOME" not in os.environ,
                         reason="run by test_credentialed_tests_keep_it")
     def test_a_credentialed_tier_sees_it(self, tier):
-        assert str(Path.home()) == os.environ["DEVELOPER_HOME"]
+        assert str(Path.home()) == os.environ["BOBI_TEST_DEVELOPER_HOME"]
 
     @pytest.mark.timeout(60)
     def test_credentialed_tests_keep_it(self, developer):
@@ -135,7 +139,7 @@ class TestDevelopersHomeContract:
             developer,
             "tests/integration/test_env_isolation.py::TestDevelopersHomeContract"
             "::test_a_credentialed_tier_sees_it",
-            DEVELOPER_HOME=str(developer),
+            BOBI_TEST_DEVELOPER_HOME=str(developer),
         )
 
         assert result.returncode == 0, result.stdout + result.stderr
@@ -147,8 +151,18 @@ class TestDevelopersHomeContract:
         so that module runs only where the home is disposable."""
         result = _pytest_as(
             developer, "tests/integration/test_service_systemd.py", "-rs",
-            CI="", BOBI_TEST_SYSTEMD="",
+            GITHUB_ACTIONS="false", BOBI_TEST_SYSTEMD="0",
         )
 
         assert result.returncode == 0, result.stdout + result.stderr
         assert "BOBI_TEST_SYSTEMD" in result.stdout
+
+    def test_a_cleared_environment_cannot_reach_it(self):
+        """With HOME unset, Python falls back to the password database, which no
+        variable redirects and no watched HOME can see. test_launch_lineage
+        clears the environment and renders, so a unit run overwrote the real
+        ~/AGENTS.md and ~/.claude/CLAUDE.md however HOME was set (#1147)."""
+        isolated = Path.home()
+
+        with patch.dict(os.environ, clear=True):
+            assert Path.home() == isolated

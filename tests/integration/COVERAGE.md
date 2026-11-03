@@ -35,7 +35,7 @@ stays off developer machines.
 | **kb** | `test_kb.py` | 17 | — | Full: create, add, search, FTS, hybrid, sidecar |
 | **monitors** | `test_event_server.py` (scheduler), `test_monitor_scheduler.py` | 1+18 | — | Full: registry loading, scheduler lifecycle, command/check/notify, dedup, state persistence |
 | **setup** | `test_setup_flow.py` | 1 | claude | Good: full create flow |
-| **service** | `test_service_systemd.py` | 4 | — (runs in CI or with `BOBI_TEST_SYSTEMD=1`; skips off Linux or without a systemd user instance) | Good: `install-service` under the host's real systemd user instance: cgroup placement, restart after SIGKILL, direct-manager sweep, uninstall. launchd is unit-tested only |
+| **service** | `test_service_systemd.py` | 4 | - (runs in GitHub Actions or with `BOBI_TEST_SYSTEMD=1`; skips off Linux or without a systemd user instance) | Good: `install-service` under the host's real systemd user instance: cgroup placement, restart after SIGKILL, direct-manager sweep, uninstall. launchd is unit-tested only |
 
 ## Maintenance
 

@@ -39,6 +39,7 @@ os.environ["PYTHONPATH"] = _existing_pythonpath
 os.environ["PYTHONSAFEPATH"] = "1"
 
 import asyncio
+import pwd
 import threading
 
 import pytest
@@ -80,6 +81,11 @@ def _isolate_user_home(request, monkeypatch, tmp_path_factory):
     Subprocesses inherit all three, but this runs per test: a module-scoped
     fixture runs first, so one that boots an agent still reaches the real home.
 
+    With ``HOME`` unset, Python falls back to the password database, so a test
+    that clears the environment would reach the real home however ``HOME`` was
+    set. The fallback answers with the temporary home too. A child process
+    started without ``HOME`` stays out of reach.
+
     Two kinds of test keep the real home. Those marked ``claude``, ``live`` or
     ``docker`` may need the developer's credentials, and e2e tests need the
     browsers Playwright installs there.
@@ -88,9 +94,17 @@ def _isolate_user_home(request, monkeypatch, tmp_path_factory):
         request.node.get_closest_marker(m) for m in ("claude", "live", "docker")
     ):
         return
-    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("user-home")))
+    home = str(tmp_path_factory.mktemp("user-home"))
+    real_getpwuid = pwd.getpwuid
+
+    def _getpwuid(uid):
+        entry = real_getpwuid(uid)
+        return pwd.struct_passwd((*entry[:5], home, entry[6]))
+
+    monkeypatch.setenv("HOME", home)
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(pwd, "getpwuid", _getpwuid)
 
 
 @pytest.fixture(autouse=True)
