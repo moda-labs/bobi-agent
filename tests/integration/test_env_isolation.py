@@ -12,12 +12,23 @@ It failed silently: the child exited with "Bobi Agent 'test-repo' is not
 installed", the parent only saw an unparseable result, and the symptom
 surfaced as an unrelated-looking assertion in the sleep-cycle flow. These
 tests assert the contract directly so the next stomp names itself.
+
+The developer's own home is part of the same contract. A stub boot writes
+``~/AGENTS.md`` and strips Bobi's block from both brains' global instructions,
+so a test that kept the real environment changed every Claude Code and Codex
+session on the machine, and still passed (#1147).
 """
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+from bobi.brain.instructions import MANAGED_BEGIN, MANAGED_END
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class TestIsolatedHomeContract:
@@ -33,9 +44,6 @@ class TestIsolatedHomeContract:
     def test_a_subprocess_resolves_the_isolated_agent(self, bobi_env):
         """The binding must survive into a child process, which is where the
         original bug actually bit - in-process resolution looked fine."""
-        import subprocess
-        import sys
-
         out = subprocess.run(
             [sys.executable, "-c",
              "from bobi import paths; print(paths.home_dir())"],
@@ -45,3 +53,102 @@ class TestIsolatedHomeContract:
         assert out.stdout.strip() == str(bobi_env.home_dir), (
             f"child resolved {out.stdout.strip()!r}, "
             f"want {str(bobi_env.home_dir)!r}")
+
+
+@pytest.fixture
+def developer(tmp_path):
+    """A developer's real environment, somewhere a test can watch it.
+
+    Both brain files carry a managed block because a stub boot strips it. With
+    nothing to strip, a boot that reached them would leave no trace.
+    """
+    home = tmp_path / "developer"
+    block = f"# my notes\n\n{MANAGED_BEGIN}\nteam rules\n{MANAGED_END}\n"
+    for brain_dir, name in (("claude", "CLAUDE.md"), ("codex", "AGENTS.md")):
+        (home / brain_dir).mkdir(parents=True)
+        (home / brain_dir / name).write_text(block)
+    return home
+
+
+def _contents(root):
+    return {p: p.read_bytes() if p.is_file() else None for p in root.rglob("*")}
+
+
+def _pytest_as(developer, *args, **env):
+    """Run pytest in a child, as this developer would.
+
+    A child because the guard under test is a conftest fixture, which has
+    already replaced this process's HOME.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         f"--basetemp={developer.parent / 'pytest'}", *args],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "HOME": str(developer),
+            "CLAUDE_CONFIG_DIR": str(developer / "claude"),
+            "CODEX_HOME": str(developer / "codex"),
+            **env,
+        },
+        capture_output=True, text=True,
+    )
+
+
+class TestDevelopersHomeContract:
+    @pytest.mark.timeout(170)
+    def test_stub_boots_leave_it_untouched(self, developer, tmp_path):
+        """A manager boot and a subagent boot, each its own detached process:
+        the two ways an integration test reaches the render."""
+        before = _contents(developer)
+
+        result = _pytest_as(
+            developer,
+            "tests/integration/test_manager_lifecycle.py::TestManagerStartStop"
+            "::test_launch_team_service_starts_manager[stub]",
+            "tests/integration/test_agent_launch.py::TestAdhocAgentLaunch"
+            "::test_adhoc_agent_completes[stub]",
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _contents(developer) == before
+        # Both boots still rendered, in their per-test homes. Without this, a
+        # boot that stopped rendering would leave this test green.
+        rendered = list((tmp_path / "pytest").glob("user-home[0-9]*/AGENTS.md"))
+        assert len(rendered) == 2
+
+    @pytest.mark.parametrize("tier", [
+        pytest.param("claude", marks=pytest.mark.claude),
+        pytest.param("live", marks=pytest.mark.live),
+        pytest.param("docker", marks=pytest.mark.docker),
+    ])
+    @pytest.mark.skipif("DEVELOPER_HOME" not in os.environ,
+                        reason="run by test_credentialed_tests_keep_it")
+    def test_a_credentialed_tier_sees_it(self, tier):
+        assert str(Path.home()) == os.environ["DEVELOPER_HOME"]
+
+    @pytest.mark.timeout(60)
+    def test_credentialed_tests_keep_it(self, developer):
+        """These tiers may need the developer's credentials. CI deselects all
+        three, so nothing else there would notice them losing the real home."""
+        result = _pytest_as(
+            developer,
+            "tests/integration/test_env_isolation.py::TestDevelopersHomeContract"
+            "::test_a_credentialed_tier_sees_it",
+            DEVELOPER_HOME=str(developer),
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "3 passed" in result.stdout
+
+    @pytest.mark.timeout(60)
+    def test_the_systemd_module_stays_off_a_developers_machine(self, developer):
+        """systemd gives its manager the real home and no fixture can reach it,
+        so that module runs only where the home is disposable."""
+        result = _pytest_as(
+            developer, "tests/integration/test_service_systemd.py", "-rs",
+            CI="", BOBI_TEST_SYSTEMD="",
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "BOBI_TEST_SYSTEMD" in result.stdout
