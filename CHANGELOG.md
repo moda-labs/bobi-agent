@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.62.0 - 2026-11-02
+
+Minor release: Bobi can show where its tokens go and which model ran each turn,
+and can route turns to cheaper models through TypeSafe JEV. Both are opt-in and
+off by default. Slack replies with a Markdown table now arrive as native tables
+that wrap.
+
+### Added
+
+- **Fine-grained usage metrics (#1114, MOD-404, MOD-406).** Set
+  `BOBI_METRICS_MODE=enabled` to record sessions, turns, workflow steps, model
+  calls and tool executions with provider-reported token counts. Telemetry runs
+  out of band: a failure is reported as health and never fails an agent turn.
+  Results are queryable through the `usage` admin command's new filters,
+  `bobi admin metrics_summary|metrics_session|metrics_turn`, and the MCP tools
+  `bobi_usage_session` and `bobi_usage_turn`. The supervisor protocol is now
+  `0.4.0`, which adds a `metrics` heartbeat block. See
+  `docs/FINE_GRAINED_METRICS.md`.
+- **TypeSafe JEV model routing (#1114, MOD-405).** For each fresh session in
+  scope, JEV picks one of the configured candidate models. Shadow mode records
+  the pick and runs the control model; enforce mode runs the pick. Any low
+  confidence, timeout or other miss runs the control or configured model and
+  records the reason. Routing needs `BOBI_METRICS_EXPERIMENT_JSON` and
+  `TYPESAFE_API_KEY`. JEV receives metadata only unless `prompt_egress` is set
+  to `redacted`. See `docs/JEV_ROUTER_DATA_FLOW.md`.
+- **Metrics & Routing page in `bobi app` (#1114).** At
+  `#/agents/<name>/metrics`, operators see spend, routing savings and per-turn
+  detail, configure JEV, and test a prompt end to end.
+
+### Changed
+
+- **Slack tables wrap (#1128, #1123).** A Markdown table in a Slack reply is sent
+  as a native table block that wraps long cells. A reply with several tables is
+  split into one message per table. A table that cannot convert, or that Slack
+  rejects as blocks, is sent as `markdown_text` as before. Discord, WhatsApp and
+  the `/channels/send` wire format are unchanged. The event server now bundles
+  `marked` 18.1.1.
+- **Agent authoring guide (#1132).** `skills/create-agent.md` guidance now
+  separates a role's purpose from job procedures and runtime behavior, and
+  replaces line-count targets with decision rules.
+- **Model prices (#1133, #1136).** Adds `gpt-6.1-terra` and the OpenAI 12-hour
+  cache write prices. Codex cache writes still bill at the 30-minute rate.
+
+### Fixed
+
+- **Eng-team Slack notices (#1127, #1126).** The issue lifecycle notices no
+  longer paste the internal dispatch brief or claim a PR was merged. They now
+  read `Working on this issue.` and `PR <url> opened.` Ships in `eng-team` 1.5.7,
+  which is published separately from this release.
+- **Weekly model price job (#1133).** `scripts/update_prices.py` reads OpenAI's
+  new pricing page layout and refuses a table whose columns it does not
+  recognize.
+
 ## 0.61.0 - 2026-10-13
 
 Minor release: the shared communication guidance every session loads is
