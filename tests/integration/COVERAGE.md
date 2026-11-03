@@ -16,7 +16,7 @@ integration test that runs in CI. Two gating mechanisms, easy to conflate:
 
 **Your real home:** tests marked `claude`, `live` or `docker` keep your real
 `HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` because they may need your
-credentials, so a real-brain boot still writes to your global instruction
+credentials, so a real-brain boot still rewrites your global instruction
 files. Every other test here gets a temporary home (`_isolate_user_home` in
 `tests/conftest.py`), except `test_service_systemd.py`, which cannot and so
 stays off developer machines.

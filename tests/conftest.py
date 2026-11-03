@@ -44,6 +44,8 @@ import threading
 
 import pytest
 
+_E2E_TESTS = Path(__file__).resolve().parent / "e2e"
+
 
 @pytest.fixture(autouse=True)
 def _isolate_environ():
@@ -66,7 +68,8 @@ def _isolate_environ():
 
 @pytest.fixture(autouse=True)
 def _isolate_user_home(request, monkeypatch, tmp_path_factory):
-    """Tests never write to the developer's real home (conftest invariant).
+    """Tests stay out of the developer's real home, with the exceptions below
+    (conftest invariant).
 
     ``render_team_instructions`` writes ``~/AGENTS.md`` and each brain's global
     instructions file, and strips its block from the files only other brains
@@ -90,7 +93,7 @@ def _isolate_user_home(request, monkeypatch, tmp_path_factory):
     ``docker`` may need the developer's credentials, and e2e tests need the
     browsers Playwright installs there.
     """
-    if "/e2e/" in str(request.fspath) or any(
+    if request.path.resolve().is_relative_to(_E2E_TESTS) or any(
         request.node.get_closest_marker(m) for m in ("claude", "live", "docker")
     ):
         return

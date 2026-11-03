@@ -20,6 +20,7 @@ session on the machine, and still passed (#1147).
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -78,12 +79,11 @@ def _pytest_as(developer, *args, **env):
     """Run pytest in a child, as this developer would.
 
     A child because the guard under test is a conftest fixture, which has
-    already replaced this process's HOME. Its own ``--timeout`` lets its
-    teardown reap what it started before the parent's timeout could kill it.
+    already replaced this process's HOME.
     """
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         "--timeout=120", f"--basetemp={developer.parent / 'pytest'}", *args],
+         f"--basetemp={developer.parent / 'pytest'}", *args],
         cwd=PACKAGE_ROOT,
         env={
             **os.environ,
@@ -102,24 +102,28 @@ def _pytest_as(developer, *args, **env):
 class TestDevelopersHomeContract:
     @pytest.mark.timeout(300)
     def test_stub_boots_leave_it_untouched(self, developer, tmp_path):
-        """A manager boot and a subagent boot, each its own detached process:
-        the two ways an integration test reaches the render."""
+        """A manager boot, a blocking subagent run and a detached subagent boot:
+        the three ways an integration test reaches the render. The blocking one
+        comes first in its module because it requests ``stub_bobi_env`` directly,
+        so that env is provisioned before any per-test HOME, in this home."""
         before = _contents(developer)
 
         result = _pytest_as(
             developer,
             "tests/integration/test_manager_lifecycle.py::TestManagerStartStop"
             "::test_launch_team_service_starts_manager[stub]",
+            "tests/integration/test_agent_launch.py::TestWaitRunsThroughTheExecutor"
+            "::test_wait_prints_the_final_text_and_writes_a_ledger_entry",
             "tests/integration/test_agent_launch.py::TestAdhocAgentLaunch"
             "::test_adhoc_agent_completes[stub]",
         )
 
         assert result.returncode == 0, result.stdout + result.stderr
         assert _contents(developer) == before
-        # Both boots still rendered, in their per-test homes. Without this, a
+        # All three still rendered, in their per-test homes. Without this, a
         # boot that stopped rendering would leave this test green.
         rendered = list((tmp_path / "pytest").glob("user-home[0-9]*/AGENTS.md"))
-        assert len(rendered) == 2
+        assert len(rendered) == 3
 
     @pytest.mark.parametrize("tier", [
         pytest.param("claude", marks=pytest.mark.claude),
@@ -156,6 +160,26 @@ class TestDevelopersHomeContract:
 
         assert result.returncode == 0, result.stdout + result.stderr
         assert "BOBI_TEST_SYSTEMD" in result.stdout
+
+    @pytest.mark.timeout(60)
+    def test_a_checkout_under_a_directory_named_e2e_stays_isolated(
+        self, developer, tmp_path
+    ):
+        """Only tests/e2e opts out by path. ``worktrees/<branch>/`` makes a
+        checkout like this one reachable with a branch named ``e2e/foo``, and
+        matching the absolute path would switch the guard off for all of it."""
+        tests = tmp_path / "e2e" / "checkout" / "tests"
+        tests.mkdir(parents=True)
+        shutil.copy(PACKAGE_ROOT / "tests" / "conftest.py", tests)
+        (tests / "test_home.py").write_text(
+            "from pathlib import Path\n\n"
+            "def test_home():\n"
+            f"    assert Path.home() != Path({str(developer)!r})\n"
+        )
+
+        result = _pytest_as(developer, str(tests))
+
+        assert result.returncode == 0, result.stdout + result.stderr
 
     def test_a_cleared_environment_cannot_reach_it(self):
         """With HOME unset, Python falls back to the password database, which no
