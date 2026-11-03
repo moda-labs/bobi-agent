@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from bobi import history, paths
+from bobi.chat_history import project_slug
 from bobi.monitors.scheduler import MonitorScheduler
 from bobi.monitors.schema import Monitor
 from bobi.monitors.sleep_cycle import read_cursor, write_cursor
@@ -58,7 +59,7 @@ class Agent:
 
 
 def _transcript(projects: Path, cwd: str, session_id: str, *texts: str) -> None:
-    project = projects / "".join(c if c.isalnum() or c == "-" else "-" for c in cwd)
+    project = projects / project_slug(cwd)
     project.mkdir(parents=True, exist_ok=True)
     with (project / f"{session_id}.jsonl").open("a") as f:
         for text in texts:
@@ -178,24 +179,77 @@ class TestTwoAgentsOneProjectsTree:
         """No record exists yet on upgrade: the seed must not drop own memory."""
         alfred, eng, projects = agents
         worker_cwd = "/srv/work/alfred-repo"
-        _transcript(projects, str(alfred.root), "old-manager", "old manager note")
-        _transcript(projects, worker_cwd, "old-worker", "old worker note")
-        _transcript(projects, "/srv/work/alfred-rotated", "rotated", "rotated note")
-        _transcript(projects, str(eng.root), "eng-manager", "eng note")
-        _transcript(projects, "/srv/work/unrelated", "stranger", "stranger note")
+        sessions = {
+            "old-manager": (str(alfred.root), "old manager note"),
+            "old-worker": (worker_cwd, "old worker note"),
+            "rotated": ("/srv/work/alfred-rotated", "rotated note"),
+            "eng-manager": (str(eng.root), "eng note"),
+            "stranger": ("/srv/work/unrelated", "stranger note"),
+        }
+        for session_id, (cwd, text) in sessions.items():
+            _transcript(projects, cwd, session_id, text)
 
-        sessions = paths.sessions_dir(alfred.root)
-        (sessions / "wf-run").mkdir()
-        (sessions / "wf-run" / "state.json").write_text(json.dumps(
-            {"name": "wf-run", "session_id": "old-worker", "cwd": worker_cwd}))
+        # The database the pre-fix indexer left, with every agent's sessions.
+        alfred.bind()
+        conn = history.sqlite3.connect(str(history._db_path()))
+        history._init_db(conn)
+        conn.executemany(
+            "INSERT INTO conversations (session_id, project, cwd) VALUES (?,?,?)",
+            [(sid, cwd, cwd) for sid, (cwd, _) in sessions.items() if sid != "rotated"])
+        conn.commit()
+        conn.close()
+
+        registry = paths.sessions_dir(alfred.root)
+        (registry / "wf-run").mkdir()
+        (registry / "wf-run" / "state.json").write_text(json.dumps(
+            {"name": "wf-run", "session_id": "", "cwd": worker_cwd}))
         # Current id of a session whose cwd no registry entry records.
-        (sessions / "mgr.id").write_text("rotated\n")
+        (registry / "mgr.id").write_text("rotated\n")
+        # A bad file must cost only itself, not every later ownership read.
+        (registry / "bad.id").write_bytes(b"\xff\xfe")
+        (registry / "bad-entry").mkdir()
+        (registry / "bad-entry" / "state.json").write_text("[]")
 
         task = alfred.sleep_cycle_task()
         for own in ("old manager note", "old worker note", "rotated note"):
             assert own in task
         assert "eng note" not in task
         assert "stranger note" not in task
+
+    def test_new_agent_in_a_shared_repo_claims_only_its_own_session(self, agents):
+        """Working-directory claims preserve an old database; a new agent has none."""
+        alfred, _, projects = agents
+        shared_repo = "/srv/work/shared-repo"
+        _transcript(projects, shared_repo, "other-agent", "other agent note")
+        _transcript(projects, shared_repo, "human-session", "a person's own session")
+        _transcript(projects, shared_repo, "mine", "my first note")
+        registry = paths.sessions_dir(alfred.root)
+        (registry / "wf-run").mkdir()
+        (registry / "wf-run" / "state.json").write_text(json.dumps(
+            {"name": "wf-run", "session_id": "", "cwd": shared_repo}))
+
+        alfred.bind()
+        history.record_owned_session("mine")
+
+        task = alfred.sleep_cycle_task()
+        assert "my first note" in task
+        assert "other agent note" not in task
+        assert "a person's own session" not in task
+
+    def test_index_totals_exclude_other_agents_rows(self, agents):
+        alfred, _, projects = agents
+        alfred.bind()
+        history.record_owned_session("mine")
+        _transcript(projects, str(alfred.root), "mine", "my note")
+        history.index()
+        conn = history.sqlite3.connect(str(history._db_path()))
+        conn.execute("INSERT INTO conversations (session_id) VALUES ('foreign')")
+        conn.execute("INSERT INTO messages (session_id, type) VALUES ('foreign', 'user')")
+        conn.commit()
+        conn.close()
+
+        stats = history.index()
+        assert (stats["total_conversations"], stats["total_messages"]) == (1, 1)
 
 
 @requires_claude

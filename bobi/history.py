@@ -13,6 +13,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from bobi.chat_history import project_slug
 from bobi.fsutil import atomic_write_text, file_lock
 from bobi.timeutil import now_iso
 
@@ -64,43 +65,47 @@ def _owned_sessions() -> set[str]:
     return owned
 
 
-def _seed_owned_sessions() -> set[str]:
-    """Best-effort ownership for sessions that predate the record.
+def _owned_json() -> str:
+    """The owned ids as a ``json_each`` parameter: a set can exceed SQLite's
+    bound-variable limit."""
+    return json.dumps(sorted(_owned_sessions()))
 
-    Runs once, on the first read after upgrade. Past session ids were overwritten
-    on rotation, so this also claims sessions by working directory: the runtime
-    root and every cwd the session registry remembers. That is coarser than the
-    record: a cwd another agent also used is claimed too. It only ever applies
-    to pre-upgrade sessions.
+
+def _seed_owned_sessions() -> set[str]:
+    """Ownership for sessions that predate the record, computed once.
+
+    The session registry's ids are exact, so they are always claimed. A
+    ``history.db`` that already exists was indexed before the record did, and
+    past ids were overwritten on rotation, so its rows are also claimed by
+    working directory: the runtime root and every cwd the registry remembers.
+    That is coarser than the record: a session another agent or a person ran in
+    one of those directories is claimed too, and stays claimed if it keeps
+    running. An agent with no database has nothing to preserve and claims by id
+    only, or a new agent in a shared repo would inherit everyone's sessions.
     """
-    from bobi.usage_backfill import _project_slug
+    from bobi.sdk import SessionRegistry
 
     state = _db_path().parent
     owned: set[str] = set()
     cwds = {str(state.parent)}
     for id_file in state.glob("sessions/*.id"):
-        owned.update(id_file.read_text().split())
-    for entry_file in state.glob("sessions/*/state.json"):
         try:
-            entry = json.loads(entry_file.read_text())
+            owned.update(id_file.read_text().split())
         except (OSError, ValueError):
             continue
-        if entry.get("session_id"):
-            owned.add(entry["session_id"])
-        if entry.get("cwd"):
-            cwds.add(entry["cwd"])
+    for entry in SessionRegistry(state.parent).list_all():
+        if entry.session_id:
+            owned.add(entry.session_id)
+        if entry.cwd:
+            cwds.add(entry.cwd)
 
-    slugs = {_project_slug(cwd) for cwd in cwds}
-    for projects in _projects_dirs():
-        for slug in slugs:
-            owned.update(f.stem for f in (projects / slug).glob("*.jsonl"))
-    # Rows can outlive the transcript files Claude Code expires.
     if _db_path().exists():
+        slugs = {project_slug(cwd) for cwd in cwds}
         conn = sqlite3.connect(str(_db_path()))
         _init_db(conn)
         rows = conn.execute("SELECT session_id, project FROM conversations").fetchall()
         conn.close()
-        owned.update(sid for sid, project in rows if _project_slug(project) in slugs)
+        owned.update(sid for sid, project in rows if project_slug(project) in slugs)
     return owned
 
 
@@ -451,8 +456,15 @@ def index(project_filter: str | None = None) -> dict:
 
     conn.commit()
 
-    stats = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
-    msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    owned_json = json.dumps(sorted(owned))
+    stats = conn.execute(
+        "SELECT COUNT(*) FROM conversations "
+        "WHERE session_id IN (SELECT value FROM json_each(?))", (owned_json,),
+    ).fetchone()[0]
+    msg_count = conn.execute(
+        "SELECT COUNT(*) FROM messages "
+        "WHERE session_id IN (SELECT value FROM json_each(?))", (owned_json,),
+    ).fetchone()[0]
     conn.close()
 
     return {
@@ -503,7 +515,7 @@ def search(query: str, limit: int = 20, project: str | None = None) -> list[dict
         WHERE messages_fts MATCH ?
           AND m.session_id IN (SELECT value FROM json_each(?))
     """
-    params: list = [fts_query, json.dumps(sorted(_owned_sessions()))]
+    params: list = [fts_query, _owned_json()]
 
     if project:
         sql += " AND c.project LIKE ?"
@@ -527,7 +539,7 @@ def conversations(limit: int = 20, project: str | None = None) -> list[dict]:
     conn.row_factory = sqlite3.Row
 
     sql = "SELECT * FROM conversations WHERE session_id IN (SELECT value FROM json_each(?))"
-    params: list = [json.dumps(sorted(_owned_sessions()))]
+    params: list = [_owned_json()]
     if project:
         sql += " AND project LIKE ?"
         params.append(f"%{project}%")
@@ -596,7 +608,7 @@ def messages_since(cursor: int, limit: int | None = None) -> list[dict]:
             AND content LIKE '%## Available workflows%'
           )
     """
-    params: list = [int(cursor), json.dumps(sorted(_owned_sessions()))]
+    params: list = [int(cursor), _owned_json()]
     if excluded_session_ids:
         placeholders = ",".join("?" for _ in excluded_session_ids)
         sql += f" AND session_id NOT IN ({placeholders})"

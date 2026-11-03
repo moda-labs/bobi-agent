@@ -18,7 +18,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from bobi.chat_history import claude_projects_dirs
+from bobi.chat_history import claude_projects_dirs, project_slug
 from bobi.sdk import ACTIVE_STATUSES, SessionEntry, SessionRegistry
 
 # The provider a Claude transcript can speak for. A session recorded against
@@ -106,14 +106,9 @@ def _resolve_transcript(session_id: str, cwd: str,
     path = index.get(session_id)
     if path is None or not cwd:
         return path
-    slug = _project_slug(cwd)
+    slug = project_slug(cwd)
     sibling = path.parent.parent / slug / f"{session_id}.jsonl"
     return sibling if sibling.exists() else path
-
-
-def _project_slug(cwd: str) -> str:
-    """Claude's project-directory name for a working directory."""
-    return "".join(c if c.isalnum() or c == "-" else "-" for c in str(cwd))
 
 
 def transcript_usage(path: Path) -> dict[str, dict[str, int]]:

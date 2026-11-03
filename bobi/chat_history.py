@@ -30,6 +30,11 @@ from pathlib import Path
 CHAT_HISTORY_LIMIT = 200
 
 
+def project_slug(cwd: str) -> str:
+    """Claude's project-directory name for a working directory."""
+    return "".join(c if c.isalnum() or c == "-" else "-" for c in str(cwd))
+
+
 def safe_name(name: str) -> bool:
     return bool(name) and "/" not in name and "\\" not in name and ".." not in name
 

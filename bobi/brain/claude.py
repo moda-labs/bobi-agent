@@ -128,23 +128,11 @@ def _delta_text(event: Any) -> str:
     return ""
 
 
-def _record_owned_session(session_id: Any) -> None:
-    """Claim a session for this agent's history; never fail the turn over it.
-
-    A failed write costs nothing lasting: every later turn records again.
-    """
-    from bobi import history
-
-    try:
-        history.record_owned_session(str(session_id or ""))
-    except Exception:
-        log.warning("Could not record owned session %s", session_id, exc_info=True)
-
-
 class _ClaudeSession:
     """A :class:`BrainSession` backed by one ``ClaudeSDKClient``."""
 
     provider = "anthropic"
+    _recorded_session_id = ""
 
     def __init__(self, options: Any, provider: str = "anthropic") -> None:
         self._options = options
@@ -242,6 +230,24 @@ class _ClaudeSession:
         """
         return await self._client.get_mcp_status()
 
+    async def _record_owned_session(self, session_id: Any) -> None:
+        """Claim a session for this agent's history; never fail the turn over it.
+
+        Off the event loop, because the claim can wait on another process's
+        lock. A failed claim retries at the next record point, but a session
+        that has none left is lost from the agent's memory, so it logs an error.
+        """
+        from bobi import history
+
+        session_id = str(session_id or "")
+        if not session_id or session_id == self._recorded_session_id:
+            return
+        try:
+            await asyncio.to_thread(history.record_owned_session, session_id)
+            self._recorded_session_id = session_id
+        except Exception:
+            log.error("Could not record owned session %s", session_id, exc_info=True)
+
     async def receive_response(self) -> AsyncIterator[BrainMessage]:
         """Translate one turn's SDK messages into normalized brain messages."""
         from claude_agent_sdk import (
@@ -314,7 +320,7 @@ class _ClaudeSession:
                 # At the start of the turn, not the end: a worker killed during
                 # its only turn never reaches a result, and its work must still
                 # count as this agent's.
-                _record_owned_session(msg.data.get("session_id"))
+                await self._record_owned_session(msg.data.get("session_id"))
             elif isinstance(msg, AssistantMessage):
                 observed_at_us = time.time_ns() // 1000
                 text_parts = [
@@ -416,7 +422,7 @@ class _ClaudeSession:
                 last_event_us = observed_at_us
             elif isinstance(msg, ResultMessage):
                 # Again here: a missed init must not silently cost the session.
-                _record_owned_session(getattr(msg, "session_id", ""))
+                await self._record_owned_session(getattr(msg, "session_id", ""))
                 observed_at_us = time.time_ns() // 1000
                 cumulative_usage = getattr(msg, "model_usage", None)
                 cumulative_cost = getattr(msg, "total_cost_usd", 0.0) or 0.0
