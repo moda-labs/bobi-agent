@@ -305,6 +305,24 @@ function slackError(err: unknown): string {
 	return String(err);
 }
 
+// Follows a Slack cursor until `limit` rows are in or Slack has no more, at most
+// 200 per request. A page that fails throws, dropping the rows so far: a short
+// list would read as the whole conversation.
+async function collectSlackPages(
+	limit: number,
+	fetchPage: (pageLimit: number, cursor: string | undefined) => Promise<{ messages: unknown[]; nextCursor?: string }>,
+): Promise<Array<Record<string, unknown>>> {
+	const rows: Array<Record<string, unknown>> = [];
+	let cursor: string | undefined;
+	while (rows.length < limit) {
+		const page = await fetchPage(Math.min(limit - rows.length, 200), cursor);
+		rows.push(...(page.messages as Array<Record<string, unknown>>));
+		cursor = page.nextCursor;
+		if (!cursor) break;
+	}
+	return rows;
+}
+
 function toConversationMessage(raw: Record<string, unknown>): ConversationMessage {
 	const entry: ConversationMessage = {
 		user: (raw.user as string) || "",
@@ -434,40 +452,40 @@ const slackAdapter: ChannelAdapter = {
 	},
 
 	async fetchConversation(token, conv, limit = 100) {
+		const threadTs = conv.threadId;
 		// A ref without a thread anchor reads the channel/DM history instead
 		// of thread replies (e.g. a proactive conversation with no thread).
-		if (!conv.threadId) {
-			const raw = await callSlackApi("conversations.history", {
-				channel: conv.chatId,
-				limit: Math.min(limit, 200),
-			}, { apiUrl: slackApiUrl(), token });
-			// callSlackApi throws only on a non-2xx status, and Slack refuses a
-			// read (not_in_channel, channel_not_found) as HTTP 200 with
-			// {ok: false, error}. Unchecked, a refusal reads as an empty channel.
-			assertSlackOk("conversations.history", raw);
-			const rows = (raw.messages as Array<Record<string, unknown>> | undefined) ?? [];
-			// conversations.history returns newest-first; deliver oldest-first
-			// to match the thread-replies ordering.
-			return rows.map(toConversationMessage).reverse().slice(0, limit);
+		if (!threadTs) {
+			const rows = await collectSlackPages(limit, async (pageLimit, cursor) => {
+				const raw = await callSlackApi("conversations.history", {
+					channel: conv.chatId,
+					limit: pageLimit,
+					cursor,
+				}, { apiUrl: slackApiUrl(), token });
+				// callSlackApi throws only on a non-2xx status, and Slack refuses a
+				// read (not_in_channel, channel_not_found) as HTTP 200 with
+				// {ok: false, error}. Unchecked, a refusal reads as an empty channel.
+				assertSlackOk("conversations.history", raw);
+				return {
+					messages: (raw.messages as unknown[] | undefined) ?? [],
+					nextCursor: raw.response_metadata?.next_cursor,
+				};
+			});
+			// conversations.history returns newest-first, so the first `limit` rows
+			// are the newest; deliver them oldest-first to match the thread-replies
+			// ordering.
+			return rows.slice(0, limit).map(toConversationMessage).reverse();
 		}
-		const messages: ConversationMessage[] = [];
-		let cursor: string | undefined;
-		while (messages.length < limit) {
-			const page = await fetchSlackThreadReplies({
+		const rows = await collectSlackPages(limit, (pageLimit, cursor) =>
+			fetchSlackThreadReplies({
 				apiUrl: slackApiUrl(),
 				token,
 				channel: conv.chatId,
-				ts: conv.threadId,
-				limit: Math.min(limit - messages.length, 200),
-				...(cursor ? { cursor } : {}),
-			});
-			for (const raw of page.messages as Array<Record<string, unknown>>) {
-				messages.push(toConversationMessage(raw));
-			}
-			cursor = page.nextCursor;
-			if (!cursor) break;
-		}
-		return messages.slice(0, limit);
+				ts: threadTs,
+				limit: pageLimit,
+				cursor,
+			}));
+		return rows.slice(0, limit).map(toConversationMessage);
 	},
 
 	async uploadFiles(token, conv, files, comment) {

@@ -43,15 +43,23 @@ class _SlackStub:
                     "url_private": "https://x"}]},
     ]
 
-    #: Default body for `conversations.history`, newest-first as Slack sends
-    #: it. Unlike `replies` this is the whole response, so a test may replace
-    #: it with a refusal (#1140).
+    #: Default `conversations.history` bodies, keyed by the request's cursor
+    #: ("" for the first page), newest-first as Slack sends them. Unlike
+    #: `replies` each is the whole response, so a test may replace one with a
+    #: refusal (#1140).
     DEFAULT_HISTORY = {
-        "ok": True,
-        "messages": [
-            {"user": "U_H", "text": "newest", "ts": "90.002"},
-            {"user": "U_BOTGW", "text": "oldest", "ts": "90.001"},
-        ],
+        "": {
+            "ok": True,
+            "messages": [
+                {"user": "U_H", "text": "newest", "ts": "90.003"},
+                {"user": "U_H", "text": "middle", "ts": "90.002"},
+            ],
+            "response_metadata": {"next_cursor": "page2"},
+        },
+        "page2": {
+            "ok": True,
+            "messages": [{"user": "U_BOTGW", "text": "oldest", "ts": "90.001"}],
+        },
     }
 
     def __init__(self):
@@ -109,7 +117,7 @@ class _SlackStub:
                     return self._respond({"ok": True,
                                           "messages": stub.replies})
                 if method == "conversations.history":
-                    return self._respond(stub.history)
+                    return self._respond(stub.history[body.get("cursor", "")])
                 if method == "files.getUploadURLExternal":
                     return self._respond({
                         "ok": True, "file_id": "F_GW1",
@@ -349,8 +357,8 @@ class TestReplyEndToEnd:
         assert replies[0]["body"]["ts"] == "100.000"
 
     def test_read_conversation_bare_ref_reads_channel_history(self, gateway):
-        """#1140: a ref with no thread anchor reads the channel's history,
-        oldest-first, and never asks for thread replies."""
+        """#1140: a ref with no thread anchor reads the channel's history across
+        Slack's pages, oldest-first, and never asks for thread replies."""
         _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main
 
@@ -360,10 +368,11 @@ class TestReplyEndToEnd:
         assert result.exit_code == 0, result.output
         assert [line for line in result.output.splitlines() if line.startswith("[")] == [
             "[90.001] U_BOTGW: oldest",
-            "[90.002] U_H: newest",
+            "[90.002] U_H: middle",
+            "[90.003] U_H: newest",
         ]
         history = stub.named("conversations.history")
-        assert len(history) == 1
+        assert [call["body"].get("cursor") for call in history] == [None, "page2"]
         assert history[0]["body"]["channel"] == "C_GW"
         assert stub.named("conversations.replies") == []
 
@@ -373,7 +382,7 @@ class TestReplyEndToEnd:
         _project, stub, _es_url, _bubble = gateway
         from bobi.cli import main
 
-        stub.history = {"ok": False, "error": "not_in_channel"}
+        stub.history = {"": {"ok": False, "error": "not_in_channel"}}
         result = CliRunner().invoke(main, [
             "read-conversation", "slack:T_GW:channel:C_GW", "--json-output",
         ])
@@ -696,12 +705,12 @@ class TestLoginBootstrapCatchUpRead:
         ask = {"user": "U_BOTGW", "ts": "500.000",
                "text": f"`codex` login: reply and then {ab._ASK_MARKER}."}
 
-        stub.history = {"ok": True, "messages": [chatter, ask]}
+        stub.history = {"": {"ok": True, "messages": [chatter, ask]}}
         assert ab._recover_ask_id(project, Config(), channel, "codex") == "500.000"
 
-        stub.history = {"ok": True, "messages": [chatter]}
+        stub.history = {"": {"ok": True, "messages": [chatter]}}
         assert ab._recover_ask_id(project, Config(), channel, "codex") == ""
 
-        stub.history = {"ok": False, "error": "not_in_channel"}
+        stub.history = {"": {"ok": False, "error": "not_in_channel"}}
         with pytest.raises(GatewayError, match="not_in_channel"):
             ab._recover_ask_id(project, Config(), channel, "codex")
