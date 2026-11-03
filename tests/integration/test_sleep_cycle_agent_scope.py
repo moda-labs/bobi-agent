@@ -189,6 +189,9 @@ class TestTwoAgentsOneProjectsTree:
         for session_id, (cwd, text) in sessions.items():
             _transcript(projects, cwd, session_id, text)
 
+        # A manager session rotated away before the last index: on disk only.
+        _transcript(projects, str(alfred.root), "unindexed", "unindexed note")
+
         # The database the pre-fix indexer left, with every agent's sessions.
         alfred.bind()
         conn = history.sqlite3.connect(str(history._db_path()))
@@ -207,14 +210,16 @@ class TestTwoAgentsOneProjectsTree:
         (registry / "mgr.id").write_text("rotated\n")
         # A bad file must cost only itself, not every later ownership read.
         (registry / "bad.id").write_bytes(b"\xff\xfe")
-        (registry / "bad-entry").mkdir()
-        (registry / "bad-entry" / "state.json").write_text("[]")
+        for name, content in (("bad-shape", b"[]"), ("bad-bytes", b"\xff\xfe")):
+            (registry / name).mkdir()
+            (registry / name / "state.json").write_bytes(content)
 
         task = alfred.sleep_cycle_task()
-        for own in ("old manager note", "old worker note", "rotated note"):
+        for own in ("old manager note", "old worker note", "rotated note", "unindexed note"):
             assert own in task
         assert "eng note" not in task
         assert "stranger note" not in task
+        assert history.session_messages("eng-manager") == []
 
     def test_new_agent_in_a_shared_repo_claims_only_its_own_session(self, agents):
         """Working-directory claims preserve an old database; a new agent has none."""
@@ -259,19 +264,23 @@ class TestRealClaudeSessionIsOwned:
     def test_real_session_is_recorded_under_its_transcript_name(self, bobi_env):
         """The id bobi records must be the name Claude Code gives the file."""
         from bobi.brain import get_brain
-        from bobi.brain.base import TurnResult
+        from bobi.brain.base import AssistantText, TurnResult
         from bobi.chat_history import find_claude_transcript
 
         session = get_brain().make_session(
             cwd=str(bobi_env.project_path), system_prompt="Answer in one word.",
             options={"max_turns": 1})
 
+        owned_before_result = set()
+
         async def turn() -> str:
             await session.connect()
             try:
                 await session.query("Say ok.")
                 async for msg in session.receive_response():
-                    if isinstance(msg, TurnResult):
+                    if isinstance(msg, AssistantText):
+                        owned_before_result.update(history._owned_sessions())
+                    elif isinstance(msg, TurnResult):
                         return msg.session_id
             finally:
                 await session.disconnect()
@@ -279,6 +288,7 @@ class TestRealClaudeSessionIsOwned:
 
         session_id = asyncio.run(turn())
         assert session_id
-        assert session_id in history._owned_sessions()
+        # Claimed from init: a worker killed mid-turn never reaches a result.
+        assert session_id in owned_before_result
         assert find_claude_transcript(session_id) is not None
         assert os.path.basename(find_claude_transcript(session_id)) == f"{session_id}.jsonl"

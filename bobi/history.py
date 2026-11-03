@@ -80,8 +80,9 @@ def _seed_owned_sessions() -> set[str]:
     working directory: the runtime root and every cwd the registry remembers.
     That is coarser than the record: a session another agent or a person ran in
     one of those directories is claimed too, and stays claimed if it keeps
-    running. An agent with no database has nothing to preserve and claims by id
-    only, or a new agent in a shared repo would inherit everyone's sessions.
+    running. An agent with no database claims by id only, or a new agent in a
+    shared repo would inherit everyone's sessions. Transcripts in the runtime
+    root's own project directory are always claimed: nobody else works there.
     """
     from bobi.sdk import SessionRegistry
 
@@ -99,13 +100,21 @@ def _seed_owned_sessions() -> set[str]:
         if entry.cwd:
             cwds.add(entry.cwd)
 
+    runtime_slug = project_slug(state.parent)
+    for projects in _projects_dirs():
+        owned.update(f.stem for f in (projects / runtime_slug).glob("*.jsonl"))
+
     if _db_path().exists():
         slugs = {project_slug(cwd) for cwd in cwds}
         conn = sqlite3.connect(str(_db_path()))
         _init_db(conn)
-        rows = conn.execute("SELECT session_id, project FROM conversations").fetchall()
+        rows = conn.execute(
+            "SELECT session_id, cwd, project FROM conversations").fetchall()
         conn.close()
-        owned.update(sid for sid, project in rows if project_slug(project) in slugs)
+        # A row's cwd is exact. Only a row without one falls back to the lossy
+        # directory name, which is all `project` holds then.
+        owned.update(sid for sid, cwd, project in rows
+                     if (cwd in cwds if cwd else project_slug(project) in slugs))
     return owned
 
 
@@ -456,7 +465,7 @@ def index(project_filter: str | None = None) -> dict:
 
     conn.commit()
 
-    owned_json = json.dumps(sorted(owned))
+    owned_json = _owned_json()
     stats = conn.execute(
         "SELECT COUNT(*) FROM conversations "
         "WHERE session_id IN (SELECT value FROM json_each(?))", (owned_json,),
@@ -560,8 +569,9 @@ def session_messages(session_id: str) -> list[dict]:
     conn = sqlite3.connect(str(_db_path()))
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
-        (session_id,),
+        "SELECT * FROM messages WHERE session_id = ? "
+        "AND session_id IN (SELECT value FROM json_each(?)) ORDER BY id",
+        (session_id, _owned_json()),
     ).fetchall()
     results = [dict(r) for r in rows]
     conn.close()

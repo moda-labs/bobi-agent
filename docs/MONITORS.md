@@ -131,13 +131,14 @@ those sessions. This covers the sleep cycle and `transcript search` / `sessions`
 / `inspect`. An id, not a path, because a worker runs in the repo it works on,
 which others may also be using.
 
-The first read seeds the list with the session ids the registry holds. If a
-`history.db` already exists, which means the agent predates the list, it also
+The first read seeds the list with the session ids the registry holds and the
+transcripts in the runtime root's own project directory. If a `history.db`
+already exists, which means the agent predates the list, it also
 claims that database's sessions by working directory: the runtime root and the
 directories the registry remembers. Those claims are coarser. A session another
 agent or a person ran in one of those directories is claimed too, and stays
-claimed if it keeps running. Transcripts not yet indexed at upgrade, other than
-those by id, are not claimed. Rows from other agents stay in `history.db` but are
+claimed if it keeps running. A worker transcript not yet indexed at upgrade is
+claimed only if the registry still holds its id. Rows from other agents stay in `history.db` but are
 never returned, and the cursor moves past them.
 
 If a claim fails on a session's last turn, that session is missing from memory
