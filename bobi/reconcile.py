@@ -14,8 +14,9 @@ POST). This reconciler reads it and closes the gaps:
   2. crashed — a live status with a dead pid → mark ``crashed`` and emit
      ``agent/session.failed`` so the launcher's thread is closed instead of
      hanging on a never-arriving completion.
-  3. timed out — past the run's declared ``timeout`` (+ grace) with the pid still
-     alive → cancel it, mark ``failed``, emit ``agent/session.failed``.
+  3. timed out: past the run's declared ``timeout`` (+ grace) with the pid still
+     alive → mark ``failed``, stop its whole process tree, emit
+     ``agent/session.failed``.
 
 It is event-driven, not a poll loop: run it on manager wake (and it composes with
 the dead-pid sweep in ``SessionRegistry.list_active``). Idempotency is via the
@@ -226,7 +227,7 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
                             "emitted": landed})
             continue
 
-        # (3) Past declared deadline, pid still alive → cancel + failed + emit.
+        # (3) Past declared deadline, pid still alive → failed + stop + emit.
         if entry.timeout and entry.started_at and (
             entry.started_at + entry.timeout + RECONCILE_GRACE < now
         ):

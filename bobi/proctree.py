@@ -174,7 +174,7 @@ def _read_ps(*selector: str) -> Table | None:
 
 def read_table(proc_root: Path = PROC_ROOT) -> Table | None:
     """Every process on the host, or None when no source could be read."""
-    return (_read_proc(proc_root) if proc_root.is_dir() else None) or _read_ps("-ax")
+    return (_read_proc(proc_root) if proc_root.is_dir() else None) or _read_ps("-A")
 
 
 def start_token(pid: int) -> str:
@@ -367,6 +367,12 @@ def terminate(
                 for member in list(live.values()):
                     if _has_exited(member, table):
                         del live[member.pid]
+                if sig == signal.SIGKILL:
+                    # On every read, not just the first: each one has just
+                    # checked who is still ours, and one failed read must not
+                    # cost a process its SIGKILL.
+                    for member in live.values():
+                        send(member, sig)
                 new = [m for m in _walk(table, list(live), protected)
                        if m.pid not in live]
                 if new:
@@ -374,13 +380,6 @@ def terminate(
             if not live or time.monotonic() >= deadline:
                 return
             time.sleep(_POLL_SECONDS)
-
-    def kill_live() -> None:
-        table = read_table()
-        if table is not None:
-            for member in list(live.values()):
-                if not _has_exited(member, table):
-                    send(member, signal.SIGKILL)
 
     try:
         admit(list(members), signal.SIGTERM)
@@ -391,10 +390,12 @@ def terminate(
                 label, count(len(live)), term_grace,
                 ", ".join(describe(m.pid, m.name) for m in live.values()),
             )
-            kill_live()
             settle(signal.SIGKILL, kill_grace)
     except BaseException:
-        kill_live()
+        table = read_table()
+        for member in live.values():
+            if table is not None and not _has_exited(member, table):
+                send(member, signal.SIGKILL)
         raise
 
     def reason(pid: int) -> str:

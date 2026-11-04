@@ -150,6 +150,13 @@ class ProcessTree:
             f"bytes in {quiet_for}s"
         )
 
+    def assert_stopped_soon(self, *, timeout: float = 10.0) -> None:
+        """For an interrupt, which sends SIGKILL and propagates without waiting."""
+        deadline = time.monotonic() + timeout
+        while self.running() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assert_stopped(quiet_for=0.3)
+
     def assert_all_running(self, *, roles=ROLES) -> None:
         assert sorted(self.running()) == sorted(roles)
 

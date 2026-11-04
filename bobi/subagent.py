@@ -3235,7 +3235,7 @@ def cancel_agent(ref: str, *, terminal: tuple[str, str] | None = None) -> bool:
 
     table = proctree.read_table()
     identity = proctree.verify(table, pid, entry.pid_start)
-    if identity == proctree.GONE or not pid_alive(pid):
+    if identity == proctree.GONE:
         _close_entry(registry, name, terminal)
         log.warning("%s: the recorded process (pid %d) had already exited; "
                     "nothing was signalled.", name, pid)

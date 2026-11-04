@@ -644,6 +644,25 @@ Phases 1 to 6 keep either design available: Phase 7 needs only `pid_start` from 
 **Q2.** Recommendation (a) stands: a note on #1115 when this lands.
 The note belongs to the landing, not to this PR.
 
+### 2026-11-04: What the build added
+
+None of these changes a decision. Each is needed for what the plan already asks.
+
+- `terminate` takes `protected`, `before_signal` and `label`, and `is_self_or_ancestor` takes `start`.
+  `before_signal` runs before each batch of members is signalled, so steps 3 and 5 of the kill sequence share one code path and the interrupt rule covers the writes.
+- `SessionRegistry._reap_if_dead` reads the entry again before it writes `crashed`.
+  Writing before signalling (A4) leaves one window: a read from before the write that finishes after the process died.
+  The pid is dead by then, so a fresh read sees the write.
+- `_workflow_rows` orders a session's rows by `resumed_at or started_at`, not `started_at` alone.
+  Otherwise `_claim_sessions` folds a live session onto a closed row, and a resumed older row counts as running twice.
+- SIGKILL is not sent to a member whose token cannot be checked at that moment.
+  It is reported as a survivor with `process table unavailable`.
+- `paths.webapp_pid_path()` is new, so cancel and the web app's daemon share one definition of that file.
+- V21 has two legs, a foreground command and a background task, which is the E5 shape on the real CLI.
+
+Reruns through the real `bobi` commands on 2026-11-04, on CLI 2.1.309, showed the tool command sharing its shell's process group, where the Problem section measured a group of its own.
+The kill set follows parents, so it reaches both shapes, and the fixture keeps the harder one.
+
 ## Notes
 
 ### What this does not close

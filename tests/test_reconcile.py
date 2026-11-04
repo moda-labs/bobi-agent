@@ -189,7 +189,7 @@ class TestDeadlineStopsTheTree:
         with pytest.raises(KeyboardInterrupt):
             reconcile_sessions(emit=emit)
 
-        tree.assert_stopped()
+        tree.assert_stopped_soon()
         entry = get_registry().get(name)
         assert entry.status == TERMINAL_FAILED
         assert entry.emit_confirmed is False

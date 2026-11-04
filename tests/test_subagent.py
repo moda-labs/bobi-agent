@@ -418,6 +418,9 @@ class TestCancelAgent:
         self._run("wf-sub-run", pid=tree.pids()["cli"])
         self._run("wf-shared-pid", pid=root)
         self._run("wf-bystander", pid=os.getpid())
+        # Names a member's pid, but from an earlier process that had that pid.
+        self._run("wf-recycled", pid=tree.pids()["shell"])
+        self.registry.update("wf-recycled", pid_start="proc:another-boot:1")
 
         deliver = proctree._send
 
@@ -433,7 +436,8 @@ class TestCancelAgent:
         def read_like_subagents_list():
             while not done.is_set():
                 seen.update(entry.status
-                            for entry in self.registry.list_all(reap_dead=True))
+                            for entry in self.registry.list_all(reap_dead=True)
+                            if entry.name != "wf-recycled")
 
         reader = threading.Thread(target=read_like_subagents_list, daemon=True)
         reader.start()
@@ -448,6 +452,34 @@ class TestCancelAgent:
         for name in ("wf-target", "wf-sub-run", "wf-shared-pid"):
             assert self._closed(name), name
         assert self.registry.get("wf-bystander").status == "running"
+        assert self.registry.get("wf-recycled").status != "cancelled"
+
+    def test_a_sub_run_that_appears_during_the_wait_is_closed_too(
+            self, process_tree, monkeypatch):
+        """V15: registered too late for the list taken before the kill started.
+
+        The command forks when it takes SIGTERM. The child's entry appears just
+        as the poll that finds the child reads the table.
+        """
+        tree = process_tree()
+        root = tree.start_detached(on_term="fork")
+        command = tree.pids()["command"]
+        self._run(pid=root)
+        read_table = proctree.read_table
+
+        def read_and_register_the_child():
+            table = read_table()
+            children = [p.pid for p in table.values() if p.parent == command]
+            if children and self.registry.get("wf-late") is None:
+                self._run("wf-late", pid=children[0])
+            return table
+
+        monkeypatch.setattr(proctree, "read_table", read_and_register_the_child)
+
+        assert cancel_agent("wf-x") is True
+
+        tree.assert_stopped()
+        assert self._closed("wf-late")
 
     @pytest.mark.parametrize("rewrites_pid", [False, True],
                              ids=["pid-stays-zero", "member-pid"])
