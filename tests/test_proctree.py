@@ -523,6 +523,23 @@ def test_ps_that_cannot_answer_gives_no_table(tmp_path, fake_ps, body):
     assert proctree.read_table(tmp_path / "no-proc") is None
 
 
+@pytest.mark.parametrize("failure", ["every-row-unreadable", "listing-fails"])
+def test_proc_that_cannot_be_read_gives_no_table_and_never_asks_ps(
+        tmp_path, monkeypatch, fake_ps, failure):
+    """V7: a ``ps`` token never equals a ``/proc`` one, so every process would read as gone."""
+    fake_ps(f"cat <<'EOF'\n{_CANNED_PS}EOF")
+    root = tmp_path / "proc"
+    (root / "100").mkdir(parents=True)
+
+    def listing_fails(_path):
+        raise OSError("too many open files")
+
+    with monkeypatch.context() as patch:
+        if failure == "listing-fails":
+            patch.setattr(Path, "iterdir", listing_fails)
+        assert proctree.read_table(root) is None
+
+
 @pytest.mark.skipif(shutil.which("ps") is None,
                     reason="no ps on this host; the CI runners have one")
 def test_ps_source_stops_a_real_tree(process_tree, tmp_path, monkeypatch, signal_seam):
@@ -589,6 +606,29 @@ def test_table_read_that_fails_once_still_ends_in_sigkill(
     survivors = proctree.terminate(members, term_grace=term_grace, kill_grace=5.0)
 
     assert survivors == []
+    assert (pid, SIGKILL) in signal_seam.sent
+    tree.assert_stopped(quiet_for=QUIET)
+
+
+def test_row_with_no_token_does_not_read_as_exited(
+        process_tree, monkeypatch, signal_seam):
+    """V7: a failed boot id read blanks every token, and proves nothing about the pid."""
+    tree = process_tree()
+    pid = _start_leaf(tree, on_term="ignore")
+    members = _tree_members(pid)
+    real_read_table = proctree.read_table
+    reads = itertools.count(1)
+
+    def read_table():
+        table = real_read_table()
+        if next(reads) == 1:
+            table[pid] = replace(table[pid], token="")
+        return table
+
+    monkeypatch.setattr(proctree, "read_table", read_table)
+
+    assert proctree.terminate(members, term_grace=0.2, kill_grace=5.0) == []
+
     assert (pid, SIGKILL) in signal_seam.sent
     tree.assert_stopped(quiet_for=QUIET)
 

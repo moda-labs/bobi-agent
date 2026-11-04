@@ -128,15 +128,20 @@ def _read_stat(proc_root: Path, pid: int, boot_id: str, boot_time: float) -> Pro
                 stat[stat.find("(") + 1:close])
 
 
-def _read_proc(proc_root: Path) -> Table:
+def _read_proc(proc_root: Path) -> Table | None:
+    """The table from ``/proc``: ``{}`` if the host has none, None if a read failed."""
+    if not proc_root.is_dir():
+        return {}
     try:
         pids = [int(e.name) for e in proc_root.iterdir() if e.name.isdigit()]
     except OSError:
+        return None
+    if not pids:
         return {}
     boot_id = _boot_id(proc_root)
     boot_time = _boot_time(proc_root)
     rows = (_read_stat(proc_root, pid, boot_id, boot_time) for pid in pids)
-    return {row.pid: row for row in rows if row}
+    return {row.pid: row for row in rows if row} or None
 
 
 def _parse_ps_line(line: str) -> Proc | None:
@@ -173,8 +178,15 @@ def _read_ps(*selector: str) -> Table | None:
 
 
 def read_table(proc_root: Path = PROC_ROOT) -> Table | None:
-    """Every process on the host, or None when no source could be read."""
-    return (_read_proc(proc_root) if proc_root.is_dir() else None) or _read_ps("-A")
+    """Every process on the host, or None when it could not be read.
+
+    ``ps`` is for a host with no ``/proc``, never a fallback for a failed read:
+    its tokens never match ``/proc``'s, so every process would read as gone.
+    """
+    table = _read_proc(proc_root)
+    if table is None:
+        return None
+    return table or _read_ps("-A")
 
 
 def start_token(pid: int) -> str:
@@ -289,7 +301,10 @@ def kill_set(table: Table, root: int, protected: Collection[int]) -> list[Member
 
 def _has_exited(member: Member, table: Table) -> bool:
     proc = table.get(member.pid)
-    return proc is None or proc.state == "Z" or proc.token != member.token
+    if proc is None or proc.state == "Z":
+        return True
+    # A row with no token is a failed boot id read, which proves nothing.
+    return bool(proc.token) and proc.token != member.token
 
 
 def _send(pid: int, sig: signal.Signals) -> None:
