@@ -1,7 +1,7 @@
 """MDS-65 §4.6 — dead-man reconciler tests.
 
 A run can be stranded three ways: a crash that never reaches the terminal emit,
-a swallowed terminal bus POST, or a hang past the declared timeout. The
+a swallowed terminal bus POST, or a hang past its deadline. The
 reconciler reads state.json (the durable source of truth) and closes each,
 re-emitting an honest lifecycle event — idempotently, so healthy completions are
 never double-delivered.
@@ -57,7 +57,7 @@ class TestCrashReconcile:
         name = _seed("wf-x-1", status="running", pid=999999, role="engineer",
                      project="r", requested_by={"slack_user": "U1"})
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: None)
 
         entry = get_registry().get(name)
         assert entry.status == TERMINAL_CRASHED
@@ -94,9 +94,9 @@ class TestCrashReconcile:
     def test_second_sweep_is_noop(self):
         _seed("wf-x-2", status="running", pid=999999, project="r")
         emit1 = _Emitter()
-        reconcile_sessions(emit=emit1, cancel=lambda n: None)
+        reconcile_sessions(emit=emit1, cancel=lambda n, e: None)
         emit2 = _Emitter()
-        actions2 = reconcile_sessions(emit=emit2, cancel=lambda n: None)
+        actions2 = reconcile_sessions(emit=emit2, cancel=lambda n, e: None)
         assert actions2 == []  # already terminal + emit_confirmed
         assert emit2.calls == []
 
@@ -111,7 +111,7 @@ class TestTimeoutReconcile:
                      started_at=time.time() - (10 + RECONCILE_GRACE + 60))
         cancelled = []
         emit = _Emitter()
-        reconcile_sessions(emit=emit, cancel=cancelled.append)
+        reconcile_sessions(emit=emit, cancel=lambda n, e: cancelled.append(n))
 
         entry = get_registry().get(name)
         assert entry.status == TERMINAL_FAILED
@@ -122,7 +122,7 @@ class TestTimeoutReconcile:
         name = _seed("wf-t-2", status="running", pid=os.getpid(),
                      project="r", timeout=3600, started_at=time.time() - 5)
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
 
@@ -136,7 +136,7 @@ class TestTimeoutReconcile:
                      deadline_at=time.time() + 1000)
         cancelled = []
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=cancelled.append)
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: cancelled.append(n))
         assert actions == []
         assert cancelled == []
         assert emit.calls == []
@@ -149,7 +149,7 @@ class TestTimeoutReconcile:
                      deadline_at=time.time() - (RECONCILE_GRACE + 60))
         cancelled = []
         emit = _Emitter()
-        reconcile_sessions(emit=emit, cancel=cancelled.append)
+        reconcile_sessions(emit=emit, cancel=lambda n, e: cancelled.append(n))
 
         entry = get_registry().get(name)
         assert entry.status == TERMINAL_FAILED
@@ -163,7 +163,7 @@ class TestTimeoutReconcile:
                      project="r", phase="implement", timeout=3600,
                      started_at=time.time() - 6480,
                      deadline_at=time.time() - 240)
-        actions = reconcile_sessions(emit=_Emitter(), cancel=lambda n: None)
+        actions = reconcile_sessions(emit=_Emitter(), cancel=lambda n, e: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
 
@@ -174,7 +174,7 @@ class TestTimeoutReconcile:
                      project="r", phase="implement", timeout=0,
                      started_at=time.time() - 90_000,
                      deadline_at=time.time() - 90_000)
-        actions = reconcile_sessions(emit=_Emitter(), cancel=lambda n: None)
+        actions = reconcile_sessions(emit=_Emitter(), cancel=lambda n, e: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
 
@@ -186,14 +186,14 @@ class TestTimeoutReconcile:
                      started_at=time.time() - 5,
                      deadline_at=time.time() - 90_000)
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
 
 
 # The clock for sweeps that pin one: whole seconds, so the overrun an error names
-# is exact.
-NOW = float(int(time.time()))
+# is exact, and behind the real clock, so reading that instead changes it.
+NOW = float(int(time.time())) - 10
 DEADLINE_ERROR = ("agent ran past its deadline in phase implement (360s over) "
                   "without reporting a terminal status")
 
@@ -283,7 +283,7 @@ class TestDeadlineStopsTheTree:
         """`failed` does not block a launch, so a new run can land while a tree dies."""
         name = _past_deadline("wf-t", os.getpid())
 
-        def relaunch(session):
+        def relaunch(session, _error):
             _seed(session, status="running", pid=os.getpid(), project="new",
                   started_at=time.time())
 
@@ -305,7 +305,7 @@ class TestDeadlineStopsTheTree:
         later = _past_deadline("wf-b", os.getpid())
         stopped = []
 
-        def stop_and_relaunch_the_later_run(session):
+        def stop_and_relaunch_the_later_run(session, _error):
             stopped.append(session)
             _seed(later, status="running", pid=os.getpid(), timeout=3600,
                   started_at=time.time())
@@ -341,7 +341,7 @@ class TestDeadlineStopsTheTree:
 
         actions = reconcile_sessions(
             emit=emit, now=NOW,
-            cancel=lambda name: shutil.rmtree(get_registry().session_dir(name)))
+            cancel=lambda name, _error: shutil.rmtree(get_registry().session_dir(name)))
 
         assert [action["name"] for action in actions] == [gone, later]
         assert [data["run_key"] for _, data in emit.calls] == [gone, later]
@@ -352,7 +352,7 @@ class TestDeadlineStopsTheTree:
         """A runner's own write can land over cancel's, and the next sweep re-emits it."""
         name = _past_deadline("wf-t", os.getpid())
 
-        def the_runner_finishes(session):
+        def the_runner_finishes(session, _error):
             get_registry().mark_terminal(session, TERMINAL_COMPLETED)
 
         emit = _Emitter()
@@ -511,7 +511,7 @@ class TestReEmitSwallowed:
         name = _seed("wf-e-1", status=TERMINAL_FAILED, error="boom",
                      project="r", emit_confirmed=False, terminal_at=time.time())
         emit = _Emitter()
-        reconcile_sessions(emit=emit, cancel=lambda n: None)
+        reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert "agent/session.failed" in emit.types()
         assert get_registry().get(name).emit_confirmed is True
 
@@ -519,7 +519,7 @@ class TestReEmitSwallowed:
         name = _seed("wf-c-1", status=TERMINAL_COMPLETED, project="r",
                      emit_confirmed=False, terminal_at=time.time())
         emit = _Emitter()
-        reconcile_sessions(emit=emit, cancel=lambda n: None)
+        reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert "agent/session.completed" in emit.types()
 
     def test_confirmed_terminal_is_not_reemitted(self):
@@ -527,7 +527,7 @@ class TestReEmitSwallowed:
         _seed("wf-c-2", status=TERMINAL_COMPLETED, project="r",
               emit_confirmed=True, terminal_at=time.time())
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert actions == []
         assert emit.calls == []
 
@@ -537,11 +537,11 @@ class TestReEmitSwallowed:
         name = _seed("wf-e-2", status=TERMINAL_FAILED, error="boom", project="r",
                      emit_confirmed=False, terminal_at=time.time())
         emit = _Emitter(landed=False)
-        reconcile_sessions(emit=emit, cancel=lambda n: None)
+        reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert get_registry().get(name).emit_confirmed is False
         # next sweep with a working bus re-emits and confirms
         emit2 = _Emitter(landed=True)
-        reconcile_sessions(emit=emit2, cancel=lambda n: None)
+        reconcile_sessions(emit=emit2, cancel=lambda n, e: None)
         assert get_registry().get(name).emit_confirmed is True
 
 
@@ -550,7 +550,7 @@ class TestReconcilerIgnoresHealthyActive:
         name = _seed("wf-live-1", status="idle", pid=os.getpid(),
                      project="r", timeout=3600, started_at=time.time())
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert actions == []
         assert get_registry().get(name).status == "idle"
 
@@ -558,7 +558,7 @@ class TestReconcilerIgnoresHealthyActive:
         # e.g. a just-registered 'starting' entry with no pid/timeout yet
         name = _seed("wf-start-1", status="starting", project="r")
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert actions == []
 
 
@@ -570,7 +570,7 @@ class TestWaitingIsNotReconciled:
         name = _seed("wf-wait-1", status="waiting", pid=999999, project="r",
                      requested_by={"slack_user": "U1"})
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: None)
         assert actions == []
         assert emit.calls == []
         assert get_registry().get(name).status == "waiting"
@@ -582,7 +582,7 @@ class TestExcludeNames:
         process's dead entry isn't reported as a crashed sub-agent."""
         name = _seed("manager-app", status="running", pid=999999, project="r")
         emit = _Emitter()
-        actions = reconcile_sessions(emit=emit, cancel=lambda n: None,
+        actions = reconcile_sessions(emit=emit, cancel=lambda n, e: None,
                                      exclude_names={name})
         assert actions == []
         assert emit.calls == []

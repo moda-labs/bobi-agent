@@ -72,13 +72,7 @@ def _default_emit(event_type: str, data: dict) -> bool:
         return False
 
 
-def _deadline_error(entry, now: float) -> str:
-    return (f"agent ran past its deadline in phase {entry.phase} "
-            f"({int(now - run_deadline(entry))}s over) without reporting a "
-            "terminal status")
-
-
-def _default_cancel(name: str, now: float) -> bool:
+def _default_cancel(name: str, error: str) -> bool:
     """Stop a past-deadline run, and close its entry before signalling it.
 
     Closing first means a manager stopped during the wait still leaves a
@@ -88,11 +82,8 @@ def _default_cancel(name: str, now: float) -> bool:
     """
     from bobi.subagent import CancelIncompleteError, CancelRefusedError, cancel_agent
 
-    entry = get_registry().get(name)
-    if entry is None:
-        return False
     try:
-        return cancel_agent(name, terminal=(TERMINAL_FAILED, _deadline_error(entry, now)))
+        return cancel_agent(name, terminal=(TERMINAL_FAILED, error))
     except CancelIncompleteError as e:
         log.warning("%s", e)
         return True
@@ -209,13 +200,14 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
     re-claim that entry anyway).
 
     ``emit``/``cancel`` are injectable for testing; they default to the real bus
-    POST and ``cancel_agent``. ``cancel(name)`` returning False means the run was
-    left alone. Pure over its inputs otherwise.
+    POST and ``cancel_agent``. ``cancel(name, error)`` closes the run with that
+    error, and returning False means it was left alone. Pure over its inputs
+    otherwise.
     """
     registry = registry or get_registry()
     now = now if now is not None else time.time()
     emit = emit or _default_emit
-    cancel = cancel or (lambda name: _default_cancel(name, now))
+    cancel = cancel or _default_cancel
     exclude_names = exclude_names or set()
 
     actions: list[dict] = []
@@ -260,13 +252,15 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
         # (3) Past its deadline, pid still alive → failed + stop + emit.
         deadline = run_deadline(entry)
         if deadline and deadline + RECONCILE_GRACE < now:
-            if cancel(entry.name) is False:
+            error = (f"agent ran past its deadline in phase {entry.phase} "
+                     f"({int(now - deadline)}s over) without reporting a "
+                     "terminal status")
+            if cancel(entry.name, error) is False:
                 continue
             # The wait can last 15s. Past it the entry may be gone, or `failed` may
             # have let a relaunch take the name. Either way the record is no longer
             # this run's to touch, so the run is announced from what was read, as
             # launch admission does for a dead one.
-            error = _deadline_error(entry, now)
             current = registry.get(entry.name)
             still_this_run = current is not None and current.started_at == entry.started_at
             if still_this_run:

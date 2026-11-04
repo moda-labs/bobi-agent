@@ -706,14 +706,15 @@ Most are races at a run's first moments, recoverable with a second cancel, or a 
 #1124 landed on `main` as `0650990b` (PR #1151), and this branch merged it, as the amendment replacing Phase 7 said it would.
 #1151 does not ask whether a run is alive.
 It moves the deadline: a live run is judged by the later of `started_at + timeout` and the `deadline_at` its runner arms when a prompt step starts.
-So Q1 ends here: a run inside its step's budget never reaches this kill, and one past that budget does, verified live or not.
+So Q1 ends here: a run the sweep reads inside its step's budget never reaches this kill, and one it reads past that budget does, verified live or not.
 Column (b) of the Q1 table, the "until #1124 lands" lines above and the #1124 entry under "What this does not close" are history now.
 
 Each of these changes what the plan's sections above say, and none changes a decision.
 
 - **The deadline error is #1151's wording,** `agent ran past its deadline in phase <phase> (<n>s over) without reporting a terminal status`, because `timeout` may no longer be what the run overran.
   C2 still appends to it, so the example under Reconciler shows the old wording.
-- **`_default_cancel` takes the sweep's `now`,** so the error cancel writes and the one the sweep falls back to name the same overrun.
+- **The sweep builds that error once, from the read it judged, and passes it down.**
+  The seam is now `cancel(name, error)`, which replaces `_default_cancel(name)` under Reconciler and the one-argument callable N2 relies on, and `_default_cancel` no longer reads the entry.
 - **V17 stays, and V25 and V26 are not built.** V17 and V23 now seed a run past the budget its step armed.
 - **V24 has two legs.** Rewinding `started_at` alone now leaves a run inside its step's budget, so after a real manager start the run and its tree are untouched and the bus is silent.
   Rewinding `deadline_at` too expects what V24 always did: tree gone, `failed`, one event.
