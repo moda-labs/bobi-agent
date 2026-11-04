@@ -110,8 +110,9 @@ then runs as its own `agent`. The CLI allows that only when every prompt step
 (not route/action/notify/await) names an installed `agent`; otherwise `--role`
 is required. A prompt step with no `agent` inherits the previous step's.
 `timeout` (seconds, default 14400; anything but a positive integer reads as
-undeclared, and `bobi agent <name> doctor` warns) is the step's wall-clock
-budget. Nothing interrupts a drain already in flight on it, because the workflow
+undeclared, and `bobi agent <name> doctor` warns) is a prompt step's wall-clock
+budget, and no other step kind reads it. Nothing interrupts a drain already in
+flight on it, because the workflow
 path has no in-process wall clock; it is read at two points. It gates whether a
 turn-cap restart is allowed to **start** (see [Turn budget](#turn-budget) for the
 resulting bound). And when a prompt step starts, the engine arms the registry
@@ -121,15 +122,15 @@ inherit it.
 The reconciler's dead-man check judges a live run by the later of that and the
 **run-level** deadline (`started_at` + `run_workflow`'s own `timeout`, default
 3600), so a manager restart never closes a run that is still inside the budget
-of the step it is in (#1124), and never closes one earlier than the run-level
-deadline would.
+of its current prompt step (#1124), and never closes one earlier than the
+run-level deadline would.
 
 That check runs only at manager start, so it stops a run only if a restart lands
 after the deadline plus 300s of grace. Until then a wedged run keeps its
 concurrency slot and its session name. The check then signals the runner, marks
 the run `failed` and emits `agent/session.failed`. The signal reaches the runner
-process only, so a CLI and its tools can outlive it (#1122). Each visit to a step
-arms afresh, so nothing bounds a whole run: a loop ends at its route's
+process only, so a CLI and its tools can outlive it (#1122). Each visit to a
+prompt step arms afresh, so nothing bounds a whole run: a loop ends at its route's
 `max_iterations`.
 
 Size a step's `timeout` for the longest honest run of that step, retries

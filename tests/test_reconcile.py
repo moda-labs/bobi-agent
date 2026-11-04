@@ -9,7 +9,6 @@ never double-delivered.
 
 import os
 import time
-from pathlib import Path
 
 import pytest
 
@@ -18,7 +17,6 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.reconcile import reconcile_sessions, RECONCILE_GRACE
-from bobi.workflow.schema import load_workflow
 
 
 @pytest.fixture(autouse=True)
@@ -130,10 +128,11 @@ class TestTimeoutReconcile:
         assert "agent/session.failed" in emit.types()
 
     def test_step_inside_its_grace_is_left_running(self):
+        # A literal, so shrinking the documented 300s grace fails here.
         name = _seed("wf-t-7", status="running", pid=os.getpid(),
                      project="r", phase="implement", timeout=3600,
                      started_at=time.time() - 6480,
-                     deadline_at=time.time() - (RECONCILE_GRACE - 60))
+                     deadline_at=time.time() - 240)
         actions = reconcile_sessions(emit=_Emitter(), cancel=lambda n: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
@@ -160,36 +159,6 @@ class TestTimeoutReconcile:
         actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
-
-
-class TestShippedBudgets:
-    """What the shipped eng-team pack gives its long steps (#1124).
-
-    A step budget keeps a healthy run alive only if it beats what the step
-    really takes, and the stop only means something while it stays finite. Each
-    row is the longest that step took on a completed run on a production
-    instance, measured 2026-11-04 from the registry for single-step workflows
-    and from handoff timestamps for lifecycle steps. One instance undercounts,
-    hence the headroom.
-    """
-
-    HEADROOM = 1.25
-    CEILING = 86400  # a budget past a day no longer bounds a runaway
-
-    @pytest.mark.parametrize("workflow, step, longest_healthy", [
-        ("adhoc", "task", 8915),
-        ("issue-lifecycle", "spec", 3860),
-        ("issue-lifecycle", "implement", 11366),
-        ("issue-lifecycle", "pr", 6357),
-        ("pr-feedback", "address", 5304),
-    ])
-    def test_budget_outlasts_the_longest_real_step_and_still_ends(
-            self, workflow, step, longest_healthy):
-        path = (Path(__file__).resolve().parent.parent / "agents" / "eng-team"
-                / "workflows" / f"{workflow}.yaml")
-        budget = next(s.timeout for s in load_workflow(path).steps
-                      if s.name == step)
-        assert longest_healthy * self.HEADROOM < budget <= self.CEILING
 
 
 # --- (1) terminal-but-unconfirmed: swallowed emit ---------------------------

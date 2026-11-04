@@ -118,8 +118,8 @@ class TestSchemaLoad:
     ])
     def test_unusable_step_timeout_reads_as_undeclared(
             self, tmp_path, declared, expected):
-        # The runner does arithmetic on it before every step, so a value that
-        # is not a number must not reach it as one.
+        # The runner does arithmetic on it before every prompt step, so a value
+        # that is not a number must not reach it as one.
         f = tmp_path / "test.yaml"
         f.write_text(textwrap.dedent(f"""\
             name: test-wf
@@ -2527,9 +2527,9 @@ def _generated_adhoc(tmp_path):
 
 
 class TestStepDeadline:
-    """#1124: when a step starts, the runner arms the registry's ``deadline_at``
-    to ``now + max(step.timeout, run timeout)``, so a manager restart's
-    reconciler judges a live run by the budget of the step it is in and not by
+    """#1124: when a prompt step starts, the runner arms the registry's
+    ``deadline_at`` to ``now + max(step.timeout, run timeout)``, so a manager
+    restart's reconciler judges a live run by the budget of that step and not by
     a flat run-level deadline that nothing in the run enforces."""
 
     @pytest.fixture(autouse=True)
@@ -2567,11 +2567,14 @@ class TestStepDeadline:
         assert budget - 5 <= remaining <= budget, (label, remaining)
 
     def test_each_prompt_step_arms_its_own_budget(self):
-        observe = self._observe
+        observe, registry = self._observe, self.registry
+        phases = []
 
         class Client(FakeBrainClient):
             async def query(self, text):
                 observe("short" if "Say hi" in text else "long")
+                # The reconciler names this phase if it closes the run here.
+                phases.extend(e.phase for e in registry.list_all())
 
         brain = MagicMock()
         brain.make_session.side_effect = lambda **_kw: Client()
@@ -2584,6 +2587,7 @@ class TestStepDeadline:
         # A step budget below the run's timeout is floored at the run's own.
         self._assert_armed("short", 3600)
         self._assert_armed("long", 7200)
+        assert phases == ["short", "long"]
 
     def test_retries_inside_the_step_keep_its_deadline(self):
         # A budget is sized for the whole step, so a turn-cap resume and a
@@ -2701,6 +2705,34 @@ class TestStepDeadline:
 
         assert self._run(load(tmp_path), brain) is True
         self._assert_armed("task", DEFAULT_STEP_TIMEOUT)
+
+
+class TestShippedBudgets:
+    """What the shipped eng-team pack gives its long steps (#1124).
+
+    A step budget keeps a healthy run alive only if it beats what the step
+    really takes, and the stop only means something while it stays finite. Each
+    row is the longest that step took on a completed run on a production
+    instance, measured 2026-11-04 from the registry for single-step workflows
+    and from handoff timestamps for lifecycle steps. One instance undercounts,
+    hence the headroom.
+    """
+
+    HEADROOM = 1.25
+    CEILING = 86400  # a budget past a day no longer bounds a runaway
+
+    @pytest.mark.parametrize("workflow, step, longest_healthy", [
+        ("adhoc", "task", 8915),
+        ("issue-lifecycle", "spec", 3860),
+        ("issue-lifecycle", "implement", 11366),
+        ("issue-lifecycle", "pr", 6357),
+        ("pr-feedback", "address", 5304),
+    ])
+    def test_budget_outlasts_the_longest_real_step_and_still_ends(
+            self, workflow, step, longest_healthy):
+        budget = next(s.timeout for s in _shipped_workflow("eng-team", workflow).steps
+                      if s.name == step)
+        assert longest_healthy * self.HEADROOM < budget <= self.CEILING
 
 
 # ---------------------------------------------------------------------------
