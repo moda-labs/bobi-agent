@@ -156,11 +156,10 @@ def close_dead_run(entry, registry=None, *, emit=None):
     emit = emit or _default_emit
     # The read that produced this entry can predate a cancel, which writes the
     # entry before it signals the process. The pid is dead now, so a fresh read
-    # sees that write (the same rule as SessionRegistry._reap_if_dead). A `crashed`
-    # it finds is a list read's reap, which emits nothing, so this close still does.
+    # sees that write (the same rule as SessionRegistry._reap_if_dead).
     current = registry.get(entry.name)
-    if current and current.status != TERMINAL_CRASHED and (
-            current.status not in _RECONCILABLE_ACTIVE or current.pid != entry.pid):
+    if current and (current.status not in _RECONCILABLE_ACTIVE
+                    or current.pid != entry.pid):
         return current, False
     error = entry.error or DIED_WITHOUT_TERMINAL
     registry.mark_terminal(entry.name, TERMINAL_CRASHED, error=error,
@@ -244,24 +243,24 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
         ):
             if cancel(entry.name) is False:
                 continue
-            # The wait can last 15s, and past it the entry may be gone.
+            # The wait can last 15s. Past it the entry may be gone, or `failed` may
+            # have let a relaunch take the name. Either way the record is no longer
+            # this run's to touch, so the run is announced from what was read, as
+            # launch admission does for a dead one.
+            error = _deadline_error(entry)
             current = registry.get(entry.name)
-            if current is None:
-                continue
-            # `failed` also lets a relaunch take the name during the wait. That
-            # entry is not this run, so it is left alone, and this run is announced
-            # from what was read, as launch admission does for a dead one.
-            relaunched = current.started_at != entry.started_at
-            if relaunched:
-                closed = replace(entry, status=TERMINAL_FAILED, pid=0,
-                                 error=_deadline_error(entry))
-            else:
+            still_this_run = current is not None and current.started_at == entry.started_at
+            if still_this_run:
                 if current.status in _RECONCILABLE_ACTIVE:
                     registry.mark_terminal(entry.name, TERMINAL_FAILED,
-                                           error=_deadline_error(entry), reconciled=True)
-                closed = registry.get(entry.name) or current
+                                           error=error, reconciled=True)
+                elif current.status == TERMINAL_FAILED:
+                    error = current.error or error  # cancel's, which names any survivors
+                else:
+                    continue  # it finished by itself, and the next sweep re-emits that
+            closed = replace(entry, status=TERMINAL_FAILED, pid=0, error=error)
             landed = emit("agent/session.failed", _failed_payload(closed, "timed out"))
-            if landed and not relaunched:
+            if landed and still_this_run:
                 registry.update(entry.name, emit_confirmed=True)
             actions.append({"name": entry.name, "action": "timeout",
                             "emitted": landed})

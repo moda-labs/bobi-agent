@@ -91,25 +91,6 @@ class TestCrashReconcile:
         assert get_registry().get(name).status == expected
         assert emit.calls == []
 
-    def test_a_crash_a_list_read_reaped_is_still_announced(self, monkeypatch):
-        """A reap writes `crashed` and emits nothing, so this close is the only event."""
-        name = _seed("wf-x-reaped", status="running", pid=999999, project="r")
-        is_dead_run = reconcile.is_dead_run
-
-        def a_list_read_reaps_it_after_the_read(entry):
-            dead = is_dead_run(entry)
-            get_registry().list_active()
-            return dead
-
-        monkeypatch.setattr(reconcile, "is_dead_run", a_list_read_reaps_it_after_the_read)
-        emit = _Emitter()
-
-        actions = reconcile_sessions(emit=emit)
-
-        assert actions == [{"name": name, "action": "crashed", "emitted": True}]
-        assert emit.types() == ["agent/session.failed"]
-        assert get_registry().get(name).emit_confirmed is True
-
     def test_second_sweep_is_noop(self):
         _seed("wf-x-2", status="running", pid=999999, project="r")
         emit1 = _Emitter()
@@ -233,7 +214,8 @@ class TestDeadlineStopsTheTree:
         name = self._past_deadline("wf-t", os.getpid())
 
         def relaunch(session):
-            _seed(session, status="running", pid=os.getpid(), started_at=time.time())
+            _seed(session, status="running", pid=os.getpid(), project="new",
+                  started_at=time.time())
 
         emit = _Emitter()
 
@@ -244,6 +226,7 @@ class TestDeadlineStopsTheTree:
         assert entry.emit_confirmed is False
         assert actions == [{"name": name, "action": "timeout", "emitted": True}]
         assert emit.types() == ["agent/session.failed"]
+        assert emit.calls[0][1]["project"] == "r"
         assert "exceeded its 10s timeout" in emit.calls[0][1]["error"]
 
     def test_a_run_relaunched_during_the_sweep_is_judged_as_it_is_now(self):
@@ -280,7 +263,7 @@ class TestDeadlineStopsTheTree:
         assert get_registry().get(name).status == TERMINAL_FAILED
         assert emit.types() == ["agent/session.failed"]
 
-    def test_an_entry_removed_during_the_wait_ends_only_its_own_branch(self):
+    def test_an_entry_removed_during_the_wait_is_still_announced(self):
         """The wait can last 15s, and a later run still has to be closed."""
         gone = _seed("wf-a-gone", status="running", pid=os.getpid(),
                      project="r", timeout=10,
@@ -292,9 +275,24 @@ class TestDeadlineStopsTheTree:
             emit=emit,
             cancel=lambda name: shutil.rmtree(get_registry().session_dir(name)))
 
-        assert [action["name"] for action in actions] == [later]
-        assert [data["run_key"] for _, data in emit.calls] == [later]
+        assert [action["name"] for action in actions] == [gone, later]
+        assert [data["run_key"] for _, data in emit.calls] == [gone, later]
+        assert "exceeded its 10s timeout" in emit.calls[0][1]["error"]
         assert get_registry().get(gone) is None
+
+    def test_a_run_that_finished_during_the_wait_is_not_announced_as_timed_out(self):
+        """A runner's own write can land over cancel's, and the next sweep re-emits it."""
+        name = self._past_deadline("wf-t", os.getpid())
+
+        def the_runner_finishes(session):
+            get_registry().mark_terminal(session, TERMINAL_COMPLETED)
+
+        emit = _Emitter()
+
+        assert reconcile_sessions(emit=emit, cancel=the_runner_finishes) == []
+
+        assert get_registry().get(name).status == TERMINAL_COMPLETED
+        assert emit.calls == []
 
     @pytest.mark.parametrize("raises_after_closing", [True, False],
                              ids=["after-the-entry-closed", "before-anything-happened"])

@@ -197,11 +197,13 @@ signal.signal(signal.SIGTERM, die_with_the_session)
 while not (directory / "go").exists() and time.monotonic() < deadline:
     time.sleep(0.02)
 result = subprocess.run(command, capture_output=True, text=True)
-(directory / "result.json").write_text(json.dumps({
+# A rename, so the test never reads a file that is still being written.
+(directory / "result.tmp").write_text(json.dumps({
     "returncode": result.returncode,
     "stdout": result.stdout,
     "stderr": result.stderr,
 }))
+os.replace(directory / "result.tmp", directory / "result.json")
 while time.monotonic() < deadline:
     time.sleep(0.2)
 """
