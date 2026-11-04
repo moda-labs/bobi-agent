@@ -52,9 +52,9 @@ execution, so the framework carries a built-in `adhoc` definition in code
 (`triggers.builtin_adhoc_workflow`) that the launch path falls back to when the
 pack ships no `adhoc.yaml`. A shipped `adhoc.yaml` wins, and the manager's
 workflow menu still lists only what the pack ships. Its one step is the whole
-job, so the built-in and this repo's packs declare a `timeout` of 14400 on it
-(see [Prompt step](#prompt-step-the-default)); a pack's own `adhoc.yaml` must
-declare its own. A
+job, so a step of a workflow named `adhoc` defaults to a `timeout` of 14400
+instead of 1800, whichever definition is in use (see
+[Prompt step](#prompt-step-the-default)). A
 workflow has a name, a human-readable `trigger`, an optional `description`, an
 optional `period` (`hourly` / `daily` / `weekly` / `monthly` - one run per
 period across every dispatch path, see **Execution model**), and an ordered
@@ -113,7 +113,8 @@ then runs as its own `agent`. The CLI allows that only when every prompt step
 (not route/action/notify/await) names an installed `agent`; otherwise `--role`
 is required. A prompt step with no `agent` inherits the previous step's.
 `timeout` (seconds, default
-1800) is the step's wall-clock budget. Nothing interrupts a drain already in
+1800, or 14400 in `adhoc`; anything but a positive integer reads as undeclared)
+is the step's wall-clock budget. Nothing interrupts a drain already in
 flight on it, because the workflow path has no in-process wall clock; it is read
 at two points. It gates whether a turn-cap restart is
 allowed to **start** (see [Turn budget](#turn-budget) for the resulting bound).
@@ -134,8 +135,8 @@ only, so a CLI and its tools can outlive it (#1122).
 
 Size a step's `timeout` for the longest honest run of that step. With a smaller
 one the run-level floor applies, and a restart closes the step at about 3900s
-however healthy it is. The `adhoc` step and the long steps of the eng-team pack's
-`issue-lifecycle` and `pr-feedback` declare 14400 for that reason.
+however healthy it is. The long steps of the eng-team pack's `issue-lifecycle`
+and `pr-feedback` declare 14400 for that reason.
 
 `model` is optional. When omitted, a prompt step uses the acting role's
 configured model (`roles.<role>.model` in `agent.yaml`), then the team default
@@ -259,9 +260,14 @@ budget. Worst case for one prompt step is therefore
 agent finishing. The dead-man reconciler is the outer net: each restart re-arms
 the run's `deadline_at` to `max(step.timeout, run timeout)` from that moment,
 so a manager restart closes a restarted drain only once it outlives that
-budget plus the grace. Raising a step's `timeout` therefore widens the window in
-which a resume may start, and the outer net's worst case to about twice the
-budget, but not the turn bound above.
+budget plus the grace. Each re-arm restarts that clock, so the net's worst case
+is about four times the budget: a resume begun just under it, then the two
+handoff-repair retries.
+
+Raising a step's `timeout` also widens the window in which a resume may start. A
+step that hits the cap past the old budget used to fail there; now it resumes, up
+to the same turn bound above. So a runaway fast enough to reach the cap inside
+its budget can spend all of that bound instead of one session's cap.
 
 ### Route step
 

@@ -310,14 +310,11 @@ def merge_agent_yaml(existing_text: str, state: SetupState, catalog=None) -> str
 
 def build_adhoc_yaml() -> str:
     """The open-ended task handler every pack must ship (validate requires it)."""
-    from bobi.workflow.schema import ADHOC_STEP_TIMEOUT
-
     return yaml.dump({
         "name": "adhoc",
         "trigger": "Any ad-hoc task or request not covered by another workflow.",
         "description": "Open-ended task handler.",
-        "steps": [{"name": "task", "prompt": "${{input.task}}",
-                   "timeout": ADHOC_STEP_TIMEOUT}],
+        "steps": [{"name": "task", "prompt": "${{input.task}}"}],
     }, sort_keys=False)
 
 

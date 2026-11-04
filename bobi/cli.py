@@ -4040,9 +4040,10 @@ main.add_command(event_server_cmd)
                    "combined with --id.")
 @click.option("--task", default=None, help="Task description / context for the agent")
 @click.option("--timeout", default=3600, type=int,
-              help="Seconds a manager restart lets the run live: a floor under "
-                   "each step's own timeout, not a cap (0 = no deadline). With "
-                   "--as-check, the check's own time limit.")
+              help="Seconds a manager restart lets a workflow run live: a floor "
+                   "under each step's own timeout, not a cap (0 = no deadline). "
+                   "With --as-check, the check's time limit; with --persistent, "
+                   "the startup wait.")
 @click.option("--wait", is_flag=True,
               help="Block until the launched agent completes. Requires "
                    "'-w adhoc' — a multi-step workflow launch returns as soon "

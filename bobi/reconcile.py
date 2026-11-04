@@ -221,10 +221,10 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
         deadline = run_deadline(entry)
         if deadline and deadline + RECONCILE_GRACE < now:
             cancel(entry.name)
-            step = f" in step {entry.phase}" if entry.phase else ""
+            phase = f" in phase {entry.phase}" if entry.phase else ""
             registry.mark_terminal(
                 entry.name, TERMINAL_FAILED,
-                error=(f"agent ran past its deadline{step} "
+                error=(f"agent ran past its deadline{phase} "
                        f"({int(now - deadline)}s over) without reporting a "
                        "terminal status"),
                 reconciled=True,

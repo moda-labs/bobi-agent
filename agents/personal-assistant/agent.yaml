@@ -1,4 +1,4 @@
-version: "1.0.3"
+version: "1.0.2"
 
 # Entry point role for `bobi agent <name> start`.
 entry_point: assistant

@@ -10,4 +10,3 @@ description: >
 steps:
   - name: task
     prompt: "${{input.task}}"
-    timeout: 14400

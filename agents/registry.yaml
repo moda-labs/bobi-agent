@@ -3,5 +3,5 @@ agents:
     version: "1.5.8"
     description: "Portable asynchronous engineering org - director plus async engineer workers; GitHub + Slack with tool-agnostic seams. Derive a house team with `from: eng-team`."
   personal-assistant:
-    version: "1.0.3"
+    version: "1.0.2"
     description: "Personal assistant — one agent manages email, calendar, and to-dos via Venn (Gmail + Google Calendar), posts a daily briefing, and acts within a customizable autonomy line. Customize who-you-are and how-you-like-things in workspace/assistant-context.md."

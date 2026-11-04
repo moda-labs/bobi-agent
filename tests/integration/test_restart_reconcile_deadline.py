@@ -18,7 +18,6 @@ which no brain participates in.
 import os
 import signal
 import time
-from pathlib import Path
 
 import pytest
 import yaml
@@ -28,8 +27,6 @@ from bobi.sdk import TERMINAL_FAILED, get_registry, pid_alive
 from bobi.workflow.schema import ADHOC_STEP_TIMEOUT
 
 WORKFLOW = "restart-deadline"
-SHIPPED_ADHOC = (Path(__file__).resolve().parents[2] / "agents" / "eng-team"
-                 / "workflows" / "adhoc.yaml")
 
 WORKFLOW_YAML = f"""\
 name: {WORKFLOW}
@@ -47,11 +44,10 @@ steps:
 
 @pytest.fixture
 def env(stub_bobi_env):
-    """The stub install with its workflows staged and webhook topics off.
+    """The stub install with its workflow staged and webhook topics off.
 
     Saved-identity repair refuses the ungranted GitHub topic on restart (see
-    test_manager_lifecycle), and this test restarts twice. The install's adhoc
-    is swapped for the one the eng-team pack really ships.
+    test_manager_lifecycle), and this test restarts twice.
     """
     from bobi import paths
     from bobi.runtime_guard import with_mutable_runtime_package
@@ -63,19 +59,15 @@ def env(stub_bobi_env):
     for service in config.get("services", []):
         service["events"] = False
     workflow_path = stub_bobi_env.workflows_dir / f"{WORKFLOW}.yaml"
-    adhoc_path = stub_bobi_env.workflows_dir / "adhoc.yaml"
-    original_adhoc = adhoc_path.read_text()
     try:
         config_path.chmod(0o644)
         config_path.write_text(yaml.safe_dump(config))
         with with_mutable_runtime_package(stub_bobi_env.project_path):
             workflow_path.write_text(WORKFLOW_YAML)
-            adhoc_path.write_text(SHIPPED_ADHOC.read_text())
         yield stub_bobi_env
     finally:
         with with_mutable_runtime_package(stub_bobi_env.project_path):
             workflow_path.unlink(missing_ok=True)
-            adhoc_path.write_text(original_adhoc)
         config_path.chmod(0o644)
         config_path.write_text(original)
         config_path.chmod(original_mode)
@@ -130,9 +122,10 @@ def _age_run(name, seconds):
     # The production shape: 1h48m into a run, inside its long step's budget.
     pytest.param(WORKFLOW, "restart deadline e2e", "long",
                  6480, 7200 + RECONCILE_GRACE + 60, id="declared-step-budget"),
-    # The shipped adhoc, at the age of the longest completed run on record.
+    # An adhoc.yaml declaring no timeout, as every pack's does, at the age of
+    # the longest completed run on record.
     pytest.param("adhoc", "__stub__:hang:600", "task",
-                 8915, ADHOC_STEP_TIMEOUT + RECONCILE_GRACE + 60, id="shipped-adhoc"),
+                 8915, ADHOC_STEP_TIMEOUT + RECONCILE_GRACE + 60, id="adhoc"),
 ])
 def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
         env, stub_cli_run, stub_clean_session,
@@ -176,7 +169,7 @@ def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
 
         closed = get_registry().get(entry.name)
         assert closed.status == TERMINAL_FAILED
-        assert f"in step {step}" in closed.error
+        assert f"in phase {step}" in closed.error
         _wait(lambda: not pid_alive(runner_pid), "the runner to exit", env)
     finally:
         cli_run("stop", timeout=30)

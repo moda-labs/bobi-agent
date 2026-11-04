@@ -15,7 +15,7 @@ import pytest
 from bobi import paths
 from bobi.brain import TurnResult
 from bobi.workflow.schema import (
-    ADHOC_STEP_TIMEOUT, DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
+    ADHOC_STEP_TIMEOUT, DEFAULT_ROUTE_LOOP_MAX_ITERATIONS, DEFAULT_STEP_TIMEOUT,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
 from bobi.workflow.triggers import builtin_adhoc_workflow
@@ -107,6 +107,26 @@ class TestSchemaLoad:
         assert wf.steps[0].prompt.strip() == "Say hello"
         assert wf.steps[0].handoff.required == ["greeting"]
         assert wf.steps[0].timeout == 60
+
+    @pytest.mark.parametrize("declared, expected", [
+        ('"90"', 90),  # a string that is still a number
+        ("30m", DEFAULT_STEP_TIMEOUT),
+        ("", DEFAULT_STEP_TIMEOUT),
+        ("true", DEFAULT_STEP_TIMEOUT),
+    ])
+    def test_unusable_step_timeout_reads_as_undeclared(
+            self, tmp_path, declared, expected):
+        # The runner does arithmetic on it before every step, so a value that
+        # is not a number must not reach it as one.
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent(f"""\
+            name: test-wf
+            steps:
+              - name: greet
+                prompt: "Say hello"
+                timeout: {declared}
+        """))
+        assert load_workflow(f).steps[0].timeout == expected
 
     def test_load_step_model(self, tmp_path):
         f = tmp_path / "test.yaml"
@@ -2500,6 +2520,18 @@ def _generated_adhoc(tmp_path):
     return load_workflow(path)
 
 
+def _adhoc_declaring_its_own(tmp_path):
+    path = tmp_path / "adhoc.yaml"
+    path.write_text(textwrap.dedent("""\
+        name: adhoc
+        steps:
+          - name: task
+            prompt: "${{input.task}}"
+            timeout: 28800
+    """))
+    return load_workflow(path)
+
+
 class TestDrainDeadline:
     """#1124: before any work that can block, the runner arms the registry's
     ``deadline_at`` to ``now + max(step.timeout, run timeout)``, so a manager
@@ -2631,10 +2663,13 @@ class TestDrainDeadline:
         self._assert_armed("repair", 7200)
 
     def test_native_action_arms_the_deadline(self):
-        observe = self._observe
+        observe, registry = self._observe, self.registry
+        phases = []
 
         def action(step, ctx, cwd):
             observe("action")
+            # The reconciler names this phase if it closes the run here.
+            phases.extend(e.phase for e in registry.list_all())
             return {"status": "ok"}
 
         wf = Workflow(name="t", steps=[
@@ -2644,6 +2679,7 @@ class TestDrainDeadline:
                    side_effect=action):
             assert self._run(wf, MagicMock()) is True
         self._assert_armed("action", 3600)
+        assert phases == ["cleanup"]
 
     def test_control_model_rerun_rearms_the_deadline(self, monkeypatch):
         from dataclasses import replace
@@ -2689,13 +2725,17 @@ class TestDrainDeadline:
         assert self._run(wf, brain) is True
         self._assert_armed("rerun", 7200)
 
-    @pytest.mark.parametrize("load", [
-        lambda _tmp: builtin_adhoc_workflow(),
-        _generated_adhoc,
-        lambda _tmp: _shipped_workflow("eng-team", "adhoc"),
-        lambda _tmp: _shipped_workflow("personal-assistant", "adhoc"),
-    ], ids=["built-in", "generated-by-setup", "eng-team", "personal-assistant"])
-    def test_every_adhoc_definition_arms_the_adhoc_budget(self, load, tmp_path):
+    @pytest.mark.parametrize("load, budget", [
+        (lambda _tmp: builtin_adhoc_workflow(), ADHOC_STEP_TIMEOUT),
+        (_generated_adhoc, ADHOC_STEP_TIMEOUT),
+        (lambda _tmp: _shipped_workflow("eng-team", "adhoc"), ADHOC_STEP_TIMEOUT),
+        (lambda _tmp: _shipped_workflow("personal-assistant", "adhoc"),
+         ADHOC_STEP_TIMEOUT),
+        (_adhoc_declaring_its_own, 28800),
+    ], ids=["built-in", "generated-by-setup", "eng-team", "personal-assistant",
+            "declares-its-own"])
+    def test_adhoc_arms_its_budget_wherever_it_is_defined(
+            self, load, budget, tmp_path):
         observe = self._observe
 
         class Client(FakeBrainClient):
@@ -2706,7 +2746,7 @@ class TestDrainDeadline:
         brain.make_session.side_effect = lambda **_kw: Client()
 
         assert self._run(load(tmp_path), brain) is True
-        self._assert_armed("task", ADHOC_STEP_TIMEOUT)
+        self._assert_armed("task", budget)
 
 
 # ---------------------------------------------------------------------------
