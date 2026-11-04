@@ -4,6 +4,8 @@ from pathlib import Path
 from textwrap import dedent
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from bobi.validate import (
     validate_config,
     _check_entry_point,
