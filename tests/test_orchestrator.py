@@ -2480,7 +2480,7 @@ class TestResumeRegistryRefresh:
                 mid_run["entry"] = registry.get("wf-t-r-1")
                 mid_run["actions"] = reconcile_sessions(
                     registry, emit=lambda *a, **k: True,
-                    cancel=lambda name: None,
+                    cancel=lambda name, error: None,
                 )
                 return FakeBrainClient()
 

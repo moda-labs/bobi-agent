@@ -20,11 +20,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from bobi import paths, proctree
 from bobi.sdk import (
     save_session_id, load_resumable_session_id,
     session_handoff_path, session_log_path,
     get_registry, SessionEntry, ACTIVE_STATUSES,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
+    pid_alive, read_pid,
 )
 from bobi.brain.base import ERROR_KIND_MAX_TURNS
 from bobi.brain import normalize_brain_kind, session_brain_label
@@ -2992,14 +2994,21 @@ def list_agents() -> list[dict[str, Any]]:
     in the runtime root's SessionRegistry, so they are visible from any
     process resolving the same runtime root.
     """
+    from bobi.concurrency_semaphore import _excluded_session_names
+
     result = []
     try:
         registry = get_registry()
     except Exception:
         return result  # registry may not be initialized yet
+    # Managers are shown separately in `bobi agent <name> status`. Recognized by
+    # identity, never by role: the manager registers with the team's entry role,
+    # and a worker can hold that role too.
+    manager_names = _excluded_session_names()
+    manager_pid = read_pid(paths.manager_pid_path()) if paths.bound_root() else 0
     for entry in registry.list_active():
-        if entry.role == "manager":
-            continue  # managers are shown separately in `bobi agent <name> status`
+        if entry.name in manager_names or (entry.pid and entry.pid == manager_pid):
+            continue
         result.append({
             "run_key": entry.run_key or entry.name,
             "phase": entry.phase,
@@ -3028,23 +3037,251 @@ def find_agent(ref: str) -> SessionEntry | None:
     return max(pool, key=lambda e: e.last_activity)
 
 
-def cancel_agent(ref: str) -> bool:
-    """Cancel a running agent by session name or run key.
+# ---------------------------------------------------------------------------
+# Cancelling a run
+# ---------------------------------------------------------------------------
 
-    Terminates the detached process (if its pid is alive) and marks the
-    registry entry cancelled.
+# A launch registers its entry before anything has a pid, and the runner's own
+# register() then replaces the entry, so a cancel in this window would be undone
+# and the run would go ahead anyway. Past it, a pidless `starting` entry is a
+# launch that never got further.
+_STARTING_WINDOW_SECONDS = 60
+
+
+class CancelRefusedError(Exception):
+    """A cancel that signalled nothing and left the entry untouched."""
+
+
+class CancelIncompleteError(Exception):
+    """Processes survived SIGKILL. The run's entry is closed all the same."""
+
+    def __init__(self, name: str, total: int, survivors: list[proctree.Survivor],
+                 *, status: str = "cancelled"):
+        self.name = name
+        self.total = total
+        self.survivors = survivors
+        super().__init__("\n".join((
+            f"Could not stop {name}: {len(survivors)} of "
+            f"{proctree.count(total)} still running.",
+            *(f"  {proctree.describe(s.pid, s.name)}: {s.reason}" for s in survivors),
+            f"The run is marked {status}, but these processes are still running.",
+            "Stop them by hand:  kill -9 " + " ".join(str(s.pid) for s in survivors),
+        )))
+
+
+def _resolve_cancel_target(registry, ref: str,
+                           active: list[SessionEntry]) -> SessionEntry | None:
+    """The active entry *ref* selects, or None when there is none (C8).
+
+    An exact session name always wins. A run key can select several runs, and a
+    tree kill must not be a guess, so more than one live match is refused (C10).
     """
-    import os
-    import signal
+    entry = registry.get(ref)
+    if entry is None:
+        ref_lower = ref.lower()
+        matches = [e for e in active
+                   if ref_lower in (e.run_key.lower(), e.name.lower())]
+        live = [e for e in matches if not e.pid or pid_alive(e.pid)]
+        if len(live) > 1:
+            names = ", ".join(sorted(e.name for e in live))
+            raise CancelRefusedError(
+                f"{ref} matches more than one active run. Name one: {names}")
+        entry = live[0] if live else max(
+            matches, key=lambda e: e.last_activity, default=None)
+    return entry if entry and entry.status in ACTIVE_STATUSES else None
 
-    entry = find_agent(ref)
-    if not entry or entry.status not in ("starting", "running", "idle"):
+
+def _close_entry(registry, name: str, terminal: tuple[str, str] | None = None) -> None:
+    """Record a run as stopped. A failed write must not stop the kill."""
+    try:
+        if terminal:
+            registry.mark_terminal(name, terminal[0], error=terminal[1], reconciled=True)
+        else:
+            registry.update(name, status="cancelled", pid=0)
+    except OSError:
+        log.warning("Could not record %s as stopped", name, exc_info=True)
+
+
+def _shared_daemon_pid_files() -> list[Path]:
+    """Every pid file naming a process a run must never take down with it (I3)."""
+    from bobi.kb.embedder import _pid_path as embedding_sidecar_pid_path
+
+    return [paths.manager_pid_path(), paths.event_server_pid_path(),
+            embedding_sidecar_pid_path(), paths.webapp_pid_path()]
+
+
+def _manager_refusal(name: str) -> CancelRefusedError:
+    # The real agent name: an LLM pastes a `<name>` placeholder verbatim.
+    return CancelRefusedError(
+        f"{name} is the manager, not a sub-agent. Stop it with:  "
+        f"bobi agent {paths.agent_name_for_root()} stop")
+
+
+def _record_survivors(registry, entry: SessionEntry,
+                      survivors: list[proctree.Survivor],
+                      terminal: tuple[str, str] | None) -> None:
+    """Name the survivors on the entry, unless the name now holds a newer run."""
+    if terminal:
+        pids = ", ".join(f"pid {s.pid} {s.name}" for s in survivors)
+        error = (f"{terminal[1]}; {proctree.count(len(survivors))} could not be "
+                 f"stopped ({pids})")
+    else:
+        error = "cancel incomplete: " + "; ".join(
+            f"{proctree.describe(s.pid, s.name)} {s.reason}" for s in survivors)
+    try:
+        current = registry.get(entry.name)
+        if current is not None and current.started_at == entry.started_at:
+            registry.update(entry.name, error=error)
+    except OSError:
+        # Whatever the disk does, the operator still hears about the survivors.
+        log.warning("Could not record the survivors of %s", entry.name, exc_info=True)
+
+
+def _stop_tree(registry, entry: SessionEntry, table: proctree.Table,
+               protected: dict[int, str], active: list[SessionEntry],
+               terminal: tuple[str, str] | None) -> None:
+    """Stop a verified process and its live descendants, and record it (C1, C2)."""
+    name = entry.name
+    members = proctree.kill_set(table, entry.pid, protected)
+    member_pids = {m.pid for m in members}
+    for pid, pid_file in protected.items():
+        if pid in table and table[pid].parent in member_pids:
+            log.warning("%s: %s was not signalled: it is the team's daemon (%s).",
+                        name, proctree.describe(pid, table[pid].name), pid_file)
+    descendants = len(members) - 1
+    log.info("Cancelling %s: SIGTERM to %s (pid %d%s)", name,
+             proctree.count(len(members)), entry.pid,
+             f" and {descendants} descendant{'' if descendants == 1 else 's'}"
+             if descendants else "")
+
+    started = time.monotonic()
+    closed: dict[str, SessionEntry] = {}
+    signalled: dict[int, str] = {}
+
+    def names_a_member(other: SessionEntry) -> bool:
+        return other.pid in signalled and other.pid_start in ("", signalled[other.pid])
+
+    def close_entries(batch: list[proctree.Member]) -> None:
+        # Everything that says `running` for these processes is written before
+        # any of them is signalled, so no list read can find `running` with a
+        # dead pid and reap this as a crash. This uses the list taken before the
+        # kill started, since that scan is too slow to sit before a signal.
+        if not closed:
+            _close_entry(registry, name, terminal)
+            closed[name] = entry
+        signalled.update((m.pid, m.token) for m in batch)
+        for other in active:
+            if other.name not in closed and names_a_member(other):
+                _close_entry(registry, other.name)
+                closed[other.name] = other
+                log.info("Sub-run %s stopped with %s", other.name, name)
+
+    survivors = proctree.terminate(
+        members, protected=protected, before_signal=close_entries, label=name)
+
+    try:
+        # What those writes could not cover. A runner can write `running` just
+        # before it dies, over the write above, and its first write replaces
+        # `started_at` too. A sub-run can register after that list was taken. No
+        # reaper closes an entry with no pid, and any other would call the rest
+        # a crash.
+        for current in registry.list_all():
+            if current.status not in ACTIVE_STATUSES:
+                continue
+            before = closed.get(current.name)
+            rewritten = (before and not current.pid
+                         and current.started_at == before.started_at)
+            if rewritten or names_a_member(current):
+                _close_entry(registry, current.name,
+                             terminal if current.name == name else None)
+                if not before:
+                    log.info("Sub-run %s stopped with %s", current.name, name)
+    except OSError:
+        log.warning("Could not check the records of %s after stopping it", name,
+                    exc_info=True)
+
+    if survivors:
+        _record_survivors(registry, entry, survivors, terminal)
+        raise CancelIncompleteError(name, len(signalled), survivors,
+                                    status=terminal[0] if terminal else "cancelled")
+    log.info("Sub-agent cancelled: %s (%s stopped in %.1fs)", name,
+             proctree.count(len(signalled)), time.monotonic() - started)
+
+
+def cancel_agent(ref: str, *, terminal: tuple[str, str] | None = None) -> bool:
+    """Stop a running agent, by session name or run key, and close its entry.
+
+    Stops the recorded process and every live process under it, and blocks until
+    they are gone: about 2.5s for a real claude CLI, 15s at worst.
+
+    Returns False only when no active agent matches. Returns True once the tree
+    is gone, or when no tree could be verified, in which case a WARNING says so.
+    ``terminal`` is the deadline branch's ``(status, error)``, written instead of
+    ``cancelled``.
+
+    Raises CancelIncompleteError when processes survive SIGKILL, and
+    CancelRefusedError for what must not be cancelled: the manager, a shared
+    daemon, a run from inside itself, a launch still starting, a run key matching
+    more than one run, and a recorded process when the table cannot be read.
+    """
+    from bobi.concurrency_semaphore import _excluded_session_names
+
+    registry = get_registry()
+    # Before anything else: this scan is slow, and the kill sequence must not
+    # wait for it between writing the entries and signalling the processes.
+    active = [e for e in registry.list_all() if e.status in ACTIVE_STATUSES]
+    entry = _resolve_cancel_target(registry, ref, active)
+    if entry is None:
         return False
-    if entry.pid:
-        try:
-            os.kill(entry.pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-    get_registry().update(entry.name, status="cancelled", pid=0)
-    log.info(f"Sub-agent cancelled: {entry.name}")
+    name, pid = entry.name, entry.pid
+
+    if name in _excluded_session_names():
+        raise _manager_refusal(name)
+
+    if not pid:
+        if (entry.status == "starting"
+                and time.time() - entry.started_at < _STARTING_WINDOW_SECONDS):
+            raise CancelRefusedError(
+                f"{name} is still starting. Retry in a few seconds.")
+        _close_entry(registry, name, terminal)
+        log.warning("%s: no process is recorded for this run; nothing was signalled.",
+                    name)
+        return True
+
+    table = proctree.read_table()
+    if table is None and entry.pid_start:
+        # A recorded token means this host had a table, so the read will work
+        # again. Closing the entry now would lose the only handle on the tree, and
+        # with no table a target above this process's parent cannot be told apart.
+        raise CancelRefusedError(
+            f"{name}: the process table could not be read, so pid {pid} cannot be "
+            "verified. Nothing was signalled. Retry in a few seconds.")
+    identity = proctree.verify(table, pid, entry.pid_start)
+    if identity == proctree.GONE:
+        _close_entry(registry, name, terminal)
+        log.warning("%s: the recorded process (pid %d) had already exited; "
+                    "nothing was signalled.", name, pid)
+        return True
+
+    protected = proctree.protected_pids(_shared_daemon_pid_files(), table)
+    if pid in protected:
+        if protected[pid] == paths.manager_pid_path().name:
+            raise _manager_refusal(name)
+        raise CancelRefusedError(
+            f"{name} records a shared daemon (pid {pid}, {protected[pid]}), "
+            "so nothing was signalled.")
+
+    if proctree.is_self_or_ancestor(table, pid):
+        raise CancelRefusedError(
+            f"Cannot cancel {name} from inside it: this command is running in "
+            "that run's process tree. Run it from outside the run.")
+
+    if identity == proctree.UNKNOWN:
+        _close_entry(registry, name, terminal)
+        proctree.signal_unverified(pid)
+        log.warning("%s: cannot verify pid %d, so only that process was signalled. "
+                    "Its child processes may still be running.", name, pid)
+        return True
+
+    _stop_tree(registry, entry, table, protected, active, terminal)
     return True

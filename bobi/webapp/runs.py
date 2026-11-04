@@ -186,25 +186,54 @@ def _workflow_status(run, *, now: float) -> str:
     return DONE
 
 
-def _workflow_rows(root: Path, *, now: float,
-                   usage_by_session: dict) -> list[dict]:
+def _settle_running_row(run, *, session, ended: float) -> tuple[str, str, float]:
+    """What a ledger row saying `running` really is: (status, error, end time).
+
+    Nothing closes the row when its run is cancelled, crashes, or is closed by
+    the reconciler, so the word on disk outlives the run. *session* is the
+    session this row is the newest row for, or None: with no such session the
+    row is over and nothing more is known about it. Reading the session here
+    needs no write, and closes the rows old runs already left behind.
+    """
+    from bobi.sdk import ACTIVE_STATUSES
+
+    if session is None:
+        return CLOSED, run.error, ended
+    if session.status in ACTIVE_STATUSES:
+        return RUNNING, run.error, ended
+    status = CLOSED if session.status == "cancelled" else _session_status(session)
+    return (status, session.error or run.error,
+            session.terminal_at or session.last_activity)
+
+
+def _workflow_rows(root: Path, *, now: float, usage_by_session: dict,
+                   sessions: dict) -> list[dict]:
     from bobi.workflow.state import WorkflowRun
 
     rows = []
     # One session's usage lands on ONE row. Retries reuse their entry, but a
     # --fresh relaunch mints a second entry on the same session name; giving
     # each the session's tokens would double-count spend in a column read as
-    # a running total. The run started last wins; file times cannot say which
-    # that is (entries written in one filesystem tick tie, and an update
-    # rewrites an older run's entry).
+    # a running total. The run started or resumed last wins; file times cannot
+    # say which that is (entries written in one filesystem tick tie, and an
+    # update rewrites an older run's entry).
     usage_claimed: set[str] = set()
     runs = sorted(WorkflowRun.list_runs(root=root),
-                  key=lambda run: _epoch(run.started_at) or 0.0, reverse=True)
+                  key=lambda run: _epoch(run.resumed_at or run.started_at) or 0.0,
+                  reverse=True)
     for run in runs:
         status = _workflow_status(run, now=now)
         trigger = (run.trigger_event or {}).get("type", "")
         started = _epoch(run.started_at)
         ended = _epoch(run.completed_at)
+        error = run.error
+        # Newest first, so the first row to claim a session is that session's
+        # newest, and any other is an attempt the session has moved on from.
+        newest = bool(run.session_name) and run.session_name not in usage_claimed
+        if run.status == "running":
+            status, error, ended = _settle_running_row(
+                run, session=sessions.get(run.session_name) if newest else None,
+                ended=ended)
         usage = {}
         if run.session_name and run.session_name not in usage_claimed:
             usage_claimed.add(run.session_name)
@@ -221,7 +250,7 @@ def _workflow_rows(root: Path, *, now: float,
             origin=(f"workflow · on {trigger}" if trigger else "workflow"),
             started_at=started,
             duration=_duration(started, ended),
-            error=run.error,
+            error=error,
             session_id=run.session_name,
             run_id=run.run_id,
             tokens=usage.get("total_tokens", 0),
@@ -439,7 +468,8 @@ def _all_rows(root: Path, *, manager_name: str, now: float,
 
     rows = _session_rows(entries, manager_name=manager_name,
                          usage_by_session=usage_by_session)
-    rows += _workflow_rows(root, now=now, usage_by_session=usage_by_session)
+    rows += _workflow_rows(root, now=now, usage_by_session=usage_by_session,
+                           sessions={e.name: e for e in entries})
     rows += _monitor_rows(root, usage_by_session=usage_by_session)
 
     # Before anything counts or sorts them: one piece of work, one row.

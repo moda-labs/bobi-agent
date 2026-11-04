@@ -1,6 +1,8 @@
 """CLI contract tests for the Bobi Agent command tree."""
 
 import json
+import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1612,3 +1614,132 @@ def test_lifecycle_command_is_refused_inside_target_runtime(
     assert result.exit_code != 0
     assert "cannot run from inside the target runtime" in result.output
     assert expected_command in result.output
+
+
+class TestSubagentsCancel:
+    """V18: the operator's command, with the real `cancel_agent` behind it."""
+
+    def _cancel(self, ref):
+        return CliRunner().invoke(
+            main, ["agent", TEST_AGENT_NAME, "subagents", "cancel", ref])
+
+    def _run(self, name="wf-x", **fields):
+        from bobi.sdk import SessionEntry, get_registry
+
+        fields.setdefault("status", "running")
+        get_registry().register(SessionEntry(name=name, run_key=fields.pop(
+            "run_key", name), **fields))
+        return name
+
+    def test_a_stopped_tree_exits_zero(self, bobi_install, process_tree):
+        tree = process_tree()
+        self._run(pid=tree.start())
+
+        result = self._cancel("wf-x")
+
+        assert result.exit_code == 0, result.output
+        assert "Cancelled wf-x" in result.stdout
+        tree.assert_stopped()
+
+    def test_an_incomplete_cancel_exits_one_and_names_the_survivor(
+            self, bobi_install, process_tree, signal_seam, short_graces):
+        """C2."""
+        tree = process_tree()
+        self._run(pid=tree.start())
+        command = tree.pids()["command"]
+        signal_seam.denied.add(command)
+
+        result = self._cancel("wf-x")
+
+        assert result.exit_code == 1
+        assert "Could not stop wf-x: 1 of 4 processes still running." in result.stderr
+        assert f"  pid {command} (python): signal not permitted" in result.stderr
+        assert f"Stop them by hand:  kill -9 {command}" in result.stderr
+        assert "Cancelled" not in result.stdout
+
+    def test_cancel_from_inside_the_run_exits_one(
+            self, bobi_install, disposable_caller):
+        """C7. The caller is a real process tree, so losing the guard kills only
+        the disposable session around it."""
+        from bobi.sdk import get_registry
+
+        caller = disposable_caller.start(
+            [sys.executable, "-m", "bobi.cli", "agent", TEST_AGENT_NAME,
+             "subagents", "cancel", "wf-x"])
+        self._run(pid=caller)
+
+        result = disposable_caller.run()
+
+        assert result["returncode"] == 1, result["stderr"]
+        assert ("Cannot cancel wf-x from inside it: this command is running in "
+                "that run's process tree. Run it from outside the run."
+                ) in result["stderr"]
+        disposable_caller.assert_alive()
+        assert get_registry().get("wf-x").status == "running"
+
+    @pytest.mark.parametrize("fields,ref,expected", [
+        # C9
+        ({"status": "starting"}, "wf-x",
+         "wf-x is still starting. Retry in a few seconds."),
+        # C10
+        ({"run_key": "shared"}, "shared",
+         "shared matches more than one active run. Name one: wf-other, wf-x"),
+    ], ids=["C9", "C10"])
+    def test_a_refusal_exits_one_and_says_why(
+            self, bobi_install, fields, ref, expected):
+        self._run("wf-x", **fields)
+        self._run("wf-other", run_key="shared")
+
+        result = self._cancel(ref)
+
+        assert result.exit_code == 1
+        assert expected in result.stderr
+
+    def test_the_manager_is_refused_with_a_runnable_remedy(self, bobi_install):
+        """C6: the real agent name, never a `<name>` an LLM would paste."""
+        from bobi.service import manager_session_name
+
+        manager = manager_session_name(bobi_install.repo_path)
+        self._run(manager)
+
+        result = self._cancel(manager)
+
+        assert result.exit_code == 1
+        assert (f"{manager} is the manager, not a sub-agent. Stop it with:  "
+                f"bobi agent {TEST_AGENT_NAME} stop") in result.stderr
+
+    @pytest.mark.parametrize("token,expected", [
+        ("proc:another-boot:1", "had already exited; nothing was signalled."),
+        ("", "cannot verify pid"),
+    ], ids=["C3", "C4"])
+    def test_an_unverified_process_exits_zero_with_a_line_saying_so(
+            self, bobi_install, process_tree, token, expected):
+        from bobi.sdk import get_registry
+
+        tree = process_tree()
+        self._run(pid=tree.start())
+        get_registry().update("wf-x", pid_start=token)
+
+        result = self._cancel("wf-x")
+
+        assert result.exit_code == 0, result.output
+        assert "Cancelled wf-x" in result.stdout
+        assert expected in result.stderr
+
+    def test_no_recorded_process_exits_zero_with_a_line_saying_so(
+            self, bobi_install):
+        """C5."""
+        self._run()
+
+        result = self._cancel("wf-x")
+
+        assert result.exit_code == 0, result.output
+        assert "Cancelled wf-x" in result.stdout
+        assert "no process is recorded for this run" in result.stderr
+
+    def test_no_match_keeps_todays_answer(self, bobi_install):
+        """C8."""
+        result = self._cancel("wf-nothing")
+
+        assert result.exit_code == 0
+        assert "No running sub-agent" in result.stdout

@@ -3,24 +3,35 @@
 For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 """
 
+import errno
 import json
 import logging
 import os
+import signal
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bobi import paths
-from bobi.sdk import SessionEntry
+from bobi import paths, proctree
+from bobi.kb.embedder import _pid_path as embedder_pid_path
+from bobi.sdk import SessionEntry, SessionRegistry, get_registry
+from bobi.service import manager_session_name
 from bobi.subagent import (
     AgentResult,
+    CancelIncompleteError,
+    CancelRefusedError,
     _build_prompt,
     _resolve_project_name,
     cancel_agent,
     find_agent,
     list_agents,
 )
+from bobi.webapp.daemon import _pid_path as webapp_pid_path
+from tests.conftest import TEST_AGENT_NAME
+from tests.process_tree import ROLES_UNDER_RUNNER
 
 
 def _write_agent_yaml(root: Path, body: str = "agent: t\nentry_point: x\n") -> None:
@@ -112,24 +123,42 @@ class TestAgentLifecycle:
                    return_value=_mock_registry([done, active])):
             assert find_agent("AGD-12") is active
 
-    def test_list_agents_excludes_managers(self):
-        mgr = SessionEntry(name="moda-director-x", role="manager",
-                           status="running", pid=0)
-        eng = SessionEntry(name="agent-1-implement", run_key="1",
-                           phase="implement", status="running", pid=0)
-        with patch("bobi.subagent.get_registry",
-                   return_value=_mock_registry([mgr, eng])):
-            names = [a["name"] for a in list_agents()]
-            assert names == ["agent-1-implement"]
+    def test_list_agents_omits_the_manager_by_identity(self, bobi_install):
+        """V19: by session name and by manager.pid, on a custom entry_point.
 
-    def test_cancel_running_agent_updates_registry(self):
-        entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
-                             phase="implement", status="running", pid=0)
-        registry = _mock_registry([entry])
-        with patch("bobi.subagent.get_registry", return_value=registry):
-            assert cancel_agent("AGD-12")
-        registry.update.assert_called_once_with(
-            "agent-agd-12-implement", status="cancelled", pid=0)
+        The role proves nothing: the manager registers with the team's entry
+        role, and a worker can hold that role too.
+        """
+        manager = manager_session_name(bobi_install.repo_path)
+        assert manager.endswith("-director")
+        paths.manager_pid_path().write_text(str(os.getpid()))
+        registry = get_registry()
+        registry.register(SessionEntry(name=manager, role="director",
+                                       status="running"))
+        registry.register(SessionEntry(name="wf-in-the-manager", role="engineer",
+                                       status="running", pid=os.getpid()))
+        registry.register(SessionEntry(name="wf-worker", role="director",
+                                       status="running"))
+        registry.register(SessionEntry(name="wf-named-manager", role="manager",
+                                       status="running"))
+
+        names = {agent["name"] for agent in list_agents()}
+
+        assert names == {"wf-worker", "wf-named-manager"}
+
+    def test_cancel_agent_stops_tree(self, bobi_install, process_tree):
+        """V11, the #1122 regression: every process of the run is gone on return."""
+        tree = process_tree()
+        root = tree.start()
+        registry = get_registry()
+        registry.register(SessionEntry(name="wf-adhoc-x", run_key="x",
+                                       status="running", pid=root))
+
+        assert cancel_agent("wf-adhoc-x") is True
+
+        tree.assert_stopped()
+        entry = registry.get("wf-adhoc-x")
+        assert (entry.status, entry.pid) == ("cancelled", 0)
 
     def test_cancel_done_agent_returns_false(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",
@@ -137,6 +166,450 @@ class TestAgentLifecycle:
         with patch("bobi.subagent.get_registry",
                    return_value=_mock_registry([entry])):
             assert not cancel_agent("AGD-12")
+
+
+class TestCancelAgent:
+    """The cases and effects `cancel_agent` promises (#1122).
+
+    Real processes on an isolated root. Each test stops or spares a tree it
+    started itself, judged by ``tests/process_tree.py``, not by bobi.proctree.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _root(self, bobi_install):
+        self.root = bobi_install.repo_path
+        self.registry = get_registry()
+
+    def _run(self, name="wf-x", **fields):
+        fields.setdefault("status", "running")
+        self.registry.register(SessionEntry(name=name, run_key=fields.pop(
+            "run_key", name), **fields))
+        return name
+
+    def _closed(self, name="wf-x"):
+        entry = self.registry.get(name)
+        return entry.status == "cancelled" and entry.pid == 0
+
+    # --- C6, C7 and the daemons ---------------------------------------------
+
+    def test_the_manager_is_refused(self, process_tree, signal_seam):
+        """V12: by name and by manager.pid, on a custom entry_point."""
+        tree = process_tree()
+        root = tree.start()
+        manager = manager_session_name(self.root)
+        self._run(manager, role="director", pid=root)
+        with pytest.raises(
+                CancelRefusedError,
+                match=f"{manager} is the manager, not a sub-agent. Stop it with:"
+                      f"  bobi agent {TEST_AGENT_NAME} stop"):
+            cancel_agent(manager)
+
+        paths.manager_pid_path().write_text(str(root))
+        self._run("wf-in-the-manager", role="engineer", pid=root)
+        with pytest.raises(CancelRefusedError, match="wf-in-the-manager is the manager"):
+            cancel_agent("wf-in-the-manager")
+
+        assert signal_seam.sent == []
+        tree.assert_all_running()
+        for name in (manager, "wf-in-the-manager"):
+            entry = self.registry.get(name)
+            assert (entry.status, entry.pid) == ("running", root)
+
+    @pytest.mark.parametrize("pid_file,file_name", [
+        (lambda: paths.event_server_pid_path(), "event-server.pid"),
+        (lambda: embedder_pid_path(), "embedding-sidecar.pid"),
+        (lambda: webapp_pid_path(), "app.pid"),
+    ], ids=["event-server", "embedding-sidecar", "webapp"])
+    def test_a_daemon_is_refused_as_a_target_and_spared_inside_a_tree(
+            self, process_tree, signal_seam, caplog, pid_file, file_name):
+        """V8's cancel half, against each file the real code reads."""
+        tree = process_tree()
+        root = tree.start()
+        cli = tree.pids()["cli"]
+        path = pid_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        path.write_text(str(root))
+        self._run("wf-daemon", pid=root)
+        with pytest.raises(
+                CancelRefusedError,
+                match=f"wf-daemon records a shared daemon \\(pid {root}, {file_name}\\), "
+                      "so nothing was signalled"):
+            cancel_agent("wf-daemon")
+        assert signal_seam.sent == []
+        tree.assert_all_running()
+
+        path.write_text(str(cli))
+        self._run("wf-parent", pid=root)
+        assert cancel_agent("wf-parent") is True
+        assert signal_seam.sent == [(root, signal.SIGTERM)]
+        assert f"pid {cli}" in caplog.text
+        assert f"it is the team's daemon ({file_name})" in caplog.text
+        assert self._closed("wf-parent")
+        tree.root.wait(timeout=10)
+        tree.assert_all_running(roles=ROLES_UNDER_RUNNER)
+
+    # --- C2 -------------------------------------------------------------------
+
+    def test_a_survivor_is_reported_and_the_run_still_closes(
+            self, process_tree, signal_seam, short_graces):
+        """V13."""
+        tree = process_tree()
+        root = tree.start()
+        command = tree.pids()["command"]
+        signal_seam.denied.add(command)
+        self._run(pid=root)
+
+        with pytest.raises(CancelIncompleteError) as caught:
+            cancel_agent("wf-x")
+
+        assert caught.value.total == 4
+        assert [s.pid for s in caught.value.survivors] == [command]
+        assert str(caught.value).splitlines() == [
+            "Could not stop wf-x: 1 of 4 processes still running.",
+            f"  pid {command} (python): signal not permitted",
+            "The run is marked cancelled, but these processes are still running.",
+            f"Stop them by hand:  kill -9 {command}",
+        ]
+        entry = self.registry.get("wf-x")
+        assert (entry.status, entry.pid) == ("cancelled", 0)
+        assert entry.error == (
+            f"cancel incomplete: pid {command} (python) signal not permitted")
+
+    def test_a_relaunch_during_the_wait_keeps_its_own_error(
+            self, process_tree, signal_seam, short_graces):
+        """V13: a relaunch on the name is not this run, so nothing is written."""
+        tree = process_tree()
+        root = tree.start()
+        command = tree.pids()["command"]
+        signal_seam.denied.add(command)
+        self._run(pid=root)
+
+        def relaunch(pid, _sig):
+            if pid == root:
+                self.registry.register(SessionEntry(
+                    name="wf-x", status="running", error="its own",
+                    started_at=time.time() + 1))
+
+        signal_seam.after = relaunch
+        with pytest.raises(CancelIncompleteError):
+            cancel_agent("wf-x")
+
+        entry = self.registry.get("wf-x")
+        assert (entry.status, entry.error) == ("running", "its own")
+
+    @pytest.mark.parametrize("what_fails", ["recording-them", "the-last-scan"])
+    def test_a_failed_record_still_names_the_survivors(
+            self, process_tree, signal_seam, short_graces, monkeypatch, what_fails):
+        """V13: the operator has to hear about them, whatever the disk does."""
+        tree = process_tree()
+        root = tree.start()
+        command = tree.pids()["command"]
+        signal_seam.denied.add(command)
+        self._run(pid=root)
+        update = SessionRegistry.update
+        list_all = SessionRegistry.list_all
+        scans = []
+
+        def refuse_the_error(registry, name, **fields):
+            if "error" in fields:
+                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+            update(registry, name, **fields)
+
+        def fail_after_the_first_scan(registry, **kwargs):
+            scans.append(1)
+            if len(scans) > 1:
+                raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+            return list_all(registry, **kwargs)
+
+        if what_fails == "recording-them":
+            monkeypatch.setattr(SessionRegistry, "update", refuse_the_error)
+        else:
+            monkeypatch.setattr(SessionRegistry, "list_all", fail_after_the_first_scan)
+
+        with pytest.raises(CancelIncompleteError) as caught:
+            cancel_agent("wf-x")
+
+        assert [s.pid for s in caught.value.survivors] == [command]
+        if what_fails == "the-last-scan":
+            assert f"pid {command}" in self.registry.get("wf-x").error
+
+    # --- C3, C4, C5, C8, C9, C10 ----------------------------------------------
+
+    def test_a_recycled_pid_is_not_signalled(
+            self, process_tree, signal_seam, caplog):
+        """V14, C3: a token that no longer matches is some other process."""
+        tree = process_tree()
+        root = tree.start()
+        self._run(pid=root)
+        self.registry.update("wf-x", pid_start="proc:another-boot:1")
+
+        assert cancel_agent("wf-x") is True
+
+        assert signal_seam.sent == []
+        tree.assert_all_running()
+        assert self._closed()
+        assert (f"wf-x: the recorded process (pid {root}) had already exited; "
+                "nothing was signalled.") in caplog.text
+
+    def test_an_unreadable_table_refuses_a_run_with_a_recorded_identity(
+            self, process_tree, signal_seam, monkeypatch):
+        """The read will work again, and closing now would lose the only handle."""
+        tree = process_tree()
+        root = tree.start()
+        self._run(pid=root)
+        monkeypatch.setattr(proctree, "read_table", lambda: None)
+
+        with pytest.raises(
+                CancelRefusedError,
+                match=f"wf-x: the process table could not be read, so pid {root} "
+                      "cannot be verified. Nothing was signalled. Retry in a few seconds."):
+            cancel_agent("wf-x")
+
+        assert signal_seam.sent == []
+        tree.assert_all_running()
+        entry = self.registry.get("wf-x")
+        assert (entry.status, entry.pid) == ("running", root)
+
+    @pytest.mark.parametrize("table", ["readable", "unreadable"])
+    def test_no_recorded_identity_gets_exactly_one_sigterm(
+            self, process_tree, signal_seam, caplog, monkeypatch, table):
+        """V14, C4: unverified, so today's single signal and nothing more."""
+        tree = process_tree()
+        root = tree.start()
+        self._run(pid=root)
+        self.registry.update("wf-x", pid_start="")
+        if table == "unreadable":
+            monkeypatch.setattr(proctree, "read_table", lambda: None)
+
+        assert cancel_agent("wf-x") is True
+
+        assert signal_seam.sent == [(root, signal.SIGTERM)]
+        tree.root.wait(timeout=10)
+        tree.assert_all_running(roles=ROLES_UNDER_RUNNER)
+        assert self._closed()
+        assert (f"wf-x: cannot verify pid {root}, so only that process was "
+                "signalled. Its child processes may still be running."
+                ) in caplog.text
+
+    @pytest.mark.parametrize("status,age", [
+        ("running", 0),      # an in-process check, gate or curator session
+        ("starting", 120),   # a launch that never got further
+    ])
+    def test_no_recorded_pid_closes_without_a_signal(
+            self, signal_seam, caplog, status, age):
+        """V14, C5."""
+        self._run(status=status, started_at=time.time() - age)
+
+        assert cancel_agent("wf-x") is True
+
+        assert signal_seam.sent == []
+        assert self._closed()
+        assert ("wf-x: no process is recorded for this run; nothing was "
+                "signalled.") in caplog.text
+
+    def test_a_launch_still_starting_is_refused(self, signal_seam):
+        """V14, C9: the runner's own register would undo a cancel now."""
+        self._run(status="starting")
+
+        with pytest.raises(CancelRefusedError,
+                           match="wf-x is still starting. Retry in a few seconds."):
+            cancel_agent("wf-x")
+
+        assert self.registry.get("wf-x").status == "starting"
+
+    def test_an_ambiguous_run_key_is_refused(self, signal_seam):
+        """V14, C10: a tree kill must not be a guess."""
+        self._run("wf-a", run_key="shared")
+        self._run("wf-b", run_key="shared")
+
+        with pytest.raises(
+                CancelRefusedError,
+                match="shared matches more than one active run. Name one: wf-a, wf-b"):
+            cancel_agent("shared")
+
+        assert self.registry.get("wf-a").status == "running"
+        assert self.registry.get("wf-b").status == "running"
+
+    def test_a_run_key_resolves_to_the_one_live_run(self, signal_seam):
+        """A dead entry does not make a key ambiguous, however recent it is."""
+        self._run("wf-dead", run_key="shared", pid=999_999_999,
+                  last_activity=time.time() + 100)
+        self._run("wf-live", run_key="shared")
+
+        assert cancel_agent("shared") is True
+
+        assert self._closed("wf-live")
+        assert self.registry.get("wf-dead").status == "running"
+
+    def test_an_exact_name_beats_a_run_key(self, signal_seam):
+        self._run("shared", run_key="shared")
+        self._run("wf-b", run_key="shared")
+
+        assert cancel_agent("shared") is True
+
+        assert self._closed("shared")
+        assert self.registry.get("wf-b").status == "running"
+
+    def test_a_run_key_with_only_dead_runs_closes_the_latest(self, signal_seam):
+        """Nothing is live to guess between, so the corpse is closed and not signalled."""
+        self._run("wf-old", run_key="shared", pid=999_999_998, last_activity=1.0)
+        self._run("wf-new", run_key="shared", pid=999_999_999,
+                  last_activity=time.time() + 100)
+
+        assert cancel_agent("shared") is True
+
+        assert signal_seam.sent == []
+        assert self._closed("wf-new")
+        assert self.registry.get("wf-old").status == "running"
+
+    def test_a_finished_or_unknown_run_answers_false(self, signal_seam):
+        """C8: nothing to cancel, and nothing changes."""
+        self._run(status="completed")
+
+        assert cancel_agent("wf-x") is False
+        assert cancel_agent("nonexistent") is False
+
+        assert self.registry.get("wf-x").status == "completed"
+
+    # --- effects on records -----------------------------------------------------
+
+    def test_every_entry_in_the_tree_ends_cancelled_and_never_crashed(
+            self, process_tree, monkeypatch):
+        """V15.
+
+        The root is not this process's child, so once dead it is really gone
+        and a list read would reap anything still saying `running` as `crashed`.
+        One member lingers, and each signal is followed by a pause, so a read
+        has time to catch a wrong order.
+        """
+        tree = process_tree()
+        root = tree.start_detached(on_term="linger")
+        self._run("wf-target", pid=root)
+        self._run("wf-sub-run", pid=tree.pids()["cli"])
+        self._run("wf-shared-pid", pid=root)
+        self._run("wf-bystander", pid=os.getpid())
+        # Names a member's pid, but from an earlier process that had that pid.
+        self._run("wf-recycled", pid=tree.pids()["shell"])
+        self.registry.update("wf-recycled", pid_start="proc:another-boot:1")
+
+        deliver = proctree._send
+
+        def deliver_then_pause(pid, sig):
+            deliver(pid, sig)
+            time.sleep(0.1)
+
+        monkeypatch.setattr(proctree, "_send", deliver_then_pause)
+
+        seen = set()
+        done = threading.Event()
+
+        def read_like_subagents_list():
+            while not done.is_set():
+                seen.update(entry.status
+                            for entry in self.registry.list_all(reap_dead=True)
+                            if entry.name != "wf-recycled")
+
+        reader = threading.Thread(target=read_like_subagents_list, daemon=True)
+        reader.start()
+        try:
+            assert cancel_agent("wf-target") is True
+        finally:
+            done.set()
+            reader.join(timeout=10)
+
+        assert "crashed" not in seen
+        tree.assert_stopped()
+        for name in ("wf-target", "wf-sub-run", "wf-shared-pid"):
+            assert self._closed(name), name
+        assert self.registry.get("wf-bystander").status == "running"
+        assert self.registry.get("wf-recycled").status != "cancelled"
+
+    def test_a_sub_run_that_appears_during_the_wait_is_closed_too(
+            self, process_tree, monkeypatch):
+        """V15: registered too late for the list taken before the kill started.
+
+        The command forks when it takes SIGTERM. The child's entry appears just
+        as the poll that finds the child reads the table.
+        """
+        tree = process_tree()
+        root = tree.start_detached(on_term="fork")
+        command = tree.pids()["command"]
+        self._run(pid=root)
+        read_table = proctree.read_table
+
+        def read_and_register_the_child():
+            table = read_table()
+            children = [p.pid for p in table.values() if p.parent == command]
+            if children and self.registry.get("wf-late") is None:
+                self._run("wf-late", pid=children[0])
+            return table
+
+        monkeypatch.setattr(proctree, "read_table", read_and_register_the_child)
+
+        assert cancel_agent("wf-x") is True
+
+        tree.assert_stopped()
+        assert self._closed("wf-late")
+
+    def test_a_sub_run_registered_after_the_kill_started_is_closed_too(
+            self, process_tree, signal_seam):
+        """V15: its process is an original member, so no later batch brings it up."""
+        tree = process_tree()
+        root = tree.start_detached(on_term="linger")
+        cli = tree.pids()["cli"]
+        self._run(pid=root)
+
+        def register_the_sub_run(pid, _sig):
+            if pid == root:
+                self._run("wf-late", pid=cli)
+
+        signal_seam.after = register_the_sub_run
+
+        assert cancel_agent("wf-x") is True
+
+        assert self._closed("wf-late")
+
+    @pytest.mark.parametrize("last_write", ["pid-stays-zero", "member-pid", "register"])
+    def test_a_runner_rewriting_running_during_the_wait_is_closed_again(
+            self, process_tree, signal_seam, last_write):
+        """V15: its last write can land after cancel's, and no reaper closes it.
+
+        A runner's first write is a register(), which replaces the whole entry,
+        ``started_at`` included.
+        """
+        tree = process_tree()
+        root = tree.start_detached(on_term="linger")
+        self._run(pid=root)
+
+        def runners_last_write(pid, _sig):
+            if pid != root:
+                return
+            if last_write == "pid-stays-zero":
+                self.registry.update("wf-x", status="running")
+            elif last_write == "member-pid":
+                self.registry.update("wf-x", status="running", pid=root)
+            else:
+                self.registry.register(SessionEntry(
+                    name="wf-x", run_key="wf-x", status="running", pid=root,
+                    started_at=time.time() + 1))
+
+        signal_seam.after = runners_last_write
+
+        assert cancel_agent("wf-x") is True
+
+        assert self._closed()
+
+    def test_a_stale_read_cannot_reap_a_cancel_as_crashed(self):
+        """A read from before cancel's write can finish after the process died."""
+        self._run(pid=999_999_999)
+        stale = self.registry.get("wf-x")
+        self.registry.update("wf-x", status="cancelled", pid=0)
+
+        seen = self.registry._reap_if_dead(stale)
+
+        assert seen.status == "cancelled"
+        assert self.registry.get("wf-x").status == "cancelled"
 
 
 class TestLaunchDetached:

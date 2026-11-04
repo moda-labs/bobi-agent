@@ -13,7 +13,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Iterable
 
-from bobi import launch_stamp, paths
+from bobi import launch_stamp, paths, proctree
 from bobi.__version__ import __version__
 from bobi.fsutil import atomic_write_text, file_lock, lock_is_held
 from bobi.sdk import SessionEntry
@@ -310,48 +310,9 @@ def caller_is_manager_descendant(
     if not manager_pid:
         return False
 
-    parents = _process_parent_map()
-
-    current = caller_pid or os.getpid()
-    seen: set[int] = set()
-    while current > 0 and current not in seen:
-        if current == manager_pid:
-            return True
-        seen.add(current)
-        current = parents.get(current, 0)
-    return False
-
-
-def _process_parent_map(proc_root: Path = Path("/proc")) -> dict[int, int]:
-    if proc_root.is_dir():
-        parents: dict[int, int] = {}
-        for entry in proc_root.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                stat = (entry / "stat").read_text()
-                fields = stat[stat.rfind(")") + 2:].split()
-                parents[int(entry.name)] = int(fields[1])
-            except (OSError, ValueError, IndexError):
-                continue
-        if parents:
-            return parents
-
-    try:
-        output = subprocess.check_output(
-            ["ps", "-axo", "pid=,ppid="], text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return {}
-
-    parents = {}
-    for line in output.splitlines():
-        try:
-            pid_text, parent_text = line.split()
-            parents[int(pid_text)] = int(parent_text)
-        except ValueError:
-            continue
-    return parents
+    return proctree.is_self_or_ancestor(
+        proctree.read_table(), manager_pid, start=caller_pid,
+    )
 
 
 def _wait_for_manager_entry(

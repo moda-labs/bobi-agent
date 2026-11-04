@@ -110,13 +110,16 @@ before any of this existed:
 
 > `resume_workflow` re-stamps the registry entry with `os.getpid()` and the
 > resume timeout (#826), which assumes a dedicated per-run process. Resuming in
-> a thread of a long-lived manager would stamp the MANAGER's pid — a reconciler
-> timeout or `subagents cancel` would then SIGTERM the whole manager, and a dead
-> resume thread would never be reaped as crashed.
+> a thread of a long-lived manager would stamp the MANAGER's pid - a reconciler
+> timeout or `subagents cancel` would then refuse to touch the run, so nothing
+> could stop it, and a dead resume thread would never be reaped as crashed. In
+> any other long-lived process, cancel would terminate that process and
+> everything under it.
 
 The web app is a long-lived process too, so the same trap applies, one step
-worse: a resume threaded into it would stamp the *web app's* pid. It also binds
-no runtime root, and `resume_workflow` needs one.
+worse: a resume threaded into it would stamp the *web app's* pid, and its pid
+file would make cancel refuse the run. It also binds no runtime root, and
+`resume_workflow` needs one.
 
 So the endpoint spawns
 `bobi agent <name> workflows resume <run_id> --verdict <v> --reply <text>` in
@@ -135,8 +138,9 @@ and the claim that arbitrates a race — holds identically on either surface.
 The spawn reasoning applies with particular force there. The supervisor is the
 longest-lived process on the box, and it is the one thing that must keep
 working when the manager is wedged; a resume threaded into it would stamp the
-*supervisor's* pid on the run's registry entry, and a later reconciler timeout
-would signal the supervisor itself.
+*supervisor's* pid on the run's registry entry. A later reconciler timeout, from a
+manager under that supervisor, would then refuse to touch the run, and a
+`subagents cancel` from outside the tree would stop the supervisor itself.
 
 The `409`s below become command refusals carrying a machine-readable `code`
 (`unknown_run` / `not_waiting`), which the hosted runtime maps back to the same

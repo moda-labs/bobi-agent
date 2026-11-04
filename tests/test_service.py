@@ -201,28 +201,20 @@ def test_spawn_team_returns_without_waiting_for_registration(bobi_install, monke
 def test_caller_is_manager_descendant(
     bobi_install, monkeypatch, caller_pid, expected,
 ):
+    from bobi.proctree import Proc
     from bobi.service import caller_is_manager_descendant
 
     (bobi_install.state_dir / "manager.pid").write_text("100")
+    parents = {100: 50, 200: 100, 300: 200, 400: 1}
     monkeypatch.setattr(
-        "bobi.service._process_parent_map",
-        lambda: {100: 50, 200: 100, 300: 200, 400: 1},
+        "bobi.proctree.read_table",
+        lambda: {pid: Proc(pid, parent, "S", "", 0.0, "")
+                 for pid, parent in parents.items()},
     )
 
     assert caller_is_manager_descendant(
         bobi_install.repo_path, caller_pid=caller_pid,
     ) is expected
-
-
-def test_process_parent_map_reads_linux_proc_stat(tmp_path):
-    from bobi.service import _process_parent_map
-
-    (tmp_path / "100").mkdir()
-    (tmp_path / "100" / "stat").write_text(
-        "100 (manager with spaces) S 50 0 0 0 0 0 0 0 0 0 0 0\n"
-    )
-
-    assert _process_parent_map(tmp_path) == {100: 50}
 
 
 def test_run_team_foreground_loads_runtime_dotenv(bobi_install, monkeypatch):

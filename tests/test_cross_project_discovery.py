@@ -148,10 +148,13 @@ class TestSessionRegistry:
         assert [a.get("name") for a in list_agents()] == ["agent-42-implement"]
 
     def test_managers_are_excluded_from_agent_list(self, run_root):
+        from bobi.service import manager_session_name
+
         set_project_root(run_root)
-        session_dir = run_root / "state" / "sessions" / "bobi-manager-eng"
+        name = manager_session_name(run_root)
+        session_dir = run_root / "state" / "sessions" / name
         session_dir.mkdir(parents=True)
-        entry = SessionEntry(name="bobi-manager-eng", role="manager",
+        entry = SessionEntry(name=name, role="manager",
                              status="running", pid=os.getpid())
         (session_dir / "state.json").write_text(json.dumps(asdict(entry)))
 

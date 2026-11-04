@@ -420,6 +420,76 @@ class BobiInstall:
 
 
 @pytest.fixture
+def process_tree(tmp_path):
+    """Make real process trees (``tests/process_tree.py``), reaped after the test."""
+    from tests.process_tree import ProcessTree
+
+    trees = []
+
+    def _make(name: str = "tree") -> ProcessTree:
+        tree = ProcessTree(tmp_path / name)
+        trees.append(tree)
+        return tree
+
+    yield _make
+    for tree in trees:
+        tree.reap()
+
+
+@pytest.fixture
+def disposable_caller(tmp_path):
+    """A ``DisposableCaller`` (``tests/process_tree.py``), reaped after the test."""
+    from tests.process_tree import DisposableCaller
+
+    caller = DisposableCaller(tmp_path / "disposable-caller")
+    yield caller
+    caller.reap()
+
+
+class SignalSeam:
+    """Stands in for ``bobi.proctree._send``: delivers and records every signal.
+
+    A pid in ``denied`` fails with ``PermissionError``, the one way to make a
+    survivor for real. ``after`` runs once a signal has gone out, so a test can
+    act at an exact point in a kill sequence.
+    """
+
+    def __init__(self, deliver):
+        self._deliver = deliver
+        self.sent = []
+        self.denied = set()
+        self.after = None
+
+    def __call__(self, pid, sig):
+        self.sent.append((pid, sig))
+        if pid in self.denied:
+            raise PermissionError(f"signal to {pid} denied by the test")
+        self._deliver(pid, sig)
+        if self.after:
+            self.after(pid, sig)
+
+
+@pytest.fixture
+def signal_seam(monkeypatch):
+    from bobi import proctree
+
+    seam = SignalSeam(proctree._send)
+    monkeypatch.setattr(proctree, "_send", seam)
+    return seam
+
+
+@pytest.fixture
+def short_graces(monkeypatch):
+    """The real ``terminate``, with graces short enough to wait out in a test."""
+    from functools import partial
+
+    from bobi import proctree
+
+    monkeypatch.setattr(proctree, "terminate", partial(
+        proctree.terminate, term_grace=0.3, kill_grace=0.3))
+
+
+@pytest.fixture
 def bobi_install(tmp_path, monkeypatch):
     """Create a fully isolated Bobi home in a temp directory.
 
