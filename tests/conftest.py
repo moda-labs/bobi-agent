@@ -91,21 +91,19 @@ def _isolate_user_home(request, monkeypatch, tmp_path_factory):
 
     Unsetting the brain config dirs sends them to their defaults under the
     temporary ``HOME``, so a test that sets only ``HOME`` still sees one home.
-    Subprocesses inherit all three, but this runs per test: a module-scoped
-    fixture runs first, so one that boots an agent still reaches the real home.
+    Subprocesses inherit all three, but this runs per test, after fixtures of
+    wider scope: one that boots an agent still reaches the real home, and
+    Playwright's session browser still finds its install there.
 
     With ``HOME`` unset, Python falls back to the password database, so a test
     that clears the environment would reach the real home however ``HOME`` was
     set. The fallback answers with the temporary home too. A child process
     started without ``HOME`` stays out of reach.
 
-    Two kinds of test keep the real home. Those marked ``claude``, ``live`` or
-    ``docker`` may need the developer's credentials, and e2e tests need the
-    browsers Playwright installs there.
+    Tests marked ``claude``, ``live`` or ``docker`` keep the real home because
+    they may need the developer's credentials.
     """
-    if _in_tier(request, "e2e") or any(
-        request.node.get_closest_marker(m) for m in ("claude", "live", "docker")
-    ):
+    if any(request.node.get_closest_marker(m) for m in ("claude", "live", "docker")):
         return
     home = str(tmp_path_factory.mktemp("user-home"))
     real_getpwuid = pwd.getpwuid

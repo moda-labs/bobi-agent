@@ -99,13 +99,24 @@ def _pytest_as(developer, *args, **env):
     )
 
 
+def _checkout(root, test_source):
+    """A throwaway checkout with this repo's conftest and one test module, for
+    behavior that depends on where tests live or how they are marked."""
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    shutil.copy(PACKAGE_ROOT / "tests" / "conftest.py", tests)
+    (tests / "test_generated.py").write_text(test_source)
+    return tests
+
+
 class TestDevelopersHomeContract:
     @pytest.mark.timeout(300)
-    def test_stub_boots_leave_it_untouched(self, developer, tmp_path):
-        """A manager boot, a blocking subagent run and a detached subagent boot:
-        the three ways an integration test reaches the render. The blocking one
-        comes first in its module because it requests ``stub_bobi_env`` directly,
-        so that env is provisioned before any per-test HOME, in this home."""
+    def test_boots_leave_it_untouched(self, developer, tmp_path):
+        """A manager boot, a blocking subagent run and a detached subagent boot,
+        the three ways a stub-brain test reaches the render, then the child
+        entry on each real brain. The blocking run comes first in its module
+        because it requests ``stub_bobi_env`` directly, so that env is
+        provisioned before any per-test HOME, in this home."""
         before = _contents(developer)
 
         result = _pytest_as(
@@ -116,38 +127,32 @@ class TestDevelopersHomeContract:
             "::test_wait_prints_the_final_text_and_writes_a_ledger_entry",
             "tests/integration/test_agent_launch.py::TestAdhocAgentLaunch"
             "::test_adhoc_agent_completes[stub]",
+            "tests/test_subagent.py::TestRunAgentEntryRootBinding"
+            "::test_sets_process_brain_from_passed_root",
+            "tests/test_subagent.py::TestRunAgentEntryRootBinding"
+            "::test_clears_stale_process_brain_when_passed_root_has_default_brain",
         )
 
         assert result.returncode == 0, result.stdout + result.stderr
         assert _contents(developer) == before
-        # All three still rendered, in their per-test homes. Without this, a
+        # All five still rendered, in their per-test homes. Without this, a
         # boot that stopped rendering would leave this test green.
         rendered = list((tmp_path / "pytest").glob("user-home[0-9]*/AGENTS.md"))
-        assert len(rendered) == 3
-
-    @pytest.mark.parametrize("tier", [
-        pytest.param("claude", marks=pytest.mark.claude),
-        pytest.param("live", marks=pytest.mark.live),
-        pytest.param("docker", marks=pytest.mark.docker),
-    ])
-    @pytest.mark.skipif("BOBI_TEST_DEVELOPER_HOME" not in os.environ,
-                        reason="run by test_credentialed_tests_keep_it")
-    def test_a_credentialed_tier_sees_it(self, tier):
-        assert str(Path.home()) == os.environ["BOBI_TEST_DEVELOPER_HOME"]
+        assert len(rendered) == 5
 
     @pytest.mark.timeout(60)
-    def test_credentialed_tests_keep_it(self, developer):
+    def test_credentialed_tests_keep_it(self, developer, tmp_path):
         """These tiers may need the developer's credentials. CI deselects all
         three, so nothing else there would notice them losing the real home."""
-        result = _pytest_as(
-            developer,
-            "tests/integration/test_env_isolation.py::TestDevelopersHomeContract"
-            "::test_a_credentialed_tier_sees_it",
-            BOBI_TEST_DEVELOPER_HOME=str(developer),
-        )
+        tests = _checkout(tmp_path / "checkout", "from pathlib import Path\nimport pytest\n" + "".join(
+            f"\n@pytest.mark.{tier}\ndef test_{tier}():\n"
+            f"    assert Path.home() == Path({str(developer)!r})\n"
+            for tier in ("claude", "live", "docker")
+        ))
+
+        result = _pytest_as(developer, str(tests))
 
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "3 passed" in result.stdout
 
     @pytest.mark.timeout(60)
     def test_the_systemd_module_stays_off_a_developers_machine(self, developer):
@@ -162,19 +167,18 @@ class TestDevelopersHomeContract:
         assert "BOBI_TEST_SYSTEMD" in result.stdout
 
     @pytest.mark.timeout(60)
-    def test_a_checkout_under_a_directory_named_e2e_stays_isolated(
-        self, developer, tmp_path
+    @pytest.mark.parametrize("tier", ["integration", "e2e"])
+    def test_a_checkout_named_for_a_tier_keeps_the_unit_guards(
+        self, developer, tmp_path, tier
     ):
-        """Only tests/e2e opts out by path. ``worktrees/<branch>/`` makes a
-        checkout like this one reachable with a branch named ``e2e/foo``, and
-        matching the absolute path would switch the guard off for all of it."""
-        tests = tmp_path / "e2e" / "checkout" / "tests"
-        tests.mkdir(parents=True)
-        shutil.copy(PACKAGE_ROOT / "tests" / "conftest.py", tests)
-        (tests / "test_home.py").write_text(
-            "from pathlib import Path\n\n"
-            "def test_home():\n"
-            f"    assert Path.home() != Path({str(developer)!r})\n"
+        """``worktrees/<branch>/`` makes a checkout like this one reachable with
+        a branch named ``e2e/foo``, and matching the absolute path would switch
+        off the guard that hides the developer's real service units."""
+        tests = _checkout(
+            tmp_path / tier / "checkout",
+            "from bobi import service_manager\n\n"
+            "def test_guard_is_on():\n"
+            '    assert "_no_service_units" in str(service_manager.systemd_path())\n',
         )
 
         result = _pytest_as(developer, str(tests))
