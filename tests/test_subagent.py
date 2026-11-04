@@ -3,6 +3,7 @@
 For blocking execution and SDK interaction tests, see test_subagent_blocking.py.
 """
 
+import errno
 import json
 import logging
 import os
@@ -297,8 +298,9 @@ class TestCancelAgent:
         entry = self.registry.get("wf-x")
         assert (entry.status, entry.error) == ("running", "its own")
 
-    def test_a_failed_write_still_names_the_survivors(
-            self, process_tree, signal_seam, short_graces, monkeypatch):
+    @pytest.mark.parametrize("what_fails", ["recording-them", "the-last-scan"])
+    def test_a_failed_record_still_names_the_survivors(
+            self, process_tree, signal_seam, short_graces, monkeypatch, what_fails):
         """V13: the operator has to hear about them, whatever the disk does."""
         tree = process_tree()
         root = tree.start()
@@ -306,13 +308,24 @@ class TestCancelAgent:
         signal_seam.denied.add(command)
         self._run(pid=root)
         update = SessionRegistry.update
+        list_all = SessionRegistry.list_all
+        scans = []
 
         def refuse_the_error(registry, name, **fields):
             if "error" in fields:
-                raise OSError("no space left on device")
+                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
             update(registry, name, **fields)
 
-        monkeypatch.setattr(SessionRegistry, "update", refuse_the_error)
+        def fail_after_the_first_scan(registry, **kwargs):
+            scans.append(1)
+            if len(scans) > 1:
+                raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+            return list_all(registry, **kwargs)
+
+        if what_fails == "recording-them":
+            monkeypatch.setattr(SessionRegistry, "update", refuse_the_error)
+        else:
+            monkeypatch.setattr(SessionRegistry, "list_all", fail_after_the_first_scan)
 
         with pytest.raises(CancelIncompleteError) as caught:
             cancel_agent("wf-x")
@@ -337,13 +350,35 @@ class TestCancelAgent:
         assert (f"wf-x: the recorded process (pid {root}) had already exited; "
                 "nothing was signalled.") in caplog.text
 
+    def test_an_unreadable_table_refuses_a_run_with_a_recorded_identity(
+            self, process_tree, signal_seam, monkeypatch):
+        """The read will work again, and closing now would lose the only handle."""
+        tree = process_tree()
+        root = tree.start()
+        self._run(pid=root)
+        monkeypatch.setattr(proctree, "read_table", lambda: None)
+
+        with pytest.raises(
+                CancelRefusedError,
+                match=f"wf-x: the process table could not be read, so pid {root} "
+                      "cannot be verified. Nothing was signalled. Retry in a few seconds."):
+            cancel_agent("wf-x")
+
+        assert signal_seam.sent == []
+        tree.assert_all_running()
+        entry = self.registry.get("wf-x")
+        assert (entry.status, entry.pid) == ("running", root)
+
+    @pytest.mark.parametrize("table", ["readable", "unreadable"])
     def test_no_recorded_identity_gets_exactly_one_sigterm(
-            self, process_tree, signal_seam, caplog):
+            self, process_tree, signal_seam, caplog, monkeypatch, table):
         """V14, C4: unverified, so today's single signal and nothing more."""
         tree = process_tree()
         root = tree.start()
         self._run(pid=root)
         self.registry.update("wf-x", pid_start="")
+        if table == "unreadable":
+            monkeypatch.setattr(proctree, "read_table", lambda: None)
 
         assert cancel_agent("wf-x") is True
 

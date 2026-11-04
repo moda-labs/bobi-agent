@@ -3131,10 +3131,7 @@ def _record_survivors(registry, entry: SessionEntry,
     else:
         error = "cancel incomplete: " + "; ".join(
             f"{proctree.describe(s.pid, s.name)} {s.reason}" for s in survivors)
-    try:
-        registry.update(entry.name, error=error)
-    except OSError:
-        log.warning("Could not record the survivors of %s", entry.name, exc_info=True)
+    registry.update(entry.name, error=error)
 
 
 def _stop_tree(registry, entry: SessionEntry, table: proctree.Table,
@@ -3179,24 +3176,30 @@ def _stop_tree(registry, entry: SessionEntry, table: proctree.Table,
     survivors = proctree.terminate(
         members, protected=protected, before_signal=close_entries, label=name)
 
-    # What those writes could not cover. A runner can write `running` just before
-    # it dies, over the write above, and its first write replaces `started_at`
-    # too. A sub-run can register after that list was taken. No reaper closes an
-    # entry with no pid, and any other would call the rest a crash.
-    for current in registry.list_all():
-        if current.status not in ACTIVE_STATUSES:
-            continue
-        before = closed.get(current.name)
-        rewritten = (before and not current.pid
-                     and current.started_at == before.started_at)
-        if rewritten or names_a_member(current):
-            _close_entry(registry, current.name,
-                         terminal if current.name == name else None)
-            if not before:
-                log.info("Sub-run %s stopped with %s", current.name, name)
+    try:
+        # What those writes could not cover. A runner can write `running` just
+        # before it dies, over the write above, and its first write replaces
+        # `started_at` too. A sub-run can register after that list was taken. No
+        # reaper closes an entry with no pid, and any other would call the rest
+        # a crash.
+        for current in registry.list_all():
+            if current.status not in ACTIVE_STATUSES:
+                continue
+            before = closed.get(current.name)
+            rewritten = (before and not current.pid
+                         and current.started_at == before.started_at)
+            if rewritten or names_a_member(current):
+                _close_entry(registry, current.name,
+                             terminal if current.name == name else None)
+                if not before:
+                    log.info("Sub-run %s stopped with %s", current.name, name)
+        if survivors:
+            _record_survivors(registry, entry, survivors, terminal)
+    except OSError:
+        # Whatever the disk does, the operator still hears about the survivors.
+        log.warning("Could not finish recording %s", name, exc_info=True)
 
     if survivors:
-        _record_survivors(registry, entry, survivors, terminal)
         raise CancelIncompleteError(name, len(signalled), survivors,
                                     status=terminal[0] if terminal else "cancelled")
     log.info("Sub-agent cancelled: %s (%s stopped in %.1fs)", name,
@@ -3216,8 +3219,8 @@ def cancel_agent(ref: str, *, terminal: tuple[str, str] | None = None) -> bool:
 
     Raises CancelIncompleteError when processes survive SIGKILL, and
     CancelRefusedError for what must not be cancelled: the manager, a shared
-    daemon, a run from inside itself, a launch still starting, and a run key
-    matching more than one run.
+    daemon, a run from inside itself, a launch still starting, a run key matching
+    more than one run, and a recorded process when the table cannot be read.
     """
     from bobi.concurrency_semaphore import _excluded_session_names
 
@@ -3244,6 +3247,13 @@ def cancel_agent(ref: str, *, terminal: tuple[str, str] | None = None) -> bool:
         return True
 
     table = proctree.read_table()
+    if table is None and entry.pid_start:
+        # A recorded token means this host had a table, so the read will work
+        # again. Closing the entry now would lose the only handle on the tree, and
+        # with no table a target above this process's parent cannot be told apart.
+        raise CancelRefusedError(
+            f"{name}: the process table could not be read, so pid {pid} cannot be "
+            "verified. Nothing was signalled. Retry in a few seconds.")
     identity = proctree.verify(table, pid, entry.pid_start)
     if identity == proctree.GONE:
         _close_entry(registry, name, terminal)

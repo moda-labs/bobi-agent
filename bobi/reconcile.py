@@ -200,13 +200,11 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
     exclude_names = exclude_names or set()
 
     actions: list[dict] = []
-    for name in sorted(e.name for e in registry.list_all()):
-        if name in exclude_names:
-            continue
-        # Read again, not from the list above: stopping a run earlier in this
-        # sweep also stops the sub-runs under it, and each must be seen closed.
-        entry = registry.get(name)
-        if entry is None:
+    # A stable order, so what stopping one run does to another does not depend on
+    # the filesystem. Stopping a run also stops the sub-runs under it, so a read
+    # here can be out of date by the time its turn comes: close_dead_run reads again.
+    for entry in sorted(registry.list_all(), key=lambda e: e.name):
+        if entry.name in exclude_names:
             continue
         status = entry.status
 
@@ -243,8 +241,10 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
         ):
             if cancel(entry.name) is False:
                 continue
+            # The wait can last 15s. Past it the entry may be gone, or `failed`
+            # may have let a relaunch take the name, and that run is not this one.
             current = registry.get(entry.name)
-            if current is None:
+            if current is None or current.started_at != entry.started_at:
                 continue
             if current.status in _RECONCILABLE_ACTIVE:
                 registry.mark_terminal(entry.name, TERMINAL_FAILED,

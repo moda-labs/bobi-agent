@@ -216,9 +216,9 @@ with whatever it started, and a line on stderr names it.
 - `Could not stop <id>` with exit 1 means something survived SIGKILL. The run is
   still marked cancelled, and the message names the pids to stop by hand.
 - Exit 1 with nothing signalled is a refusal: the manager (use `bobi agent <name>
-  stop`), a shared daemon, a run from inside itself, a launch still starting
-  (retry in a few seconds), and a run key matching more than one active run (name
-  one).
+  stop`), a shared daemon, a run from inside itself, a launch still starting or a
+  process table that could not be read (retry in a few seconds), and a run key
+  matching more than one active run (name one).
 
 A process that detached before the cancel (`nohup cmd &`) is no longer under the
 run and keeps running.

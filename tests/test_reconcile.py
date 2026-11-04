@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shutil
+import signal
 import sys
 import time
 
@@ -178,8 +179,9 @@ class TestDeadlineStopsTheTree:
             """The parent's event goes out before the sweep reaches the child.
 
             A stopped process can sit as a zombie until init collects it, and a
-            zombie still reads as alive. Past that point a sweep acting on what
-            it read earlier would find `running` with a dead pid.
+            zombie still reads as alive. Past that point the sweep's own read of
+            the child says `running` with a dead pid, and only a fresh read sees
+            the cancel.
             """
 
             def __call__(self, event_type, data):
@@ -196,6 +198,47 @@ class TestDeadlineStopsTheTree:
         assert get_registry().get(parent).status == TERMINAL_FAILED
         assert get_registry().get(child).status == "cancelled"
         assert [data["run_key"] for _, data in emit.calls] == [parent]
+
+    @pytest.mark.parametrize("case", ["no-pid", "recycled-pid", "no-token"])
+    def test_a_run_with_no_verified_tree_still_closes_as_failed(
+            self, process_tree, signal_seam, case):
+        """C5, C3 and C4 through the real cancel, as a restart reaches them."""
+        root = 0 if case == "no-pid" else process_tree().start()
+        name = self._past_deadline("wf-t", root)
+        if case == "no-pid":
+            get_registry().update(name, status="starting")
+        elif case == "recycled-pid":
+            get_registry().update(name, pid_start="proc:another-boot:1")
+        else:
+            get_registry().update(name, pid_start="")
+        emit = _Emitter()
+
+        actions = reconcile_sessions(emit=emit)
+
+        entry = get_registry().get(name)
+        assert (entry.status, entry.pid) == (TERMINAL_FAILED, 0)
+        assert entry.reconciled_at > 0
+        assert entry.error == ("agent exceeded its 10s timeout without reporting "
+                               "a terminal status")
+        assert emit.types() == ["agent/session.failed"]
+        assert actions == [{"name": name, "action": "timeout", "emitted": True}]
+        expected = [(root, signal.SIGTERM)] if case == "no-token" else []
+        assert signal_seam.sent == expected
+
+    def test_a_relaunch_during_the_wait_is_not_closed_or_announced(self):
+        """`failed` does not block a launch, so a new run can land while a tree dies."""
+        name = self._past_deadline("wf-t", os.getpid())
+
+        def relaunch(session):
+            _seed(session, status="running", pid=os.getpid(), started_at=time.time())
+
+        emit = _Emitter()
+
+        assert reconcile_sessions(emit=emit, cancel=relaunch) == []
+
+        entry = get_registry().get(name)
+        assert (entry.status, entry.pid) == ("running", os.getpid())
+        assert emit.calls == []
 
     def test_a_runner_rewriting_running_during_the_wait_still_ends_failed(
             self, process_tree, signal_seam):
@@ -347,6 +390,21 @@ class TestAHonestSweep:
         disposable_caller.assert_alive()
         entry = get_registry().get(name)
         assert (entry.status, entry.pid) == ("running", caller)
+
+    def test_an_unreadable_table_leaves_the_run_for_the_next_sweep(
+            self, process_tree, signal_seam, monkeypatch):
+        root = process_tree().start()
+        name = _seed("wf-t", status="running", pid=root, project="r", timeout=10,
+                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
+        monkeypatch.setattr("bobi.proctree.read_table", lambda: None)
+        emit = _Emitter()
+
+        assert reconcile_sessions(emit=emit) == []
+
+        assert signal_seam.sent == []
+        assert emit.calls == []
+        entry = get_registry().get(name)
+        assert (entry.status, entry.pid) == ("running", root)
 
     @pytest.mark.parametrize("landed", [True, False])
     def test_default_emit_reports_what_post_event_returned(
