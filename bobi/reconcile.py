@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 
 from bobi.sdk import (
     ACTIVE_STATUSES,
@@ -151,16 +152,15 @@ def close_dead_run(entry, registry=None, *, emit=None):
     wholesale - the crash record, and the un-emitted ``emit_confirmed=False``
     the sweep keys off, would be gone. Nobody would ever learn the run died.
     """
-    from dataclasses import replace
-
     registry = registry or get_registry()
     emit = emit or _default_emit
     # The read that produced this entry can predate a cancel, which writes the
     # entry before it signals the process. The pid is dead now, so a fresh read
-    # sees that write (the same rule as SessionRegistry._reap_if_dead).
+    # sees that write (the same rule as SessionRegistry._reap_if_dead). A `crashed`
+    # it finds is a list read's reap, which emits nothing, so this close still does.
     current = registry.get(entry.name)
-    if current and (current.status not in _RECONCILABLE_ACTIVE
-                    or current.pid != entry.pid):
+    if current and current.status != TERMINAL_CRASHED and (
+            current.status not in _RECONCILABLE_ACTIVE or current.pid != entry.pid):
         return current, False
     error = entry.error or DIED_WITHOUT_TERMINAL
     registry.mark_terminal(entry.name, TERMINAL_CRASHED, error=error,
@@ -200,11 +200,14 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
     exclude_names = exclude_names or set()
 
     actions: list[dict] = []
-    # A stable order, so what stopping one run does to another does not depend on
-    # the filesystem. Stopping a run also stops the sub-runs under it, so a read
-    # here can be out of date by the time its turn comes: close_dead_run reads again.
-    for entry in sorted(registry.list_all(), key=lambda e: e.name):
-        if entry.name in exclude_names:
+    for name in sorted(e.name for e in registry.list_all()):
+        if name in exclude_names:
+            continue
+        # Read again, not from the list above: stopping a run earlier in this
+        # sweep also stops the sub-runs under it, and a stale read would judge
+        # each of them, or a relaunch on the name, as it was.
+        entry = registry.get(name)
+        if entry is None:
             continue
         status = entry.status
 
@@ -241,17 +244,24 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
         ):
             if cancel(entry.name) is False:
                 continue
-            # The wait can last 15s. Past it the entry may be gone, or `failed`
-            # may have let a relaunch take the name, and that run is not this one.
+            # The wait can last 15s, and past it the entry may be gone.
             current = registry.get(entry.name)
-            if current is None or current.started_at != entry.started_at:
+            if current is None:
                 continue
-            if current.status in _RECONCILABLE_ACTIVE:
-                registry.mark_terminal(entry.name, TERMINAL_FAILED,
-                                       error=_deadline_error(entry), reconciled=True)
-            landed = emit("agent/session.failed",
-                          _failed_payload(registry.get(entry.name), "timed out"))
-            if landed:
+            # `failed` also lets a relaunch take the name during the wait. That
+            # entry is not this run, so it is left alone, and this run is announced
+            # from what was read, as launch admission does for a dead one.
+            relaunched = current.started_at != entry.started_at
+            if relaunched:
+                closed = replace(entry, status=TERMINAL_FAILED, pid=0,
+                                 error=_deadline_error(entry))
+            else:
+                if current.status in _RECONCILABLE_ACTIVE:
+                    registry.mark_terminal(entry.name, TERMINAL_FAILED,
+                                           error=_deadline_error(entry), reconciled=True)
+                closed = registry.get(entry.name) or current
+            landed = emit("agent/session.failed", _failed_payload(closed, "timed out"))
+            if landed and not relaunched:
                 registry.update(entry.name, emit_confirmed=True)
             actions.append({"name": entry.name, "action": "timeout",
                             "emitted": landed})

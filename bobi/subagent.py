@@ -3121,9 +3121,6 @@ def _record_survivors(registry, entry: SessionEntry,
                       survivors: list[proctree.Survivor],
                       terminal: tuple[str, str] | None) -> None:
     """Name the survivors on the entry, unless the name now holds a newer run."""
-    current = registry.get(entry.name)
-    if current is None or current.started_at != entry.started_at:
-        return
     if terminal:
         pids = ", ".join(f"pid {s.pid} {s.name}" for s in survivors)
         error = (f"{terminal[1]}; {proctree.count(len(survivors))} could not be "
@@ -3131,7 +3128,13 @@ def _record_survivors(registry, entry: SessionEntry,
     else:
         error = "cancel incomplete: " + "; ".join(
             f"{proctree.describe(s.pid, s.name)} {s.reason}" for s in survivors)
-    registry.update(entry.name, error=error)
+    try:
+        current = registry.get(entry.name)
+        if current is not None and current.started_at == entry.started_at:
+            registry.update(entry.name, error=error)
+    except OSError:
+        # Whatever the disk does, the operator still hears about the survivors.
+        log.warning("Could not record the survivors of %s", entry.name, exc_info=True)
 
 
 def _stop_tree(registry, entry: SessionEntry, table: proctree.Table,
@@ -3193,13 +3196,12 @@ def _stop_tree(registry, entry: SessionEntry, table: proctree.Table,
                              terminal if current.name == name else None)
                 if not before:
                     log.info("Sub-run %s stopped with %s", current.name, name)
-        if survivors:
-            _record_survivors(registry, entry, survivors, terminal)
     except OSError:
-        # Whatever the disk does, the operator still hears about the survivors.
-        log.warning("Could not finish recording %s", name, exc_info=True)
+        log.warning("Could not check the records of %s after stopping it", name,
+                    exc_info=True)
 
     if survivors:
+        _record_survivors(registry, entry, survivors, terminal)
         raise CancelIncompleteError(name, len(signalled), survivors,
                                     status=terminal[0] if terminal else "cancelled")
     log.info("Sub-agent cancelled: %s (%s stopped in %.1fs)", name,

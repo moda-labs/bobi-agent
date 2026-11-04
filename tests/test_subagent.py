@@ -331,6 +331,8 @@ class TestCancelAgent:
             cancel_agent("wf-x")
 
         assert [s.pid for s in caught.value.survivors] == [command]
+        if what_fails == "the-last-scan":
+            assert f"pid {command}" in self.registry.get("wf-x").error
 
     # --- C3, C4, C5, C8, C9, C10 ----------------------------------------------
 

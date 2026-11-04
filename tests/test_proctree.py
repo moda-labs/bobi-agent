@@ -527,9 +527,10 @@ def test_ps_that_cannot_answer_gives_no_table(tmp_path, fake_ps, body):
 @pytest.fixture
 def canned_proc(tmp_path):
     root = tmp_path / "proc"
+    fields = ["S", "50", *map(str, range(5, 22)), "7700", "23", "24"]
     for pid in (100, 200):
         (root / str(pid)).mkdir(parents=True)
-        (root / str(pid) / "stat").write_text(f"{pid} (x) S 50 0\n")
+        (root / str(pid) / "stat").write_text(f"{pid} (x) {' '.join(fields)}\n")
     (root / "sys" / "kernel" / "random").mkdir(parents=True)
     (root / "sys" / "kernel" / "random" / "boot_id").write_text("boot-1\n")
     return root
@@ -582,6 +583,8 @@ def test_proc_row_that_is_gone_or_hidden_leaves_the_rest_of_the_table(
 @pytest.mark.parametrize("code", [errno.ENOENT, errno.EACCES], ids=["missing", "masked"])
 def test_boot_id_the_host_does_not_offer_means_no_tokens(canned_proc, monkeypatch, code):
     """V7: no identity on this host, which is C4, and not a failed read."""
+    assert {row.token for row in proctree.read_table(canned_proc).values()} == {
+        "proc:boot-1:7700"}
     with monkeypatch.context() as patch:
         _fail_reads(patch, "boot_id", code)
         assert {row.token for row in proctree.read_table(canned_proc).values()} == {""}
@@ -590,6 +593,7 @@ def test_boot_id_the_host_does_not_offer_means_no_tokens(canned_proc, monkeypatc
 def test_start_token_of_a_failed_read_is_empty(canned_proc, monkeypatch):
     """V7: a registry write must not fail because a token could not be read."""
     monkeypatch.setattr(proctree, "PROC_ROOT", canned_proc)
+    assert proctree.start_token(100) == "proc:boot-1:7700"
     with monkeypatch.context() as patch:
         _fail_reads(patch, "100/stat", errno.EMFILE)
         assert proctree.start_token(100) == ""

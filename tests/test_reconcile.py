@@ -18,7 +18,7 @@ import time
 import pytest
 
 from bobi.sdk import (
-    SessionEntry, SessionRegistry, get_registry, pid_alive,
+    SessionEntry, SessionRegistry, get_registry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi import reconcile
@@ -90,6 +90,25 @@ class TestCrashReconcile:
 
         assert get_registry().get(name).status == expected
         assert emit.calls == []
+
+    def test_a_crash_a_list_read_reaped_is_still_announced(self, monkeypatch):
+        """A reap writes `crashed` and emits nothing, so this close is the only event."""
+        name = _seed("wf-x-reaped", status="running", pid=999999, project="r")
+        is_dead_run = reconcile.is_dead_run
+
+        def a_list_read_reaps_it_after_the_read(entry):
+            dead = is_dead_run(entry)
+            get_registry().list_active()
+            return dead
+
+        monkeypatch.setattr(reconcile, "is_dead_run", a_list_read_reaps_it_after_the_read)
+        emit = _Emitter()
+
+        actions = reconcile_sessions(emit=emit)
+
+        assert actions == [{"name": name, "action": "crashed", "emitted": True}]
+        assert emit.types() == ["agent/session.failed"]
+        assert get_registry().get(name).emit_confirmed is True
 
     def test_second_sweep_is_noop(self):
         _seed("wf-x-2", status="running", pid=999999, project="r")
@@ -172,25 +191,9 @@ class TestDeadlineStopsTheTree:
             self, process_tree):
         tree = process_tree()
         parent = self._past_deadline("wf-a-parent", tree.start())
-        cli = tree.pids()["cli"]
-        child = _seed("wf-b-child", status="running", pid=cli, project="r")
-
-        class WaitsForTheChildToBeReaped(_Emitter):
-            """The parent's event goes out before the sweep reaches the child.
-
-            A stopped process can sit as a zombie until init collects it, and a
-            zombie still reads as alive. Past that point the sweep's own read of
-            the child says `running` with a dead pid, and only a fresh read sees
-            the cancel.
-            """
-
-            def __call__(self, event_type, data):
-                deadline = time.monotonic() + 5
-                while pid_alive(cli) and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                return super().__call__(event_type, data)
-
-        emit = WaitsForTheChildToBeReaped()
+        child = _seed("wf-b-child", status="running", pid=tree.pids()["cli"],
+                      project="r")
+        emit = _Emitter()
 
         reconcile_sessions(emit=emit)
 
@@ -225,7 +228,7 @@ class TestDeadlineStopsTheTree:
         expected = [(root, signal.SIGTERM)] if case == "no-token" else []
         assert signal_seam.sent == expected
 
-    def test_a_relaunch_during_the_wait_is_not_closed_or_announced(self):
+    def test_a_relaunch_during_the_wait_is_left_alone_and_the_old_run_announced(self):
         """`failed` does not block a launch, so a new run can land while a tree dies."""
         name = self._past_deadline("wf-t", os.getpid())
 
@@ -234,11 +237,30 @@ class TestDeadlineStopsTheTree:
 
         emit = _Emitter()
 
-        assert reconcile_sessions(emit=emit, cancel=relaunch) == []
+        actions = reconcile_sessions(emit=emit, cancel=relaunch)
 
         entry = get_registry().get(name)
         assert (entry.status, entry.pid) == ("running", os.getpid())
-        assert emit.calls == []
+        assert entry.emit_confirmed is False
+        assert actions == [{"name": name, "action": "timeout", "emitted": True}]
+        assert emit.types() == ["agent/session.failed"]
+        assert "exceeded its 10s timeout" in emit.calls[0][1]["error"]
+
+    def test_a_run_relaunched_during_the_sweep_is_judged_as_it_is_now(self):
+        """What the sweep listed can be out of date when that entry's turn comes."""
+        first = self._past_deadline("wf-a", os.getpid())
+        later = self._past_deadline("wf-b", os.getpid())
+        stopped = []
+
+        def stop_and_relaunch_the_later_run(session):
+            stopped.append(session)
+            _seed(later, status="running", pid=os.getpid(), timeout=3600,
+                  started_at=time.time())
+
+        reconcile_sessions(emit=_Emitter(), cancel=stop_and_relaunch_the_later_run)
+
+        assert stopped == [first]
+        assert get_registry().get(later).status == "running"
 
     def test_a_runner_rewriting_running_during_the_wait_still_ends_failed(
             self, process_tree, signal_seam):
