@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, fields, asdict, replace
 from pathlib import Path
 from typing import Any
 
-from bobi import paths
+from bobi import paths, proctree
 from bobi.fsutil import atomic_write_json
 
 log = logging.getLogger(__name__)
@@ -287,6 +287,10 @@ class SessionEntry:
     cwd: str = ""
     status: str = "starting"
     pid: int = 0
+    # pid_start: the start token of the process at ``pid`` (``bobi.proctree``),
+    # kept by register() and update(). A pid alone does not identify a process:
+    # it can be recycled while this entry still names it. "" means unknown.
+    pid_start: str = ""
     image_hash: str = ""
     model: str = ""
     provider: str = ""
@@ -372,13 +376,16 @@ class SessionRegistry:
         d = self.session_dir(entry.name)
         d.mkdir(parents=True, exist_ok=True)
         path = d / "state.json"
+        data = {**asdict(entry), "pid_start": proctree.start_token(entry.pid)}
         with _state_file_lock(path):
-            self._write_state(path, asdict(entry))
+            self._write_state(path, data)
 
     def update(self, name: str, **kwargs) -> None:
         path = self._state_path(name)
         if not path.exists():
             return
+        if "pid" in kwargs:
+            kwargs.setdefault("pid_start", proctree.start_token(kwargs["pid"]))
         with _state_file_lock(path):
             if not path.exists():
                 return
@@ -605,6 +612,13 @@ class SessionRegistry:
             return entry
         if not entry.pid or pid_alive(entry.pid):
             return entry
+        # The read that produced this entry can predate a cancel, which writes
+        # the entry before it signals the process. The pid is dead now, so a
+        # fresh read sees that write.
+        current = self.get(entry.name)
+        if current and (current.status not in ACTIVE_STATUSES
+                        or current.pid != entry.pid):
+            return current
         msg = DIED_WITHOUT_TERMINAL
         self.mark_terminal(entry.name, TERMINAL_CRASHED, error=msg)
         # Return the crashed view synthesized in memory, NOT a re-read of
