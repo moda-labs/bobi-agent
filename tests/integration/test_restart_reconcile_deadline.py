@@ -37,7 +37,7 @@ steps:
     prompt: "__stub__:reply:ok"
     timeout: 60
   - name: long
-    prompt: "__stub__:hang:600"
+    prompt: "__stub__:hang"
     timeout: 7200
 """
 
@@ -124,7 +124,7 @@ def _age_run(name, seconds):
                  6480, 7200 + RECONCILE_GRACE + 60, id="declared-step-budget"),
     # An adhoc.yaml declaring no timeout, as every pack's does, at the age of
     # the longest completed run on record.
-    pytest.param("adhoc", "__stub__:hang:600", "task",
+    pytest.param("adhoc", "__stub__:hang", "task",
                  8915, DEFAULT_STEP_TIMEOUT + RECONCILE_GRACE + 60, id="adhoc"),
 ])
 def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(

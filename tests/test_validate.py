@@ -241,10 +241,15 @@ class TestCheckWorkflowEffort:
         assert not results[0].ok
         assert not results[0].required
 
-    def test_malformed_workflow_skipped(self, tmp_path):
+    @pytest.mark.parametrize("content", [
+        "steps: [unclosed\n",
+        "steps:\n",
+        "steps: 5\n",
+    ])
+    def test_malformed_workflow_skipped(self, tmp_path, content):
         wf_dir = tmp_path / "package" / "workflows"
         wf_dir.mkdir(parents=True, exist_ok=True)
-        (wf_dir / "bad.yaml").write_text("steps: [unclosed\n")
+        (wf_dir / "bad.yaml").write_text(content)
         assert self._check(Config(), tmp_path) == []
 
     def test_no_workflows_dir_passes(self, tmp_path):

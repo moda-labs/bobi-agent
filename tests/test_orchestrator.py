@@ -2456,6 +2456,7 @@ class TestResumeRegistryRefresh:
             name="wf-t-r-1", run_key="1", phase="t", project="r", cwd="/tmp",
             status="waiting", pid=999999,
             started_at=time.time() - 90_000, timeout=3600,
+            deadline_at=time.time() - 90_000,
         ))
 
         run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
@@ -2487,7 +2488,7 @@ class TestResumeRegistryRefresh:
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
-            StepDef(name="implement", prompt="build it"),
+            StepDef(name="implement", prompt="build it", timeout=60),
         ])
 
         before = time.time()
@@ -2505,6 +2506,9 @@ class TestResumeRegistryRefresh:
         assert entry.pid == os.getpid()
         assert entry.started_at >= before
         assert entry.timeout == 1234
+        # The first step after the gate replaced the pre-suspension deadline,
+        # floored at this resume's own timeout (#1124).
+        assert before + 1234 <= entry.deadline_at <= time.time() + 1234
         # The resumed run survives a reconcile pass untouched.
         assert mid_run["actions"] == []
 
@@ -2625,6 +2629,34 @@ class TestStepDeadline:
         assert "handoff-repair retry" in queries[-1]
         assert len(deadlines) == 3
         assert len(set(deadlines)) == 1
+
+    def test_a_revisited_step_arms_a_fresh_deadline(self):
+        # A rework loop's goto back to a step must not leave it on the clock of
+        # its first visit: each visit gets the step's whole budget.
+        registry = self.registry
+        deadlines = []
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                if "Review it" in text:
+                    [entry] = registry.list_all()
+                    deadlines.append(entry.deadline_at)
+
+        brain = MagicMock()
+        brain.make_session.side_effect = lambda **_kw: Client()
+        wf = Workflow(name="t", steps=[
+            StepDef(name="review", prompt="Review it", timeout=7200,
+                    handoff=HandoffContract(required=["clean"])),
+            StepDef(name="gate", condition="clean == true", goto="done",
+                    else_goto="review", max_iterations=2, on_exhausted="done"),
+            StepDef(name="done", prompt="Finish"),
+        ])
+
+        with patch("bobi.workflow.orchestrator._read_handoff",
+                   return_value={"clean": False}):
+            assert self._run(wf, brain) is True
+        assert len(deadlines) == 2
+        assert deadlines[1] > deadlines[0]
 
     def test_native_action_arms_the_deadline(self):
         observe, registry = self._observe, self.registry

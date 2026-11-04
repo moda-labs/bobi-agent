@@ -423,7 +423,8 @@ def _workflow_steps(project_path: Path):
             raw = _yaml.safe_load(wf_path.read_text()) or {}
         except Exception:
             continue
-        for step in raw.get("steps", []) if isinstance(raw, dict) else []:
+        steps = raw.get("steps") if isinstance(raw, dict) else None
+        for step in steps if isinstance(steps, list) else []:
             if isinstance(step, dict):
                 yield wf_path, step
 
@@ -470,8 +471,8 @@ def _check_workflow_timeout(project_path: Path) -> list[CheckResult]:
         checks.append(CheckResult(
             f"{wf_path.name}:{step.get('name', '?')}.timeout",
             ok=False, required=False,
-            detail=f"timeout {value!r} is not a positive integer, so the step "
-                   "gets the default budget",
+            detail=f"timeout {value!r} is not a positive integer, so it reads "
+                   "as undeclared",
             hint="declare whole seconds, for example timeout: 7200",
         ))
     return checks

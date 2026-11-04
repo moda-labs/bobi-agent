@@ -124,9 +124,12 @@ of the step it is in (#1124), and never closes one earlier than the run-level
 deadline would.
 
 That check runs only at manager start, so it stops a run only if a restart lands
-after the deadline plus 300s of grace. It then signals the runner, marks the run
-`failed` and emits `agent/session.failed`. The signal reaches the runner process
-only, so a CLI and its tools can outlive it (#1122).
+after the deadline plus 300s of grace. Until then a wedged run keeps its
+concurrency slot and its session name. The check then signals the runner, marks
+the run `failed` and emits `agent/session.failed`. The signal reaches the runner
+process only, so a CLI and its tools can outlive it (#1122). Each visit to a step
+arms afresh, so nothing bounds a whole run: a loop ends at its route's
+`max_iterations`.
 
 Size a step's `timeout` for the longest honest run of that step, retries
 included. Below the run's `--timeout` the run-level floor applies, so at the
@@ -533,8 +536,9 @@ file is removed by hand. Closing that window needs a recovery protocol for a
 torn claim; it is recorded rather than built because nothing in the runtime
 calls this path today (see above). The winner re-stamps the run's registry
 entry with its own pid and a fresh `started_at`/`timeout` (the resume
-`--timeout`), so the dead-man reconciler judges the resumed process on its own
-budget rather than the long-dead launch process's. It then restores the variable
+`--timeout`), so the dead-man reconciler judges the resumed process by its own
+clock rather than the long-dead launch process's, until the next prompt or action
+step arms its own deadline. It then restores the variable
 context, injects the triggering event under the `event` scope, and re-enters
 `_run_workflow_async` at `suspended_at_step`. Execution continues as if the await
 never paused.
