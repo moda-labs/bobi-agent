@@ -9,7 +9,7 @@ Each restart therefore killed a healthy run, marked it ``failed`` and emitted
 This drives the REAL pieces end to end: a real manager (stub brain) restarted
 through the CLI, a real detached workflow runner, the real registry, and the
 real startup reconcile. The only thing the test writes directly is registry
-DATA (backdated timestamps), so a 65-minute-old run can be staged in seconds.
+DATA (backdated timestamps), so a run hours old can be staged in seconds.
 
 Stub only: the mechanism is process lifecycle and the reconciler's predicate,
 which no brain participates in.
@@ -18,14 +18,18 @@ which no brain participates in.
 import os
 import signal
 import time
+from pathlib import Path
 
 import pytest
 import yaml
 
+from bobi.reconcile import RECONCILE_GRACE
 from bobi.sdk import TERMINAL_FAILED, get_registry, pid_alive
+from bobi.workflow.schema import ADHOC_STEP_TIMEOUT
 
 WORKFLOW = "restart-deadline"
-RUN_KEY = "1124-e2e"
+SHIPPED_ADHOC = (Path(__file__).resolve().parents[2] / "agents" / "eng-team"
+                 / "workflows" / "adhoc.yaml")
 
 WORKFLOW_YAML = f"""\
 name: {WORKFLOW}
@@ -43,10 +47,11 @@ steps:
 
 @pytest.fixture
 def env(stub_bobi_env):
-    """The stub install with its workflow staged and webhook topics off.
+    """The stub install with its workflows staged and webhook topics off.
 
     Saved-identity repair refuses the ungranted GitHub topic on restart (see
-    test_manager_lifecycle), and this test restarts twice.
+    test_manager_lifecycle), and this test restarts twice. The install's adhoc
+    is swapped for the one the eng-team pack really ships.
     """
     from bobi import paths
     from bobi.runtime_guard import with_mutable_runtime_package
@@ -58,15 +63,19 @@ def env(stub_bobi_env):
     for service in config.get("services", []):
         service["events"] = False
     workflow_path = stub_bobi_env.workflows_dir / f"{WORKFLOW}.yaml"
+    adhoc_path = stub_bobi_env.workflows_dir / "adhoc.yaml"
+    original_adhoc = adhoc_path.read_text()
     try:
         config_path.chmod(0o644)
         config_path.write_text(yaml.safe_dump(config))
         with with_mutable_runtime_package(stub_bobi_env.project_path):
             workflow_path.write_text(WORKFLOW_YAML)
+            adhoc_path.write_text(SHIPPED_ADHOC.read_text())
         yield stub_bobi_env
     finally:
         with with_mutable_runtime_package(stub_bobi_env.project_path):
             workflow_path.unlink(missing_ok=True)
+            adhoc_path.write_text(original_adhoc)
         config_path.chmod(0o644)
         config_path.write_text(original)
         config_path.chmod(original_mode)
@@ -89,9 +98,9 @@ def _wait(predicate, what, env=None):
     pytest.fail(f"timed out waiting for {what}; manager.log tail:\n{tail}")
 
 
-def _run_entry():
+def _run_entry(run_key):
     return next((e for e in get_registry().list_all()
-                 if e.run_key == RUN_KEY), None)
+                 if e.run_key == run_key), None)
 
 
 def _manager_boots(env) -> int:
@@ -108,10 +117,28 @@ def _restart_and_wait_for_reconcile(env, cli_run):
     _wait(lambda: _manager_boots(env) > boots, "manager to reboot", env)
 
 
+def _age_run(name, seconds):
+    # Stamps the run as if it had reached this point `seconds` ago: its start
+    # and the deadline armed when its step began move back together.
+    entry = get_registry().get(name)
+    get_registry().update(name, started_at=entry.started_at - seconds,
+                          deadline_at=entry.deadline_at - seconds)
+
+
 @pytest.mark.timeout(600)
+@pytest.mark.parametrize("workflow, task, step, healthy_age, overdue_age", [
+    # The production shape: 1h48m into a run, inside its long step's budget.
+    pytest.param(WORKFLOW, "restart deadline e2e", "long",
+                 6480, 7200 + RECONCILE_GRACE + 60, id="declared-step-budget"),
+    # The shipped adhoc, at the age of the longest completed run on record.
+    pytest.param("adhoc", "__stub__:hang:600", "task",
+                 8915, ADHOC_STEP_TIMEOUT + RECONCILE_GRACE + 60, id="shipped-adhoc"),
+])
 def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
-        env, stub_cli_run, stub_clean_session):
+        env, stub_cli_run, stub_clean_session,
+        workflow, task, step, healthy_age, overdue_age):
     cli_run = stub_cli_run
+    run_key = f"1124-e2e-{step}"
     runner_pid = 0
     try:
         start = cli_run("start", timeout=45)
@@ -119,22 +146,22 @@ def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
         _wait(lambda: _manager_boots(env), "manager to boot", env)
 
         launch = cli_run(
-            "subagents", "launch", "-w", WORKFLOW, "--role", "engineer",
-            "--id", RUN_KEY, "--task", "restart deadline e2e",
+            "subagents", "launch", "-w", workflow, "--role", "engineer",
+            "--id", run_key, "--task", task,
             timeout=60,
         )
         assert launch.returncode == 0, launch.stderr
         entry = _wait(
-            lambda: (e := _run_entry()) and e.phase == "long"
+            lambda: (e := _run_entry(run_key)) and e.phase == step
             and e.status == "running" and e,
-            "the run to enter its long step", env,
+            f"the run to enter its {step} step", env,
         )
         runner_pid = entry.pid
         assert pid_alive(runner_pid)
 
-        # Leg 1 - the production shape: the run is 1h48m old, far past the
-        # run-level 3600s + grace, but inside its long step's own budget.
-        get_registry().update(entry.name, started_at=time.time() - 6480)
+        # Leg 1 - the run is far past the run-level 3600s + grace, but inside
+        # its step's own budget: a restart leaves it alone.
+        _age_run(entry.name, healthy_age)
         _restart_and_wait_for_reconcile(env, cli_run)
 
         survived = get_registry().get(entry.name)
@@ -144,12 +171,12 @@ def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
 
         # Leg 2 - the outer net still holds: once the drain itself is past
         # its budget plus grace, the next restart closes the run.
-        get_registry().update(entry.name, deadline_at=time.time() - 400)
+        _age_run(entry.name, overdue_age - healthy_age)
         _restart_and_wait_for_reconcile(env, cli_run)
 
         closed = get_registry().get(entry.name)
         assert closed.status == TERMINAL_FAILED
-        assert "long" in closed.error
+        assert f"in step {step}" in closed.error
         _wait(lambda: not pid_alive(runner_pid), "the runner to exit", env)
     finally:
         cli_run("stop", timeout=30)

@@ -15,9 +15,10 @@ import pytest
 from bobi import paths
 from bobi.brain import TurnResult
 from bobi.workflow.schema import (
-    DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
+    ADHOC_STEP_TIMEOUT, DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
+from bobi.workflow.triggers import builtin_adhoc_workflow
 from bobi.workflow.orchestrator import (
     _build_step_prompt, _read_handoff, _validate_handoff,
     _drain_response, _setup_worktree,
@@ -2486,6 +2487,19 @@ class TestResumeRegistryRefresh:
         assert mid_run["actions"] == []
 
 
+def _shipped_workflow(pack, name):
+    repo = Path(__file__).resolve().parent.parent
+    return load_workflow(repo / "agents" / pack / "workflows" / f"{name}.yaml")
+
+
+def _generated_adhoc(tmp_path):
+    from bobi.setup.authoring import build_adhoc_yaml
+
+    path = tmp_path / "adhoc.yaml"
+    path.write_text(build_adhoc_yaml())
+    return load_workflow(path)
+
+
 class TestDrainDeadline:
     """#1124: before any work that can block, the runner arms the registry's
     ``deadline_at`` to ``now + max(step.timeout, run timeout)``, so a manager
@@ -2630,6 +2644,25 @@ class TestDrainDeadline:
                    side_effect=action):
             assert self._run(wf, MagicMock()) is True
         self._assert_armed("action", 3600)
+
+    @pytest.mark.parametrize("load", [
+        lambda _tmp: builtin_adhoc_workflow(),
+        _generated_adhoc,
+        lambda _tmp: _shipped_workflow("eng-team", "adhoc"),
+        lambda _tmp: _shipped_workflow("personal-assistant", "adhoc"),
+    ], ids=["built-in", "generated-by-setup", "eng-team", "personal-assistant"])
+    def test_every_adhoc_definition_arms_the_adhoc_budget(self, load, tmp_path):
+        observe = self._observe
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                observe("task")
+
+        brain = MagicMock()
+        brain.make_session.side_effect = lambda **_kw: Client()
+
+        assert self._run(load(tmp_path), brain) is True
+        self._assert_armed("task", ADHOC_STEP_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------

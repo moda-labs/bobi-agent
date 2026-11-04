@@ -12,3 +12,4 @@ steps:
   - name: task
     agent: assistant
     prompt: "${{input.task}}"
+    timeout: 14400

@@ -7,7 +7,9 @@ re-emitting an honest lifecycle event — idempotently, so healthy completions a
 never double-delivered.
 """
 
+import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +18,7 @@ from bobi.sdk import (
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.reconcile import reconcile_sessions, RECONCILE_GRACE
+from bobi.workflow.schema import load_workflow
 
 
 @pytest.fixture(autouse=True)
@@ -148,6 +151,51 @@ class TestTimeoutReconcile:
         actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
+
+
+class TestShippedBudgets:
+    """What the shipped eng-team pack declares, judged by the reconciler (#1124).
+
+    A step budget keeps a healthy run alive only if it beats what the step
+    really takes, and the stop only means something while it stays finite. Each
+    row is the longest that step took on a completed run on a production
+    instance, measured 2026-11-04 from the registry for single-step workflows
+    and from handoff timestamps for lifecycle steps. One instance undercounts,
+    hence the headroom.
+    """
+
+    HEADROOM = 1.25
+    RUN_TIMEOUT = 3600  # what a launch gets unless it passes --timeout
+
+    @pytest.mark.parametrize("workflow, step, longest_healthy", [
+        ("adhoc", "task", 8915),
+        ("issue-lifecycle", "spec", 3860),
+        ("issue-lifecycle", "implement", 11366),
+        ("issue-lifecycle", "pr", 6357),
+        ("pr-feedback", "address", 5304),
+    ])
+    def test_budget_outlasts_the_longest_real_step_and_still_ends(
+            self, workflow, step, longest_healthy):
+        path = (Path(__file__).resolve().parent.parent / "agents" / "eng-team"
+                / "workflows" / f"{workflow}.yaml")
+        declared = next(s.timeout for s in load_workflow(path).steps
+                        if s.name == step)
+        budget = max(declared, self.RUN_TIMEOUT)
+        now = time.time()
+
+        def seed(name, age):
+            return _seed(name, status="running", pid=os.getpid(), project="r",
+                         phase=step, timeout=self.RUN_TIMEOUT,
+                         started_at=now - age, deadline_at=now - age + budget)
+
+        healthy = seed("wf-healthy", longest_healthy * self.HEADROOM)
+        runaway = seed("wf-runaway", budget + RECONCILE_GRACE + 60)
+        cancelled = []
+        reconcile_sessions(emit=_Emitter(), cancel=cancelled.append, now=now)
+
+        assert get_registry().get(healthy).status == "running"
+        assert get_registry().get(runaway).status == TERMINAL_FAILED
+        assert cancelled == [runaway]
 
 
 # --- (1) terminal-but-unconfirmed: swallowed emit ---------------------------

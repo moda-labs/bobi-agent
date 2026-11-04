@@ -22,6 +22,13 @@ from bobi.config import positive_int
 
 DEFAULT_ROUTE_LOOP_MAX_ITERATIONS = 3
 
+# The step budget of an ad-hoc task, in seconds (#1124). The one step is the
+# whole job, so it needs a job's budget: the longest completed ad-hoc run
+# measured on a production instance took 8915s (2026-11-04). Packs that ship
+# their own adhoc.yaml declare the same number. See docs/WORKFLOW_ENGINE.md for
+# what a step's `timeout` does and does not bound.
+ADHOC_STEP_TIMEOUT = 14400
+
 # The vocabulary a human answers an await gate in. It rides the resume as the
 # ``event`` scope, so a route step after the await reads it as
 # ``${{event.verdict}}``.
