@@ -18,8 +18,8 @@ when the host already has one rather than replace a real service.
 It needs the host's real home: systemd reads the unit from there and hands the
 manager its own HOME, out of reach of any test fixture, so the manager renders
 instructions into that home like any boot (#1147). The module therefore keeps
-the real home and runs only where that home is disposable: in GitHub Actions,
-or with ``BOBI_TEST_SYSTEMD=1``.
+the real home and runs only where that home is disposable: on a GitHub-hosted
+runner, or with ``BOBI_TEST_SYSTEMD=1``.
 
 To run it from macOS, use any Linux host with systemd as PID 1 and a
 lingering user, e.g. a privileged container booted with ``/sbin/init``.
@@ -55,10 +55,10 @@ def _user_systemd_ok() -> bool:
 
 
 pytestmark = [
-    pytest.mark.skipif(os.environ.get("GITHUB_ACTIONS") != "true"
+    pytest.mark.skipif(os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
                        and os.environ.get("BOBI_TEST_SYSTEMD") != "1",
-                       reason="writes to the real home; runs in GitHub Actions or with "
-                              "BOBI_TEST_SYSTEMD=1"),
+                       reason="writes to the real home; runs on a GitHub-hosted runner or "
+                              "with BOBI_TEST_SYSTEMD=1"),
     pytest.mark.skipif(not _user_systemd_ok(),
                        reason="needs Linux with a systemd user instance"),
     pytest.mark.skipif(UNIT_PATH.exists(),

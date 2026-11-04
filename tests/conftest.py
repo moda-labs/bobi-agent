@@ -54,7 +54,8 @@ def _in_tier(request, *tiers):
     directory named for a tier would otherwise switch these guards off for
     every test in it.
     """
-    return request.path.resolve().relative_to(_TESTS_ROOT).parts[0] in tiers
+    path = request.path.resolve()
+    return any(path.is_relative_to(_TESTS_ROOT / tier) for tier in tiers)
 
 
 @pytest.fixture(autouse=True)

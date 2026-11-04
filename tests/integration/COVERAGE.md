@@ -17,9 +17,10 @@ integration test that runs in CI. Two gating mechanisms, easy to conflate:
 **Your real home:** tests marked `claude`, `live` or `docker` keep your real
 `HOME`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` because they may need your
 credentials, so a real-brain boot still rewrites your global instruction
-files. Every other test here gets a temporary home (`_isolate_user_home` in
-`tests/conftest.py`), except `test_service_systemd.py`, which cannot and so
-stays off developer machines.
+files. Every other test here gets a temporary home per test
+(`_isolate_user_home` in `tests/conftest.py`), though a fixture of wider scope
+runs before it. `test_service_systemd.py` cannot use one, so it stays off
+developer machines.
 
 | Subsystem | Integration Test File(s) | Tests | Marker | Coverage |
 |-----------|--------------------------|-------|--------|----------|
@@ -35,7 +36,7 @@ stays off developer machines.
 | **kb** | `test_kb.py` | 17 | — | Full: create, add, search, FTS, hybrid, sidecar |
 | **monitors** | `test_event_server.py` (scheduler), `test_monitor_scheduler.py` | 1+18 | — | Full: registry loading, scheduler lifecycle, command/check/notify, dedup, state persistence |
 | **setup** | `test_setup_flow.py` | 1 | claude | Good: full create flow |
-| **service** | `test_service_systemd.py` | 4 | - (runs in GitHub Actions or with `BOBI_TEST_SYSTEMD=1`; skips off Linux or without a systemd user instance) | Good: `install-service` under the host's real systemd user instance: cgroup placement, restart after SIGKILL, direct-manager sweep, uninstall. launchd is unit-tested only |
+| **service** | `test_service_systemd.py` | 4 | - (runs on GitHub-hosted runners or with `BOBI_TEST_SYSTEMD=1`; skips off Linux or without a systemd user instance) | Good: `install-service` under the host's real systemd user instance: cgroup placement, restart after SIGKILL, direct-manager sweep, uninstall. launchd is unit-tested only |
 
 ## Maintenance
 

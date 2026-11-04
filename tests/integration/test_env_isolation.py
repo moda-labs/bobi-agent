@@ -20,6 +20,7 @@ session on the machine, and still passed (#1147).
 """
 
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,9 @@ import pytest
 from bobi.brain.instructions import MANAGED_BEGIN, MANAGED_END
 
 from .conftest import PACKAGE_ROOT
+
+# Read at import, before any fixture patches the lookup.
+PASSWORD_DATABASE_HOME = pwd.getpwuid(os.getuid()).pw_dir
 
 
 class TestIsolatedHomeContract:
@@ -83,7 +87,7 @@ def _pytest_as(developer, *args, **env):
     """
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         f"--basetemp={developer.parent / 'pytest'}", *args],
+         "-p", "no:randomly", f"--basetemp={developer.parent / 'pytest'}", *args],
         cwd=PACKAGE_ROOT,
         env={
             **os.environ,
@@ -144,15 +148,36 @@ class TestDevelopersHomeContract:
     def test_credentialed_tests_keep_it(self, developer, tmp_path):
         """These tiers may need the developer's credentials. CI deselects all
         three, so nothing else there would notice them losing the real home."""
-        tests = _checkout(tmp_path / "checkout", "from pathlib import Path\nimport pytest\n" + "".join(
-            f"\n@pytest.mark.{tier}\ndef test_{tier}():\n"
-            f"    assert Path.home() == Path({str(developer)!r})\n"
-            for tier in ("claude", "live", "docker")
-        ))
+        expected = (str(developer), str(developer / "claude"), str(developer / "codex"))
+        tests = _checkout(
+            tmp_path / "checkout",
+            "import os\nimport pytest\n\n"
+            "def _environment():\n"
+            '    return tuple(os.environ.get(name) for name in '
+            '("HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"))\n'
+            + "".join(
+                f"\n@pytest.mark.{tier}\ndef test_{tier}():\n"
+                f"    assert _environment() == {expected!r}\n"
+                for tier in ("claude", "live", "docker")
+            ),
+        )
 
         result = _pytest_as(developer, str(tests))
 
         assert result.returncode == 0, result.stdout + result.stderr
+
+    @pytest.mark.timeout(60)
+    def test_real_brain_legs_carry_a_marker_that_keeps_it(self, developer):
+        """A dual-brain ``[claude]`` leg gets its marker only from the collection
+        hook in the integration conftest, and CI never runs that leg."""
+        result = _pytest_as(
+            developer, "--collect-only", "-m", "live",
+            "tests/integration/test_agent_launch.py",
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "test_adhoc_agent_completes[claude]" in result.stdout
+        assert "[stub]" not in result.stdout
 
     @pytest.mark.timeout(60)
     def test_the_systemd_module_stays_off_a_developers_machine(self, developer):
@@ -160,7 +185,7 @@ class TestDevelopersHomeContract:
         so that module runs only where the home is disposable."""
         result = _pytest_as(
             developer, "tests/integration/test_service_systemd.py", "-rs",
-            GITHUB_ACTIONS="false", BOBI_TEST_SYSTEMD="0",
+            RUNNER_ENVIRONMENT="self-hosted", BOBI_TEST_SYSTEMD="0",
         )
 
         assert result.returncode == 0, result.stdout + result.stderr
@@ -190,7 +215,5 @@ class TestDevelopersHomeContract:
         variable redirects and no watched HOME can see. test_launch_lineage
         clears the environment and renders, so a unit run overwrote the real
         ~/AGENTS.md and ~/.claude/CLAUDE.md however HOME was set (#1147)."""
-        isolated = Path.home()
-
         with patch.dict(os.environ, clear=True):
-            assert Path.home() == isolated
+            assert str(Path.home()) != PASSWORD_DATABASE_HOME
