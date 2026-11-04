@@ -23,14 +23,11 @@ from bobi.config import positive_int
 DEFAULT_ROUTE_LOOP_MAX_ITERATIONS = 3
 
 # A step's wall-clock budget in seconds when it declares none. See
-# docs/WORKFLOW_ENGINE.md for what that budget does and does not bound.
-DEFAULT_STEP_TIMEOUT = 1800
-
-# The same default for a step of the workflow named `adhoc`, wherever that is
-# defined (#1124). Its one step is the whole job, so it needs a job's budget:
-# the longest completed ad-hoc run measured on a production instance took 8915s
-# (2026-11-04). A definition can still declare its own `timeout`.
-ADHOC_STEP_TIMEOUT = 14400
+# docs/WORKFLOW_ENGINE.md for what that budget does and does not bound. It has
+# to suit a step that is a whole job, as `adhoc`'s only step is (#1124): the
+# longest completed ad-hoc run measured on a production instance took 8915s
+# (2026-11-04).
+DEFAULT_STEP_TIMEOUT = 14400
 
 # The vocabulary a human answers an await gate in. It rides the resume as the
 # ``event`` scope, so a route step after the await reads it as
@@ -194,9 +191,6 @@ def load_workflow(path: Path) -> Workflow:
     if not isinstance(raw, dict):
         raise ValueError("workflow file must contain a YAML mapping")
 
-    name = raw.get("name", path.stem)
-    default_timeout = (ADHOC_STEP_TIMEOUT if name == "adhoc"
-                       else DEFAULT_STEP_TIMEOUT)
     steps = []
     for s in raw.get("steps", []):
         handoff_raw = s.get("handoff", {})
@@ -213,7 +207,7 @@ def load_workflow(path: Path) -> Workflow:
             effort=s.get("effort", ""),
             max_turns=positive_int(s.get("max_turns")),
             handoff=handoff,
-            timeout=positive_int(s.get("timeout")) or default_timeout,
+            timeout=positive_int(s.get("timeout")) or DEFAULT_STEP_TIMEOUT,
             worktree=s.get("worktree", False),
             condition=s.get("if", ""),
             goto=s.get("goto", ""),
@@ -230,12 +224,12 @@ def load_workflow(path: Path) -> Workflow:
     period = raw.get("period", "") or ""
     if period and period not in PERIOD_FORMATS:
         raise ValueError(
-            f"Workflow {name}: period {period!r} "
+            f"Workflow {raw.get('name', path.stem)}: period {period!r} "
             f"must be one of {sorted(PERIOD_FORMATS)}"
         )
 
     workflow = Workflow(
-        name=name,
+        name=raw.get("name", path.stem),
         steps=steps,
         trigger=raw.get("trigger", ""),
         description=raw.get("description", ""),

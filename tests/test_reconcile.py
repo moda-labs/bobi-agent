@@ -98,10 +98,10 @@ class TestTimeoutReconcile:
         assert actions == []
         assert get_registry().get(name).status == "running"
 
-    def test_long_run_inside_its_current_drain_budget_survives(self):
+    def test_long_run_inside_its_current_step_budget_survives(self):
         # The #1124 production shape: a healthy issue-lifecycle run 1h48m in,
-        # past the flat run-level 3600s, but its current step's drain armed a
-        # deadline that has not passed. A manager restart must leave it alone.
+        # past the flat run-level 3600s, but its current step armed a deadline
+        # that has not passed. A manager restart must leave it alone.
         name = _seed("wf-t-3", status="running", pid=os.getpid(),
                      project="r", phase="implement", timeout=3600,
                      started_at=time.time() - 6480,
@@ -114,7 +114,7 @@ class TestTimeoutReconcile:
         assert emit.calls == []
         assert get_registry().get(name).status == "running"
 
-    def test_drain_past_its_budget_is_closed_and_names_the_step(self):
+    def test_step_past_its_budget_is_closed_and_names_the_step(self):
         name = _seed("wf-t-4", status="running", pid=os.getpid(),
                      project="r", phase="implement", timeout=3600,
                      started_at=time.time() - 6480,
@@ -140,7 +140,7 @@ class TestTimeoutReconcile:
         assert actions == []
         assert get_registry().get(name).status == "running"
 
-    def test_stale_drain_deadline_never_closes_before_the_run_level_one(self):
+    def test_stale_step_deadline_never_closes_before_the_run_level_one(self):
         # A resume from await re-stamps started_at/timeout (#826) but leaves
         # the pre-suspension deadline_at behind; the later of the two governs.
         name = _seed("wf-t-5", status="running", pid=os.getpid(),

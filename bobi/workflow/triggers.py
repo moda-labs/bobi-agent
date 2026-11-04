@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .schema import ADHOC_STEP_TIMEOUT, StepDef, Workflow, load_workflow
+from .schema import StepDef, Workflow, load_workflow
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +25,7 @@ def builtin_adhoc_workflow() -> Workflow:
     """
     return Workflow(
         name="adhoc",
-        steps=[StepDef(name="task", prompt="${{input.task}}",
-                       timeout=ADHOC_STEP_TIMEOUT)],
+        steps=[StepDef(name="task", prompt="${{input.task}}")],
         description=(
             "Open-ended task with no structured lifecycle. Use for "
             "investigations, questions, one-off fixes, or anything that "

@@ -251,14 +251,11 @@ every rule above - the derived key, the active-run guard, and period
 override included. Two identical `--wait` launches therefore refuse each
 other; fan identical copies out with `--id-random`, exactly as detached.
 `--timeout` is the budget the dead-man reconciler judges the run by, the same
-as a detached run. It is not a cap on the whole run - it is the floor of each
-step's drain deadline: before each piece of step work the engine arms a deadline of
-`max(step timeout, --timeout)` from that moment, and the reconciler closes a
-live run only once both that deadline and `--timeout` from the run's start
-have passed, plus a grace period. The reconciler runs only at a manager restart.
-An `adhoc` step defaults to 14400s, so `--timeout` changes those runs' budget
-only above that. `--timeout 0` declares no deadline. The
-in-process bound on a runaway agent is the role's turn cap, not a wall clock.
+as a detached run. It is not a cap on the whole run, only a floor under each
+step's own `timeout`, which defaults to 14400s, so it changes an `adhoc` run's
+budget only above that (see `docs/WORKFLOW_ENGINE.md`). `--timeout 0` declares no
+deadline. The in-process bound on a runaway agent is the role's turn cap, not a
+wall clock.
 `--as-check` is the explicit short-lived monitoring-check harness; it prints
 verdict JSON and is the only `subagents launch` mode that accepts
 `--post-event`. It never reaches the launch admission path, so run keys do not

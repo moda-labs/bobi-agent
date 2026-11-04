@@ -1,4 +1,4 @@
-"""A manager restart judges a live workflow run by its current drain (#1124).
+"""A manager restart judges a live workflow run by its current step (#1124).
 
 The startup reconciler used to close every live run past ``started_at +
 timeout + grace`` - a flat run-level deadline (default 3600s) that nothing in
@@ -24,7 +24,7 @@ import yaml
 
 from bobi.reconcile import RECONCILE_GRACE
 from bobi.sdk import TERMINAL_FAILED, get_registry, pid_alive
-from bobi.workflow.schema import ADHOC_STEP_TIMEOUT
+from bobi.workflow.schema import DEFAULT_STEP_TIMEOUT
 
 WORKFLOW = "restart-deadline"
 
@@ -125,7 +125,7 @@ def _age_run(name, seconds):
     # An adhoc.yaml declaring no timeout, as every pack's does, at the age of
     # the longest completed run on record.
     pytest.param("adhoc", "__stub__:hang:600", "task",
-                 8915, ADHOC_STEP_TIMEOUT + RECONCILE_GRACE + 60, id="adhoc"),
+                 8915, DEFAULT_STEP_TIMEOUT + RECONCILE_GRACE + 60, id="adhoc"),
 ])
 def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
         env, stub_cli_run, workflow, task, step, healthy_age, overdue_age):
@@ -164,7 +164,7 @@ def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
         assert survived.pid == runner_pid
         assert pid_alive(runner_pid), "restart killed a healthy run"
 
-        # Leg 2 - the outer net still holds: once the drain itself is past
+        # Leg 2 - the outer net still holds: once the step itself is past
         # its budget plus grace, the next restart closes the run.
         _age_run(entry.name, overdue_age - healthy_age)
         _restart_and_wait_for_reconcile(env, cli_run)

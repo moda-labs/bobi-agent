@@ -449,10 +449,9 @@ steps:
     prompt: "${{input.task}}"
 ```
 
-A step of `adhoc` defaults to a 14400s `timeout` instead of the usual 1800,
-because the one step is the whole job. A manager restart closes a run past its
-step's budget (`docs/WORKFLOW_ENGINE.md`), so give any other long step a
-`timeout` that outlasts its longest honest run.
+A step that declares no `timeout` gets 14400s. A manager restart can close a run
+past its step's budget (`docs/WORKFLOW_ENGINE.md`), so give any step that can
+honestly run longer a `timeout` that outlasts it.
 
 ### Monitors (monitors/defaults.yaml)
 

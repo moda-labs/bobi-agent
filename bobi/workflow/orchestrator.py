@@ -90,10 +90,10 @@ OUTCOME_SUSPENDED = "suspended"
 # calls `asyncio.run` bare), so a resume begun just under the deadline still
 # gets a full fresh budget. Worst case per prompt step is therefore
 # `max_turns * (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by
-# the agent finishing; the dead-man reconciler is the outer net. Each drain
-# re-arms the registry's `deadline_at` from the step's budget, so that net
-# judges a live run by the drain it is in (#1124). Raising either number
-# raises that product - see #845 review.
+# the agent finishing; the dead-man reconciler is the outer net. A step arms
+# the registry's `deadline_at` once, when it starts, so that net judges a live
+# run by the step it is in and a resume gets no fresh deadline (#1124). Raising
+# either number raises that product - see #845 review.
 MAX_TURN_BUDGET_RESUMES = 3
 
 
@@ -1065,15 +1065,14 @@ async def _run_workflow_async(
         raise RuntimeError("session open fell through both attempts")
 
     def _arm_deadline(step: StepDef) -> None:
-        """Name the step as current and give this piece of its work a deadline.
+        """Name the step as current and start the clock on its budget.
 
-        Called before a step's turn or native action and before every retry of
-        the turn: the work that can run long (#1124). Nothing here interrupts a
-        running drain, so the dead-man reconciler is the only wall
-        clock; it must judge the drain in flight by its own step's budget. The
-        run's ``timeout`` is a floor: every drain gets at least the budget the
-        run was launched with, so a step declaring a shorter one (the 1800s
-        default) is not judged more strictly than the run as a whole.
+        Called once per visit to a step that does work (#1124). Nothing here
+        interrupts a running drain, so the dead-man reconciler is the only wall
+        clock, and it must judge a live run by the step in flight. Retries
+        inside the step keep this deadline: a budget is sized for the whole
+        step. The run's ``timeout`` is a floor, so a step declaring less is not
+        judged more strictly than the run as a whole.
         """
         registry.update(session_name, phase=step.name,
                         deadline_at=time.time() + max(step.timeout, timeout))
@@ -1517,7 +1516,6 @@ async def _run_workflow_async(
                     max_turns=current_max_turns,
                 )
                 try:
-                    _arm_deadline(step)
                     await client.connect()
                     resume_prompt = _turn_budget_resume_prompt(step, final_try)
                     telemetry_context["prompt_bytes"] = prompt_bytes(resume_prompt)
@@ -1566,7 +1564,6 @@ async def _run_workflow_async(
                     None, agent_name=current_agent, model=current_model,
                     effort=current_effort, max_turns=current_max_turns,
                 )
-                _arm_deadline(step)
                 await client.connect()
                 # A fresh transcript: it gets the run's background like any other.
                 prompt = _context_prefix() + step_prompt
@@ -1631,7 +1628,6 @@ async def _run_workflow_async(
                     model_requested=current_model,
                     **telemetry_context,
                 )
-                _arm_deadline(step)
                 await client.query(fix_prompt)
                 await _drain_response(
                     client,

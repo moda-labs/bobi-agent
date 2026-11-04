@@ -51,10 +51,7 @@ exception is `adhoc`: since #1057 an ad-hoc task IS a one-step workflow
 execution, so the framework carries a built-in `adhoc` definition in code
 (`triggers.builtin_adhoc_workflow`) that the launch path falls back to when the
 pack ships no `adhoc.yaml`. A shipped `adhoc.yaml` wins, and the manager's
-workflow menu still lists only what the pack ships. Its one step is the whole
-job, so a step of a workflow named `adhoc` defaults to a `timeout` of 14400
-instead of 1800, whichever definition is in use (see
-[Prompt step](#prompt-step-the-default)). A
+workflow menu still lists only what the pack ships. A
 workflow has a name, a human-readable `trigger`, an optional `description`, an
 optional `period` (`hourly` / `daily` / `weekly` / `monthly` - one run per
 period across every dispatch path, see **Execution model**), and an ordered
@@ -112,20 +109,18 @@ written, launch it without `--role`, exactly as auto-dispatch does: each step
 then runs as its own `agent`. The CLI allows that only when every prompt step
 (not route/action/notify/await) names an installed `agent`; otherwise `--role`
 is required. A prompt step with no `agent` inherits the previous step's.
-`timeout` (seconds, default
-1800, or 14400 in `adhoc`; anything but a positive integer reads as undeclared,
-and `bobi agent <name> doctor` warns) is the step's wall-clock budget. Nothing interrupts a drain already in
-flight on it, because the workflow path has no in-process wall clock; it is read
-at two points. It gates whether a turn-cap restart is
-allowed to **start** (see [Turn budget](#turn-budget) for the resulting bound).
-And before every piece of step work that can block - the step's turn, each
-turn-cap restart, a control-model rerun, each handoff-repair retry, a native
-action - the engine arms
-the registry entry's `deadline_at` to `now + max(step.timeout, run timeout)`.
+`timeout` (seconds, default 14400; anything but a positive integer reads as
+undeclared, and `bobi agent <name> doctor` warns) is the step's wall-clock
+budget. Nothing interrupts a drain already in flight on it, because the workflow
+path has no in-process wall clock; it is read at two points. It gates whether a
+turn-cap restart is allowed to **start** (see [Turn budget](#turn-budget) for the
+resulting bound). And when a prompt or action step starts, the engine arms the
+registry entry's `deadline_at` to `now + max(step.timeout, run timeout)`. Retries
+inside the step keep that deadline.
 The reconciler's dead-man check judges a live run by the later of that and the
 **run-level** deadline (`started_at` + `run_workflow`'s own `timeout`, default
 3600), so a manager restart never closes a run that is still inside the budget
-of the drain it is in (#1124), and never closes one earlier than the run-level
+of the step it is in (#1124), and never closes one earlier than the run-level
 deadline would.
 
 That check runs only at manager start, so it stops a run only if a restart lands
@@ -133,10 +128,9 @@ after the deadline plus 300s of grace. It then signals the runner, marks the run
 `failed` and emits `agent/session.failed`. The signal reaches the runner process
 only, so a CLI and its tools can outlive it (#1122).
 
-Size a step's `timeout` for the longest honest run of that step. With a smaller
-one the run-level floor applies, and a restart closes the step at about 3900s
-however healthy it is. The long steps of the eng-team pack's `issue-lifecycle`
-and `pr-feedback` declare 14400 for that reason.
+Size a step's `timeout` for the longest honest run of that step, retries
+included. Below the run's `--timeout` the run-level floor applies, so at the
+default a restart closes the step at about 3900s however healthy it is.
 
 `model` is optional. When omitted, a prompt step uses the acting role's
 configured model (`roles.<role>.model` in `agent.yaml`), then the team default
@@ -257,12 +251,10 @@ whether a new resume **starts**; nothing enforces it against a drain already
 running, so a resume begun just under the deadline still gets a full fresh
 budget. Worst case for one prompt step is therefore
 `max_turns × (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by the
-agent finishing. The dead-man reconciler is the outer net: each restart re-arms
-the run's `deadline_at` to `max(step.timeout, run timeout)` from that moment,
-so a manager restart closes a restarted drain only once it outlives that
-budget plus the grace. Each re-arm restarts that clock, so the net's worst case
-is about four times the budget: a resume begun just under it, then the two
-handoff-repair retries.
+agent finishing. The dead-man reconciler is the outer net: a resume gets a fresh
+turn budget but keeps the deadline the step armed when it started, so a manager
+restart can close a step past its budget plus the grace, whichever drain it is
+in.
 
 Raising a step's `timeout` also widens the window in which a resume may start. A
 step that hits the cap past the old budget used to fail there; now it resumes, up

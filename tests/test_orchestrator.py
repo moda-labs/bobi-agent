@@ -15,7 +15,7 @@ import pytest
 from bobi import paths
 from bobi.brain import TurnResult
 from bobi.workflow.schema import (
-    ADHOC_STEP_TIMEOUT, DEFAULT_ROUTE_LOOP_MAX_ITERATIONS, DEFAULT_STEP_TIMEOUT,
+    DEFAULT_ROUTE_LOOP_MAX_ITERATIONS, DEFAULT_STEP_TIMEOUT,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
 from bobi.workflow.triggers import builtin_adhoc_workflow
@@ -2522,25 +2522,11 @@ def _generated_adhoc(tmp_path):
     return load_workflow(path)
 
 
-def _adhoc_declaring_its_own(tmp_path):
-    path = tmp_path / "adhoc.yaml"
-    path.write_text(textwrap.dedent("""\
-        name: adhoc
-        steps:
-          - name: task
-            prompt: "${{input.task}}"
-            timeout: 28800
-    """))
-    return load_workflow(path)
-
-
-class TestDrainDeadline:
-    """#1124: before any work that can block, the runner arms the registry's
-    ``deadline_at`` to ``now + max(step.timeout, run timeout)``, so a manager
-    restart's reconciler judges a live run by its current drain's budget and
-    not by a flat run-level deadline that nothing in the run enforces."""
-
-    STALE = 1.0  # an obviously-expired deadline, planted to prove a re-arm
+class TestStepDeadline:
+    """#1124: when a step starts, the runner arms the registry's ``deadline_at``
+    to ``now + max(step.timeout, run timeout)``, so a manager restart's
+    reconciler judges a live run by the budget of the step it is in and not by
+    a flat run-level deadline that nothing in the run enforces."""
 
     @pytest.fixture(autouse=True)
     def bound_root(self, tmp_path, monkeypatch):
@@ -2554,10 +2540,6 @@ class TestDrainDeadline:
     def _observe(self, label):
         [entry] = self.registry.list_all()
         self.observed.append((label, entry.deadline_at - time.time()))
-
-    def _plant_stale(self):
-        [entry] = self.registry.list_all()
-        self.registry.update(entry.name, deadline_at=self.STALE)
 
     def _run(self, workflow, brain, *, saved_id="", timeout=3600):
         with patch("bobi.brain.get_brain", lambda kind=None: brain), \
@@ -2599,18 +2581,24 @@ class TestDrainDeadline:
         self._assert_armed("short", 3600)
         self._assert_armed("long", 7200)
 
-    def test_turn_cap_resume_rearms_the_deadline(self):
-        from bobi.brain import AssistantText, TurnResult
+    def test_retries_inside_the_step_keep_its_deadline(self):
+        # A budget is sized for the whole step, so a turn-cap resume and a
+        # handoff repair get fresh turns but no fresh deadline.
+        from bobi.brain import AssistantText
+        from bobi.sdk import session_handoff_path
 
-        observe, plant = self._observe, self._plant_stale
-        clients = []
+        registry = self.registry
+        clients, queries, deadlines = [], [], []
 
         class Client(FakeBrainClient):
             async def query(self, text):
-                if not clients[1:]:
-                    plant()          # first drain: leave an expired deadline
-                else:
-                    observe("resume")
+                [entry] = registry.list_all()
+                queries.append(text)
+                deadlines.append(entry.deadline_at)
+                if "handoff-repair retry" in text:
+                    path = session_handoff_path(entry.name, "build")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("summary: done\n")
 
             async def receive_response(self):
                 if len(clients) == 1:
@@ -2628,41 +2616,15 @@ class TestDrainDeadline:
         brain = MagicMock()
         brain.make_session.side_effect = make_session
         wf = Workflow(name="t", steps=[
-            StepDef(name="build", prompt="Build it", timeout=7200),
-        ])
-
-        assert self._run(wf, brain, saved_id="s") is True
-        assert len(clients) == 2
-        self._assert_armed("resume", 7200)
-
-    def test_handoff_repair_retry_rearms_the_deadline(self):
-        from bobi.sdk import session_handoff_path
-
-        observe, plant, registry = self._observe, self._plant_stale, self.registry
-        queries = []
-
-        class Client(FakeBrainClient):
-            async def query(self, text):
-                queries.append(text)
-                if len(queries) == 1:
-                    plant()          # the step's drain ran out its deadline
-                    return
-                observe("repair")
-                [entry] = registry.list_all()
-                path = session_handoff_path(entry.name, "build")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("summary: done\n")
-
-        brain = MagicMock()
-        brain.make_session.side_effect = lambda **_kw: Client()
-        wf = Workflow(name="t", steps=[
             StepDef(name="build", prompt="Build it", timeout=7200,
                     handoff=HandoffContract(required=["summary"])),
         ])
 
-        assert self._run(wf, brain) is True
-        assert "handoff-repair retry" in queries[1]
-        self._assert_armed("repair", 7200)
+        assert self._run(wf, brain, saved_id="s") is True
+        assert len(clients) == 2
+        assert "handoff-repair retry" in queries[-1]
+        assert len(deadlines) == 3
+        assert len(set(deadlines)) == 1
 
     def test_native_action_arms_the_deadline(self):
         observe, registry = self._observe, self.registry
@@ -2683,61 +2645,14 @@ class TestDrainDeadline:
         self._assert_armed("action", 3600)
         assert phases == ["cleanup"]
 
-    def test_control_model_rerun_rearms_the_deadline(self, monkeypatch):
-        from dataclasses import replace
-        from bobi.metrics.routing import RouteOutcome
-        from tests.metrics.helpers import decision
-
-        observe, plant = self._observe, self._plant_stale
-
-        class Client(FakeBrainClient):
-            def __init__(self, model):
-                super().__init__()
-                self.model = model
-
-            async def query(self, text):
-                if self.model == "cheap":
-                    plant()          # the failed drain ran out its deadline
-                else:
-                    observe("rerun")
-
-            async def receive_response(self):
-                if self.model == "cheap":
-                    yield TurnResult(session_id="s", is_error=True,
-                                     error_message="model cheap is not available")
-                    return
-                async for message in FakeBrainClient.receive_response(self):
-                    yield message
-
-        brain = MagicMock()
-        brain.make_session.side_effect = (
-            lambda **kw: Client(kw["options"]["model"]))
-
-        async def route(ctx, sticky_record=None):
-            return RouteOutcome("cheap", replace(
-                decision(), model_selected="cheap", control_model="control"))
-        monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
-        monkeypatch.setattr("bobi.metrics.routing.log_routing_incident",
-                            lambda record, root=None: None)
-        wf = Workflow(name="t", steps=[
-            StepDef(name="build", prompt="Build it", agent="engineer",
-                    timeout=7200),
-        ])
-
-        assert self._run(wf, brain) is True
-        self._assert_armed("rerun", 7200)
-
-    @pytest.mark.parametrize("load, budget", [
-        (lambda _tmp: builtin_adhoc_workflow(), ADHOC_STEP_TIMEOUT),
-        (_generated_adhoc, ADHOC_STEP_TIMEOUT),
-        (lambda _tmp: _shipped_workflow("eng-team", "adhoc"), ADHOC_STEP_TIMEOUT),
-        (lambda _tmp: _shipped_workflow("personal-assistant", "adhoc"),
-         ADHOC_STEP_TIMEOUT),
-        (_adhoc_declaring_its_own, 28800),
-    ], ids=["built-in", "generated-by-setup", "eng-team", "personal-assistant",
-            "declares-its-own"])
-    def test_adhoc_arms_its_budget_wherever_it_is_defined(
-            self, load, budget, tmp_path):
+    @pytest.mark.parametrize("load", [
+        lambda _tmp: builtin_adhoc_workflow(),
+        _generated_adhoc,
+        lambda _tmp: _shipped_workflow("eng-team", "adhoc"),
+        lambda _tmp: _shipped_workflow("personal-assistant", "adhoc"),
+    ], ids=["built-in", "generated-by-setup", "eng-team", "personal-assistant"])
+    def test_adhoc_gets_the_default_budget_wherever_it_is_defined(
+            self, load, tmp_path):
         observe = self._observe
 
         class Client(FakeBrainClient):
@@ -2748,7 +2663,7 @@ class TestDrainDeadline:
         brain.make_session.side_effect = lambda **_kw: Client()
 
         assert self._run(load(tmp_path), brain) is True
-        self._assert_armed("task", budget)
+        self._assert_armed("task", DEFAULT_STEP_TIMEOUT)
 
 
 # ---------------------------------------------------------------------------

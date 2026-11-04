@@ -265,15 +265,15 @@ class TestCheckWorkflowTimeout:
         ("-1", True),
     ])
     def test_only_an_unusable_timeout_warns(self, tmp_path, declared, warns):
-        from bobi.validate import _check_workflow_timeout
-
-        wf_dir = tmp_path / "package" / "workflows"
-        wf_dir.mkdir(parents=True)
-        (wf_dir / "build.yaml").write_text(
+        package = tmp_path / "package"
+        (package / "workflows").mkdir(parents=True)
+        (package / "agent.yaml").write_text("entry_point: manager\n")
+        (package / "workflows" / "build.yaml").write_text(
             "name: build\nsteps:\n  - name: compile\n"
             f"    prompt: p\n    timeout: {declared}\n"
         )
-        results = _check_workflow_timeout(tmp_path)
+        results = [c for c in validate_config(tmp_path).checks
+                   if c.name.endswith(".timeout")]
         assert [r.name for r in results] == (
             ["build.yaml:compile.timeout"] if warns else [])
         assert all(not r.ok and not r.required for r in results)
