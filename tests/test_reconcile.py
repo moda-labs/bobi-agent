@@ -14,7 +14,7 @@ import time
 import pytest
 
 from bobi.sdk import (
-    SessionEntry, SessionRegistry, get_registry,
+    SessionEntry, SessionRegistry, get_registry, pid_alive,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
 from bobi.reconcile import _default_emit, reconcile_sessions, RECONCILE_GRACE
@@ -143,9 +143,24 @@ class TestDeadlineStopsTheTree:
             self, process_tree):
         tree = process_tree()
         parent = self._past_deadline("wf-a-parent", tree.start())
-        child = _seed("wf-b-child", status="running", pid=tree.pids()["cli"],
-                      project="r")
-        emit = _Emitter()
+        cli = tree.pids()["cli"]
+        child = _seed("wf-b-child", status="running", pid=cli, project="r")
+
+        class WaitsForTheChildToBeReaped(_Emitter):
+            """The parent's event goes out before the sweep reaches the child.
+
+            A stopped process can sit as a zombie until init collects it, and a
+            zombie still reads as alive. Past that point a sweep acting on what
+            it read earlier would find `running` with a dead pid.
+            """
+
+            def __call__(self, event_type, data):
+                deadline = time.monotonic() + 5
+                while pid_alive(cli) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                return super().__call__(event_type, data)
+
+        emit = WaitsForTheChildToBeReaped()
 
         reconcile_sessions(emit=emit)
 
