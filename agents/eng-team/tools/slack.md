@@ -26,15 +26,19 @@ bobi reply <conversation> --file <file_path> "optional comment"
 bobi reply <conversation> --file ./screenshot.png --title "Screenshot" "Here's what I see"
 ```
 
-## Read a thread
+## Read a conversation
 
-Fetch all messages (and file metadata) in the conversation:
+Fetch up to `-n` messages (default 100) with their file metadata. A ref with no
+thread reads the channel's history:
 
 ```bash
 bobi read-conversation <conversation>
 bobi read-conversation <conversation> --json-output
 bobi read-conversation <conversation> -n 50
 ```
+
+It exits 1 if the platform refuses the read, for example when the bot is not in
+the channel, so an empty result means there are no messages.
 
 ## Receiving files and images
 

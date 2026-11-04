@@ -48,6 +48,9 @@ principal asked for.
 bobi read-conversation <conversation>
 ```
 
+It exits 1 if the platform refuses the read, for example when the bot is not in
+the channel, so an empty result means there are no messages.
+
 ## Voice
 
 - Lead with the outcome; specifics over hedging.
