@@ -3055,7 +3055,8 @@ class CancelRefusedError(Exception):
 class CancelIncompleteError(Exception):
     """Processes survived SIGKILL. The run's entry is closed all the same."""
 
-    def __init__(self, name: str, total: int, survivors: list[proctree.Survivor]):
+    def __init__(self, name: str, total: int, survivors: list[proctree.Survivor],
+                 *, status: str = "cancelled"):
         self.name = name
         self.total = total
         self.survivors = survivors
@@ -3063,7 +3064,7 @@ class CancelIncompleteError(Exception):
             f"Could not stop {name}: {len(survivors)} of "
             f"{proctree.count(total)} still running.",
             *(f"  {proctree.describe(s.pid, s.name)}: {s.reason}" for s in survivors),
-            "The run is marked cancelled, but these processes are still running.",
+            f"The run is marked {status}, but these processes are still running.",
             "Stop them by hand:  kill -9 " + " ".join(str(s.pid) for s in survivors),
         )))
 
@@ -3079,13 +3080,14 @@ def _resolve_cancel_target(registry, ref: str,
     if entry is None:
         ref_lower = ref.lower()
         matches = [e for e in active
-                   if ref_lower in (e.run_key.lower(), e.name.lower())
-                   and (not e.pid or pid_alive(e.pid))]
-        if len(matches) > 1:
-            names = ", ".join(sorted(e.name for e in matches))
+                   if ref_lower in (e.run_key.lower(), e.name.lower())]
+        live = [e for e in matches if not e.pid or pid_alive(e.pid)]
+        if len(live) > 1:
+            names = ", ".join(sorted(e.name for e in live))
             raise CancelRefusedError(
                 f"{ref} matches more than one active run. Name one: {names}")
-        entry = matches[0] if matches else find_agent(ref)
+        entry = live[0] if live else max(
+            matches, key=lambda e: e.last_activity, default=None)
     return entry if entry and entry.status in ACTIVE_STATUSES else None
 
 
@@ -3129,7 +3131,10 @@ def _record_survivors(registry, entry: SessionEntry,
     else:
         error = "cancel incomplete: " + "; ".join(
             f"{proctree.describe(s.pid, s.name)} {s.reason}" for s in survivors)
-    registry.update(entry.name, error=error)
+    try:
+        registry.update(entry.name, error=error)
+    except OSError:
+        log.warning("Could not record the survivors of %s", entry.name, exc_info=True)
 
 
 def _stop_tree(registry, entry: SessionEntry, table: proctree.Table,
@@ -3151,25 +3156,22 @@ def _stop_tree(registry, entry: SessionEntry, table: proctree.Table,
 
     started = time.monotonic()
     closed: dict[str, SessionEntry] = {}
-    signalled: set[int] = set()
+    signalled: dict[int, str] = {}
+
+    def names_a_member(other: SessionEntry) -> bool:
+        return other.pid in signalled and other.pid_start in ("", signalled[other.pid])
 
     def close_entries(batch: list[proctree.Member]) -> None:
         # Everything that says `running` for these processes is written before
         # any of them is signalled, so no list read can find `running` with a
-        # dead pid and reap this as a crash. The first batch uses the list taken
-        # before the kill started, since that scan is too slow to sit between
-        # this write and the signal. A later batch is a process forked during
-        # the kill, and may be a run registered after that list was taken.
-        candidates = active if not closed else [
-            e for e in registry.list_all() if e.status in ACTIVE_STATUSES]
+        # dead pid and reap this as a crash. This uses the list taken before the
+        # kill started, since that scan is too slow to sit before a signal.
         if not closed:
             _close_entry(registry, name, terminal)
             closed[name] = entry
-        tokens = {m.pid: m.token for m in batch}
-        signalled.update(tokens)
-        for other in candidates:
-            if (other.name not in closed and other.pid in tokens
-                    and other.pid_start in ("", tokens[other.pid])):
+        signalled.update((m.pid, m.token) for m in batch)
+        for other in active:
+            if other.name not in closed and names_a_member(other):
                 _close_entry(registry, other.name)
                 closed[other.name] = other
                 log.info("Sub-run %s stopped with %s", other.name, name)
@@ -3177,18 +3179,26 @@ def _stop_tree(registry, entry: SessionEntry, table: proctree.Table,
     survivors = proctree.terminate(
         members, protected=protected, before_signal=close_entries, label=name)
 
-    # A runner can write `running` just before it dies, over the write above,
-    # and no reaper closes an entry with no pid or a pid it thinks is still ours.
-    for before in closed.values():
-        current = registry.get(before.name)
-        if (current and current.status in ACTIVE_STATUSES
-                and current.started_at == before.started_at
-                and (not current.pid or current.pid in signalled)):
-            _close_entry(registry, before.name, terminal if before.name == name else None)
+    # What those writes could not cover. A runner can write `running` just before
+    # it dies, over the write above, and its first write replaces `started_at`
+    # too. A sub-run can register after that list was taken. No reaper closes an
+    # entry with no pid, and any other would call the rest a crash.
+    for current in registry.list_all():
+        if current.status not in ACTIVE_STATUSES:
+            continue
+        before = closed.get(current.name)
+        rewritten = (before and not current.pid
+                     and current.started_at == before.started_at)
+        if rewritten or names_a_member(current):
+            _close_entry(registry, current.name,
+                         terminal if current.name == name else None)
+            if not before:
+                log.info("Sub-run %s stopped with %s", current.name, name)
 
     if survivors:
         _record_survivors(registry, entry, survivors, terminal)
-        raise CancelIncompleteError(name, len(signalled), survivors)
+        raise CancelIncompleteError(name, len(signalled), survivors,
+                                    status=terminal[0] if terminal else "cancelled")
     log.info("Sub-agent cancelled: %s (%s stopped in %.1fs)", name,
              proctree.count(len(signalled)), time.monotonic() - started)
 

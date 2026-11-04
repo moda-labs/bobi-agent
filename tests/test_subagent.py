@@ -16,7 +16,7 @@ import pytest
 
 from bobi import paths, proctree
 from bobi.kb.embedder import _pid_path as embedder_pid_path
-from bobi.sdk import SessionEntry, get_registry
+from bobi.sdk import SessionEntry, SessionRegistry, get_registry
 from bobi.service import manager_session_name
 from bobi.subagent import (
     AgentResult,
@@ -297,6 +297,28 @@ class TestCancelAgent:
         entry = self.registry.get("wf-x")
         assert (entry.status, entry.error) == ("running", "its own")
 
+    def test_a_failed_write_still_names_the_survivors(
+            self, process_tree, signal_seam, short_graces, monkeypatch):
+        """V13: the operator has to hear about them, whatever the disk does."""
+        tree = process_tree()
+        root = tree.start()
+        command = tree.pids()["command"]
+        signal_seam.denied.add(command)
+        self._run(pid=root)
+        update = SessionRegistry.update
+
+        def refuse_the_error(registry, name, **fields):
+            if "error" in fields:
+                raise OSError("no space left on device")
+            update(registry, name, **fields)
+
+        monkeypatch.setattr(SessionRegistry, "update", refuse_the_error)
+
+        with pytest.raises(CancelIncompleteError) as caught:
+            cancel_agent("wf-x")
+
+        assert [s.pid for s in caught.value.survivors] == [command]
+
     # --- C3, C4, C5, C8, C9, C10 ----------------------------------------------
 
     def test_a_recycled_pid_is_not_signalled(
@@ -392,6 +414,18 @@ class TestCancelAgent:
         assert self._closed("shared")
         assert self.registry.get("wf-b").status == "running"
 
+    def test_a_run_key_with_only_dead_runs_closes_the_latest(self, signal_seam):
+        """Nothing is live to guess between, so the corpse is closed and not signalled."""
+        self._run("wf-old", run_key="shared", pid=999_999_998, last_activity=1.0)
+        self._run("wf-new", run_key="shared", pid=999_999_999,
+                  last_activity=time.time() + 100)
+
+        assert cancel_agent("shared") is True
+
+        assert signal_seam.sent == []
+        assert self._closed("wf-new")
+        assert self.registry.get("wf-old").status == "running"
+
     def test_a_finished_or_unknown_run_answers_false(self, signal_seam):
         """C8: nothing to cancel, and nothing changes."""
         self._run(status="completed")
@@ -481,19 +515,47 @@ class TestCancelAgent:
         tree.assert_stopped()
         assert self._closed("wf-late")
 
-    @pytest.mark.parametrize("rewrites_pid", [False, True],
-                             ids=["pid-stays-zero", "member-pid"])
+    def test_a_sub_run_registered_after_the_kill_started_is_closed_too(
+            self, process_tree, signal_seam):
+        """V15: its process is an original member, so no later batch brings it up."""
+        tree = process_tree()
+        root = tree.start_detached(on_term="linger")
+        cli = tree.pids()["cli"]
+        self._run(pid=root)
+
+        def register_the_sub_run(pid, _sig):
+            if pid == root:
+                self._run("wf-late", pid=cli)
+
+        signal_seam.after = register_the_sub_run
+
+        assert cancel_agent("wf-x") is True
+
+        assert self._closed("wf-late")
+
+    @pytest.mark.parametrize("last_write", ["pid-stays-zero", "member-pid", "register"])
     def test_a_runner_rewriting_running_during_the_wait_is_closed_again(
-            self, process_tree, signal_seam, rewrites_pid):
-        """V15: its last write can land after cancel's, and no reaper closes it."""
+            self, process_tree, signal_seam, last_write):
+        """V15: its last write can land after cancel's, and no reaper closes it.
+
+        A runner's first write is a register(), which replaces the whole entry,
+        ``started_at`` included.
+        """
         tree = process_tree()
         root = tree.start_detached(on_term="linger")
         self._run(pid=root)
 
         def runners_last_write(pid, _sig):
-            if pid == root:
-                pid_fields = {"pid": root} if rewrites_pid else {}
-                self.registry.update("wf-x", status="running", **pid_fields)
+            if pid != root:
+                return
+            if last_write == "pid-stays-zero":
+                self.registry.update("wf-x", status="running")
+            elif last_write == "member-pid":
+                self.registry.update("wf-x", status="running", pid=root)
+            else:
+                self.registry.register(SessionEntry(
+                    name="wf-x", run_key="wf-x", status="running", pid=root,
+                    started_at=time.time() + 1))
 
         signal_seam.after = runners_last_write
 

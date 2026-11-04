@@ -208,7 +208,8 @@ normally still needs `--role`). A persistent launch (`--persistent` /
 `subagents cancel` stops the run's recorded process and every live process under
 it, including a tool command in its own session. It sends SIGTERM, waits up to
 10s, sends SIGKILL to whatever is left, waits up to 5s more, and blocks until
-then. A real run takes about 2.5s.
+then. A real run takes about 2.5s. A shared daemon under the run is spared, along
+with whatever it started, and a line on stderr names it.
 
 - `Cancelled <id>` with exit 0 means the tree is gone, or that no tree could be
   verified, in which case a line on stderr says so.

@@ -8,6 +8,9 @@ never double-delivered.
 """
 
 import json
+import logging
+import os
+import shutil
 import sys
 import time
 
@@ -17,6 +20,7 @@ from bobi.sdk import (
     SessionEntry, SessionRegistry, get_registry, pid_alive,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
+from bobi import reconcile
 from bobi.reconcile import _default_emit, reconcile_sessions, RECONCILE_GRACE
 
 
@@ -61,6 +65,30 @@ class TestCrashReconcile:
         assert "agent/session.failed" in emit.types()
         payload = emit.calls[0][1]
         assert payload["requested_by"] == {"slack_user": "U1"}
+
+    @pytest.mark.parametrize("what_landed,expected", [
+        ("a-cancel", "cancelled"), ("a-relaunch", "running"),
+    ])
+    def test_a_stale_read_closes_nothing(self, monkeypatch, what_landed, expected):
+        """Cancel writes before it signals, so a read older than the death can miss it."""
+        name = _seed("wf-x-stale", status="running", pid=999999, project="r")
+        is_dead_run = reconcile.is_dead_run
+
+        def something_lands_after_the_read(entry):
+            dead = is_dead_run(entry)
+            if what_landed == "a-cancel":
+                get_registry().update(name, status="cancelled", pid=0)
+            else:
+                _seed(name, status="running", pid=os.getpid(), project="r")
+            return dead
+
+        monkeypatch.setattr(reconcile, "is_dead_run", something_lands_after_the_read)
+        emit = _Emitter()
+
+        assert reconcile_sessions(emit=emit) == []
+
+        assert get_registry().get(name).status == expected
+        assert emit.calls == []
 
     def test_second_sweep_is_noop(self):
         _seed("wf-x-2", status="running", pid=999999, project="r")
@@ -169,16 +197,77 @@ class TestDeadlineStopsTheTree:
         assert get_registry().get(child).status == "cancelled"
         assert [data["run_key"] for _, data in emit.calls] == [parent]
 
+    def test_a_runner_rewriting_running_during_the_wait_still_ends_failed(
+            self, process_tree, signal_seam):
+        tree = process_tree()
+        root = tree.start_detached(on_term="linger")
+        name = self._past_deadline("wf-t", root)
+
+        def runners_last_write(pid, _sig):
+            if pid == root:
+                get_registry().update(name, status="running")
+
+        signal_seam.after = runners_last_write
+        emit = _Emitter()
+
+        reconcile_sessions(emit=emit)
+
+        assert get_registry().get(name).status == TERMINAL_FAILED
+        assert emit.types() == ["agent/session.failed"]
+
+    def test_an_entry_removed_during_the_wait_ends_only_its_own_branch(self):
+        """The wait can last 15s, and a later run still has to be closed."""
+        gone = _seed("wf-a-gone", status="running", pid=os.getpid(),
+                     project="r", timeout=10,
+                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
+        later = _seed("wf-b-dead", status="running", pid=999999, project="r")
+        emit = _Emitter()
+
+        actions = reconcile_sessions(
+            emit=emit,
+            cancel=lambda name: shutil.rmtree(get_registry().session_dir(name)))
+
+        assert [action["name"] for action in actions] == [later]
+        assert [data["run_key"] for _, data in emit.calls] == [later]
+        assert get_registry().get(gone) is None
+
+    @pytest.mark.parametrize("raises_after_closing", [True, False],
+                             ids=["after-the-entry-closed", "before-anything-happened"])
+    def test_a_cancel_that_blows_up_is_announced_only_if_it_closed_the_run(
+            self, process_tree, monkeypatch, raises_after_closing):
+        """`failed` with no event would wait for the next restart to be heard."""
+        name = self._past_deadline("wf-t", process_tree().start())
+
+        def terminate(members, *, before_signal, **_kwargs):
+            if raises_after_closing:
+                before_signal(list(members))
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("bobi.proctree.terminate", terminate)
+        emit = _Emitter()
+
+        reconcile_sessions(emit=emit)
+
+        entry = get_registry().get(name)
+        if raises_after_closing:
+            assert entry.status == TERMINAL_FAILED
+            assert emit.types() == ["agent/session.failed"]
+        else:
+            assert entry.status == "running"
+            assert emit.calls == []
+
     def test_a_survivor_is_named_in_the_error_and_the_event_still_goes(
-            self, process_tree, signal_seam, short_graces):
+            self, process_tree, signal_seam, short_graces, caplog):
         tree = process_tree()
         name = self._past_deadline("wf-t", tree.start())
         command = tree.pids()["command"]
         signal_seam.denied.add(command)
         emit = _Emitter()
 
-        reconcile_sessions(emit=emit)
+        with caplog.at_level(logging.WARNING, logger="bobi.reconcile"):
+            reconcile_sessions(emit=emit)
 
+        assert "The run is marked failed, but these processes" in caplog.text
         entry = get_registry().get(name)
         assert entry.status == TERMINAL_FAILED
         assert entry.error == (

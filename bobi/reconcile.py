@@ -96,7 +96,9 @@ def _default_cancel(name: str) -> bool:
         return False
     except Exception:
         log.warning("Reconcile could not cancel %s", name, exc_info=True)
-        return False
+        # The entry is written before any signal, so it says how far this got.
+        current = get_registry().get(name)
+        return current is not None and current.status == TERMINAL_FAILED
 
 
 def _failed_payload(entry, reason: str) -> dict:
@@ -153,6 +155,13 @@ def close_dead_run(entry, registry=None, *, emit=None):
 
     registry = registry or get_registry()
     emit = emit or _default_emit
+    # The read that produced this entry can predate a cancel, which writes the
+    # entry before it signals the process. The pid is dead now, so a fresh read
+    # sees that write (the same rule as SessionRegistry._reap_if_dead).
+    current = registry.get(entry.name)
+    if current and (current.status not in _RECONCILABLE_ACTIVE
+                    or current.pid != entry.pid):
+        return current, False
     error = entry.error or DIED_WITHOUT_TERMINAL
     registry.mark_terminal(entry.name, TERMINAL_CRASHED, error=error,
                            reconciled=True)
@@ -222,9 +231,10 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
 
         # (2) Live status, dead pid → crashed + emit.
         if is_dead_run(entry):
-            _closed, landed = close_dead_run(entry, registry, emit=emit)
-            actions.append({"name": entry.name, "action": "crashed",
-                            "emitted": landed})
+            closed, landed = close_dead_run(entry, registry, emit=emit)
+            if closed.status == TERMINAL_CRASHED:
+                actions.append({"name": entry.name, "action": "crashed",
+                                "emitted": landed})
             continue
 
         # (3) Past declared deadline, pid still alive → failed + stop + emit.
@@ -234,7 +244,9 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
             if cancel(entry.name) is False:
                 continue
             current = registry.get(entry.name)
-            if current and current.status in _RECONCILABLE_ACTIVE:
+            if current is None:
+                continue
+            if current.status in _RECONCILABLE_ACTIVE:
                 registry.mark_terminal(entry.name, TERMINAL_FAILED,
                                        error=_deadline_error(entry), reconciled=True)
             landed = emit("agent/session.failed",
