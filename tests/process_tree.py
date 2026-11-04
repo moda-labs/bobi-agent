@@ -12,6 +12,7 @@ tree by design.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -33,7 +34,8 @@ _LAUNCHER = r"""
 import subprocess
 import sys
 root = subprocess.Popen(sys.argv[1:], start_new_session=True,
-                        stdin=subprocess.DEVNULL)
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
 print(root.pid)
 """
 
@@ -63,6 +65,15 @@ def _command_line_from_ps(pid: int) -> str:
 def pid_running(pid: int) -> bool:
     """Whether *pid* is a running process. A zombie has already stopped."""
     return bool(_command_line(pid))
+
+
+def kill_if_running(pid: int, marker: str) -> None:
+    """SIGKILL *pid* only while its command line still contains *marker*."""
+    if marker in _command_line(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 class ProcessTree:
@@ -145,10 +156,90 @@ class ProcessTree:
     def reap(self) -> None:
         """Kill whatever is left, by verified pid. Always runs in ``finally``."""
         for pid in self.pids().values():
-            if self._is_ours(pid):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
+            kill_if_running(pid, str(self.script))
         if self.root is not None:
             self.root.wait()
+
+
+# Runs one command as this process's child and stays alive afterwards. It takes
+# its own session, and SIGTERM kills that whole session, so a command that
+# signals its own ancestor takes out only this harness and never the test run
+# (shape: ``_RUNTIME_CALLER_HARNESS`` in test_manager_lifecycle.py). It holds the
+# command back until ``go`` appears, so a test can first record this process's
+# pid wherever the command will look for it.
+_CALLER_HARNESS = r"""
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+directory = Path(sys.argv[1])
+command = sys.argv[2:]
+deadline = time.monotonic() + 120
+
+
+def die_with_the_session(_signum, _frame):
+    os.killpg(os.getpgrp(), signal.SIGKILL)
+
+
+signal.signal(signal.SIGTERM, die_with_the_session)
+(directory / "caller.pid").write_text(str(os.getpid()))
+while not (directory / "go").exists() and time.monotonic() < deadline:
+    time.sleep(0.02)
+result = subprocess.run(command, capture_output=True, text=True)
+(directory / "result.json").write_text(json.dumps({
+    "returncode": result.returncode,
+    "stdout": result.stdout,
+    "stderr": result.stderr,
+}))
+while time.monotonic() < deadline:
+    time.sleep(0.2)
+"""
+
+
+class DisposableCaller:
+    """A throwaway ancestor for a command that must not signal its own caller."""
+
+    def __init__(self, directory: Path):
+        directory.mkdir(parents=True, exist_ok=True)
+        self.directory = directory
+        self.process: subprocess.Popen | None = None
+
+    def start(self, command: list[str]) -> int:
+        """Start the harness with *command* held back. Returns the harness pid."""
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", _CALLER_HARNESS, str(self.directory), *command],
+            start_new_session=True, stdin=subprocess.DEVNULL,
+        )
+        pid_file = self.directory / "caller.pid"
+        deadline = time.monotonic() + 30
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return self.process.pid
+
+    def run(self, timeout: float = 60.0) -> dict:
+        """Release the command and return what it did."""
+        (self.directory / "go").touch()
+        result_file = self.directory / "result.json"
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if result_file.exists():
+                return json.loads(result_file.read_text())
+            assert self.process.poll() is None, (
+                "the caller was killed: the command signalled its own ancestor"
+            )
+            time.sleep(0.02)
+        raise TimeoutError(f"the command did not finish in {timeout}s")
+
+    def assert_alive(self) -> None:
+        assert self.process.poll() is None, "the caller was signalled"
+
+    def reap(self) -> None:
+        """Kill the harness's own session, which this class created."""
+        if self.process is not None and self.process.poll() is None:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        if self.process is not None:
+            self.process.wait()

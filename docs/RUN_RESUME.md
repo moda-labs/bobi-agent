@@ -110,13 +110,16 @@ before any of this existed:
 
 > `resume_workflow` re-stamps the registry entry with `os.getpid()` and the
 > resume timeout (#826), which assumes a dedicated per-run process. Resuming in
-> a thread of a long-lived manager would stamp the MANAGER's pid — a reconciler
-> timeout or `subagents cancel` would then SIGTERM the whole manager, and a dead
-> resume thread would never be reaped as crashed.
+> a thread of a long-lived manager would stamp the MANAGER's pid - a reconciler
+> timeout or `subagents cancel` would then refuse to touch the run, so nothing
+> could stop it, and a dead resume thread would never be reaped as crashed. In
+> any other long-lived process, cancel would terminate that process and
+> everything under it.
 
 The web app is a long-lived process too, so the same trap applies, one step
-worse: a resume threaded into it would stamp the *web app's* pid. It also binds
-no runtime root, and `resume_workflow` needs one.
+worse: a resume threaded into it would stamp the *web app's* pid, and its pid
+file would make cancel refuse the run. It also binds no runtime root, and
+`resume_workflow` needs one.
 
 So the endpoint spawns
 `bobi agent <name> workflows resume <run_id> --verdict <v> --reply <text>` in

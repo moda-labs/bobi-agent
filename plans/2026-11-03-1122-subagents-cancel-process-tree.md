@@ -475,8 +475,8 @@ Phase 5 is independent of Phases 2 to 4 and could run in parallel.
 
 ### Phase 2 - Process table and tree kill
 
-- [ ] Add `bobi/proctree.py` per Kill sequence and Safety invariants.
-- [ ] Move `_process_parent_map` there and point `bobi/service.py` and `tests/test_service.py` at it.
+- [wip] Add `bobi/proctree.py` per Kill sequence and Safety invariants.
+- [x] Move `_process_parent_map` there and point `bobi/service.py` and `tests/test_service.py` at it.
 
 **Validation gate**
 
@@ -485,35 +485,35 @@ Phase 5 is independent of Phases 2 to 4 and could run in parallel.
 
 ### Phase 3 - Process identity
 
-- [ ] Add `SessionEntry.pid_start` and maintain it in `register` and `update`.
+- [x] Add `SessionEntry.pid_start` and maintain it in `register` and `update`.
 
 **Validation gate**
 
-- [ ] `pytest tests/test_registry.py --timeout=30 -q` passes V16, including an entry on disk with no `pid_start`.
+- [x] `pytest tests/test_registry.py --timeout=30 -q` passes V16, including an entry on disk with no `pid_start`.
 
 ### Phase 4 - Cancel, the reconciler, the runs view
 
-- [ ] Rewrite `cancel_agent` per Cases, add the two errors, and update the CLI.
-- [ ] Update `_default_cancel`, `_default_emit` and the sweep per Reconciler.
-- [ ] Add the `running` rule to `_all_rows`.
+- [x] Rewrite `cancel_agent` per Cases, add the two errors, and update the CLI.
+- [x] Update `_default_cancel`, `_default_emit` and the sweep per Reconciler.
+- [x] Add the `running` rule to `_all_rows`.
 
 **Validation gate**
 
-- [ ] `pytest tests/test_subagent.py tests/test_reconcile.py tests/test_cli.py tests/test_webapp_runs.py --timeout=30 -q` passes V11 to V15, V17, V18, V22, V23.
-- [ ] V11 and V22 are now green with no change to their assertions.
+- [x] `pytest tests/test_subagent.py tests/test_reconcile.py tests/test_cli.py tests/test_webapp_runs.py --timeout=30 -q` passes V11 to V15, V17, V18, V22, V23.
+- [x] V11 and V22 are now green with no change to their assertions.
 
 ### Phase 5 - Stop listing the manager
 
-- [ ] Change `list_agents` to the identity test in I4.
+- [x] Change `list_agents` to the identity test in I4.
 
 **Validation gate**
 
-- [ ] `pytest tests/test_subagent.py tests/test_cross_project_discovery.py --timeout=30 -q` passes V19.
+- [x] `pytest tests/test_subagent.py tests/test_cross_project_discovery.py --timeout=30 -q` passes V19.
 
 ### Phase 6 - End to end and docs
 
-- [ ] Finish V20, V21 and V24.
-- [ ] Update the docs and docstrings listed in Relevant files, in this PR.
+- [wip] Finish V20, V21 and V24.
+- [wip] Update the docs and docstrings listed in Relevant files, in this PR.
 
 **Validation gate**
 

@@ -83,7 +83,8 @@ def resume_run(root: Path, run_id: str, *, verdict: str = "",
     registry entry with ``os.getpid()`` and the resume timeout, which assumes a
     dedicated per-run process. Resuming inside a long-lived process would stamp
     THAT process's pid - a reconciler timeout or a ``subagents cancel`` would
-    then signal the web app, or the supervisor, instead of the run.
+    then terminate the supervisor and everything under it instead of the run,
+    or refuse outright for the web app, which its pid file marks as a daemon.
 
     The single-winner claim lives in the spawned command, not here: a claim
     held by a caller that then fails to spawn strands the run. This checks the

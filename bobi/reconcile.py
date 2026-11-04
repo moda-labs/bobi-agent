@@ -60,19 +60,42 @@ def _default_emit(event_type: str, data: dict) -> bool:
     """Best-effort lifecycle POST; returns whether it landed."""
     try:
         from bobi.events.publish import post_event
-        post_event(event_type, {k: v for k, v in data.items() if v not in (None, "")})
-        return True
+        return post_event(
+            event_type, {k: v for k, v in data.items() if v not in (None, "")})
     except Exception as e:
         log.debug("Reconcile emit %s not posted: %s", event_type, e)
         return False
 
 
-def _default_cancel(name: str) -> None:
+def _deadline_error(entry) -> str:
+    return (f"agent exceeded its {entry.timeout}s timeout "
+            "without reporting a terminal status")
+
+
+def _default_cancel(name: str) -> bool:
+    """Stop a past-deadline run, and close its entry before signalling it.
+
+    Closing first means a manager stopped during the wait still leaves a
+    `failed` entry the next sweep can announce. Returns False when the run was
+    left alone, so the caller must neither close it nor announce it: marking a
+    run we did not stop `failed` would leave it alive and untracked.
+    """
+    from bobi.subagent import CancelIncompleteError, CancelRefusedError, cancel_agent
+
+    entry = get_registry().get(name)
+    if entry is None:
+        return False
     try:
-        from bobi.subagent import cancel_agent
-        cancel_agent(name)
+        return cancel_agent(name, terminal=(TERMINAL_FAILED, _deadline_error(entry)))
+    except CancelIncompleteError as e:
+        log.warning("%s", e)
+        return True
+    except CancelRefusedError as e:
+        log.warning("Reconcile left %s running: %s", name, e)
+        return False
     except Exception:
-        log.debug("Reconcile cancel failed for %s", name, exc_info=True)
+        log.warning("Reconcile could not cancel %s", name, exc_info=True)
+        return False
 
 
 def _failed_payload(entry, reason: str) -> dict:
@@ -157,7 +180,8 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
     re-claim that entry anyway).
 
     ``emit``/``cancel`` are injectable for testing; they default to the real bus
-    POST and ``cancel_agent``. Pure over its inputs otherwise.
+    POST and ``cancel_agent``. ``cancel(name)`` returning False means the run was
+    left alone. Pure over its inputs otherwise.
     """
     registry = registry or get_registry()
     now = now if now is not None else time.time()
@@ -166,8 +190,13 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
     exclude_names = exclude_names or set()
 
     actions: list[dict] = []
-    for entry in registry.list_all():
-        if entry.name in exclude_names:
+    for name in sorted(e.name for e in registry.list_all()):
+        if name in exclude_names:
+            continue
+        # Read again, not from the list above: stopping a run earlier in this
+        # sweep also stops the sub-runs under it, and each must be seen closed.
+        entry = registry.get(name)
+        if entry is None:
             continue
         status = entry.status
 
@@ -201,13 +230,12 @@ def reconcile_sessions(registry=None, *, now: float | None = None,
         if entry.timeout and entry.started_at and (
             entry.started_at + entry.timeout + RECONCILE_GRACE < now
         ):
-            cancel(entry.name)
-            registry.mark_terminal(
-                entry.name, TERMINAL_FAILED,
-                error=(f"agent exceeded its {entry.timeout}s timeout "
-                       "without reporting a terminal status"),
-                reconciled=True,
-            )
+            if cancel(entry.name) is False:
+                continue
+            current = registry.get(entry.name)
+            if current and current.status in _RECONCILABLE_ACTIVE:
+                registry.mark_terminal(entry.name, TERMINAL_FAILED,
+                                       error=_deadline_error(entry), reconciled=True)
             landed = emit("agent/session.failed",
                           _failed_payload(registry.get(entry.name), "timed out"))
             if landed:

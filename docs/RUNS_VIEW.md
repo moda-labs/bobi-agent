@@ -50,7 +50,7 @@ came for. `404` for an agent this machine does not have.
 `running` · `idle` · `awaiting_action` · `done` · `closed` · `failed` ·
 `crashed`.
 
-Each source maps its own on-disk word onto it. Two mappings are judgement
+Each source maps its own on-disk word onto it. Three mappings are judgement
 rather than translation:
 
 **`awaiting_action` is derived, not recorded.** A workflow run suspended past
@@ -61,6 +61,15 @@ The clock runs from the last resume, not from first suspension.
 
 **`status=failed` is the terminal-failure tab.** It returns `failed` and
 `crashed`. Human approval and clarification gates use `status=awaiting_action`.
+
+**A workflow row's `running` is only as live as its session.** Nothing closes a
+ledger row when its run is cancelled, crashes, or is closed by the reconciler, so
+the word on disk can outlive the run, and the fold does not take it on trust. A
+ledger row saying `running` reads `running` only if it is the newest row, by
+`resumed_at` or else `started_at`, for a session that is live. Otherwise the
+newest row takes its session's status, error and end time, with a cancelled
+session shown as `closed`. An older row, or a row with no session, shows `closed`.
+Other ledger statuses are read as written.
 
 ## `detail.live`: can this row be spoken to right now
 

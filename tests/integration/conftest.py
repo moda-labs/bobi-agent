@@ -442,9 +442,10 @@ def _reap_process_group(pid: int, grace: float = 5.0) -> None:
     A launch is detached with ``start_new_session=True``
     (``bobi/subagent.py::_launch_detached``), so the agent leads its own
     process group and ``killpg`` takes its node children with it. The wait is
-    the load-bearing part, and it is why ``cancel_agent`` is not enough here:
-    that SIGTERMs and returns immediately, leaving the agent free to keep
-    writing while the caller removes its directory.
+    the load-bearing part: it stops the agent writing while the caller removes
+    its directory. This is test teardown only, and a group kill misses a tool
+    command in a process group of its own. ``cancel_agent`` is what stops a
+    run's whole tree.
 
     Bounded and best effort. SIGKILL after the grace period, and return
     regardless once it expires: a process that took SIGKILL cannot execute

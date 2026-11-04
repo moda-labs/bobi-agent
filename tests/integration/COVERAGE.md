@@ -27,7 +27,7 @@ developer machines.
 | **cli** | `test_cli_commands.py` | 29 | — | Full: every CLI command exercised against isolated install |
 | **config** | `test_agent_yaml_config.py`, `test_config_resolution.py` | 7+7 | — | Full: YAML loading, env var interpolation, dotenv chain, deployment state, channels |
 | **session** | `test_session_lifecycle.py` | 10 | — | Full: lifecycle (start → idle → message → stop), registry tracking; rotation is covered at unit level (`tests/test_context_rotation.py`) |
-| **subagent** | `test_agent_launch.py`, `test_subagent_executor.py` | 8+13 | dual-brain (launch only) | Full: launch, build_prompt, session naming, lifecycle events, requires gating |
+| **subagent** | `test_agent_launch.py`, `test_subagent_executor.py`, `test_subagents_cancel.py` | 8+13+3 | dual-brain (launch only); one `claude` test (cancel) | Full: launch, build_prompt, session naming, lifecycle events, requires gating, cancel stopping a real process tree through the CLI and through a manager restart past a run's deadline. The real claude CLI's tree runs locally only |
 | **sdk** | `test_manager_sdk.py` | 5 | claude | Good: connect, multi-turn, resume, inject |
 | **registry** | `test_registry.py` | 13 | — | Full: fetch, update, browse, multi-registry, cache |
 | **inbox** | `test_inbox_transport.py` | 5 | — | Good: round-trip, blocking, teardown, concurrent |

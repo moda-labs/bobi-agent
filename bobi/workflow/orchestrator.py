@@ -217,9 +217,11 @@ def try_resume_for_event(event_type: str, run_key: str = "", event: dict | None 
     entry with os.getpid() and the resume timeout (#826), which assumes a
     dedicated per-run process. Resuming in a thread of a long-lived manager
     would stamp the MANAGER's pid - a reconciler timeout or ``subagents
-    cancel`` would then SIGTERM the whole manager, and a dead resume thread
-    would never be reaped as crashed. Spawn a process (as launch does), and
-    pass an explicit timeout, before making this the manager's resume path.
+    cancel`` would then refuse to touch the run, so nothing could stop it, and
+    a dead resume thread would never be reaped as crashed. In any other
+    long-lived process, cancel would terminate that process and everything under
+    it. Spawn a process (as launch does), and pass an explicit timeout, before
+    making this the manager's resume path.
     """
     from bobi.workflow.triggers import WorkflowDispatcher
 

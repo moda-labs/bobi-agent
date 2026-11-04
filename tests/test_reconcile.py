@@ -7,15 +7,17 @@ re-emitting an honest lifecycle event — idempotently, so healthy completions a
 never double-delivered.
 """
 
+import json
+import sys
 import time
 
 import pytest
 
 from bobi.sdk import (
-    SessionEntry, get_registry,
+    SessionEntry, SessionRegistry, get_registry,
     TERMINAL_COMPLETED, TERMINAL_FAILED, TERMINAL_CRASHED,
 )
-from bobi.reconcile import reconcile_sessions, RECONCILE_GRACE
+from bobi.reconcile import _default_emit, reconcile_sessions, RECONCILE_GRACE
 
 
 @pytest.fixture(autouse=True)
@@ -94,6 +96,166 @@ class TestTimeoutReconcile:
         actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
+
+
+class TestDeadlineStopsTheTree:
+    """V17: the real cancel at a run's deadline, on a real process tree.
+
+    Without the #1124 change this is what a restart does to a verified-live run
+    past its deadline: the whole tree stops, the entry goes `failed`, and one
+    event goes out.
+    """
+
+    def _past_deadline(self, name, pid):
+        return _seed(name, status="running", pid=pid, project="r", timeout=10,
+                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
+
+    def test_the_tree_stops_and_failed_is_written_once(
+            self, process_tree, monkeypatch):
+        tree = process_tree()
+        name = self._past_deadline("wf-t", tree.start())
+        written = []
+        update = SessionRegistry.update
+
+        def record_status(registry, session, **fields):
+            if "status" in fields:
+                written.append(fields["status"])
+            update(registry, session, **fields)
+
+        monkeypatch.setattr(SessionRegistry, "update", record_status)
+        emit = _Emitter()
+
+        actions = reconcile_sessions(emit=emit)
+
+        tree.assert_stopped()
+        assert written == [TERMINAL_FAILED]
+        entry = get_registry().get(name)
+        assert entry.status == TERMINAL_FAILED
+        assert entry.pid == 0
+        assert entry.reconciled_at > 0
+        assert entry.emit_confirmed is True
+        assert entry.error == ("agent exceeded its 10s timeout without reporting "
+                               "a terminal status")
+        assert emit.types() == ["agent/session.failed"]
+        assert actions == [{"name": name, "action": "timeout", "emitted": True}]
+
+    def test_a_wait_child_stopped_with_its_parent_is_not_announced_as_crashed(
+            self, process_tree):
+        tree = process_tree()
+        parent = self._past_deadline("wf-a-parent", tree.start())
+        child = _seed("wf-b-child", status="running", pid=tree.pids()["cli"],
+                      project="r")
+        emit = _Emitter()
+
+        reconcile_sessions(emit=emit)
+
+        tree.assert_stopped()
+        assert get_registry().get(parent).status == TERMINAL_FAILED
+        assert get_registry().get(child).status == "cancelled"
+        assert [data["run_key"] for _, data in emit.calls] == [parent]
+
+    def test_a_survivor_is_named_in_the_error_and_the_event_still_goes(
+            self, process_tree, signal_seam, short_graces):
+        tree = process_tree()
+        name = self._past_deadline("wf-t", tree.start())
+        command = tree.pids()["command"]
+        signal_seam.denied.add(command)
+        emit = _Emitter()
+
+        reconcile_sessions(emit=emit)
+
+        entry = get_registry().get(name)
+        assert entry.status == TERMINAL_FAILED
+        assert entry.error == (
+            "agent exceeded its 10s timeout without reporting a terminal status; "
+            f"1 process could not be stopped (pid {command} python)")
+        assert entry.error in emit.calls[0][1]["error"]
+
+    def test_an_interrupt_mid_wait_leaves_a_run_the_next_sweep_announces(
+            self, process_tree, signal_seam):
+        tree = process_tree()
+        root = tree.start()
+        name = self._past_deadline("wf-t", root)
+        interrupted = []
+
+        def interrupt_once(pid, _sig):
+            if pid == root and not interrupted:
+                interrupted.append(pid)
+                raise KeyboardInterrupt
+
+        signal_seam.after = interrupt_once
+        emit = _Emitter()
+
+        with pytest.raises(KeyboardInterrupt):
+            reconcile_sessions(emit=emit)
+
+        tree.assert_stopped()
+        entry = get_registry().get(name)
+        assert entry.status == TERMINAL_FAILED
+        assert entry.emit_confirmed is False
+        assert emit.calls == []
+
+        emit_again = _Emitter()
+        reconcile_sessions(emit=emit_again)
+        assert emit_again.types() == ["agent/session.failed"]
+        assert get_registry().get(name).emit_confirmed is True
+
+
+# Runs one real sweep with the real cancel, in a process of its own.
+_SWEEP = r"""
+import json
+import sys
+from pathlib import Path
+
+from bobi import paths
+from bobi.reconcile import reconcile_sessions
+
+paths.bind_root(Path(sys.argv[1]))
+emitted = []
+actions = reconcile_sessions(emit=lambda event, data: emitted.append(event) or True)
+print(json.dumps({"actions": actions, "emitted": emitted}))
+"""
+
+
+class TestAHonestSweep:
+    """V23: a sweep reports only what happened (A3, A6)."""
+
+    def test_a_sweep_inside_its_target_refuses_and_changes_nothing(
+            self, tmp_path, disposable_caller):
+        """A manager started from a tool call is a descendant of that run.
+
+        The target has no token, so the only guard between it and a SIGTERM to
+        this sweep's own ancestor is the ancestor check. The ancestor is a
+        disposable session, so losing that guard fails this test and nothing
+        else.
+        """
+        caller = disposable_caller.start(
+            [sys.executable, "-c", _SWEEP, str(tmp_path)])
+        name = _seed("wf-around-the-sweep", status="running", pid=caller,
+                     project="r", timeout=10,
+                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
+        get_registry().update(name, pid_start="")
+
+        result = disposable_caller.run()
+
+        assert result["returncode"] == 0, result["stderr"]
+        assert json.loads(result["stdout"]) == {"actions": [], "emitted": []}
+        disposable_caller.assert_alive()
+        entry = get_registry().get(name)
+        assert (entry.status, entry.pid) == ("running", caller)
+
+    @pytest.mark.parametrize("landed", [True, False])
+    def test_default_emit_reports_what_post_event_returned(
+            self, monkeypatch, landed):
+        monkeypatch.setattr("bobi.events.publish.post_event",
+                            lambda *args, **kwargs: landed)
+        name = _seed("wf-e", status=TERMINAL_FAILED, error="boom", project="r",
+                     terminal_at=time.time())
+
+        assert _default_emit("agent/session.failed", {"run_key": name}) is landed
+        reconcile_sessions()
+
+        assert get_registry().get(name).emit_confirmed is landed
 
 
 # --- (1) terminal-but-unconfirmed: swallowed emit ---------------------------

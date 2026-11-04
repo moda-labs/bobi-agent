@@ -203,6 +203,25 @@ allowed only when every prompt step of the workflow names one (so `-w adhoc`
 normally still needs `--role`). A persistent launch (`--persistent` /
 `--subscribe`) always needs `--role`.
 
+### Cancelling a run
+
+`subagents cancel` stops the run's recorded process and every live process under
+it, including a tool command in its own session. It sends SIGTERM, waits up to
+10s, sends SIGKILL to whatever is left, waits up to 5s more, and blocks until
+then. A real run takes about 2.5s.
+
+- `Cancelled <id>` with exit 0 means the tree is gone, or that no tree could be
+  verified, in which case a line on stderr says so.
+- `Could not stop <id>` with exit 1 means something survived SIGKILL. The run is
+  still marked cancelled, and the message names the pids to stop by hand.
+- Exit 1 with nothing signalled is a refusal: the manager (use `bobi agent <name>
+  stop`), a shared daemon, a run from inside itself, a launch still starting
+  (retry in a few seconds), and a run key matching more than one active run (name
+  one).
+
+A process that detached before the cancel (`nohup cmd &`) is no longer under the
+run and keeps running.
+
 ### Run keys and duplicate suppression
 
 Every launch has a run key. It names the session

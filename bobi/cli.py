@@ -2191,11 +2191,16 @@ def subagents_show(ref):
 @subagents.command("cancel")
 @click.argument("ref")
 def subagents_cancel(ref):
-    """Cancel a running sub-agent."""
+    """Cancel a running sub-agent, and every process it started."""
     _detect_project_root()
-    from bobi.subagent import cancel_agent
+    from bobi.subagent import CancelIncompleteError, CancelRefusedError, cancel_agent
 
-    if cancel_agent(ref):
+    try:
+        cancelled = cancel_agent(ref)
+    except (CancelIncompleteError, CancelRefusedError) as exc:
+        click.echo(str(exc), err=True)
+        raise SystemExit(1) from None
+    if cancelled:
         click.echo(f"Cancelled {ref}")
     else:
         click.echo(f"No running sub-agent for {ref}")

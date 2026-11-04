@@ -181,6 +181,10 @@ def webapp_dir() -> Path:
     return home_dir() / "webapp"
 
 
+def webapp_pid_path() -> Path:
+    return webapp_dir() / "app.pid"
+
+
 def ensure_global_config() -> Path:
     path = global_config_path()
     if not path.exists():
