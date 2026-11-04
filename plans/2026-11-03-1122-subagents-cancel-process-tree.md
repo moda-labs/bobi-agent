@@ -1,7 +1,7 @@
 # Make `subagents cancel` stop a run's whole process tree
 
-> **Status:** Building
-> **Tracking issue:** moda-labs/bobi-agent#1122 · **Related:** #1124, #1115 · **Created:** 2026-11-03 · **Last amended:** - (see Amendments)
+> **Status:** In review
+> **Tracking issue:** moda-labs/bobi-agent#1122 · **Related:** #1124, #1115 · **Created:** 2026-11-03 · **Last amended:** 2026-11-04 (see Amendments)
 >
 > Every `file:line` here was read at `origin/main` `e8fe14f1` (0.62.0).
 > The spec in the #1122 issue body was written at `b9bc83bc` (0.60.1).
@@ -475,13 +475,13 @@ Phase 5 is independent of Phases 2 to 4 and could run in parallel.
 
 ### Phase 2 - Process table and tree kill
 
-- [wip] Add `bobi/proctree.py` per Kill sequence and Safety invariants.
+- [x] Add `bobi/proctree.py` per Kill sequence and Safety invariants.
 - [x] Move `_process_parent_map` there and point `bobi/service.py` and `tests/test_service.py` at it.
 
 **Validation gate**
 
-- [ ] `pytest tests/test_proctree.py --timeout=30 -q` passes V1 to V10.
-- [ ] `pytest tests/test_service.py --timeout=30 -q` passes.
+- [x] `pytest tests/test_proctree.py --timeout=30 -q` passes V1 to V10.
+- [x] `pytest tests/test_service.py --timeout=30 -q` passes.
 
 ### Phase 3 - Process identity
 
@@ -512,24 +512,26 @@ Phase 5 is independent of Phases 2 to 4 and could run in parallel.
 
 ### Phase 6 - End to end and docs
 
-- [wip] Finish V20, V21 and V24.
-- [wip] Update the docs and docstrings listed in Relevant files, in this PR.
+- [x] Finish V20, V21 and V24.
+- [x] Update the docs and docstrings listed in Relevant files, in this PR.
 
 **Validation gate**
 
-- [ ] `pytest tests/integration/test_subagents_cancel.py -v` passes, and V21 shows as `PASSED`, not `SKIPPED`, in the output on the PR.
+- [x] `pytest tests/integration/test_subagents_cancel.py -v` passes, and V21 shows as `PASSED`, not `SKIPPED`, in the output on the PR.
 - [ ] `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q` is green.
 
 ### Phase 7 - The #1124 deadline fix (only if Q1 is answered (a))
 
-- [ ] Leave a verified-live run alone at the deadline branch, as Q1 describes.
-- [ ] Update `bobi/reconcile.py:17-18`, `docs/WORKFLOW_ENGINE.md:116-118`, `:238`, `bobi/workflow/orchestrator.py:91-93`.
-- [ ] Replace V17 with V25, add V26, flip V24's expectation, and update `tests/test_reconcile.py:76-88`.
+Replaced by #1124 (see Amendments). None of this is built here.
+
+- [f] Leave a verified-live run alone at the deadline branch, as Q1 describes.
+- [f] Update `bobi/reconcile.py:17-18`, `docs/WORKFLOW_ENGINE.md:116-118`, `:238`, `bobi/workflow/orchestrator.py:91-93`.
+- [f] Replace V17 with V25, add V26, flip V24's expectation, and update `tests/test_reconcile.py:76-88`.
 
 **Validation gate**
 
-- [ ] `pytest tests/test_reconcile.py --timeout=30 -q` passes V25, V26 and the updated V23.
-- [ ] `pytest tests/integration/test_subagents_cancel.py -k test_manager_restart_past_deadline -v` passes with the tree alive after a real manager start.
+- [f] `pytest tests/test_reconcile.py --timeout=30 -q` passes V25, V26 and the updated V23.
+- [f] `pytest tests/integration/test_subagents_cancel.py -k test_manager_restart_past_deadline -v` passes with the tree alive after a real manager start.
 
 ## Proof of work
 
@@ -662,6 +664,42 @@ None of these changes a decision. Each is needed for what the plan already asks.
 
 Reruns through the real `bobi` commands on 2026-11-04, on CLI 2.1.309, showed the tool command sharing its shell's process group, where the Problem section measured a group of its own.
 The kill set follows parents, so it reaches both shapes, and the fixture keeps the harder one.
+
+### 2026-11-04: Phase 7 is replaced by #1124
+
+Zach decided in Slack on 2026-11-04 that the team takes over `feat/MOD-434-restart-reconciler-deadline` as its own PR for #1124, landing before this one.
+That replaces Phase 7, whose items are marked `[f]` above because they will not be built here.
+Q1 is answered: neither (a) nor (b), since the deadline check gets its fix from that PR instead.
+Until #1124 lands, a restart behaves as column (b) of the Q1 table.
+Once it does, this branch merges `main` and reruns its suite, and V24 and V17 follow whatever that PR decides for a verified-live run.
+
+### 2026-11-04: What the review changed
+
+The review gate found these, each with a test that failed first.
+Each changes what the plan's sections above say, and none changes a decision.
+
+- **One table source per host.** `read_table` fell back to `ps` whenever `/proc` gave no rows, and a `ps` token never equals a `/proc` one, so one failed read made every process read as gone.
+  Any failed read now gives no table, and `ps` is only for a host with no `/proc` or an empty one.
+  Only a process that exited, one `hidepid` hides, and a host with no boot id are treated as facts, so a hole in the table cannot read as a process gone.
+- **C4 is narrower.** The Cases table lists "no process table" under C4.
+  A run with a recorded token and no readable table is now refused with exit 1 and nothing signalled, because a token proves this host has a table, so a retry works, and closing the entry would lose the only handle on the tree.
+  It also keeps I5 true for such a run, which no table cannot otherwise prove above the caller's parent.
+  A run with no token keeps the single SIGTERM, so a host with no table at all can still cancel, and I5 stays best effort there: with no table and no token, cancel from inside a run can still reach an ancestor above the caller's parent, as `main` does (R8).
+- **Step 7 of the kill sequence is one scan after the kill.**
+  It closes any active entry naming a process that was signalled, and any entry this cancel closed that was rewritten to `running` with no pid and an unchanged `started_at`.
+  The plan's "unchanged `started_at`" missed a runner's first `register()`, which replaces it, and a sub-run registered after step 1's list was never closed.
+  That scan replaces the rescan the build added for later batches.
+- **`close_dead_run` reads the entry again**, as `_reap_if_dead` does, for launch admission and the sweep's small window.
+  The sweep's own re-read stays too, because it decides on what the entry says now: a stale read would stop a relaunch, or lose a crash a list read had reaped.
+- **The deadline branch checks `started_at` after the wait.** `failed` lets a relaunch take the name, and the branch would otherwise write `failed, pid=0` over the new run.
+  It leaves the new entry alone and announces the old run from what it read, as launch admission does for a dead run. The event carries the run key the new run also holds.
+  A run that finished by itself during the wait is left for the next sweep to re-emit, not announced as timed out.
+- **`_default_cancel`'s catch-all reports what the entry says.** A cancel that raises after closing the run is still announced in that sweep.
+
+The mutant table's rows follow: "Second write" is now a mutant of that scan, "Sweep re-read" is now caught by a relaunch test in `tests/test_reconcile.py` and no longer by V17, and the rest of the mutant set is on the PR.
+
+Considered and left as they are, each narrow, with its reason on the PR.
+Most are races at a run's first moments, recoverable with a second cancel, or a stale pid file inside the 1h margin I3 chose.
 
 ## Notes
 
