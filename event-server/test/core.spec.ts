@@ -3264,13 +3264,14 @@ describe("handleChannelsHistory", () => {
 	// #1140: Slack refuses with HTTP 200 and {ok:false}, so "no access" must not
 	// read as "no messages" on either ref shape, nor as a short read on a later page.
 	it.each([
-		["a bare ref", "slack:T1:channel:C9", [refusal]],
-		["a thread ref", "slack:T1:channel:C9:thread:12.34", [refusal]],
+		["a bare ref", "slack:T1:channel:C9", [refusal], "not_in_channel"],
+		["a thread ref", "slack:T1:channel:C9:thread:12.34", [refusal], "not_in_channel"],
 		["a bare ref's later page", "slack:T1:channel:C9", [
 			{ ok: true, messages: [{ user: "U1", text: "m", ts: "1.0" }], response_metadata: { next_cursor: "c2" } },
 			refusal,
-		]],
-	])("a read Slack refuses is an error: %s", async (_label, ref, pages) => {
+		], "not_in_channel"],
+		["a reply with no message list", "slack:T1:channel:C9", [{ ok: true }], "no message list"],
+	])("a read Slack refuses is an error: %s", async (_label, ref, pages, error) => {
 		const store = createMockStorage();
 		stubReplies("T1", pages);
 		await seedWorkspace(store, "bubA");
@@ -3278,7 +3279,7 @@ describe("handleChannelsHistory", () => {
 		expect(result.status).toBe(502);
 		const body = result.body as Record<string, unknown>;
 		expect(body.ok).toBe(false);
-		expect(body.error).toContain("not_in_channel");
+		expect(body.error).toContain(error);
 		expect(body).not.toHaveProperty("messages");
 	});
 

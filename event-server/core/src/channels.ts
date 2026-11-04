@@ -309,10 +309,9 @@ function slackError(err: unknown): string {
 }
 
 // Reads a Slack conversation method through its cursor until `limit` rows are in
-// or Slack has no more, at most 200 per request. Slack can return more than it was
-// asked for, so each caller cuts to `limit` from the end it keeps. A page that
-// fails throws, dropping the rows so far: a short list would read as the whole
-// conversation.
+// or Slack has no more, at most 200 per request, and returns the first `limit` in
+// Slack's order. A page that fails throws, dropping the rows so far: a short list
+// would read as the whole conversation.
 async function fetchSlackRows(
 	token: string,
 	method: string,
@@ -331,11 +330,14 @@ async function fetchSlackRows(
 		// (not_in_channel, channel_not_found) as HTTP 200 with {ok: false, error}.
 		// Unchecked, a refusal reads as an empty conversation.
 		assertSlackOk(method, raw);
-		rows.push(...((raw.messages as Array<Record<string, unknown>> | undefined) ?? []));
+		if (!Array.isArray(raw.messages)) {
+			throw new Error(`Slack ${method} returned no message list`);
+		}
+		rows.push(...raw.messages);
 		cursor = raw.response_metadata?.next_cursor;
 		if (!cursor) break;
 	}
-	return rows;
+	return rows.slice(0, limit);
 }
 
 function toConversationMessage(raw: Record<string, unknown>): ConversationMessage {
@@ -471,14 +473,13 @@ const slackAdapter: ChannelAdapter = {
 		// of thread replies (e.g. a proactive conversation with no thread).
 		if (!conv.threadId) {
 			const rows = await fetchSlackRows(token, "conversations.history", { channel: conv.chatId }, limit);
-			// conversations.history returns newest-first, so the first `limit` rows
-			// are the newest; deliver them oldest-first to match the thread-replies
-			// ordering.
-			return rows.slice(0, limit).map(toConversationMessage).reverse();
+			// conversations.history returns newest-first, so these are the newest
+			// rows; deliver them oldest-first to match the thread-replies ordering.
+			return rows.map(toConversationMessage).reverse();
 		}
 		const rows = await fetchSlackRows(
 			token, "conversations.replies", { channel: conv.chatId, ts: conv.threadId }, limit);
-		return rows.slice(0, limit).map(toConversationMessage);
+		return rows.map(toConversationMessage);
 	},
 
 	async uploadFiles(token, conv, files, comment) {
