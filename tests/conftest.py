@@ -44,7 +44,17 @@ import threading
 
 import pytest
 
-_E2E_TESTS = Path(__file__).resolve().parent / "e2e"
+_TESTS_ROOT = Path(__file__).resolve().parent
+
+
+def _in_tier(request, *tiers):
+    """Whether this test lives under ``tests/<tier>``.
+
+    Judged from this directory, not the absolute path: a checkout under a
+    directory named for a tier would otherwise switch these guards off for
+    every test in it.
+    """
+    return request.path.resolve().relative_to(_TESTS_ROOT).parts[0] in tiers
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +103,7 @@ def _isolate_user_home(request, monkeypatch, tmp_path_factory):
     ``docker`` may need the developer's credentials, and e2e tests need the
     browsers Playwright installs there.
     """
-    if request.path.resolve().is_relative_to(_E2E_TESTS) or any(
+    if _in_tier(request, "e2e") or any(
         request.node.get_closest_marker(m) for m in ("claude", "live", "docker")
     ):
         return
@@ -163,7 +173,7 @@ def _clear_leaked_event_loop(request):
 
     Skipped for e2e tests — Playwright needs its own loop for teardown.
     """
-    if "/e2e/" in str(request.fspath):
+    if _in_tier(request, "e2e"):
         yield
         return
     leaked = asyncio.events._get_running_loop()
@@ -254,8 +264,7 @@ def _no_event_server_io(request, monkeypatch):
     imports it eagerly and tests it directly, so it is unaffected. Integration
     and e2e tests drive the real transport and opt out.
     """
-    p = str(request.fspath)
-    if "/integration/" in p or "/e2e/" in p:
+    if _in_tier(request, "integration", "e2e"):
         yield
         return
     monkeypatch.setattr(
@@ -276,8 +285,7 @@ def _no_real_service_manager(request, monkeypatch, tmp_path):
     ``launchctl kickstart`` calls. A leaked LaunchAgent from this suite once
     crash-looped against the developer's ~/.bobi.
     """
-    p = str(request.fspath)
-    if "/integration/" in p or "/e2e/" in p:
+    if _in_tier(request, "integration", "e2e"):
         yield
         return
     from bobi import service_manager
@@ -288,7 +296,7 @@ def _no_real_service_manager(request, monkeypatch, tmp_path):
     monkeypatch.setattr(service_manager, "_run", _no_service_manager)
     gui_probe = service_manager._gui_available
     gui_probe.cache_clear()
-    if not p.endswith("test_service_manager.py"):
+    if request.path.name != "test_service_manager.py":
         units = tmp_path / "_no_service_units"
         monkeypatch.setattr(service_manager, "systemd_path",
                             lambda: units / service_manager.SYSTEMD_UNIT)
