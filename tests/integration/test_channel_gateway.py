@@ -43,9 +43,29 @@ class _SlackStub:
                     "url_private": "https://x"}]},
     ]
 
+    #: Default `conversations.history` bodies, keyed by the request's cursor
+    #: ("" for the first page), newest-first as Slack sends them. Unlike
+    #: `replies` each is the whole response, so a test may replace one with a
+    #: refusal (#1140).
+    DEFAULT_HISTORY = {
+        "": {
+            "ok": True,
+            "messages": [
+                {"user": "U_H", "text": "newest", "ts": "90.003"},
+                {"user": "U_H", "text": "middle", "ts": "90.002"},
+            ],
+            "response_metadata": {"next_cursor": "page2"},
+        },
+        "page2": {
+            "ok": True,
+            "messages": [{"user": "U_BOTGW", "text": "oldest", "ts": "90.001"}],
+        },
+    }
+
     def __init__(self):
         self.calls: list[dict] = []
         self.replies = list(self.DEFAULT_REPLIES)
+        self.history = dict(self.DEFAULT_HISTORY)
         self.port = _free_port()
         stub = self
 
@@ -96,6 +116,8 @@ class _SlackStub:
                 if method == "conversations.replies":
                     return self._respond({"ok": True,
                                           "messages": stub.replies})
+                if method == "conversations.history":
+                    return self._respond(stub.history[body.get("cursor", "")])
                 if method == "files.getUploadURLExternal":
                     return self._respond({
                         "ok": True, "file_id": "F_GW1",
@@ -178,6 +200,7 @@ def gateway(gateway_env, monkeypatch):
     monkeypatch.setenv("BOBI_ROOT", str(project))
     stub.calls.clear()
     stub.replies = list(_SlackStub.DEFAULT_REPLIES)
+    stub.history = dict(_SlackStub.DEFAULT_HISTORY)
     return project, stub, es_url, bubble
 
 
@@ -332,6 +355,37 @@ class TestReplyEndToEnd:
         assert len(replies) == 1
         assert replies[0]["body"]["channel"] == "C_GW"
         assert replies[0]["body"]["ts"] == "100.000"
+
+    def test_read_conversation_bare_ref_reads_channel_history(self, gateway):
+        """#1140: a ref with no thread anchor reads the channel's history across
+        Slack's pages, oldest-first, and never asks for thread replies."""
+        _project, stub, _es_url, _bubble = gateway
+        from bobi.cli import main
+
+        result = CliRunner().invoke(main, [
+            "read-conversation", "slack:T_GW:channel:C_GW", "--json-output",
+        ])
+        assert result.exit_code == 0, result.output
+        assert [m["text"] for m in json.loads(result.stdout)] == [
+            "oldest", "middle", "newest"]
+        history = stub.named("conversations.history")
+        assert [call["body"].get("cursor") for call in history] == [None, "page2"]
+        assert history[0]["body"]["channel"] == "C_GW"
+        assert stub.named("conversations.replies") == []
+
+    def test_read_conversation_refused_bare_read_fails_with_empty_stdout(self, gateway):
+        """#1140: Slack refuses with HTTP 200 and ok:false. That must fail the
+        command, so a caller can never parse a `[]` as "no messages"."""
+        _project, stub, _es_url, _bubble = gateway
+        from bobi.cli import main
+
+        stub.history = {"": {"ok": False, "error": "not_in_channel"}}
+        result = CliRunner().invoke(main, [
+            "read-conversation", "slack:T_GW:channel:C_GW", "--json-output",
+        ])
+        assert result.exit_code == 1, result.output
+        assert "not_in_channel" in result.stderr
+        assert result.stdout == ""
 
     def test_reply_command_posts_via_gateway(self, gateway):
         _project, stub, _es_url, _bubble = gateway
@@ -629,3 +683,31 @@ class TestLoginBootstrapCatchUpRead:
         # blocks on the former and posts a fresh ask on the latter.
         assert ab._recover_ask_id(project, Config(), channel, "codex") is None
         assert stub.named("conversations.replies") == []
+
+    def test_recover_ask_id_answers_stay_distinct_through_the_real_adapter(
+        self, gateway,
+    ):
+        """#1140: "" means "I looked and there is no ask", and it authorizes a
+        fresh post. A read Slack refused looked at nothing, so it must raise."""
+        from bobi import auth_bootstrap as ab
+        from bobi.config import Config
+        from bobi.events.gateway import GatewayError
+
+        project, stub, _es_url, _bubble = gateway
+        channel = ab.LoginChannel(
+            destination="slack:T_GW:channel:C_GW", source="slack",
+            topic="slack:T_GW:app:A_GW",
+        )
+        chatter = {"user": "U_H", "text": "unrelated", "ts": "500.001"}
+        ask = {"user": "U_BOTGW", "ts": "500.000",
+               "text": "`codex` login: reply and then I will begin the login flow."}
+
+        stub.history = {"": {"ok": True, "messages": [chatter, ask]}}
+        assert ab._recover_ask_id(project, Config(), channel, "codex") == "500.000"
+
+        stub.history = {"": {"ok": True, "messages": [chatter]}}
+        assert ab._recover_ask_id(project, Config(), channel, "codex") == ""
+
+        stub.history = {"": {"ok": False, "error": "not_in_channel"}}
+        with pytest.raises(GatewayError, match="not_in_channel"):
+            ab._recover_ask_id(project, Config(), channel, "codex")

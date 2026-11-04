@@ -2416,8 +2416,10 @@ export async function handleChannelsTyping(
 }
 
 // GET /channels/history (#629): ?conversation=...&limit=... — read the
-// messages of a conversation (Slack: the thread the ref anchors). Returns
-// { ok, messages: [{user, text, ts, files?}] } oldest-first.
+// messages of a conversation (Slack: the thread the ref anchors, or the
+// channel's history when it anchors none). Returns
+// { ok, messages: [{user, text, ts, files?}] } oldest-first, or a 502 with the
+// platform's error when the read fails, never an empty list.
 export async function handleChannelsHistory(
 	storage: StorageAdapter,
 	conversationRef: string,

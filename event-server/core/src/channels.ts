@@ -20,8 +20,8 @@ import {
 	postSlackMessage,
 	updateSlackMessage,
 	uploadSlackFiles,
-	fetchSlackThreadReplies,
 	callSlackApi,
+	assertSlackOk,
 	SlackApiError,
 	type SlackMessageOptions,
 } from "@chat-adapter/slack/api";
@@ -137,6 +137,10 @@ export interface ChannelAdapter {
 	update?(token: string, conv: Conversation, messageId: string, text: string): Promise<SendResult>;
 	/** Set (on) or clear (off) the channel's thinking/typing indicator. Best-effort. */
 	typing?(token: string, conv: Conversation, on: boolean): Promise<void>;
+	/**
+	 * A conversation's messages, oldest-first. Must throw when the platform
+	 * refuses the read: an empty list tells the caller there are no messages.
+	 */
 	fetchConversation?(token: string, conv: Conversation, limit?: number): Promise<ConversationMessage[]>;
 	uploadFiles?(token: string, conv: Conversation, files: OutboundFile[], comment?: string): Promise<SendResult>;
 }
@@ -304,6 +308,38 @@ function slackError(err: unknown): string {
 	return String(err);
 }
 
+// Reads a Slack conversation method through its cursor until `limit` rows are in
+// or Slack has no more, at most 200 per request, and returns the first `limit` in
+// Slack's order. A page that fails throws, dropping the rows so far: a short list
+// would read as the whole conversation.
+async function fetchSlackRows(
+	token: string,
+	method: string,
+	args: Record<string, unknown>,
+	limit: number,
+): Promise<Array<Record<string, unknown>>> {
+	const rows: Array<Record<string, unknown>> = [];
+	let cursor: string | undefined;
+	while (rows.length < limit) {
+		const raw = await callSlackApi(method, {
+			...args,
+			limit: Math.min(limit - rows.length, 200),
+			cursor,
+		}, { apiUrl: slackApiUrl(), token });
+		// callSlackApi throws only on a non-2xx status, and Slack refuses a read
+		// (not_in_channel, channel_not_found) as HTTP 200 with {ok: false, error}.
+		// Unchecked, a refusal reads as an empty conversation.
+		assertSlackOk(method, raw);
+		if (!Array.isArray(raw.messages)) {
+			throw new Error(`Slack ${method} returned no message list`);
+		}
+		rows.push(...raw.messages);
+		cursor = raw.response_metadata?.next_cursor;
+		if (!cursor) break;
+	}
+	return rows.slice(0, limit);
+}
+
 function toConversationMessage(raw: Record<string, unknown>): ConversationMessage {
 	const entry: ConversationMessage = {
 		user: (raw.user as string) || "",
@@ -436,33 +472,14 @@ const slackAdapter: ChannelAdapter = {
 		// A ref without a thread anchor reads the channel/DM history instead
 		// of thread replies (e.g. a proactive conversation with no thread).
 		if (!conv.threadId) {
-			const raw = await callSlackApi("conversations.history", {
-				channel: conv.chatId,
-				limit: Math.min(limit, 200),
-			}, { apiUrl: slackApiUrl(), token });
-			const rows = (raw.messages as Array<Record<string, unknown>> | undefined) ?? [];
-			// conversations.history returns newest-first; deliver oldest-first
-			// to match the thread-replies ordering.
-			return rows.map(toConversationMessage).reverse().slice(0, limit);
+			const rows = await fetchSlackRows(token, "conversations.history", { channel: conv.chatId }, limit);
+			// conversations.history returns newest-first, so these are the newest
+			// rows; deliver them oldest-first to match the thread-replies ordering.
+			return rows.map(toConversationMessage).reverse();
 		}
-		const messages: ConversationMessage[] = [];
-		let cursor: string | undefined;
-		while (messages.length < limit) {
-			const page = await fetchSlackThreadReplies({
-				apiUrl: slackApiUrl(),
-				token,
-				channel: conv.chatId,
-				ts: conv.threadId,
-				limit: Math.min(limit - messages.length, 200),
-				...(cursor ? { cursor } : {}),
-			});
-			for (const raw of page.messages as Array<Record<string, unknown>>) {
-				messages.push(toConversationMessage(raw));
-			}
-			cursor = page.nextCursor;
-			if (!cursor) break;
-		}
-		return messages.slice(0, limit);
+		const rows = await fetchSlackRows(
+			token, "conversations.replies", { channel: conv.chatId, ts: conv.threadId }, limit);
+		return rows.map(toConversationMessage);
 	},
 
 	async uploadFiles(token, conv, files, comment) {

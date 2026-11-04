@@ -21,9 +21,8 @@ HOUSE_RULES = "# House rules\n\nAlways write tests first.\n"
 def instructions_bobi_env(tmp_path_factory):
     """A stub-brain env whose installed package ships AGENTS.md.
 
-    Its own scaffold (not the shared ``stub_bobi_env``): every manager boot in
-    the shared env would otherwise render instructions into whatever HOME the
-    surrounding test left in place.
+    Its own scaffold (not the shared ``stub_bobi_env``), because only this
+    package ships ``AGENTS.md``.
     """
     old_home = os.environ.get("BOBI_HOME")
     old_root = os.environ.get("BOBI_ROOT")

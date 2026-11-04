@@ -98,8 +98,11 @@ def channels_history(project_path: Path | None, conversation: str,
     """GET /channels/history - the conversation's messages, oldest-first."""
     query = urlencode({"conversation": conversation, "limit": limit})
     data = _request(project_path, "GET", f"/channels/history?{query}")
-    messages = data.get("messages", [])
-    return messages if isinstance(messages, list) else []
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        # An empty list means there are no messages, so this must not read as one.
+        raise GatewayError("Gateway GET /channels/history returned no message list")
+    return messages
 
 
 def file_payload(path: Path, *, title: str = "", filename: str = "") -> dict:
