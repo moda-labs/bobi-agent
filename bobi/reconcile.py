@@ -48,8 +48,8 @@ from bobi.sdk import (
 
 log = logging.getLogger(__name__)
 
-# Grace period past a run's declared timeout before the dead-man closes it —
-# absorbs clock skew and a slow-but-still-alive final turn so we don't kill an
+# Grace period past a run's deadline before the dead-man closes it - absorbs
+# clock skew and a slow-but-still-alive final turn so we don't kill an
 # agent whose completion is merely a few seconds late.
 RECONCILE_GRACE = 300  # seconds
 
