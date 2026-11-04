@@ -35,7 +35,7 @@ import pytest
 from click.testing import CliRunner
 
 from bobi.events.state import save_bubble_state
-from bobi.events.gateway import channels_history, channels_send
+from bobi.events.gateway import GatewayError, channels_history, channels_send
 from bobi.events.server import _post_register, ensure_running
 from bobi.events.signing import signed_request
 
@@ -365,3 +365,10 @@ class TestLiveSlackGateway:
             tables = _tables(m)
             assert len(tables) == 1
             assert all(c == {"is_wrapped": True} for c in tables[0]["column_settings"])
+
+    def test_refused_bare_read_raises_instead_of_reading_as_empty(self, live):
+        """#1140: real Slack refuses with HTTP 200 and ok:false and no
+        `messages` key, and a bare read must surface that as an error."""
+        with pytest.raises(GatewayError, match="channel_not_found"):
+            channels_history(
+                live.project, f"slack:{live.team_id}:channel:CNOSUCHCHANNEL")

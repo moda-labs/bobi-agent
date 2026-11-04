@@ -318,6 +318,22 @@ class TestReadConversationCommand:
         # a parseable stdout, not a stream with no logging on it (#851).
         assert json.loads(result.stdout) == messages
 
+    def test_a_reply_with_no_message_list_is_an_error(self, tmp_path, monkeypatch):
+        """#1140: an empty list means there are no messages, so a reply that
+        carries no list must not read as one."""
+        _setup_project(tmp_path, monkeypatch)
+
+        def handler(request):
+            return httpx.Response(200, json={"ok": True})
+
+        with patch.object(pooled, '_client', _mock_client(handler)):
+            result = CliRunner().invoke(main, [
+                "read-conversation", "slack:T1:channel:C1", "--json-output",
+            ])
+        assert result.exit_code == 1
+        assert "no message list" in result.stderr
+        assert result.stdout == ""
+
 
 class TestRemovedSlackShims:
     """The deprecated slack-* CLI shims were removed after the gateway migration."""

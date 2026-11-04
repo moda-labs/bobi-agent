@@ -2358,6 +2358,35 @@ def test_a_failed_post_leaves_the_ask_state_byte_identical(
     assert state.read_bytes() == before
 
 
+def test_a_refused_history_read_fails_the_run_and_leaves_the_ask_state_byte_identical(
+    slack_config, ask_state_home, slack_bot_identity, monkeypatch,
+):
+    """#1140: a refused read is not "I looked and there is no ask". Taking it
+    for one would post a second ask, so the run fails and the marker survives."""
+    import bobi.events.gateway as gateway_mod
+
+    state = ask_state_home / ".login-ask-codex"
+    _ask_state(ask_state_home, "codex", "C0LOGIN42", "")
+    before = state.read_bytes()
+
+    def refused_history(project, conv, limit=100):
+        raise gateway_mod.GatewayError(
+            "Gateway GET /channels/history failed: not_in_channel")
+
+    monkeypatch.setattr(gateway_mod, "channels_history", refused_history)
+    posts = []
+    with pytest.raises(gateway_mod.GatewayError, match="not_in_channel"):
+        ab.run_bootstrap(
+            slack_config, target="codex", ask_timeout=0.1,
+            spawn_login=lambda h: (_ for _ in ()).throw(
+                AssertionError("must not spawn")),
+            post_message=lambda t, c, x, thread_ts="": posts.append(x),
+            connect_listener=lambda p, c, t: _FakeListener([], channel=c),
+        )
+    assert posts == []
+    assert state.read_bytes() == before
+
+
 def test_ask_state_is_cleared_on_success_and_only_on_success(
     slack_config, ask_state_home, slack_bot_identity, empty_thread_history,
     monkeypatch,

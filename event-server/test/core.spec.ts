@@ -3210,22 +3210,32 @@ describe("handleChannelsHistory", () => {
 		);
 	}
 
-	it("returns the thread messages with file metadata", async () => {
+	function slackRequests(method: string) {
+		return vi.mocked(fetch).mock.calls
+			.filter(([url]) => String(url).includes(`/${method}`))
+			.map(([, init]) => decodeSlackBody(init));
+	}
+
+	const refusal = { ok: false, error: "not_in_channel" };
+
+	it("returns the thread messages across pages, with file metadata", async () => {
 		const store = createMockStorage();
 		stubReplies("T1", [{
 			ok: true,
-			messages: [
-				{ user: "U1", text: "question", ts: "12.34" },
-				{
-					user: "U2", text: "answer", ts: "12.35",
-					files: [{ id: "F1", name: "a.png", mimetype: "image/png", url_private: "https://x" }],
-				},
-			],
+			messages: [{ user: "U1", text: "question", ts: "12.34" }],
+			response_metadata: { next_cursor: "c2" },
+		}, {
+			ok: true,
+			messages: [{
+				user: "U2", text: "answer", ts: "12.35",
+				files: [{ id: "F1", name: "a.png", mimetype: "image/png", url_private: "https://x" }],
+			}],
 		}]);
 		await seedWorkspace(store, "bubA");
 		const result = await handleChannelsHistory(
 			store, "slack:T1:channel:C9:thread:12.34", 100, "bubA");
 		expect(result.status).toBe(200);
+		expect(slackRequests("conversations.replies").map((r) => r.cursor)).toEqual([undefined, "c2"]);
 		const body = result.body as { messages: Array<Record<string, unknown>> };
 		expect(body.messages).toHaveLength(2);
 		expect(body.messages[0]).toMatchObject({ user: "U1", text: "question", ts: "12.34" });
@@ -3249,6 +3259,50 @@ describe("handleChannelsHistory", () => {
 		expect(result.status).toBe(200);
 		const body = result.body as { messages: Array<Record<string, unknown>> };
 		expect(body.messages.map((m) => m.ts)).toEqual(["1.0", "2.0"]);
+	});
+
+	// #1140: Slack refuses with HTTP 200 and {ok:false}, so "no access" must not
+	// read as "no messages" on either ref shape, nor as a short read on a later page.
+	it.each([
+		["a bare ref", "slack:T1:channel:C9", [refusal], "not_in_channel"],
+		["a thread ref", "slack:T1:channel:C9:thread:12.34", [refusal], "not_in_channel"],
+		["a bare ref's later page", "slack:T1:channel:C9", [
+			{ ok: true, messages: [{ user: "U1", text: "m", ts: "1.0" }], response_metadata: { next_cursor: "c2" } },
+			refusal,
+		], "not_in_channel"],
+		["a reply with no message list", "slack:T1:channel:C9", [{ ok: true }], "no message list"],
+	])("a read Slack refuses is an error: %s", async (_label, ref, pages, error) => {
+		const store = createMockStorage();
+		stubReplies("T1", pages);
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsHistory(store, ref, 100, "bubA");
+		expect(result.status).toBe(502);
+		const body = result.body as Record<string, unknown>;
+		expect(body.ok).toBe(false);
+		expect(body.error).toContain(error);
+		expect(body).not.toHaveProperty("messages");
+	});
+
+	it("follows the cursor past Slack's per-request ceiling, keeping the newest messages", async () => {
+		const store = createMockStorage();
+		// Newest-first as Slack sends them: ts 260.0 down to 1.0. Page 2 answers a
+		// request for 50 with 60 rows and a further cursor, so the cap has to hold.
+		const rows = Array.from({ length: 260 }, (_, i) => ({ user: "U1", text: "m", ts: `${260 - i}.0` }));
+		stubReplies("T1", [
+			{ ok: true, messages: rows.slice(0, 200), response_metadata: { next_cursor: "c2" } },
+			{ ok: true, messages: rows.slice(200), response_metadata: { next_cursor: "c3" } },
+			// Never requested. stubReplies repeats its last page, so this stops a loop
+			// that ignores the cap: it fails on the request list instead of hanging.
+			{ ok: true, messages: [] },
+		]);
+		await seedWorkspace(store, "bubA");
+		const result = await handleChannelsHistory(store, "slack:T1:channel:C9", 250, "bubA");
+		expect(result.status).toBe(200);
+		expect(slackRequests("conversations.history").map((r) => [r.limit, r.cursor]))
+			.toEqual([["200", undefined], ["50", "c2"]]);
+		const body = result.body as { messages: Array<Record<string, unknown>> };
+		// The newest 250 of the 260, oldest-first: page 2's 10 oldest rows are dropped.
+		expect(body.messages.map((m) => m.ts)).toEqual(rows.slice(0, 250).reverse().map((r) => r.ts));
 	});
 
 	it("rejects missing/invalid conversation", async () => {
@@ -4124,6 +4178,17 @@ describe("discord app registration and outbound send", () => {
 		expect(res.status).toBe(200);
 		const messages = (res.body as Record<string, unknown>).messages as Array<Record<string, string>>;
 		expect(messages.map((m) => m.ts)).toEqual(["m1", "m2"]);
+	});
+
+	it("a history read Discord refuses is an error", async () => {
+		const store = createMockStorage();
+		stubDiscordApi();
+		await register(store);
+		vi.stubGlobal("fetch", vi.fn(async () => fetchOk(403, { message: "Missing Access" })));
+
+		const res = await handleChannelsHistory(store, DC_CONV, 10, "bubA");
+		expect(res.status).toBe(502);
+		expect((res.body as Record<string, unknown>).error).toContain("Missing Access");
 	});
 
 	// Multipart upload stub: verifies the token like stubDiscordApi, records

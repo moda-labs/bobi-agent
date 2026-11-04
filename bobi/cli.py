@@ -1527,8 +1527,9 @@ def _gateway_call(fn, *args, **kwargs):
     except GatewayError as e:
         click.echo(str(e), err=True)
         click.echo(
-            "(replies go through the event server's channel gateway; make "
-            "sure the agent is started so the server is running and its "
+            "(replies and reads go through the event server's channel gateway. "
+            "Unless the error above names the cause, such as not_in_channel, "
+            "make sure the agent is started so the server is running and its "
             "chat workspace is registered)",
             err=True,
         )
@@ -1651,14 +1652,21 @@ def reply(conversation, text, edit_ref, file_path, title):
 
 @main.command("read-conversation")
 @click.argument("conversation")
-@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
+@click.option("--limit", "-n", default=100,
+              help="Max messages to fetch (default: 100). The event server "
+                   "caps large reads.")
 @click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
 def read_conversation(conversation, limit, as_json):
     """Read the messages of a conversation (e.g. the Slack thread it anchors).
 
+    A ref with no thread reads the channel's history. Exits 1 if the platform
+    refuses the read, e.g. the bot is not in the channel, so an empty result
+    means there are no messages.
+
     Usage:
         bobi read-conversation slack:T0952RZRZ0X:channel:C123:thread:171.42
         bobi read-conversation slack:T0952RZRZ0X:dm:D456:thread:171.42 --json-output
+        bobi read-conversation slack:T0952RZRZ0X:channel:C123
     """
     _parse_conversation_or_exit(conversation)
     _read_conversation(conversation, limit, as_json)
