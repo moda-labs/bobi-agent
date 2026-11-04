@@ -109,6 +109,7 @@ def validate_config(project_path: Path) -> ValidationResult:
     checks.extend(_check_roles(cfg, project_path))
     checks.extend(_check_effort(cfg))
     checks.extend(_check_workflow_effort(cfg, project_path))
+    checks.extend(_check_workflow_timeout(project_path))
     checks.extend(_check_monitor_relevance(project_path))
     checks.extend(_check_service_credentials(cfg))
     checks.extend(_check_venn_services(cfg))
@@ -404,13 +405,11 @@ def _check_effort(cfg) -> list[CheckResult]:
     return checks
 
 
-def _check_workflow_effort(cfg, project_path: Path) -> list[CheckResult]:
-    """Warn on unrecognized step-level `effort:` in workflow YAMLs (#778).
+def _workflow_steps(project_path: Path):
+    """Every (workflow file, raw step mapping) in the installed pack.
 
-    The step field rides the same pass-through contract as the config-level
-    values `_check_effort` covers, and fails the same silent way at runtime,
-    so it gets the same typo warning. Malformed workflow files are skipped -
-    they surface through the workflow loader's own paths.
+    Malformed workflow files are skipped - they surface through the workflow
+    loader's own paths.
     """
     import yaml as _yaml
 
@@ -418,30 +417,63 @@ def _check_workflow_effort(cfg, project_path: Path) -> list[CheckResult]:
 
     wf_dir = paths.workflows_dir(project_path)
     if not wf_dir.is_dir():
-        return []
-
-    accepted = _accepted_efforts(cfg)
-    brain_label = cfg.brain_kind or "claude"
-    checks = []
+        return
     for wf_path in sorted(wf_dir.glob("*.yaml")):
         try:
             raw = _yaml.safe_load(wf_path.read_text()) or {}
         except Exception:
             continue
         for step in raw.get("steps", []) if isinstance(raw, dict) else []:
-            if not isinstance(step, dict):
-                continue
-            value = step.get("effort")
-            if value is None or value == "":
-                continue
-            if not isinstance(value, str) or value not in accepted:
-                label = f"{wf_path.name}:{step.get('name', '?')}.effort"
-                checks.append(CheckResult(
-                    label, ok=False, required=False,
-                    detail=f"effort {value!r} is not accepted by the "
-                           f"{brain_label} brain",
-                    hint=f"accepted values: {', '.join(sorted(accepted))}",
-                ))
+            if isinstance(step, dict):
+                yield wf_path, step
+
+
+def _check_workflow_effort(cfg, project_path: Path) -> list[CheckResult]:
+    """Warn on unrecognized step-level `effort:` in workflow YAMLs (#778).
+
+    The step field rides the same pass-through contract as the config-level
+    values `_check_effort` covers, and fails the same silent way at runtime,
+    so it gets the same typo warning.
+    """
+    accepted = _accepted_efforts(cfg)
+    brain_label = cfg.brain_kind or "claude"
+    checks = []
+    for wf_path, step in _workflow_steps(project_path):
+        value = step.get("effort")
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str) or value not in accepted:
+            label = f"{wf_path.name}:{step.get('name', '?')}.effort"
+            checks.append(CheckResult(
+                label, ok=False, required=False,
+                detail=f"effort {value!r} is not accepted by the "
+                       f"{brain_label} brain",
+                hint=f"accepted values: {', '.join(sorted(accepted))}",
+            ))
+    return checks
+
+
+def _check_workflow_timeout(project_path: Path) -> list[CheckResult]:
+    """Warn on a step `timeout:` that is not a positive integer (#1124).
+
+    The loader reads it as undeclared, so the step silently gets the default
+    budget, and a manager restart can close it far sooner than its YAML appears
+    to allow.
+    """
+    from bobi.config import positive_int
+
+    checks = []
+    for wf_path, step in _workflow_steps(project_path):
+        value = step.get("timeout")
+        if value is None or positive_int(value):
+            continue
+        checks.append(CheckResult(
+            f"{wf_path.name}:{step.get('name', '?')}.timeout",
+            ok=False, required=False,
+            detail=f"timeout {value!r} is not a positive integer, so the step "
+                   "gets the default budget",
+            hint="declare whole seconds, for example timeout: 7200",
+        ))
     return checks
 
 

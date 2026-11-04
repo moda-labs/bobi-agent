@@ -249,6 +249,34 @@ class TestCheckWorkflowEffort:
         assert self._check(Config(), tmp_path) == []
 
 
+class TestCheckWorkflowTimeout:
+    """A step `timeout:` the loader cannot use silently becomes the default
+    budget, so a manager restart can close the step sooner than it reads (#1124)."""
+
+    @pytest.mark.parametrize("declared, warns", [
+        ("7200", False),
+        ("", False),
+        ('"7200"', False),
+        ("7200.0", True),
+        ("2h", True),
+        ("0", True),
+        ("-1", True),
+    ])
+    def test_only_an_unusable_timeout_warns(self, tmp_path, declared, warns):
+        from bobi.validate import _check_workflow_timeout
+
+        wf_dir = tmp_path / "package" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "build.yaml").write_text(
+            "name: build\nsteps:\n  - name: compile\n"
+            f"    prompt: p\n    timeout: {declared}\n"
+        )
+        results = _check_workflow_timeout(tmp_path)
+        assert [r.name for r in results] == (
+            ["build.yaml:compile.timeout"] if warns else [])
+        assert all(not r.ok and not r.required for r in results)
+
+
 class TestCheckBrain:
     """A gateway team without a resolvable base_url fails every session at its
     first turn, so validate must block it (#655, #789)."""

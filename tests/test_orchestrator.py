@@ -113,6 +113,8 @@ class TestSchemaLoad:
         ("30m", DEFAULT_STEP_TIMEOUT),
         ("", DEFAULT_STEP_TIMEOUT),
         ("true", DEFAULT_STEP_TIMEOUT),
+        ("0", DEFAULT_STEP_TIMEOUT),
+        ("-5", DEFAULT_STEP_TIMEOUT),
     ])
     def test_unusable_step_timeout_reads_as_undeclared(
             self, tmp_path, declared, expected):

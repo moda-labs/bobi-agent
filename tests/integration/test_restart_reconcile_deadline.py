@@ -128,15 +128,17 @@ def _age_run(name, seconds):
                  8915, ADHOC_STEP_TIMEOUT + RECONCILE_GRACE + 60, id="adhoc"),
 ])
 def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
-        env, stub_cli_run, stub_clean_session,
-        workflow, task, step, healthy_age, overdue_age):
+        env, stub_cli_run, workflow, task, step, healthy_age, overdue_age):
     cli_run = stub_cli_run
     run_key = f"1124-e2e-{step}"
     runner_pid = 0
+    # The install outlives one test, so its log already holds earlier boots. A
+    # boot line landing late would satisfy the restart's own wait below.
+    earlier_boots = _manager_boots(env)
     try:
         start = cli_run("start", timeout=45)
         assert start.returncode == 0, start.stderr
-        _wait(lambda: _manager_boots(env), "manager to boot", env)
+        _wait(lambda: _manager_boots(env) > earlier_boots, "manager to boot", env)
 
         launch = cli_run(
             "subagents", "launch", "-w", workflow, "--role", "engineer",
@@ -172,6 +174,8 @@ def test_restart_keeps_a_healthy_long_run_and_still_closes_an_overdue_one(
         assert f"in phase {step}" in closed.error
         _wait(lambda: not pid_alive(runner_pid), "the runner to exit", env)
     finally:
-        cli_run("stop", timeout=30)
-        if runner_pid and pid_alive(runner_pid):
-            os.kill(runner_pid, signal.SIGKILL)
+        try:
+            cli_run("stop", timeout=30)
+        finally:
+            if runner_pid and pid_alive(runner_pid):
+                os.kill(runner_pid, signal.SIGKILL)

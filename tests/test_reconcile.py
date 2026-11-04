@@ -78,7 +78,7 @@ class TestCrashReconcile:
 class TestTimeoutReconcile:
     def test_past_deadline_alive_pid_is_cancelled_and_failed(self):
         # alive pid (our own) started long ago with a tiny timeout
-        name = _seed("wf-t-1", status="running", pid=__import__("os").getpid(),
+        name = _seed("wf-t-1", status="running", pid=os.getpid(),
                      project="r", timeout=10,
                      started_at=time.time() - (10 + RECONCILE_GRACE + 60))
         cancelled = []
@@ -91,7 +91,7 @@ class TestTimeoutReconcile:
         assert "agent/session.failed" in emit.types()
 
     def test_within_deadline_is_left_running(self):
-        name = _seed("wf-t-2", status="running", pid=__import__("os").getpid(),
+        name = _seed("wf-t-2", status="running", pid=os.getpid(),
                      project="r", timeout=3600, started_at=time.time() - 5)
         emit = _Emitter()
         actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
@@ -102,7 +102,7 @@ class TestTimeoutReconcile:
         # The #1124 production shape: a healthy issue-lifecycle run 1h48m in,
         # past the flat run-level 3600s, but its current step's drain armed a
         # deadline that has not passed. A manager restart must leave it alone.
-        name = _seed("wf-t-3", status="running", pid=__import__("os").getpid(),
+        name = _seed("wf-t-3", status="running", pid=os.getpid(),
                      project="r", phase="implement", timeout=3600,
                      started_at=time.time() - 6480,
                      deadline_at=time.time() + 1000)
@@ -115,7 +115,7 @@ class TestTimeoutReconcile:
         assert get_registry().get(name).status == "running"
 
     def test_drain_past_its_budget_is_closed_and_names_the_step(self):
-        name = _seed("wf-t-4", status="running", pid=__import__("os").getpid(),
+        name = _seed("wf-t-4", status="running", pid=os.getpid(),
                      project="r", phase="implement", timeout=3600,
                      started_at=time.time() - 6480,
                      deadline_at=time.time() - (RECONCILE_GRACE + 60))
@@ -132,7 +132,7 @@ class TestTimeoutReconcile:
     def test_run_declared_without_timeout_is_never_closed(self):
         # timeout=0 declares no deadline; whatever the runner armed, the run
         # is left alone - exactly as before deadline_at existed.
-        name = _seed("wf-t-6", status="running", pid=__import__("os").getpid(),
+        name = _seed("wf-t-6", status="running", pid=os.getpid(),
                      project="r", phase="implement", timeout=0,
                      started_at=time.time() - 90_000,
                      deadline_at=time.time() - 90_000)
@@ -143,7 +143,7 @@ class TestTimeoutReconcile:
     def test_stale_drain_deadline_never_closes_before_the_run_level_one(self):
         # A resume from await re-stamps started_at/timeout (#826) but leaves
         # the pre-suspension deadline_at behind; the later of the two governs.
-        name = _seed("wf-t-5", status="running", pid=__import__("os").getpid(),
+        name = _seed("wf-t-5", status="running", pid=os.getpid(),
                      project="r", phase="resuming", timeout=3600,
                      started_at=time.time() - 5,
                      deadline_at=time.time() - 90_000)
@@ -245,7 +245,7 @@ class TestReEmitSwallowed:
 
 class TestReconcilerIgnoresHealthyActive:
     def test_idle_with_live_pid_untouched(self):
-        name = _seed("wf-live-1", status="idle", pid=__import__("os").getpid(),
+        name = _seed("wf-live-1", status="idle", pid=os.getpid(),
                      project="r", timeout=3600, started_at=time.time())
         emit = _Emitter()
         actions = reconcile_sessions(emit=emit, cancel=lambda n: None)

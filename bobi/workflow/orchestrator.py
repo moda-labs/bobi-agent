@@ -1067,8 +1067,9 @@ async def _run_workflow_async(
     def _arm_deadline(step: StepDef) -> None:
         """Name the step as current and give this piece of its work a deadline.
 
-        Called before anything in a step that can block (#1124). Nothing here
-        interrupts a running drain, so the dead-man reconciler is the only wall
+        Called before a step's turn or native action and before every retry of
+        the turn: the work that can run long (#1124). Nothing here interrupts a
+        running drain, so the dead-man reconciler is the only wall
         clock; it must judge the drain in flight by its own step's budget. The
         run's ``timeout`` is a floor: every drain gets at least the budget the
         run was launched with, so a step declaring a shorter one (the 1800s
@@ -1179,8 +1180,8 @@ async def _run_workflow_async(
             if step.action:
                 step_observation = _observe_step(step, "action", step_idx)
                 log.info(f"Native action step {step.name}: {step.action}")
-                _arm_deadline(step)
                 try:
+                    _arm_deadline(step)
                     result = _execute_native_action(step, ctx, cwd)
                 except Exception as exc:
                     step_observation.finish(
@@ -1515,8 +1516,8 @@ async def _run_workflow_async(
                     model=current_model, effort=current_effort,
                     max_turns=current_max_turns,
                 )
-                _arm_deadline(step)
                 try:
+                    _arm_deadline(step)
                     await client.connect()
                     resume_prompt = _turn_budget_resume_prompt(step, final_try)
                     telemetry_context["prompt_bytes"] = prompt_bytes(resume_prompt)

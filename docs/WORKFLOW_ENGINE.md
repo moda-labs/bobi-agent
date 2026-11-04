@@ -113,8 +113,8 @@ then runs as its own `agent`. The CLI allows that only when every prompt step
 (not route/action/notify/await) names an installed `agent`; otherwise `--role`
 is required. A prompt step with no `agent` inherits the previous step's.
 `timeout` (seconds, default
-1800, or 14400 in `adhoc`; anything but a positive integer reads as undeclared)
-is the step's wall-clock budget. Nothing interrupts a drain already in
+1800, or 14400 in `adhoc`; anything but a positive integer reads as undeclared,
+and `bobi agent <name> doctor` warns) is the step's wall-clock budget. Nothing interrupts a drain already in
 flight on it, because the workflow path has no in-process wall clock; it is read
 at two points. It gates whether a turn-cap restart is
 allowed to **start** (see [Turn budget](#turn-budget) for the resulting bound).
