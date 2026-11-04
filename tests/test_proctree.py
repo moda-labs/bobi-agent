@@ -8,6 +8,7 @@ own processes. The parsing rows feed canned input and never reach ``terminate``.
 
 from __future__ import annotations
 
+import errno
 import itertools
 import logging
 import os
@@ -523,21 +524,75 @@ def test_ps_that_cannot_answer_gives_no_table(tmp_path, fake_ps, body):
     assert proctree.read_table(tmp_path / "no-proc") is None
 
 
-@pytest.mark.parametrize("failure", ["every-row-unreadable", "listing-fails"])
-def test_proc_that_cannot_be_read_gives_no_table_and_never_asks_ps(
-        tmp_path, monkeypatch, fake_ps, failure):
-    """V7: a ``ps`` token never equals a ``/proc`` one, so every process would read as gone."""
-    fake_ps(f"cat <<'EOF'\n{_CANNED_PS}EOF")
+@pytest.fixture
+def canned_proc(tmp_path):
     root = tmp_path / "proc"
-    (root / "100").mkdir(parents=True)
+    for pid in (100, 200):
+        (root / str(pid)).mkdir(parents=True)
+        (root / str(pid) / "stat").write_text(f"{pid} (x) S 50 0\n")
+    (root / "sys" / "kernel" / "random").mkdir(parents=True)
+    (root / "sys" / "kernel" / "random" / "boot_id").write_text("boot-1\n")
+    return root
+
+
+def _fail_reads(patch, suffix: str, code: int) -> None:
+    """Make a read of any file whose path ends in *suffix* fail with errno *code*."""
+    real_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if str(path).endswith(suffix):
+            raise OSError(code, os.strerror(code))
+        return real_read_text(path, *args, **kwargs)
+
+    patch.setattr(Path, "read_text", read_text)
+
+
+@pytest.mark.parametrize("failure", ["listing", "one-row", "boot-id", "every-row-gone"])
+def test_failed_proc_read_gives_no_table_and_never_asks_ps(
+        canned_proc, monkeypatch, fake_ps, failure):
+    """V7: a hole in the table reads as a process gone, and so would every ``ps`` token."""
+    fake_ps(f"cat <<'EOF'\n{_CANNED_PS}EOF")
 
     def listing_fails(_path):
-        raise OSError("too many open files")
+        raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
 
+    if failure == "every-row-gone":
+        for pid in (100, 200):
+            (canned_proc / str(pid) / "stat").unlink()
     with monkeypatch.context() as patch:
-        if failure == "listing-fails":
+        if failure == "listing":
             patch.setattr(Path, "iterdir", listing_fails)
-        assert proctree.read_table(root) is None
+        elif failure == "one-row":
+            _fail_reads(patch, "200/stat", errno.EMFILE)
+        elif failure == "boot-id":
+            _fail_reads(patch, "boot_id", errno.EMFILE)
+        assert proctree.read_table(canned_proc) is None
+
+
+@pytest.mark.parametrize("code", [errno.ENOENT, errno.ESRCH, errno.EACCES],
+                         ids=["exited", "exiting", "not-ours-to-read"])
+def test_proc_row_that_is_gone_or_hidden_leaves_the_rest_of_the_table(
+        canned_proc, monkeypatch, code):
+    """V7: a process can exit mid-read, and hidepid hides another user's."""
+    with monkeypatch.context() as patch:
+        _fail_reads(patch, "200/stat", code)
+        assert sorted(proctree.read_table(canned_proc)) == [100]
+
+
+@pytest.mark.parametrize("code", [errno.ENOENT, errno.EACCES], ids=["missing", "masked"])
+def test_boot_id_the_host_does_not_offer_means_no_tokens(canned_proc, monkeypatch, code):
+    """V7: no identity on this host, which is C4, and not a failed read."""
+    with monkeypatch.context() as patch:
+        _fail_reads(patch, "boot_id", code)
+        assert {row.token for row in proctree.read_table(canned_proc).values()} == {""}
+
+
+def test_start_token_of_a_failed_read_is_empty(canned_proc, monkeypatch):
+    """V7: a registry write must not fail because a token could not be read."""
+    monkeypatch.setattr(proctree, "PROC_ROOT", canned_proc)
+    with monkeypatch.context() as patch:
+        _fail_reads(patch, "100/stat", errno.EMFILE)
+        assert proctree.start_token(100) == ""
 
 
 @pytest.mark.skipif(shutil.which("ps") is None,
@@ -606,29 +661,6 @@ def test_table_read_that_fails_once_still_ends_in_sigkill(
     survivors = proctree.terminate(members, term_grace=term_grace, kill_grace=5.0)
 
     assert survivors == []
-    assert (pid, SIGKILL) in signal_seam.sent
-    tree.assert_stopped(quiet_for=QUIET)
-
-
-def test_row_with_no_token_does_not_read_as_exited(
-        process_tree, monkeypatch, signal_seam):
-    """V7: a failed boot id read blanks every token, and proves nothing about the pid."""
-    tree = process_tree()
-    pid = _start_leaf(tree, on_term="ignore")
-    members = _tree_members(pid)
-    real_read_table = proctree.read_table
-    reads = itertools.count(1)
-
-    def read_table():
-        table = real_read_table()
-        if next(reads) == 1:
-            table[pid] = replace(table[pid], token="")
-        return table
-
-    monkeypatch.setattr(proctree, "read_table", read_table)
-
-    assert proctree.terminate(members, term_grace=0.2, kill_grace=5.0) == []
-
     assert (pid, SIGKILL) in signal_seam.sent
     tree.assert_stopped(quiet_for=QUIET)
 

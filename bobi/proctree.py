@@ -91,9 +91,10 @@ Table = dict[int, Proc]
 # --- reading the table -------------------------------------------------------
 
 def _boot_id(proc_root: Path) -> str:
+    """The boot id, or "" when this host does not offer one. Any other failure raises."""
     try:
         return (proc_root / "sys" / "kernel" / "random" / "boot_id").read_text().strip()
-    except OSError:
+    except (FileNotFoundError, PermissionError):
         return ""
 
 
@@ -108,15 +109,22 @@ def _boot_time(proc_root: Path = PROC_ROOT) -> float:
 
 
 def _read_stat(proc_root: Path, pid: int, boot_id: str, boot_time: float) -> Proc | None:
-    """One ``/proc/<pid>/stat`` row, or None when the process has gone."""
+    """One ``/proc/<pid>/stat`` row, or None when the process has gone or is hidden.
+
+    Any other failed read raises, because it says nothing about the process, and
+    a row left out reads as a process that has exited.
+    """
     try:
         # errors="replace": a process can name itself anything, and one that
         # fails to decode must not read as a process that has exited.
         stat = (proc_root / str(pid) / "stat").read_text(errors="replace")
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return None
+    try:
         close = stat.rfind(")")
         fields = stat[close + 2:].split()
         state, parent = fields[0], int(fields[1])
-    except (OSError, ValueError, IndexError):
+    except (ValueError, IndexError):
         return None
     # starttime is field 22 of the file, and the slice starts at field 3.
     starttime = fields[19] if len(fields) > 19 else ""
@@ -134,13 +142,13 @@ def _read_proc(proc_root: Path) -> Table | None:
         return {}
     try:
         pids = [int(e.name) for e in proc_root.iterdir() if e.name.isdigit()]
+        if not pids:
+            return {}
+        boot_id = _boot_id(proc_root)
+        boot_time = _boot_time(proc_root)
+        rows = [_read_stat(proc_root, pid, boot_id, boot_time) for pid in pids]
     except OSError:
         return None
-    if not pids:
-        return {}
-    boot_id = _boot_id(proc_root)
-    boot_time = _boot_time(proc_root)
-    rows = (_read_stat(proc_root, pid, boot_id, boot_time) for pid in pids)
     return {row.pid: row for row in rows if row} or None
 
 
@@ -194,7 +202,10 @@ def start_token(pid: int) -> str:
     if pid <= 0:
         return ""
     if PROC_ROOT.is_dir():
-        proc = _read_stat(PROC_ROOT, pid, _boot_id(PROC_ROOT), 0.0)
+        try:
+            proc = _read_stat(PROC_ROOT, pid, _boot_id(PROC_ROOT), 0.0)
+        except OSError:
+            return ""
     else:
         proc = (_read_ps("-p", str(pid)) or {}).get(pid)
     return proc.token if proc else ""
@@ -301,10 +312,7 @@ def kill_set(table: Table, root: int, protected: Collection[int]) -> list[Member
 
 def _has_exited(member: Member, table: Table) -> bool:
     proc = table.get(member.pid)
-    if proc is None or proc.state == "Z":
-        return True
-    # A row with no token is a failed boot id read, which proves nothing.
-    return bool(proc.token) and proc.token != member.token
+    return proc is None or proc.state == "Z" or proc.token != member.token
 
 
 def _send(pid: int, sig: signal.Signals) -> None:
