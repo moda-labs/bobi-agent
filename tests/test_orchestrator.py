@@ -15,9 +15,10 @@ import pytest
 from bobi import paths
 from bobi.brain import TurnResult
 from bobi.workflow.schema import (
-    DEFAULT_ROUTE_LOOP_MAX_ITERATIONS,
+    DEFAULT_ROUTE_LOOP_MAX_ITERATIONS, DEFAULT_STEP_TIMEOUT,
     Workflow, StepDef, HandoffContract, load_workflow,
 )
+from bobi.workflow.triggers import builtin_adhoc_workflow
 from bobi.workflow.orchestrator import (
     _build_step_prompt, _read_handoff, _validate_handoff,
     _drain_response, _setup_worktree,
@@ -106,6 +107,28 @@ class TestSchemaLoad:
         assert wf.steps[0].prompt.strip() == "Say hello"
         assert wf.steps[0].handoff.required == ["greeting"]
         assert wf.steps[0].timeout == 60
+
+    @pytest.mark.parametrize("declared, expected", [
+        ('"90"', 90),  # a string that is still a number
+        ("30m", DEFAULT_STEP_TIMEOUT),
+        ("", DEFAULT_STEP_TIMEOUT),
+        ("true", DEFAULT_STEP_TIMEOUT),
+        ("0", DEFAULT_STEP_TIMEOUT),
+        ("-5", DEFAULT_STEP_TIMEOUT),
+    ])
+    def test_unusable_step_timeout_reads_as_undeclared(
+            self, tmp_path, declared, expected):
+        # The runner does arithmetic on it before every prompt step, so a value
+        # that is not a number must not reach it as one.
+        f = tmp_path / "test.yaml"
+        f.write_text(textwrap.dedent(f"""\
+            name: test-wf
+            steps:
+              - name: greet
+                prompt: "Say hello"
+                timeout: {declared}
+        """))
+        assert load_workflow(f).steps[0].timeout == expected
 
     def test_load_step_model(self, tmp_path):
         f = tmp_path / "test.yaml"
@@ -2433,6 +2456,7 @@ class TestResumeRegistryRefresh:
             name="wf-t-r-1", run_key="1", phase="t", project="r", cwd="/tmp",
             status="waiting", pid=999999,
             started_at=time.time() - 90_000, timeout=3600,
+            deadline_at=time.time() - 90_000,
         ))
 
         run = WorkflowRun.create("t", {"data": {"run_key": "1"}})
@@ -2464,7 +2488,7 @@ class TestResumeRegistryRefresh:
 
         wf = Workflow(name="t", steps=[
             StepDef(name="wait", await_event="approval"),
-            StepDef(name="implement", prompt="build it"),
+            StepDef(name="implement", prompt="build it", timeout=60),
         ])
 
         before = time.time()
@@ -2482,8 +2506,233 @@ class TestResumeRegistryRefresh:
         assert entry.pid == os.getpid()
         assert entry.started_at >= before
         assert entry.timeout == 1234
+        # The first step after the gate replaced the pre-suspension deadline,
+        # floored at this resume's own timeout (#1124).
+        assert before + 1234 <= entry.deadline_at <= time.time() + 1234
         # The resumed run survives a reconcile pass untouched.
         assert mid_run["actions"] == []
+
+
+def _shipped_workflow(pack, name):
+    repo = Path(__file__).resolve().parent.parent
+    return load_workflow(repo / "agents" / pack / "workflows" / f"{name}.yaml")
+
+
+def _generated_adhoc(tmp_path):
+    from bobi.setup.authoring import build_adhoc_yaml
+
+    path = tmp_path / "adhoc.yaml"
+    path.write_text(build_adhoc_yaml())
+    return load_workflow(path)
+
+
+class TestStepDeadline:
+    """#1124: when a prompt step starts, the runner arms the registry's
+    ``deadline_at`` to ``now + max(step.timeout, run timeout)``, so a manager
+    restart's reconciler judges a live run by the budget of that step and not by
+    a flat run-level deadline that nothing in the run enforces."""
+
+    @pytest.fixture(autouse=True)
+    def bound_root(self, tmp_path, monkeypatch):
+        from bobi.sdk import SessionRegistry
+
+        root = _bind_runtime_root(tmp_path / "_repo", monkeypatch)
+        paths.sessions_dir(root)
+        self.registry = SessionRegistry()
+        self.observed = []  # (label, deadline_at - now) at each armed point
+
+    def _observe(self, label):
+        [entry] = self.registry.list_all()
+        self.observed.append((label, entry.deadline_at - time.time()))
+
+    def _run(self, workflow, brain, *, saved_id="", timeout=3600):
+        with patch("bobi.brain.get_brain", lambda kind=None: brain), \
+             patch("bobi.workflow.orchestrator.get_registry",
+                   return_value=self.registry), \
+             patch("bobi.workflow.orchestrator._emit_lifecycle_event"), \
+             patch("bobi.workflow.orchestrator._setup_worktree",
+                   return_value="/tmp"), \
+             patch("bobi.workflow.orchestrator.load_session_id",
+                   return_value=saved_id), \
+             patch("bobi.workflow.orchestrator.save_session_id"), \
+             patch("bobi.brain.turns.save_session_id"), \
+             patch("bobi.brain.turns.observe_brain_turn"), \
+             patch("bobi.workflow.orchestrator.log_activity"), \
+             patch("bobi.brain.turns.log_activity"):
+            return run_workflow(workflow, task="t", repo="r", cwd="/tmp",
+                                run_key="1124", timeout=timeout)
+
+    def _assert_armed(self, label, budget):
+        remaining = dict(self.observed)[label]
+        assert budget - 5 <= remaining <= budget, (label, remaining)
+
+    def test_each_prompt_step_arms_its_own_budget(self):
+        observe, registry = self._observe, self.registry
+        phases = []
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                observe("short" if "Say hi" in text else "long")
+                # The reconciler names this phase if it closes the run here.
+                phases.extend(e.phase for e in registry.list_all())
+
+        brain = MagicMock()
+        brain.make_session.side_effect = lambda **_kw: Client()
+        wf = Workflow(name="t", steps=[
+            StepDef(name="short", prompt="Say hi", timeout=60),
+            StepDef(name="long", prompt="Build it", timeout=7200),
+        ])
+
+        assert self._run(wf, brain) is True
+        # A step budget below the run's timeout is floored at the run's own.
+        self._assert_armed("short", 3600)
+        self._assert_armed("long", 7200)
+        assert phases == ["short", "long"]
+
+    def test_retries_inside_the_step_keep_its_deadline(self):
+        # A budget is sized for the whole step, so a turn-cap resume and a
+        # handoff repair get fresh turns but no fresh deadline.
+        from bobi.brain import AssistantText
+        from bobi.sdk import session_handoff_path
+
+        registry = self.registry
+        clients, queries, deadlines = [], [], []
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                [entry] = registry.list_all()
+                queries.append(text)
+                deadlines.append(entry.deadline_at)
+                if "handoff-repair retry" in text:
+                    path = session_handoff_path(entry.name, "build")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("summary: done\n")
+
+            async def receive_response(self):
+                if len(clients) == 1:
+                    yield TurnResult(session_id="s", is_error=True,
+                                     error_kind="max_turns_reached",
+                                     error_message="cap hit")
+                    return
+                yield AssistantText(text="Done.")
+                yield TurnResult(session_id="s")
+
+        def make_session(**_kw):
+            clients.append(Client())
+            return clients[-1]
+
+        brain = MagicMock()
+        brain.make_session.side_effect = make_session
+        wf = Workflow(name="t", steps=[
+            StepDef(name="build", prompt="Build it", timeout=7200,
+                    handoff=HandoffContract(required=["summary"])),
+        ])
+
+        assert self._run(wf, brain, saved_id="s") is True
+        assert len(clients) == 2
+        assert "handoff-repair retry" in queries[-1]
+        assert len(deadlines) == 3
+        assert len(set(deadlines)) == 1
+
+    def test_a_revisited_step_arms_a_fresh_deadline(self):
+        # A rework loop's goto back to a step must not leave it on the clock of
+        # its first visit: each visit gets the step's whole budget.
+        registry = self.registry
+        deadlines = []
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                if "Review it" in text:
+                    [entry] = registry.list_all()
+                    deadlines.append(entry.deadline_at)
+
+        brain = MagicMock()
+        brain.make_session.side_effect = lambda **_kw: Client()
+        wf = Workflow(name="t", steps=[
+            StepDef(name="review", prompt="Review it", timeout=7200,
+                    handoff=HandoffContract(required=["clean"])),
+            StepDef(name="gate", condition="clean == true", goto="done",
+                    else_goto="review", max_iterations=2, on_exhausted="done"),
+            StepDef(name="done", prompt="Finish"),
+        ])
+
+        with patch("bobi.workflow.orchestrator._read_handoff",
+                   return_value={"clean": False}):
+            assert self._run(wf, brain) is True
+        assert len(deadlines) == 2
+        assert deadlines[1] > deadlines[0]
+
+    def test_a_cap_hit_past_the_step_budget_does_not_resume(self):
+        # The budget's other reader: a step out of budget fails at the cap.
+        clients = []
+
+        class Client(FakeBrainClient):
+            async def receive_response(self):
+                await asyncio.sleep(1.1)
+                yield TurnResult(session_id="s", is_error=True,
+                                 error_kind="max_turns_reached",
+                                 error_message="cap hit")
+
+        def make_session(**_kw):
+            clients.append(Client())
+            return clients[-1]
+
+        brain = MagicMock()
+        brain.make_session.side_effect = make_session
+        wf = Workflow(name="t", steps=[
+            StepDef(name="build", prompt="Build it", timeout=1),
+        ])
+
+        assert self._run(wf, brain, saved_id="s") is False
+        assert len(clients) == 1
+
+    @pytest.mark.parametrize("load", [
+        lambda _tmp: builtin_adhoc_workflow(),
+        _generated_adhoc,
+        lambda _tmp: _shipped_workflow("eng-team", "adhoc"),
+        lambda _tmp: _shipped_workflow("personal-assistant", "adhoc"),
+    ], ids=["built-in", "generated-by-setup", "eng-team", "personal-assistant"])
+    def test_adhoc_gets_the_default_budget_wherever_it_is_defined(
+            self, load, tmp_path):
+        observe = self._observe
+
+        class Client(FakeBrainClient):
+            async def query(self, text):
+                observe("task")
+
+        brain = MagicMock()
+        brain.make_session.side_effect = lambda **_kw: Client()
+
+        assert self._run(load(tmp_path), brain) is True
+        self._assert_armed("task", DEFAULT_STEP_TIMEOUT)
+
+
+class TestShippedBudgets:
+    """What the shipped eng-team pack gives its long steps (#1124).
+
+    A step budget keeps a healthy run alive only if it beats what the step
+    really takes, and the stop only means something while it stays finite. Each
+    row is the longest that step took on a completed run on a production
+    instance, measured 2026-11-04 from the registry for single-step workflows
+    and from handoff timestamps for lifecycle steps. One instance undercounts,
+    hence the headroom.
+    """
+
+    HEADROOM = 1.25
+    CEILING = 86400  # a budget past a day no longer bounds a runaway
+
+    @pytest.mark.parametrize("workflow, step, longest_healthy", [
+        ("adhoc", "task", 8915),
+        ("issue-lifecycle", "spec", 3860),
+        ("issue-lifecycle", "implement", 11366),
+        ("issue-lifecycle", "pr", 6357),
+        ("pr-feedback", "address", 5304),
+    ])
+    def test_budget_outlasts_the_longest_real_step_and_still_ends(
+            self, workflow, step, longest_healthy):
+        budget = next(s.timeout for s in _shipped_workflow("eng-team", workflow).steps
+                      if s.name == step)
+        assert longest_healthy * self.HEADROOM < budget <= self.CEILING
 
 
 # ---------------------------------------------------------------------------

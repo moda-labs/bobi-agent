@@ -278,7 +278,7 @@ class TestRunningLedgerRows:
         assert row["duration_seconds"] is not None
 
     @pytest.mark.parametrize("session_status,error,expected", [
-        ("failed", "agent exceeded its 3600s timeout", "failed"),
+        ("failed", "agent ran past its deadline in phase task (60s over)", "failed"),
         ("crashed", "agent process died", "crashed"),
         ("completed", "", "done"),
         ("cancelled", "", "closed"),

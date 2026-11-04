@@ -4,6 +4,8 @@ from pathlib import Path
 from textwrap import dedent
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from bobi.validate import (
     validate_config,
     _check_entry_point,
@@ -239,14 +241,47 @@ class TestCheckWorkflowEffort:
         assert not results[0].ok
         assert not results[0].required
 
-    def test_malformed_workflow_skipped(self, tmp_path):
+    @pytest.mark.parametrize("content", [
+        "steps: [unclosed\n",
+        "steps:\n",
+        "steps: 5\n",
+    ])
+    def test_malformed_workflow_skipped(self, tmp_path, content):
         wf_dir = tmp_path / "package" / "workflows"
         wf_dir.mkdir(parents=True, exist_ok=True)
-        (wf_dir / "bad.yaml").write_text("steps: [unclosed\n")
+        (wf_dir / "bad.yaml").write_text(content)
         assert self._check(Config(), tmp_path) == []
 
     def test_no_workflows_dir_passes(self, tmp_path):
         assert self._check(Config(), tmp_path) == []
+
+
+class TestCheckWorkflowTimeout:
+    """A step `timeout:` the loader cannot use silently becomes the default
+    budget, so a manager restart can close the step sooner than it reads (#1124)."""
+
+    @pytest.mark.parametrize("declared, warns", [
+        ("7200", False),
+        ("", False),
+        ('"7200"', False),
+        ("7200.0", True),
+        ("2h", True),
+        ("0", True),
+        ("-1", True),
+    ])
+    def test_only_an_unusable_timeout_warns(self, tmp_path, declared, warns):
+        package = tmp_path / "package"
+        (package / "workflows").mkdir(parents=True)
+        (package / "agent.yaml").write_text("entry_point: manager\n")
+        (package / "workflows" / "build.yaml").write_text(
+            "name: build\nsteps:\n  - name: compile\n"
+            f"    prompt: p\n    timeout: {declared}\n"
+        )
+        results = [c for c in validate_config(tmp_path).checks
+                   if c.name.endswith(".timeout")]
+        assert [r.name for r in results] == (
+            ["build.yaml:compile.timeout"] if warns else [])
+        assert all(not r.ok and not r.required for r in results)
 
 
 class TestCheckBrain:

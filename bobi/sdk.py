@@ -326,8 +326,13 @@ class SessionEntry:
     # landed. The reconciler re-emits terminal-but-unconfirmed runs.
     emit_confirmed: bool = False
     # timeout: the run's declared/effective timeout in seconds, persisted at
-    # register so the dead-man reconciler knows each run's deadline.
+    # register so the dead-man reconciler knows the run-level deadline.
     timeout: int = 0
+    # deadline_at: absolute epoch the most recent prompt step may run until
+    # (0.0 = not armed). A workflow runner arms it when a prompt step starts,
+    # from that step's own budget; the reconciler uses the later of this and
+    # started_at + timeout (#1124).
+    deadline_at: float = 0.0
     # reconciled_at: set when the reconciler closed a stranded run (idempotency).
     reconciled_at: float = 0.0
     ack_watermark: dict = field(default_factory=dict)

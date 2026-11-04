@@ -3018,7 +3018,10 @@ def workflow_status():
                    "${{event.verdict}}.")
 @click.option("--reply", default="",
               help="The human's own words, carried as ${{event.reply}}.")
-@click.option("--timeout", default=3600, help="Max execution time in seconds")
+@click.option("--timeout", default=3600,
+              help="Floor, in seconds, under each step's own timeout when a "
+                   "manager restart judges the resumed run. Not a cap "
+                   "(0 = no deadline).")
 def workflow_resume(run_id, verdict, reply, timeout):
     """Resume a suspended workflow run.
 
@@ -4041,7 +4044,11 @@ main.add_command(event_server_cmd)
                    "copies of an IDENTICAL launch on purpose. Cannot be "
                    "combined with --id.")
 @click.option("--task", default=None, help="Task description / context for the agent")
-@click.option("--timeout", default=3600, type=int, help="Timeout in seconds")
+@click.option("--timeout", default=3600, type=int,
+              help="Floor, in seconds, under each step's own timeout when a "
+                   "manager restart judges a workflow run. Not a cap "
+                   "(0 = no deadline). With --as-check, the check's time limit, "
+                   "at most 600; with --persistent, the startup wait.")
 @click.option("--wait", is_flag=True,
               help="Block until the launched agent completes. Requires "
                    "'-w adhoc' — a multi-step workflow launch returns as soon "

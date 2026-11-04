@@ -220,9 +220,8 @@ def resolve_effort(cfg, role: str | None = None, explicit: str | None = None) ->
 
 # The framework default per-session turn cap (#845).
 #
-# A long agent session's real budget is its WALL-CLOCK timeout (6h for an
-# engineer workflow run); the turn cap exists to bound a runaway loop, not to
-# end useful work. At 200 it did the opposite: two real engineer sessions were
+# The turn cap exists to bound a runaway loop, not to end useful work. At 200
+# it did the opposite: two real engineer sessions were
 # killed on turn 201 - one 227 minutes in, both hours inside their timeout and
 # both mid-edit with no handoff written - because a Bash-heavy build spends
 # turns on ordinary tool use (141 and 201 Bash calls respectively). 1000 is

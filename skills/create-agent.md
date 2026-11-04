@@ -398,8 +398,9 @@ ignores, or rejects it is the backend's own behavior.
 `max_turns` caps one session's turns: step `max_turns:` >
 `roles.<role>.max_turns` > `brain.max_turns` > the framework default (1000).
 There is no launch flag - it is a runaway-loop backstop, not a dial you tune
-per invocation. Size it well clear of honest work: the real budget for a long
-session is its wall-clock timeout, and a tool-heavy build spends turns fast.
+per invocation. Size it well clear of honest work, because a tool-heavy build
+spends turns fast. It is also the only bound enforced in-process on a workflow
+step: a step's `timeout` interrupts nothing (see `docs/WORKFLOW_ENGINE.md`).
 A monitor check that needs hundreds of turns is malfunctioning, so cap those
 low; a builder should be free to run. See `docs/WORKFLOW_ENGINE.md` for what
 happens when a workflow step does hit the cap (it is resumed, not failed).
@@ -447,6 +448,10 @@ steps:
   - name: task
     prompt: "${{input.task}}"
 ```
+
+A step that declares no `timeout` gets 14400s. A manager restart can close a run
+past its step's budget (`docs/WORKFLOW_ENGINE.md`), so give any step that can
+honestly run longer a `timeout` that outlasts it.
 
 ### Monitors (monitors/defaults.yaml)
 

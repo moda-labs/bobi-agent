@@ -106,7 +106,7 @@ class TestCrashReconcile:
 class TestTimeoutReconcile:
     def test_past_deadline_alive_pid_is_cancelled_and_failed(self):
         # alive pid (our own) started long ago with a tiny timeout
-        name = _seed("wf-t-1", status="running", pid=__import__("os").getpid(),
+        name = _seed("wf-t-1", status="running", pid=os.getpid(),
                      project="r", timeout=10,
                      started_at=time.time() - (10 + RECONCILE_GRACE + 60))
         cancelled = []
@@ -119,30 +119,102 @@ class TestTimeoutReconcile:
         assert "agent/session.failed" in emit.types()
 
     def test_within_deadline_is_left_running(self):
-        name = _seed("wf-t-2", status="running", pid=__import__("os").getpid(),
+        name = _seed("wf-t-2", status="running", pid=os.getpid(),
                      project="r", timeout=3600, started_at=time.time() - 5)
         emit = _Emitter()
         actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
         assert actions == []
         assert get_registry().get(name).status == "running"
 
+    def test_long_run_inside_its_current_step_budget_survives(self):
+        # The #1124 production shape: a healthy issue-lifecycle run 1h48m in,
+        # past the flat run-level 3600s, but its current step armed a deadline
+        # that has not passed. A manager restart must leave it alone.
+        name = _seed("wf-t-3", status="running", pid=os.getpid(),
+                     project="r", phase="implement", timeout=3600,
+                     started_at=time.time() - 6480,
+                     deadline_at=time.time() + 1000)
+        cancelled = []
+        emit = _Emitter()
+        actions = reconcile_sessions(emit=emit, cancel=cancelled.append)
+        assert actions == []
+        assert cancelled == []
+        assert emit.calls == []
+        assert get_registry().get(name).status == "running"
+
+    def test_step_past_its_budget_is_closed_and_names_the_step(self):
+        name = _seed("wf-t-4", status="running", pid=os.getpid(),
+                     project="r", phase="implement", timeout=3600,
+                     started_at=time.time() - 6480,
+                     deadline_at=time.time() - (RECONCILE_GRACE + 60))
+        cancelled = []
+        emit = _Emitter()
+        reconcile_sessions(emit=emit, cancel=cancelled.append)
+
+        entry = get_registry().get(name)
+        assert entry.status == TERMINAL_FAILED
+        assert cancelled == [name]
+        assert "implement" in entry.error
+        assert "agent/session.failed" in emit.types()
+
+    def test_step_inside_its_grace_is_left_running(self):
+        # A literal, so shrinking the documented 300s grace fails here.
+        name = _seed("wf-t-7", status="running", pid=os.getpid(),
+                     project="r", phase="implement", timeout=3600,
+                     started_at=time.time() - 6480,
+                     deadline_at=time.time() - 240)
+        actions = reconcile_sessions(emit=_Emitter(), cancel=lambda n: None)
+        assert actions == []
+        assert get_registry().get(name).status == "running"
+
+    def test_run_declared_without_timeout_is_never_closed(self):
+        # timeout=0 declares no deadline; whatever the runner armed, the run
+        # is left alone - exactly as before deadline_at existed.
+        name = _seed("wf-t-6", status="running", pid=os.getpid(),
+                     project="r", phase="implement", timeout=0,
+                     started_at=time.time() - 90_000,
+                     deadline_at=time.time() - 90_000)
+        actions = reconcile_sessions(emit=_Emitter(), cancel=lambda n: None)
+        assert actions == []
+        assert get_registry().get(name).status == "running"
+
+    def test_stale_step_deadline_never_closes_before_the_run_level_one(self):
+        # A resume from await re-stamps started_at/timeout (#826) but leaves
+        # the pre-suspension deadline_at behind; the later of the two governs.
+        name = _seed("wf-t-5", status="running", pid=os.getpid(),
+                     project="r", phase="resuming", timeout=3600,
+                     started_at=time.time() - 5,
+                     deadline_at=time.time() - 90_000)
+        emit = _Emitter()
+        actions = reconcile_sessions(emit=emit, cancel=lambda n: None)
+        assert actions == []
+        assert get_registry().get(name).status == "running"
+
+
+# The clock for sweeps that pin one: whole seconds, so the overrun an error names
+# is exact.
+NOW = float(int(time.time()))
+DEADLINE_ERROR = ("agent ran past its deadline in phase implement (360s over) "
+                  "without reporting a terminal status")
+
+
+def _past_deadline(name, pid):
+    """A live run as its runner leaves it, past the budget its step armed (#1124)."""
+    return _seed(name, status="running", pid=pid, project="r", phase="implement",
+                 timeout=3600, started_at=NOW - 18000, deadline_at=NOW - 360)
+
 
 class TestDeadlineStopsTheTree:
     """V17: the real cancel at a run's deadline, on a real process tree.
 
-    Without the #1124 change this is what a restart does to a verified-live run
-    past its deadline: the whole tree stops, the entry goes `failed`, and one
-    event goes out.
+    This is what a restart does to a live run past its step's budget: the whole
+    tree stops, the entry goes `failed`, and one event goes out.
     """
-
-    def _past_deadline(self, name, pid):
-        return _seed(name, status="running", pid=pid, project="r", timeout=10,
-                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
 
     def test_the_tree_stops_and_failed_is_written_once(
             self, process_tree, monkeypatch):
         tree = process_tree()
-        name = self._past_deadline("wf-t", tree.start())
+        name = _past_deadline("wf-t", tree.start())
         written = []
         update = SessionRegistry.update
 
@@ -154,7 +226,7 @@ class TestDeadlineStopsTheTree:
         monkeypatch.setattr(SessionRegistry, "update", record_status)
         emit = _Emitter()
 
-        actions = reconcile_sessions(emit=emit)
+        actions = reconcile_sessions(emit=emit, now=NOW)
 
         tree.assert_stopped()
         assert written == [TERMINAL_FAILED]
@@ -163,15 +235,14 @@ class TestDeadlineStopsTheTree:
         assert entry.pid == 0
         assert entry.reconciled_at > 0
         assert entry.emit_confirmed is True
-        assert entry.error == ("agent exceeded its 10s timeout without reporting "
-                               "a terminal status")
+        assert entry.error == DEADLINE_ERROR
         assert emit.types() == ["agent/session.failed"]
         assert actions == [{"name": name, "action": "timeout", "emitted": True}]
 
     def test_a_wait_child_stopped_with_its_parent_is_not_announced_as_crashed(
             self, process_tree):
         tree = process_tree()
-        parent = self._past_deadline("wf-a-parent", tree.start())
+        parent = _past_deadline("wf-a-parent", tree.start())
         child = _seed("wf-b-child", status="running", pid=tree.pids()["cli"],
                       project="r")
         emit = _Emitter()
@@ -188,7 +259,7 @@ class TestDeadlineStopsTheTree:
             self, process_tree, signal_seam, case):
         """C5, C3 and C4 through the real cancel, as a restart reaches them."""
         root = 0 if case == "no-pid" else process_tree().start()
-        name = self._past_deadline("wf-t", root)
+        name = _past_deadline("wf-t", root)
         if case == "no-pid":
             get_registry().update(name, status="starting")
         elif case == "recycled-pid":
@@ -197,13 +268,12 @@ class TestDeadlineStopsTheTree:
             get_registry().update(name, pid_start="")
         emit = _Emitter()
 
-        actions = reconcile_sessions(emit=emit)
+        actions = reconcile_sessions(emit=emit, now=NOW)
 
         entry = get_registry().get(name)
         assert (entry.status, entry.pid) == (TERMINAL_FAILED, 0)
         assert entry.reconciled_at > 0
-        assert entry.error == ("agent exceeded its 10s timeout without reporting "
-                               "a terminal status")
+        assert entry.error == DEADLINE_ERROR
         assert emit.types() == ["agent/session.failed"]
         assert actions == [{"name": name, "action": "timeout", "emitted": True}]
         expected = [(root, signal.SIGTERM)] if case == "no-token" else []
@@ -211,7 +281,7 @@ class TestDeadlineStopsTheTree:
 
     def test_a_relaunch_during_the_wait_is_left_alone_and_the_old_run_announced(self):
         """`failed` does not block a launch, so a new run can land while a tree dies."""
-        name = self._past_deadline("wf-t", os.getpid())
+        name = _past_deadline("wf-t", os.getpid())
 
         def relaunch(session):
             _seed(session, status="running", pid=os.getpid(), project="new",
@@ -219,7 +289,7 @@ class TestDeadlineStopsTheTree:
 
         emit = _Emitter()
 
-        actions = reconcile_sessions(emit=emit, cancel=relaunch)
+        actions = reconcile_sessions(emit=emit, cancel=relaunch, now=NOW)
 
         entry = get_registry().get(name)
         assert (entry.status, entry.pid) == ("running", os.getpid())
@@ -227,12 +297,12 @@ class TestDeadlineStopsTheTree:
         assert actions == [{"name": name, "action": "timeout", "emitted": True}]
         assert emit.types() == ["agent/session.failed"]
         assert emit.calls[0][1]["project"] == "r"
-        assert "exceeded its 10s timeout" in emit.calls[0][1]["error"]
+        assert emit.calls[0][1]["error"] == DEADLINE_ERROR
 
     def test_a_run_relaunched_during_the_sweep_is_judged_as_it_is_now(self):
         """What the sweep listed can be out of date when that entry's turn comes."""
-        first = self._past_deadline("wf-a", os.getpid())
-        later = self._past_deadline("wf-b", os.getpid())
+        first = _past_deadline("wf-a", os.getpid())
+        later = _past_deadline("wf-b", os.getpid())
         stopped = []
 
         def stop_and_relaunch_the_later_run(session):
@@ -249,7 +319,7 @@ class TestDeadlineStopsTheTree:
             self, process_tree, signal_seam):
         tree = process_tree()
         root = tree.start_detached(on_term="linger")
-        name = self._past_deadline("wf-t", root)
+        name = _past_deadline("wf-t", root)
 
         def runners_last_write(pid, _sig):
             if pid == root:
@@ -265,24 +335,22 @@ class TestDeadlineStopsTheTree:
 
     def test_an_entry_removed_during_the_wait_is_still_announced(self):
         """The wait can last 15s, and a later run still has to be closed."""
-        gone = _seed("wf-a-gone", status="running", pid=os.getpid(),
-                     project="r", timeout=10,
-                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
+        gone = _past_deadline("wf-a-gone", os.getpid())
         later = _seed("wf-b-dead", status="running", pid=999999, project="r")
         emit = _Emitter()
 
         actions = reconcile_sessions(
-            emit=emit,
+            emit=emit, now=NOW,
             cancel=lambda name: shutil.rmtree(get_registry().session_dir(name)))
 
         assert [action["name"] for action in actions] == [gone, later]
         assert [data["run_key"] for _, data in emit.calls] == [gone, later]
-        assert "exceeded its 10s timeout" in emit.calls[0][1]["error"]
+        assert emit.calls[0][1]["error"] == DEADLINE_ERROR
         assert get_registry().get(gone) is None
 
     def test_a_run_that_finished_during_the_wait_is_not_announced_as_timed_out(self):
         """A runner's own write can land over cancel's, and the next sweep re-emits it."""
-        name = self._past_deadline("wf-t", os.getpid())
+        name = _past_deadline("wf-t", os.getpid())
 
         def the_runner_finishes(session):
             get_registry().mark_terminal(session, TERMINAL_COMPLETED)
@@ -299,7 +367,7 @@ class TestDeadlineStopsTheTree:
     def test_a_cancel_that_blows_up_is_announced_only_if_it_closed_the_run(
             self, process_tree, monkeypatch, raises_after_closing):
         """`failed` with no event would wait for the next restart to be heard."""
-        name = self._past_deadline("wf-t", process_tree().start())
+        name = _past_deadline("wf-t", process_tree().start())
 
         def terminate(members, *, before_signal, **_kwargs):
             if raises_after_closing:
@@ -322,27 +390,26 @@ class TestDeadlineStopsTheTree:
     def test_a_survivor_is_named_in_the_error_and_the_event_still_goes(
             self, process_tree, signal_seam, short_graces, caplog):
         tree = process_tree()
-        name = self._past_deadline("wf-t", tree.start())
+        name = _past_deadline("wf-t", tree.start())
         command = tree.pids()["command"]
         signal_seam.denied.add(command)
         emit = _Emitter()
 
         with caplog.at_level(logging.WARNING, logger="bobi.reconcile"):
-            reconcile_sessions(emit=emit)
+            reconcile_sessions(emit=emit, now=NOW)
 
         assert "The run is marked failed, but these processes" in caplog.text
         entry = get_registry().get(name)
         assert entry.status == TERMINAL_FAILED
         assert entry.error == (
-            "agent exceeded its 10s timeout without reporting a terminal status; "
-            f"1 process could not be stopped (pid {command} python)")
+            f"{DEADLINE_ERROR}; 1 process could not be stopped (pid {command} python)")
         assert entry.error in emit.calls[0][1]["error"]
 
     def test_an_interrupt_mid_wait_leaves_a_run_the_next_sweep_announces(
             self, process_tree, signal_seam):
         tree = process_tree()
         root = tree.start()
-        name = self._past_deadline("wf-t", root)
+        name = _past_deadline("wf-t", root)
         interrupted = []
 
         def interrupt_once(pid, _sig):
@@ -398,9 +465,7 @@ class TestAHonestSweep:
         """
         caller = disposable_caller.start(
             [sys.executable, "-c", _SWEEP, str(tmp_path)])
-        name = _seed("wf-around-the-sweep", status="running", pid=caller,
-                     project="r", timeout=10,
-                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
+        name = _past_deadline("wf-around-the-sweep", caller)
         get_registry().update(name, pid_start="")
 
         result = disposable_caller.run()
@@ -414,8 +479,7 @@ class TestAHonestSweep:
     def test_an_unreadable_table_leaves_the_run_for_the_next_sweep(
             self, process_tree, signal_seam, monkeypatch):
         root = process_tree().start()
-        name = _seed("wf-t", status="running", pid=root, project="r", timeout=10,
-                     started_at=time.time() - (10 + RECONCILE_GRACE + 60))
+        name = _past_deadline("wf-t", root)
         monkeypatch.setattr("bobi.proctree.read_table", lambda: None)
         emit = _Emitter()
 
@@ -483,7 +547,7 @@ class TestReEmitSwallowed:
 
 class TestReconcilerIgnoresHealthyActive:
     def test_idle_with_live_pid_untouched(self):
-        name = _seed("wf-live-1", status="idle", pid=__import__("os").getpid(),
+        name = _seed("wf-live-1", status="idle", pid=os.getpid(),
                      project="r", timeout=3600, started_at=time.time())
         emit = _Emitter()
         actions = reconcile_sessions(emit=emit, cancel=lambda n: None)

@@ -207,11 +207,12 @@ def _events_for(socket, run_key: str, *, seconds: float) -> list[dict]:
 def test_manager_restart_past_deadline(
         stub_bobi_env, stub_cli_run, stub_clean_session, process_tree,
         no_external_topics):
-    """V24, the reconciler's deadline branch through a real manager start.
+    """V24, the reconciler's deadline branch through real manager starts.
 
-    Without the #1124 change, a restart stops a verified-live run past its
-    deadline: the tree is gone, the entry is `failed`, and the manager's own
-    sweep publishes one `agent/session.failed` to the real event server.
+    Past its `timeout` but inside its step's budget (#1124), a restart leaves a
+    live run and its whole tree alone. Past that budget, the tree is gone, the
+    entry is `failed`, and the manager's own sweep publishes one
+    `agent/session.failed` to the real event server.
     """
     env = stub_bobi_env
     name = "wf-adhoc-test-repo-past-deadline"
@@ -244,12 +245,23 @@ def test_manager_restart_past_deadline(
         _start_manager(env, stub_cli_run)
 
         state = _state(env, name)
+        assert (state["status"], state["pid"]) == ("running", runner), state
+        tree.assert_all_running(roles=ROLES_UNDER_RUNNER)
+        assert _events_for(socket, "past-deadline", seconds=5) == []
+
+        stopped = stub_cli_run("stop", timeout=30)
+        assert stopped.returncode == 0, stopped.stderr
+        get_registry().update(name, deadline_at=time.time() - (RECONCILE_GRACE + 60))
+
+        _start_manager(env, stub_cli_run)
+
+        state = _state(env, name)
         assert state["status"] == "failed", state
         assert not pid_running(runner)
         tree.assert_stopped()
         events = _events_for(socket, "past-deadline", seconds=5)
         assert len(events) == 1, events
-        assert "exceeded its" in events[0]["payload"]["error"]
+        assert "past its deadline in phase task" in events[0]["payload"]["error"]
     finally:
         socket.close()
         stub_cli_run("stop", timeout=30)

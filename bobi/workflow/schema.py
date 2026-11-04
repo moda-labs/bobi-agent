@@ -22,6 +22,13 @@ from bobi.config import positive_int
 
 DEFAULT_ROUTE_LOOP_MAX_ITERATIONS = 3
 
+# A step's wall-clock budget in seconds when it declares none. See
+# docs/WORKFLOW_ENGINE.md for what that budget does and does not bound. It has
+# to suit a step that is a whole job, as `adhoc`'s only step is (#1124): the
+# longest completed ad-hoc run measured on a production instance took 8915s
+# (2026-11-04).
+DEFAULT_STEP_TIMEOUT = 14400
+
 # The vocabulary a human answers an await gate in. It rides the resume as the
 # ``event`` scope, so a route step after the await reads it as
 # ``${{event.verdict}}``.
@@ -75,7 +82,7 @@ class StepDef:
     # triage step's.
     max_turns: int = 0
     handoff: HandoffContract = field(default_factory=HandoffContract)
-    timeout: int = 1800
+    timeout: int = DEFAULT_STEP_TIMEOUT
     worktree: bool = False
 
     # Route step fields
@@ -200,7 +207,7 @@ def load_workflow(path: Path) -> Workflow:
             effort=s.get("effort", ""),
             max_turns=positive_int(s.get("max_turns")),
             handoff=handoff,
-            timeout=s.get("timeout", 1800),
+            timeout=positive_int(s.get("timeout")) or DEFAULT_STEP_TIMEOUT,
             worktree=s.get("worktree", False),
             condition=s.get("if", ""),
             goto=s.get("goto", ""),
