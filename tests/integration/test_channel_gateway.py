@@ -574,7 +574,10 @@ class TestTypingFlowEndToEnd:
 
         posts = stub.named("chat.postMessage")
         assert posts == []
-        statuses = stub.named("assistant.threads.setStatus")
+        # The previous test's refresh loop clears its own thread from a background
+        # thread, so that call can land here.
+        statuses = [call for call in stub.named("assistant.threads.setStatus")
+                    if call["body"]["thread_ts"] == "100.000"]
         assert statuses and statuses[-1]["body"]["status"] == "is thinking…"
 
         from bobi.events.channels import stop_all_refresh_loops
