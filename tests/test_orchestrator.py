@@ -2645,6 +2645,50 @@ class TestDrainDeadline:
             assert self._run(wf, MagicMock()) is True
         self._assert_armed("action", 3600)
 
+    def test_control_model_rerun_rearms_the_deadline(self, monkeypatch):
+        from dataclasses import replace
+        from bobi.metrics.routing import RouteOutcome
+        from tests.metrics.helpers import decision
+
+        observe, plant = self._observe, self._plant_stale
+
+        class Client(FakeBrainClient):
+            def __init__(self, model):
+                super().__init__()
+                self.model = model
+
+            async def query(self, text):
+                if self.model == "cheap":
+                    plant()          # the failed drain ran out its deadline
+                else:
+                    observe("rerun")
+
+            async def receive_response(self):
+                if self.model == "cheap":
+                    yield TurnResult(session_id="s", is_error=True,
+                                     error_message="model cheap is not available")
+                    return
+                async for message in FakeBrainClient.receive_response(self):
+                    yield message
+
+        brain = MagicMock()
+        brain.make_session.side_effect = (
+            lambda **kw: Client(kw["options"]["model"]))
+
+        async def route(ctx, sticky_record=None):
+            return RouteOutcome("cheap", replace(
+                decision(), model_selected="cheap", control_model="control"))
+        monkeypatch.setattr("bobi.metrics.routing.resolve_route", route)
+        monkeypatch.setattr("bobi.metrics.routing.log_routing_incident",
+                            lambda record, root=None: None)
+        wf = Workflow(name="t", steps=[
+            StepDef(name="build", prompt="Build it", agent="engineer",
+                    timeout=7200),
+        ])
+
+        assert self._run(wf, brain) is True
+        self._assert_armed("rerun", 7200)
+
     @pytest.mark.parametrize("load", [
         lambda _tmp: builtin_adhoc_workflow(),
         _generated_adhoc,

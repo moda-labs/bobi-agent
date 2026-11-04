@@ -1566,6 +1566,8 @@ async def _run_workflow_async(
                     None, agent_name=current_agent, model=current_model,
                     effort=current_effort, max_turns=current_max_turns,
                 )
+                registry.update(session_name,
+                                deadline_at=_drain_deadline(step))
                 await client.connect()
                 # A fresh transcript: it gets the run's background like any other.
                 prompt = _context_prefix() + step_prompt
