@@ -186,48 +186,72 @@ Do not copy this principle into each role or require an optional context read.
 The existing operator setting `BOBI_COMMUNICATION_STYLE=off` disables it.
 Installing a team alone does not update framework instructions; use a released framework version and refresh sessions to adopt a changed principle.
 
-Principles for role prompts:
-- **Start with identity**: "You are a [role] that [does what]."
-- **Define scope**: What this role does and does NOT do.
-- **Be operational**: Concrete instructions, CLI commands, decision tables.
-- **Include examples**: Show what good output looks like.
-- **Set boundaries**: What to delegate vs handle directly.
+Write roles for the human who maintains them as well as the agent that follows them.
+Plain language and a clear structure help both; dense prose is not an agent optimization.
 
-Coordinator structure:
+Keep the role focused on identity, scope, qualitative success, shared judgment, communication, and permission boundaries.
+Describe multiple jobs separately without embedding each job's procedure in the role.
+Point to the relevant skill when a job starts, and state what to do if that skill is unavailable.
+
 ```markdown
-# Role Title
+# Role name
 
-You are a [role] for [scope]. You receive events and [what you do].
+You are [who], helping [whom] with [purpose].
 
-## Event handling
+## Jobs and success
 
-| Event type | Action |
+Describe each job and what a good outcome means for the human.
+
+## Judgment and communication
+
+State the few principles that apply across jobs.
+
+## Boundaries
+
+State who may authorize consequential actions and where current capabilities are defined.
+
+## Choose the job
+
+Link each job to its skill and explain when to read it.
+```
+
+### Job skills and instruction structure
+
+A skill explains how to perform one job.
+Package it under `context/skills/<job>/SKILL.md` when it is an on-demand reference, and explicitly route to it from the role; do not assume every brain discovers it automatically.
+Its description should explain what it does and when to use it, not summarize every rule.
+
+Organize the body around the work: purpose, inputs, a short sequence of steps, the output, and an example where one helps.
+Use imperative verbs and familiar terms; introduce a technical term only when it makes a decision or tool call more precise.
+Explain why a consequential rule exists so the agent can apply it beyond the example.
+
+Keep each instruction in one canonical place:
+
+| Content | Home |
 |---|---|
-| ... | ... |
+| Identity, success, shared judgment, permission boundaries | Role |
+| Task procedure, decisions, output contract, task examples | Job skill |
+| Tool syntax and service behavior | Tool guide |
+| Triggers, schedules, routing, deterministic delivery rules | Runtime configuration or workflow |
+| Long or conditional background | Referenced context |
 
-## Operational rules
+Current capabilities must reach the model before it acts: load them through the runtime or require the role to read their reference before starting work.
+Moving a restriction to an unread document does not preserve it.
+A permission stated in prose does not implement a missing tool or enforce a runtime boundary.
 
-- ...
-```
+Prefer a few clear decision rules over accumulated exceptions.
+Reword, consolidate, or remove an existing instruction before adding another reminder.
+Lead with the desired behavior; use explicit prohibitions for important boundaries.
+Allow judgment where several approaches are valid, and specify exact values or sequences where reliability requires them, such as write verification or a delivery schema.
+Do not prescribe a target line count: include only information that changes the agent's decisions.
 
-Worker structure:
-```markdown
-# Role Title
+Use a small, representative example to demonstrate the expected work, not an exhaustive catalog of past failures.
+When revising an agent, inspect the complete input, including caller prompts and examples, for instructions that contradict the new behavior.
+Compare before/after runs on representative tasks, including a prior failure and a case whose behavior must stay unchanged.
+Read the outputs and tool actions; format validation alone does not establish behavioral correctness.
+Keep human judgments of usefulness separate from mechanically checkable requirements.
 
-You are a [role] that [does what]. You receive tasks from [who] and
-[produce what output].
-
-## How you work
-
-Step-by-step instructions.
-
-## Quality standards
-
-What "done" looks like.
-```
-
-Role prompts: 300-600 lines for complex roles, under 100 for simple workers.
-Every line should be an instruction the agent will use — no filler.
+These principles follow [Anthropic's skill authoring guidance](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices), [context engineering guidance](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents), and [OpenAI's skill guidance](https://learn.chatgpt.com/docs/build-skills).
 
 ### Tools (tools/<service>.md)
 
@@ -521,7 +545,7 @@ command reference.
    that receives events and dispatches workers. Workers are short-lived.
 
 2. **Workflows encode process, not logic**: A workflow defines WHAT steps
-   happen in WHAT order. The HOW lives in role prompts.
+   happen in WHAT order. Shared judgment lives in roles; task procedures live in the relevant skills.
 
 3. **Handoffs are contracts**: Required handoff fields are the API between
    steps. Design them carefully.
@@ -535,7 +559,7 @@ command reference.
 ## Important
 
 - Generate a complete, working team — no placeholders or TODOs.
-- Role prompts should reference `bobi` CLI commands the agent will use.
+- Put service commands in tool guides or job skills and reference them from the role when needed.
 - Don't copy engineering-specific content into non-engineering packs.
 - Write files to the team source directory, normally
   `$BOBI_HOME/agents/<name>/src/`.

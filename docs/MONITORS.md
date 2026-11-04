@@ -122,6 +122,28 @@ without a restart.
   distillation judgment matters more than poll cost; pin its
   model with `roles: {curator: {model: ...}}`.
 
+### Sleep-cycle input: only this agent's sessions
+
+Claude Code keeps transcripts per OS user, so agents sharing a user share one
+`projects` tree. The Claude brain records each session id it runs in
+`run/state/owned_transcripts.txt`, and `bobi/history.py` indexes and returns only
+those sessions. This covers the sleep cycle and `transcript search` / `sessions`
+/ `inspect`. An id, not a path, because a worker runs in the repo it works on,
+which others may also be using.
+
+Until the first claim saves the list, reads compute it from the session ids the
+registry holds and the transcripts started in the runtime root. If a `history.db`
+already exists, which means the agent predates the list, it also claims that
+database's sessions by exact working directory: the runtime root and the
+directories the registry remembers. Those claims are coarser. A session another
+agent or a person ran in one of those directories is claimed too, and stays
+claimed if it keeps running. A worker transcript not yet indexed at upgrade is
+claimed only if the registry still holds its id. Rows from other agents stay in `history.db` but are
+never returned, and the cursor moves past them.
+
+If a claim fails on a session's last turn, that session is missing from memory
+and `manager.log` carries the error.
+
 ### Sleep-cycle budgets, and why a run cannot wedge
 
 Two thresholds govern the artifact, and only one of them fails a run:

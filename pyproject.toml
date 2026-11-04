@@ -1,6 +1,6 @@
 [project]
 name = "bobi"
-version = "0.61.0"
+version = "0.62.0"
 description = "Build teams of event-driven AI agents"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -119,10 +119,10 @@ path = "hatch_build.py"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-    "claude: test requires a real Claude CLI session (deselected in integration-fast)",
+    "claude: test requires a real Claude CLI session (deselected in integration-fast); keeps the developer's real home",
     "local_only: test only runs against the local Node.js event server backend",
-    "docker: test builds/runs the instance container image (needs a docker daemon; deselected in integration-fast)",
-    "live: test hits a live external API (Claude, Slack, ...); gated by credentials/env, not run on PRs",
+    "docker: test builds/runs the instance container image (needs a docker daemon; deselected in integration-fast); keeps the developer's real home",
+    "live: test hits a live external API (Claude, Slack, ...); gated by credentials/env, not run on PRs; keeps the developer's real home",
     "real_listener: subscription-login test drives the real event-listener registration path, not the ask-first fake",
 ]
 

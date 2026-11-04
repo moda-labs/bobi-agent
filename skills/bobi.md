@@ -145,6 +145,9 @@ bobi read-conversation <conversation> [-n 50] [--json-output]
 Use `bobi reply` and `bobi read-conversation` for Slack and any other
 chat channel delivered through the channel gateway.
 
+`bobi read-conversation` exits 1 when the platform refuses the read, for example
+when the bot is not in the channel, so an empty result means there are no messages.
+
 Tables in a Slack reply are sent as native Slack tables that wrap long cells.
 Slack takes one table per message, so each extra table in one reply arrives as
 its own message: prefer one table per reply, and give each extra table its own

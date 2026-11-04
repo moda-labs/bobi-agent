@@ -39,8 +39,23 @@ os.environ["PYTHONPATH"] = _existing_pythonpath
 os.environ["PYTHONSAFEPATH"] = "1"
 
 import asyncio
+import pwd
+import threading
 
 import pytest
+
+_TESTS_ROOT = Path(__file__).resolve().parent
+
+
+def _in_tier(request, *tiers):
+    """Whether this test lives under ``tests/<tier>``.
+
+    Judged from this directory, not the absolute path: a checkout under a
+    directory named for a tier would otherwise switch these guards off for
+    every test in it.
+    """
+    path = request.path.resolve()
+    return any(path.is_relative_to(_TESTS_ROOT / tier) for tier in tiers)
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +75,48 @@ def _isolate_environ():
     yield
     os.environ.clear()
     os.environ.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_home(request, monkeypatch, tmp_path_factory):
+    """Tests stay out of the developer's real home, with the exceptions below
+    (conftest invariant).
+
+    ``render_team_instructions`` writes ``~/AGENTS.md`` and each brain's global
+    instructions file, and strips its block from the files only other brains
+    load. Any test that reaches a process bootstrap calls it. Unredirected, a
+    unit run put Bobi's communication style into every Claude Code and Codex
+    session on the machine and replaced a symlinked target with a regular file
+    (#1143), and a stub-brain integration run emptied a real host's Claude
+    instructions (#1147).
+
+    Unsetting the brain config dirs sends them to their defaults under the
+    temporary ``HOME``, so a test that sets only ``HOME`` still sees one home.
+    Subprocesses inherit all three, but this runs per test, after fixtures of
+    wider scope: one that boots an agent still reaches the real home, and
+    Playwright's session browser still finds its install there.
+
+    With ``HOME`` unset, Python falls back to the password database, so a test
+    that clears the environment would reach the real home however ``HOME`` was
+    set. The fallback answers with the temporary home too. A child process
+    started without ``HOME`` stays out of reach.
+
+    Tests marked ``claude``, ``live`` or ``docker`` keep the real home because
+    they may need the developer's credentials.
+    """
+    if any(request.node.get_closest_marker(m) for m in ("claude", "live", "docker")):
+        return
+    home = str(tmp_path_factory.mktemp("user-home"))
+    real_getpwuid = pwd.getpwuid
+
+    def _getpwuid(uid):
+        entry = real_getpwuid(uid)
+        return pwd.struct_passwd((*entry[:5], home, entry[6]))
+
+    monkeypatch.setenv("HOME", home)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(pwd, "getpwuid", _getpwuid)
 
 
 @pytest.fixture(autouse=True)
@@ -115,7 +172,7 @@ def _clear_leaked_event_loop(request):
 
     Skipped for e2e tests — Playwright needs its own loop for teardown.
     """
-    if "/e2e/" in str(request.fspath):
+    if _in_tier(request, "e2e"):
         yield
         return
     leaked = asyncio.events._get_running_loop()
@@ -149,6 +206,53 @@ def _reset_paths_root():
 
 
 @pytest.fixture(autouse=True)
+def _no_leaked_metrics_producer():
+    """No test may leave a metrics producer thread running (conftest invariant).
+
+    An enabled ``MetricsRuntime`` starts a ``MetricsProducer`` thread that
+    rewrites its health file about once a second, through the process-wide
+    ``Path.write_text`` and ``os.replace``, until the runtime is closed. Left
+    running, it keeps writing inside every later test, and a test that spies on
+    either call counts the stray write as its own. That is how the 2026-10-24
+    nightly failed ``test_state_writes_never_expose_partial_json``: two
+    publications where the registry made one, the second in another test's
+    spool directory.
+
+    The process-wide runtime that product code starts on its own
+    (``get_runtime``) has no owner in the test, so it is reset here, like the
+    bound root above. A test closes any other runtime it opens before its
+    teardown ends, in a ``finally`` or a fixture finalizer: a close at the end
+    of the body is skipped when an earlier assertion fails. A producer still
+    running after that fails the test, and is closed first so the leak cannot
+    reach the next one.
+    """
+    before = set(threading.enumerate())
+    yield
+    from bobi.metrics import runtime
+
+    runtime.reset_runtime_for_tests()
+    leaked = [
+        producer for thread in threading.enumerate()
+        if thread not in before
+        and (producer := _metrics_producer(thread)) is not None
+    ]
+    for producer in leaked:
+        producer.close()
+    assert not leaked, (
+        f"test left {len(leaked)} MetricsProducer thread(s) running; "
+        "close each MetricsRuntime it opens in a finally or a fixture finalizer"
+    )
+
+
+def _metrics_producer(thread):
+    """The ``MetricsProducer`` whose writer loop *thread* runs, or None."""
+    run = getattr(thread, "_target", None)  # CPython drops it once run() returns
+    if getattr(run, "__qualname__", "") == "MetricsProducer._run":
+        return run.__self__
+    return None
+
+
+@pytest.fixture(autouse=True)
 def _no_event_server_io(request, monkeypatch):
     """Unit tests never touch a real event server (conftest invariant).
 
@@ -159,8 +263,7 @@ def _no_event_server_io(request, monkeypatch):
     imports it eagerly and tests it directly, so it is unaffected. Integration
     and e2e tests drive the real transport and opt out.
     """
-    p = str(request.fspath)
-    if "/integration/" in p or "/e2e/" in p:
+    if _in_tier(request, "integration", "e2e"):
         yield
         return
     monkeypatch.setattr(
@@ -181,8 +284,7 @@ def _no_real_service_manager(request, monkeypatch, tmp_path):
     ``launchctl kickstart`` calls. A leaked LaunchAgent from this suite once
     crash-looped against the developer's ~/.bobi.
     """
-    p = str(request.fspath)
-    if "/integration/" in p or "/e2e/" in p:
+    if _in_tier(request, "integration", "e2e"):
         yield
         return
     from bobi import service_manager
@@ -193,7 +295,7 @@ def _no_real_service_manager(request, monkeypatch, tmp_path):
     monkeypatch.setattr(service_manager, "_run", _no_service_manager)
     gui_probe = service_manager._gui_available
     gui_probe.cache_clear()
-    if not p.endswith("test_service_manager.py"):
+    if request.path.name != "test_service_manager.py":
         units = tmp_path / "_no_service_units"
         monkeypatch.setattr(service_manager, "systemd_path",
                             lambda: units / service_manager.SYSTEMD_UNIT)

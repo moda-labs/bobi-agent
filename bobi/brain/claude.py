@@ -140,6 +140,7 @@ class _ClaudeSession:
         # "gateway", not real Anthropic spend).
         self.provider = provider
         self._client = self._new_client()
+        self._recorded_session_id = ""
         self._model_usage_baseline: dict[str, dict[str, Any]] = {}
         self._total_cost_baseline = 0.0
         resume = getattr(options, "resume", None)
@@ -229,6 +230,24 @@ class _ClaudeSession:
         """
         return await self._client.get_mcp_status()
 
+    async def _record_owned_session(self, session_id: Any) -> None:
+        """Claim a session for this agent's history; never fail the turn over it.
+
+        Off the event loop, because the claim can wait on another process's
+        lock. A failed claim retries at the next record point, but a session
+        that has none left is lost from the agent's memory, so it logs an error.
+        """
+        from bobi import history
+
+        session_id = str(session_id or "")
+        if not session_id or session_id == self._recorded_session_id:
+            return
+        try:
+            await asyncio.to_thread(history.record_owned_session, session_id)
+            self._recorded_session_id = session_id
+        except Exception:
+            log.error("Could not record owned session %s", session_id, exc_info=True)
+
     async def receive_response(self) -> AsyncIterator[BrainMessage]:
         """Translate one turn's SDK messages into normalized brain messages."""
         from claude_agent_sdk import (
@@ -236,6 +255,7 @@ class _ClaudeSession:
             ResultMessage,
             ServerToolResultBlock,
             ServerToolUseBlock,
+            SystemMessage,
             TextBlock,
             ToolResultBlock,
             ToolUseBlock,
@@ -250,6 +270,7 @@ class _ClaudeSession:
             if isinstance(item, type)
         )
         user_message_type = UserMessage if isinstance(UserMessage, type) else ()
+        system_message_type = SystemMessage if isinstance(SystemMessage, type) else ()
 
         assistant_error_kind = ""
         assistant_error_message = ""
@@ -295,7 +316,12 @@ class _ClaudeSession:
                 completed_tool_ids.append(tool_id)
 
         async for msg in self._client.receive_response():
-            if isinstance(msg, AssistantMessage):
+            if isinstance(msg, system_message_type) and msg.subtype == "init":
+                # At the start of the turn, not the end: a worker killed during
+                # its only turn never reaches a result, and its work must still
+                # count as this agent's.
+                await self._record_owned_session(msg.data.get("session_id"))
+            elif isinstance(msg, AssistantMessage):
                 observed_at_us = time.time_ns() // 1000
                 text_parts = [
                     b.text for b in msg.content if isinstance(b, TextBlock)
@@ -395,6 +421,8 @@ class _ClaudeSession:
                         finish_tool(block, observed_at_us)
                 last_event_us = observed_at_us
             elif isinstance(msg, ResultMessage):
+                # Again here: a missed init must not silently cost the session.
+                await self._record_owned_session(getattr(msg, "session_id", ""))
                 observed_at_us = time.time_ns() // 1000
                 cumulative_usage = getattr(msg, "model_usage", None)
                 cumulative_cost = getattr(msg, "total_cost_usd", 0.0) or 0.0

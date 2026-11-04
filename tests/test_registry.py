@@ -130,13 +130,16 @@ class TestSessionRegistry:
         def replace_and_observe(source, destination):
             source_path = Path(source)
             destination_path = Path(destination)
-            staged = json.loads(source_path.read_text())
-            published = (
-                json.loads(state_path.read_text())
-                if state_path.exists()
-                else None
-            )
-            observed.append((source_path, destination_path, staged, published))
+            # Other threads in the process replace their own files; count
+            # only renames into or out of this session's directory.
+            if state_path.parent in (source_path.parent, destination_path.parent):
+                staged = json.loads(source_path.read_text())
+                published = (
+                    json.loads(state_path.read_text())
+                    if state_path.exists()
+                    else None
+                )
+                observed.append((source_path, destination_path, staged, published))
             original_replace(source, destination)
 
         monkeypatch.setattr(builtins, "open", builtin_open_and_observe)

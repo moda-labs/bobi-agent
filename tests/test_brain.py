@@ -920,6 +920,7 @@ def _claude_session_over(messages, *, provider="anthropic"):
     """A _ClaudeSession whose underlying SDK client is swapped for a fake."""
     sess = _ClaudeSession.__new__(_ClaudeSession)
     sess._client = _FakeSDKClient(messages)
+    sess._recorded_session_id = ""
     sess.provider = provider
     return sess
 
@@ -1651,3 +1652,58 @@ def test_successful_turn_discussing_an_outage_is_not_reclassified():
         is_error=True, result="You've hit your session limit · resets 12:40am",
     ))
     assert failed.error_kind == ERROR_KIND_CREDITS_EXHAUSTED
+
+
+class TestOwnedSessionRecording:
+    """The brain is the only thing that knows which session an agent ran (#1142)."""
+
+    @pytest.fixture
+    def claims(self, monkeypatch):
+        from bobi import history
+
+        recorded = []
+        monkeypatch.setattr(history, "record_owned_session", recorded.append)
+        return recorded
+
+    @pytest.mark.asyncio
+    async def test_worker_killed_in_its_only_turn_is_still_claimed(self, claims):
+        from claude_agent_sdk import SystemMessage
+
+        class Killed(_FakeSDKClient):
+            async def receive_response(self):
+                yield SystemMessage("init", {"session_id": "sess-1"})
+                raise RuntimeError("worker killed")
+
+        sess = _claude_session_over([])
+        sess._client = Killed([])
+        with pytest.raises(RuntimeError):
+            [m async for m in sess.receive_response()]
+        assert claims == ["sess-1"]
+
+    @pytest.mark.asyncio
+    async def test_result_claims_a_session_whose_init_was_missed(self, claims):
+        sess = _claude_session_over([_result(session_id="sess-1")])
+        [m async for m in sess.receive_response()]
+        assert claims == ["sess-1"]
+
+    @pytest.mark.asyncio
+    async def test_failed_claim_keeps_the_turn_and_retries_at_the_result(self, monkeypatch):
+        from claude_agent_sdk import SystemMessage
+
+        from bobi import history
+
+        attempts = []
+
+        def flaky(session_id):
+            attempts.append(session_id)
+            if len(attempts) == 1:
+                raise OSError("disk full")
+
+        monkeypatch.setattr(history, "record_owned_session", flaky)
+        sess = _claude_session_over([
+            SystemMessage("init", {"session_id": "sess-1"}),
+            _result(session_id="sess-1"),
+        ])
+        messages = [m async for m in sess.receive_response()]
+        assert isinstance(messages[-1], TurnResult)
+        assert attempts == ["sess-1", "sess-1"]

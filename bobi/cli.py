@@ -1527,8 +1527,9 @@ def _gateway_call(fn, *args, **kwargs):
     except GatewayError as e:
         click.echo(str(e), err=True)
         click.echo(
-            "(replies go through the event server's channel gateway; make "
-            "sure the agent is started so the server is running and its "
+            "(replies and reads go through the event server's channel gateway. "
+            "Unless the error above names the cause, such as not_in_channel, "
+            "make sure the agent is started so the server is running and its "
             "chat workspace is registered)",
             err=True,
         )
@@ -1651,14 +1652,21 @@ def reply(conversation, text, edit_ref, file_path, title):
 
 @main.command("read-conversation")
 @click.argument("conversation")
-@click.option("--limit", "-n", default=100, help="Max messages to fetch (default: 100)")
+@click.option("--limit", "-n", default=100,
+              help="Max messages to fetch (default: 100). The event server "
+                   "caps large reads.")
 @click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
 def read_conversation(conversation, limit, as_json):
     """Read the messages of a conversation (e.g. the Slack thread it anchors).
 
+    A ref with no thread reads the channel's history. Exits 1 if the platform
+    refuses the read, e.g. the bot is not in the channel, so an empty result
+    means there are no messages.
+
     Usage:
         bobi read-conversation slack:T0952RZRZ0X:channel:C123:thread:171.42
         bobi read-conversation slack:T0952RZRZ0X:dm:D456:thread:171.42 --json-output
+        bobi read-conversation slack:T0952RZRZ0X:channel:C123
     """
     _parse_conversation_or_exit(conversation)
     _read_conversation(conversation, limit, as_json)
@@ -2847,15 +2855,16 @@ def ingest_token_revoke(token_id):
 @transcript.command("index")
 @click.option("--project", default=None, help="Filter to project (substring match on path)")
 def transcript_index(project):
-    """Index conversation JSONL files into searchable SQLite.
+    """Index this agent's conversation JSONL files into searchable SQLite.
 
     Scans the Claude Code transcript roots — $CLAUDE_CONFIG_DIR/projects when
-    set, then ~/.claude/projects — for */*.jsonl and indexes messages into a
-    local SQLite database for fast searching.
+    set, then ~/.claude/projects — for */*.jsonl and indexes the messages of
+    sessions this agent ran into a local SQLite database for fast searching.
+    Other sessions under those roots are skipped.
 
     Usage:
-        bobi agent eng transcript index                # index all projects
-        bobi agent eng transcript index --project foo  # index only projects matching "foo"
+        bobi agent eng transcript index                # index this agent's sessions
+        bobi agent eng transcript index --project foo  # only those in projects matching "foo"
     """
     from .history import index as do_index
     click.echo("Indexing conversations...")

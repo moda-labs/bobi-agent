@@ -307,6 +307,7 @@ class TestScriptCacheRunnerIntegration:
             assert [k for _, k in fired] == ["y"]
 
 
+@pytest.mark.claude
 @pytest.mark.skipif(
     not os.environ.get("BOBI_RUN_CLAUDE_TESTS"),
     reason="requires a real Claude CLI session (set BOBI_RUN_CLAUDE_TESTS=1)",

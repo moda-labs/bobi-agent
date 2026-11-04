@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -252,9 +253,13 @@ class TestClaim:
 
         writes: list[str] = []
         real_write_text = Path.write_text
+        claimer = threading.current_thread()
 
         def record(self, *args, **kwargs):
-            writes.append(str(self))
+            # Only the claim's own writes, wherever they land: other threads
+            # in the process write their own files.
+            if threading.current_thread() is claimer:
+                writes.append(str(self))
             return real_write_text(self, *args, **kwargs)
 
         monkeypatch.setattr(Path, "write_text", record)
