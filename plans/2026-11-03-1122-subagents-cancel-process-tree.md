@@ -518,7 +518,7 @@ Phase 5 is independent of Phases 2 to 4 and could run in parallel.
 **Validation gate**
 
 - [x] `pytest tests/integration/test_subagents_cancel.py -v` passes, and V21 shows as `PASSED`, not `SKIPPED`, in the output on the PR.
-- [ ] `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q` is green.
+- [x] `pytest tests/ --ignore=tests/integration/ --ignore=tests/e2e/ --timeout=30 -q` is green.
 
 ### Phase 7 - The #1124 deadline fix (only if Q1 is answered (a))
 
