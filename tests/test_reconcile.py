@@ -189,11 +189,13 @@ class TestShippedBudgets:
                          started_at=now - age, deadline_at=now - age + budget)
 
         healthy = seed("wf-healthy", longest_healthy * self.HEADROOM)
+        in_grace = seed("wf-in-grace", budget + RECONCILE_GRACE - 60)
         runaway = seed("wf-runaway", budget + RECONCILE_GRACE + 60)
         cancelled = []
         reconcile_sessions(emit=_Emitter(), cancel=cancelled.append, now=now)
 
         assert get_registry().get(healthy).status == "running"
+        assert get_registry().get(in_grace).status == "running"
         assert get_registry().get(runaway).status == TERMINAL_FAILED
         assert cancelled == [runaway]
 
