@@ -194,6 +194,17 @@ def gateway_env(tmp_path_factory):
             pass
 
 
+def _thread_statuses(stub, thread_ts: str) -> list[str]:
+    """Typing statuses set on one thread.
+
+    The stub outlives each test, and a previous test's refresh loop clears its own
+    thread from a background thread, so that call can land in a later test.
+    """
+    return [call["body"]["status"]
+            for call in stub.named("assistant.threads.setStatus")
+            if call["body"]["thread_ts"] == thread_ts]
+
+
 @pytest.fixture
 def gateway(gateway_env, monkeypatch):
     project, stub, es_url, bubble = gateway_env
@@ -540,8 +551,7 @@ class TestInboundMentionEndToEnd:
 
         posts = stub.named("chat.postMessage")
         assert posts == []
-        statuses = stub.named("assistant.threads.setStatus")
-        assert statuses and statuses[-1]["body"]["status"] == "is thinking…"
+        assert _thread_statuses(stub, "1700000000.000100")[-1] == "is thinking…"
 
         from bobi.events.channels import stop_all_refresh_loops
         stop_all_refresh_loops()
@@ -574,11 +584,7 @@ class TestTypingFlowEndToEnd:
 
         posts = stub.named("chat.postMessage")
         assert posts == []
-        # The previous test's refresh loop clears its own thread from a background
-        # thread, so that call can land here.
-        statuses = [call for call in stub.named("assistant.threads.setStatus")
-                    if call["body"]["thread_ts"] == "100.000"]
-        assert statuses and statuses[-1]["body"]["status"] == "is thinking…"
+        assert _thread_statuses(stub, "100.000")[-1] == "is thinking…"
 
         from bobi.events.channels import stop_all_refresh_loops
         stop_all_refresh_loops()
