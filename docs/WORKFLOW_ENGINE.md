@@ -109,13 +109,33 @@ written, launch it without `--role`, exactly as auto-dispatch does: each step
 then runs as its own `agent`. The CLI allows that only when every prompt step
 (not route/action/notify/await) names an installed `agent`; otherwise `--role`
 is required. A prompt step with no `agent` inherits the previous step's.
-`timeout` (seconds, default
-1800) is the step's wall-clock budget, and it has exactly one enforcement point:
-it gates whether a turn-cap restart is allowed to **start** (see [Turn
-budget](#turn-budget) for the resulting bound). Nothing interrupts a drain already in
-flight on it. It is **not** the value the reconciler's dead-man check uses —
-that check reads the **run-level** timeout (`run_workflow`'s own parameter,
-default 3600), which covers the whole run, not any single step.
+`timeout` (seconds, default 14400; anything but a positive integer reads as
+undeclared, and `bobi agent <name> doctor` warns) is a prompt step's wall-clock
+budget, and no other step kind reads it. Nothing interrupts a drain already in
+flight on it, because the workflow
+path has no in-process wall clock; it is read at two points. It gates whether a
+turn-cap restart is allowed to **start** (see [Turn budget](#turn-budget) for the
+resulting bound). And when a prompt step starts, the engine arms the registry
+entry's `deadline_at` to `now + max(step.timeout, run timeout)`. Retries inside
+the step keep that deadline, and the other step kinds, which do no long work,
+inherit it.
+The reconciler's dead-man check judges a live run by the later of that and the
+**run-level** deadline (`started_at` + `run_workflow`'s own `timeout`, default
+3600), so a manager restart never closes a run that is still inside the budget
+of its current prompt step (#1124), and never closes one earlier than the
+run-level deadline would.
+
+That check runs only at manager start, so it stops a run only if a restart lands
+after the deadline plus 300s of grace. Until then a wedged run keeps its
+concurrency slot and its session name. The check then signals the runner, marks
+the run `failed` and emits `agent/session.failed`. The signal reaches the runner
+process only, so a CLI and its tools can outlive it (#1122). Each visit to a
+prompt step arms afresh, so nothing bounds a whole run: a loop ends at its route's
+`max_iterations`.
+
+Size a step's `timeout` for the longest honest run of that step, retries
+included. Below the run's `--timeout` the run-level floor applies, so a restart
+closes the step at that floor plus the grace, however healthy it is.
 
 `model` is optional. When omitted, a prompt step uses the acting role's
 configured model (`roles.<role>.model` in `agent.yaml`), then the team default
@@ -214,8 +234,9 @@ steps:
     max_turns: 2000        # this step only
 ```
 
-The real budget for a long session is its wall-clock `timeout`; the turn cap
-exists to bound a runaway loop. Size it well clear of honest work - a
+The turn cap exists to bound a runaway loop, and on a workflow step it is the
+only bound enforced in-process: a step's `timeout` interrupts nothing. Size it
+well clear of honest work - a
 Bash-heavy build step spends turns on ordinary tool use, and the framework
 default was raised from 200 to 1000 after two real engineer sessions were
 killed on turn 201, hours inside their 6h timeouts (#845).
@@ -235,7 +256,15 @@ whether a new resume **starts**; nothing enforces it against a drain already
 running, so a resume begun just under the deadline still gets a full fresh
 budget. Worst case for one prompt step is therefore
 `max_turns × (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by the
-agent finishing. The dead-man reconciler is the outer net.
+agent finishing. The dead-man reconciler is the outer net: a resume gets a fresh
+turn budget but keeps the deadline the step armed when it started, so a manager
+restart can close a step past its budget plus the grace, whichever drain it is
+in.
+
+Raising a step's `timeout` also widens the window in which a resume may start. A
+step that hits the cap past the old budget used to fail there; now it resumes, up
+to the same turn bound above. So a runaway fast enough to reach the cap inside
+its budget can spend all of that bound instead of one session's cap.
 
 ### Route step
 
@@ -509,8 +538,9 @@ file is removed by hand. Closing that window needs a recovery protocol for a
 torn claim; it is recorded rather than built because nothing in the runtime
 calls this path today (see above). The winner re-stamps the run's registry
 entry with its own pid and a fresh `started_at`/`timeout` (the resume
-`--timeout`), so the dead-man reconciler judges the resumed process on its own
-budget rather than the long-dead launch process's. It then restores the variable
+`--timeout`), so the dead-man reconciler judges the resumed process by its own
+clock rather than the long-dead launch process's, until the next prompt step arms
+its own deadline. It then restores the variable
 context, injects the triggering event under the `event` scope, and re-enters
 `_run_workflow_async` at `suspended_at_step`. Execution continues as if the await
 never paused.

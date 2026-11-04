@@ -90,8 +90,10 @@ OUTCOME_SUSPENDED = "suspended"
 # calls `asyncio.run` bare), so a resume begun just under the deadline still
 # gets a full fresh budget. Worst case per prompt step is therefore
 # `max_turns * (MAX_TURN_BUDGET_RESUMES + 1)` turns, ended in-process only by
-# the agent finishing; the dead-man reconciler is the outer net. Raising
-# either number raises that product - see #845 review.
+# the agent finishing; the dead-man reconciler is the outer net. A prompt step
+# arms the registry's `deadline_at` once, when it starts, so that net judges a
+# live run by the step it is in and a resume gets no fresh deadline (#1124).
+# Raising either number raises that product - see #845 review.
 MAX_TURN_BUDGET_RESUMES = 3
 
 
@@ -1274,7 +1276,14 @@ async def _run_workflow_async(
 
             # Prompt step — inject into the persistent session
             step_start = time.time()
-            registry.update(session_name, phase=step.name)
+            # Start the clock on this step's budget (#1124). Nothing here
+            # interrupts a running drain, so the dead-man reconciler is the only
+            # wall clock, and it must judge a live run by the step in flight.
+            # Retries inside the step keep this deadline: a budget is sized for
+            # the whole step. The run's ``timeout`` is a floor, so a step
+            # declaring less is not judged more strictly than the run as a whole.
+            registry.update(session_name, phase=step.name,
+                            deadline_at=step_start + max(step.timeout, timeout))
 
             step_on_route = _on_route(step)
             step_model = _step_model(step)

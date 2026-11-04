@@ -55,7 +55,7 @@ steps:
     handoff:
       required: [spec_url]
       optional: [plan_path]
-    timeout: 3000
+    timeout: 14400
 
   - name: plan_review
     agent: engineer
@@ -115,7 +115,7 @@ steps:
       Build the feature with TDD — write tests first, then implement.
     handoff:
       required: [status]
-    timeout: 3600
+    timeout: 14400
 
   - name: pr
     agent: engineer
@@ -124,7 +124,7 @@ steps:
       Create the pull request, link it to the issue, move ticket to In Review.
     handoff:
       required: [pr_url]
-    timeout: 1800
+    timeout: 14400
 
   - name: qa
     agent: engineer
