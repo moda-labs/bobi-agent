@@ -254,7 +254,8 @@ other; fan identical copies out with `--id-random`, exactly as detached.
 floor under each step's own `timeout` when a manager restart judges it. A step's
 `timeout` defaults to 14400s, so `--timeout` changes an `adhoc` run's budget only
 above that (see `docs/WORKFLOW_ENGINE.md`). `--timeout 0` declares no deadline.
-The in-process bound on a runaway agent is the role's turn cap, not a wall clock.
+A resume after an await gate takes its own `--timeout`, not the launch's. The
+in-process bound on a runaway agent is the role's turn cap, not a wall clock.
 `--as-check` is the explicit short-lived monitoring-check harness; it prints
 verdict JSON and is the only `subagents launch` mode that accepts
 `--post-event`. It never reaches the launch admission path, so run keys do not

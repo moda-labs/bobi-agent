@@ -17,9 +17,9 @@ POST). This reconciler reads it and closes the gaps:
   3. timed out - past its deadline (+ grace) with the pid still alive → cancel
      it, mark ``failed``, emit ``agent/session.failed``. The deadline is the
      later of the run-level ``started_at + timeout`` and the ``deadline_at`` a
-     workflow runner arms when a step starts, from that step's own budget
-     (#1124), so a manager restart never closes a run that is still inside
-     the budget of the step it is in.
+     workflow runner arms when a prompt step starts, from that step's own
+     budget (#1124), so a manager restart never closes a run that is still
+     inside the budget of the step it is in.
 
 It is event-driven, not a poll loop: run it on manager wake (and it composes with
 the dead-pid sweep in ``SessionRegistry.list_active``). Idempotency is via the

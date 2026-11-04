@@ -114,9 +114,10 @@ undeclared, and `bobi agent <name> doctor` warns) is the step's wall-clock
 budget. Nothing interrupts a drain already in flight on it, because the workflow
 path has no in-process wall clock; it is read at two points. It gates whether a
 turn-cap restart is allowed to **start** (see [Turn budget](#turn-budget) for the
-resulting bound). And when a prompt or action step starts, the engine arms the
-registry entry's `deadline_at` to `now + max(step.timeout, run timeout)`. Retries
-inside the step keep that deadline.
+resulting bound). And when a prompt step starts, the engine arms the registry
+entry's `deadline_at` to `now + max(step.timeout, run timeout)`. Retries inside
+the step keep that deadline, and the other step kinds, which do no long work,
+inherit it.
 The reconciler's dead-man check judges a live run by the later of that and the
 **run-level** deadline (`started_at` + `run_workflow`'s own `timeout`, default
 3600), so a manager restart never closes a run that is still inside the budget
@@ -132,8 +133,8 @@ arms afresh, so nothing bounds a whole run: a loop ends at its route's
 `max_iterations`.
 
 Size a step's `timeout` for the longest honest run of that step, retries
-included. Below the run's `--timeout` the run-level floor applies, so at the
-default a restart closes the step at about 3900s however healthy it is.
+included. Below the run's `--timeout` the run-level floor applies, so a restart
+closes the step at that floor plus the grace, however healthy it is.
 
 `model` is optional. When omitted, a prompt step uses the acting role's
 configured model (`roles.<role>.model` in `agent.yaml`), then the team default
@@ -537,8 +538,8 @@ torn claim; it is recorded rather than built because nothing in the runtime
 calls this path today (see above). The winner re-stamps the run's registry
 entry with its own pid and a fresh `started_at`/`timeout` (the resume
 `--timeout`), so the dead-man reconciler judges the resumed process by its own
-clock rather than the long-dead launch process's, until the next prompt or action
-step arms its own deadline. It then restores the variable
+clock rather than the long-dead launch process's, until the next prompt step arms
+its own deadline. It then restores the variable
 context, injects the triggering event under the `event` scope, and re-enters
 `_run_workflow_async` at `suspended_at_step`. Execution continues as if the await
 never paused.

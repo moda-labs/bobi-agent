@@ -2658,24 +2658,29 @@ class TestStepDeadline:
         assert len(deadlines) == 2
         assert deadlines[1] > deadlines[0]
 
-    def test_native_action_arms_the_deadline(self):
-        observe, registry = self._observe, self.registry
-        phases = []
+    def test_a_cap_hit_past_the_step_budget_does_not_resume(self):
+        # The budget's other reader: a step out of budget fails at the cap.
+        clients = []
 
-        def action(step, ctx, cwd):
-            observe("action")
-            # The reconciler names this phase if it closes the run here.
-            phases.extend(e.phase for e in registry.list_all())
-            return {"status": "ok"}
+        class Client(FakeBrainClient):
+            async def receive_response(self):
+                await asyncio.sleep(1.1)
+                yield TurnResult(session_id="s", is_error=True,
+                                 error_kind="max_turns_reached",
+                                 error_message="cap hit")
 
+        def make_session(**_kw):
+            clients.append(Client())
+            return clients[-1]
+
+        brain = MagicMock()
+        brain.make_session.side_effect = make_session
         wf = Workflow(name="t", steps=[
-            StepDef(name="cleanup", action="cleanup_worktree", timeout=600),
+            StepDef(name="build", prompt="Build it", timeout=1),
         ])
-        with patch("bobi.workflow.orchestrator._execute_native_action",
-                   side_effect=action):
-            assert self._run(wf, MagicMock()) is True
-        self._assert_armed("action", 3600)
-        assert phases == ["cleanup"]
+
+        assert self._run(wf, brain, saved_id="s") is False
+        assert len(clients) == 1
 
     @pytest.mark.parametrize("load", [
         lambda _tmp: builtin_adhoc_workflow(),
