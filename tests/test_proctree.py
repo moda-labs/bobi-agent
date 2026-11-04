@@ -73,8 +73,8 @@ def _reaped_pid(tree) -> int:
     return pid
 
 
-# One process with two children: the fixture's runner, with the tree under it,
-# and a leaf. They all share its session and group.
+# One process with the fixture's roles as its children, all in its session and
+# group. ``runner`` brings the tree under it, and any other role is a leaf.
 _HOST = r"""
 import os
 import signal
@@ -83,7 +83,7 @@ import sys
 import time
 from pathlib import Path
 
-script, on_term = sys.argv[1:]
+script, on_term, *roles = sys.argv[1:]
 if on_term == "ignore":
     # A handler, not SIG_IGN: exec resets a handler, and children keep SIG_IGN.
     signal.signal(signal.SIGTERM, lambda *_: None)
@@ -92,18 +92,18 @@ temp.write_text(str(os.getpid()))
 os.replace(temp, temp.with_name("host.pid"))
 children = [subprocess.Popen([sys.executable, script, "--role", role],
                              stdin=subprocess.DEVNULL)
-            for role in ("runner", "sibling")]
+            for role in roles]
 time.sleep(120)
 """
 
 
-def _start_host(tree, *, on_term: str = "die") -> dict[str, int]:
+def _start_host(tree, *roles: str, on_term: str = "die") -> dict[str, int]:
     """Start ``_HOST`` as a session leader. Returns every pid by role."""
     tree.root = subprocess.Popen(
-        [sys.executable, "-c", _HOST, str(tree.script), on_term],
+        [sys.executable, "-c", _HOST, str(tree.script), on_term, *roles],
         start_new_session=True, stdin=subprocess.DEVNULL,
     )
-    return tree.wait_for(("host", "sibling", *ROLES))
+    return tree.wait_for(("host", *ROLES, *roles))
 
 
 def _tree_members(root: int) -> list[Member]:
@@ -221,7 +221,7 @@ def test_member_ignoring_sigterm_is_killed(process_tree, signal_seam, caplog):
 def test_sibling_in_the_roots_session_and_group_survives(process_tree):
     """V3, I1: a tree is found by parent, never by session or group."""
     tree = process_tree()
-    pids = _start_host(tree)
+    pids = _start_host(tree, "runner", "sibling")
     root, sibling = pids["runner"], pids["sibling"]
     assert os.getsid(sibling) == os.getsid(root)
     assert os.getpgid(sibling) == os.getpgid(root)
@@ -235,7 +235,7 @@ def test_sibling_in_the_roots_session_and_group_survives(process_tree):
 
 def test_is_self_or_ancestor_follows_the_real_parent_chain(process_tree):
     """V3, I5: true all the way up the chain, and for nothing off it."""
-    pids = _start_host(process_tree())
+    pids = _start_host(process_tree(), "runner", "sibling")
     command, sibling = pids["command"], pids["sibling"]
     table = proctree.read_table()
 
@@ -368,13 +368,12 @@ def test_pid_recycled_during_the_wait_gets_no_sigkill(
 
 def test_zombie_root_counts_as_exited(process_tree, signal_seam):
     """V5: the root is this process's child and stays a zombie, with no escalation."""
-    tree = process_tree()
-    root = tree.start()
+    root = _start_leaf(process_tree())
 
     assert proctree.terminate(_tree_members(root), kill_grace=1.0) == []
 
     assert _os_row(root)[0] == "Z"
-    assert {sig for _, sig in signal_seam.sent} == {SIGTERM}
+    assert signal_seam.sent == [(root, SIGTERM)]
     assert _tree_members(root) == []
 
 
@@ -395,9 +394,7 @@ def test_member_already_gone_is_not_an_error(process_tree, monkeypatch):
 def test_child_forked_during_the_wait_is_stopped(process_tree, signal_seam):
     """V6: the command forks on SIGTERM and outlives a poll, so a re-read finds it."""
     tree = process_tree()
-    root = tree.start(on_term="fork")
-    first_pids = [member.pid for member in _tree_members(root)]
-    assert first_pids == [tree.pids()[role] for role in ROLES]
+    root = _start_leaf(tree, on_term="fork")
     batches = []
 
     survivors = proctree.terminate(
@@ -408,7 +405,7 @@ def test_child_forked_during_the_wait_is_stopped(process_tree, signal_seam):
 
     assert survivors == []
     late = tree.pids()["late"]
-    assert [pids for pids, _ in batches] == [first_pids, [late]]
+    assert [pids for pids, _ in batches] == [[root], [late]]
     assert (late, SIGTERM) not in batches[1][1], "recorded only after it was signalled"
     assert (late, SIGTERM) in signal_seam.sent
     tree.assert_stopped(quiet_for=QUIET)
@@ -585,15 +582,14 @@ def test_table_read_that_fails_once_still_ends_in_sigkill(
         process_tree, monkeypatch, signal_seam, failed_read, term_grace):
     """V7: one failed read costs a poll. It must not cost the SIGKILL."""
     tree = process_tree()
-    root = tree.start(on_term="ignore")
-    command = tree.pids()["command"]
-    members = _tree_members(root)
+    pid = _start_leaf(tree, on_term="ignore")
+    members = _tree_members(pid)
     _script_table_reads(monkeypatch, {failed_read: None})
 
-    survivors = proctree.terminate(members, term_grace=term_grace, kill_grace=2.0)
+    survivors = proctree.terminate(members, term_grace=term_grace, kill_grace=5.0)
 
     assert survivors == []
-    assert (command, SIGKILL) in signal_seam.sent
+    assert (pid, SIGKILL) in signal_seam.sent
     tree.assert_stopped(quiet_for=QUIET)
 
 
@@ -605,20 +601,26 @@ def _pid_file(directory: Path, name: str, pid: int) -> Path:
     return path
 
 
-@pytest.mark.parametrize("file_name", PID_FILES)
-def test_pid_file_protects_its_process_and_subtree(
-        process_tree, tmp_path, signal_seam, file_name):
-    """V8, I3: the host outlives the SIGTERM round, so the re-read walk meets it too."""
+def test_pid_files_protect_their_processes_and_subtrees(
+        process_tree, tmp_path, signal_seam):
+    """V8, I3: all four files, read together as a cancel reads them.
+
+    The first file's daemon has a whole tree under it. The host outlives the
+    SIGTERM round, so the walk of every later read meets the daemons too.
+    """
     tree = process_tree()
-    pids = _start_host(tree, on_term="ignore")
-    daemon = pids["runner"]
+    daemons = dict(zip(PID_FILES, ("runner", "daemon-2", "daemon-3", "daemon-4")))
+    pids = _start_host(tree, *daemons.values(), "sibling", on_term="ignore")
+    spared = {*ROLES, *daemons.values()}
     table = proctree.read_table()
 
     protected = proctree.protected_pids(
-        [_pid_file(tmp_path, file_name, daemon)], table)
+        [_pid_file(tmp_path, name, pids[role]) for name, role in daemons.items()],
+        table,
+    )
     members = proctree.kill_set(table, pids["host"], protected)
 
-    assert protected == {daemon: file_name}
+    assert protected == {pids[role]: name for name, role in daemons.items()}
     assert sorted(member.pid for member in members) == sorted(
         [pids["host"], pids["sibling"]])
 
@@ -626,8 +628,8 @@ def test_pid_file_protects_its_process_and_subtree(
         members, term_grace=0.3, kill_grace=10.0, protected=protected)
 
     assert survivors == []
-    assert sorted(tree.running()) == sorted(ROLES)
-    assert not {pids[role] for role in ROLES} & {pid for pid, _ in signal_seam.sent}
+    assert set(tree.running()) == spared
+    assert not {pids[role] for role in spared} & {pid for pid, _ in signal_seam.sent}
 
 
 def test_target_under_a_protected_parent_is_stopped(process_tree, tmp_path):
@@ -744,7 +746,7 @@ def test_member_that_cannot_be_signalled_is_reported_within_both_graces(
     members = _tree_members(root)
     name = next(member.name for member in members if member.pid == command)
     signal_seam.denied.add(command)
-    term_grace, kill_grace = 1.0, 0.5
+    term_grace, kill_grace = 1.5, 1.0
 
     started = time.monotonic()
     survivors = proctree.terminate(members, term_grace=term_grace, kill_grace=kill_grace)
@@ -752,28 +754,23 @@ def test_member_that_cannot_be_signalled_is_reported_within_both_graces(
 
     assert survivors == [Survivor(command, name, NOT_PERMITTED)]
     assert list(tree.running()) == ["command"]
-    # The margin is for a loaded box, and stays under either default grace.
-    assert term_grace + kill_grace <= elapsed < term_grace + kill_grace + 4.0
+    # The margin is for a loaded box, and keeps each default grace out of range.
+    assert term_grace + kill_grace <= elapsed < term_grace + kill_grace + 3.5
 
 
 def test_member_surviving_sigkill_is_named_as_such(process_tree, monkeypatch):
     """A process stuck in the kernel takes SIGKILL and stays, so the seam drops it."""
-    tree = process_tree()
-    root = tree.start(on_term="ignore")
-    command = tree.pids()["command"]
-    members = _tree_members(root)
-    name = next(member.name for member in members if member.pid == command)
+    pid = _start_leaf(process_tree(), on_term="ignore")
+    members = _tree_members(pid)
     real_send = proctree._send
+    monkeypatch.setattr(
+        proctree, "_send",
+        lambda target, sig: None if sig == SIGKILL else real_send(target, sig),
+    )
 
-    def send(pid, sig):
-        if (pid, sig) != (command, SIGKILL):
-            real_send(pid, sig)
+    survivors = proctree.terminate(members, term_grace=0.2, kill_grace=0.2)
 
-    monkeypatch.setattr(proctree, "_send", send)
-
-    survivors = proctree.terminate(members, term_grace=1.0, kill_grace=0.5)
-
-    assert survivors == [Survivor(command, name, DID_NOT_EXIT)]
+    assert survivors == [Survivor(pid, members[0].name, DID_NOT_EXIT)]
 
 
 @pytest.mark.parametrize("refusal", [ProcessLookupError, PermissionError])
@@ -813,15 +810,15 @@ def test_interrupt_with_no_readable_table_sends_no_sigkill(
         process_tree, monkeypatch, signal_seam):
     """V10: identity cannot be checked, so nothing is killed, and it still propagates."""
     tree = process_tree()
-    root = tree.start()
-    members = _tree_members(root)
+    pid = _start_leaf(tree)
+    members = _tree_members(pid)
     monkeypatch.setattr(proctree, "read_table", lambda: None)
 
     with pytest.raises(KeyboardInterrupt):
         proctree.terminate(members, before_signal=_interrupt)
 
     assert signal_seam.sent == []
-    tree.assert_all_running()
+    assert pid_running(pid)
 
 
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit],
@@ -833,14 +830,12 @@ def test_interrupt_during_the_wait_kills_live_members(
     SystemExit is what the manager's SIGTERM handler raises during the sweep.
     """
     tree = process_tree()
-    root = tree.start(on_term="ignore")
-    pids = tree.pids()
-    members = _tree_members(root)
+    pid = _start_leaf(tree, on_term="ignore")
+    members = _tree_members(pid)
     _script_table_reads(monkeypatch, {2: interrupt})
 
     with pytest.raises(interrupt):
         proctree.terminate(members)
 
-    assert signal_seam.sent[:4] == [(pids[role], SIGTERM) for role in ROLES]
-    assert (pids["command"], SIGKILL) in signal_seam.sent[4:]
+    assert signal_seam.sent == [(pid, SIGTERM), (pid, SIGKILL)]
     tree.assert_stopped_soon()
