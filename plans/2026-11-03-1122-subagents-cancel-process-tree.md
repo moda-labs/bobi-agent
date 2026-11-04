@@ -524,14 +524,14 @@ Phase 5 is independent of Phases 2 to 4 and could run in parallel.
 
 Replaced by #1124 (see Amendments). None of this is built here.
 
-- [f] Leave a verified-live run alone at the deadline branch, as Q1 describes.
-- [f] Update `bobi/reconcile.py:17-18`, `docs/WORKFLOW_ENGINE.md:116-118`, `:238`, `bobi/workflow/orchestrator.py:91-93`.
-- [f] Replace V17 with V25, add V26, flip V24's expectation, and update `tests/test_reconcile.py:76-88`.
+- [f] state:replaced-by-1124 Leave a verified-live run alone at the deadline branch, as Q1 describes.
+- [f] state:replaced-by-1124 Update `bobi/reconcile.py:17-18`, `docs/WORKFLOW_ENGINE.md:116-118`, `:238`, `bobi/workflow/orchestrator.py:91-93`.
+- [f] state:replaced-by-1124 Replace V17 with V25, add V26, flip V24's expectation, and update `tests/test_reconcile.py:76-88`.
 
 **Validation gate**
 
-- [f] `pytest tests/test_reconcile.py --timeout=30 -q` passes V25, V26 and the updated V23.
-- [f] `pytest tests/integration/test_subagents_cancel.py -k test_manager_restart_past_deadline -v` passes with the tree alive after a real manager start.
+- [f] state:replaced-by-1124 `pytest tests/test_reconcile.py --timeout=30 -q` passes V25, V26 and the updated V23.
+- [f] state:replaced-by-1124 `pytest tests/integration/test_subagents_cancel.py -k test_manager_restart_past_deadline -v` passes with the tree alive after a real manager start.
 
 ## Proof of work
 
