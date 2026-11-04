@@ -166,6 +166,7 @@ class TestShippedBudgets:
 
     HEADROOM = 1.25
     RUN_TIMEOUT = 3600  # what a launch gets unless it passes --timeout
+    CEILING = 86400  # a budget past a day no longer bounds a runaway
 
     @pytest.mark.parametrize("workflow, step, longest_healthy", [
         ("adhoc", "task", 8915),
@@ -181,6 +182,7 @@ class TestShippedBudgets:
         declared = next(s.timeout for s in load_workflow(path).steps
                         if s.name == step)
         budget = max(declared, self.RUN_TIMEOUT)
+        assert budget <= self.CEILING
         now = time.time()
 
         def seed(name, age):
