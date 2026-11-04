@@ -254,6 +254,97 @@ class TestLiveness:
         assert row["detail"]["live"] is False
 
 
+class TestRunningLedgerRows:
+    """A ledger row saying `running` is only as live as its session (#1122).
+
+    Nothing closes the row when a run is cancelled, crashes or is closed by the
+    reconciler, so the fold reads the session to know what the row really is.
+    """
+
+    def test_cancelled_run_is_not_running(self, bobi_install):
+        from bobi.subagent import cancel_agent
+
+        _session(bobi_install, "wf-c", status="running", terminal_at=0.0,
+                 started_at=NOW - 600)
+        _workflow(bobi_install, "wf-c-run", status="running", completed_at=0,
+                  session_name="wf-c", started_at=NOW - 600, aware=True)
+
+        assert cancel_agent("wf-c") is True
+
+        payload = _rows(bobi_install, now=time.time())
+        assert payload["counts"]["running"] == 0
+        row = _by_key(payload)["workflow:wf-c-run"]
+        assert row["status"] == "closed"
+        assert row["duration_seconds"] is not None
+
+    @pytest.mark.parametrize("session_status,error,expected", [
+        ("failed", "agent exceeded its 3600s timeout", "failed"),
+        ("crashed", "agent process died", "crashed"),
+        ("completed", "", "done"),
+        ("cancelled", "", "closed"),
+    ])
+    def test_the_newest_row_takes_its_finished_sessions_outcome(
+            self, bobi_install, session_status, error, expected):
+        _session(bobi_install, "wf-s", status=session_status, error=error,
+                 terminal_at=NOW - 60, started_at=NOW - 600)
+        _workflow(bobi_install, "wf-s-run", status="running", completed_at=0,
+                  session_name="wf-s", started_at=NOW - 600, aware=True)
+
+        row = _by_key(_rows(bobi_install))["workflow:wf-s-run"]
+        assert row["status"] == expected
+        assert row["error"] == error
+        assert row["duration_seconds"] == 540
+
+    def test_an_older_row_and_a_row_with_no_session_are_closed(
+            self, bobi_install):
+        _session(bobi_install, "wf-relaunched", status="running",
+                 terminal_at=0.0, started_at=NOW - 60)
+        _workflow(bobi_install, "wf-old-try", status="running", completed_at=0,
+                  session_name="wf-relaunched", started_at=NOW - 900, aware=True)
+        _workflow(bobi_install, "wf-new-try", status="running", completed_at=0,
+                  session_name="wf-relaunched", started_at=NOW - 60, aware=True)
+        _workflow(bobi_install, "wf-no-session", status="running",
+                  completed_at=0, session_name="gone", aware=True)
+
+        payload = _rows(bobi_install)
+        rows = _by_key(payload)
+        assert rows["workflow:wf-old-try"]["status"] == "closed"
+        assert rows["workflow:wf-no-session"]["status"] == "closed"
+        assert rows["workflow:wf-new-try"]["status"] == "running"
+        assert payload["counts"]["running"] == 1
+
+    def test_a_resumed_older_row_with_a_live_session_stays_running(
+            self, bobi_install):
+        # The row resumed last is the live one, whichever started last.
+        _session(bobi_install, "wf-resumed", status="running", terminal_at=0.0,
+                 started_at=NOW - 60)
+        _workflow(bobi_install, "wf-first", status="running", completed_at=0,
+                  session_name="wf-resumed", started_at=NOW - 900,
+                  resumed_at=NOW - 60, aware=True)
+        _workflow(bobi_install, "wf-second", status="running", completed_at=0,
+                  session_name="wf-resumed", started_at=NOW - 300, aware=True)
+
+        payload = _rows(bobi_install)
+        rows = _by_key(payload)
+        assert rows["workflow:wf-first"]["status"] == "running"
+        assert rows["workflow:wf-second"]["status"] == "closed"
+        assert payload["counts"]["running"] == 1
+
+    @pytest.mark.parametrize("ledger_status,expected", [
+        ("waiting", "idle"),
+        ("resuming", "done"),
+    ])
+    def test_other_ledger_statuses_are_left_alone(
+            self, bobi_install, ledger_status, expected):
+        _session(bobi_install, "wf-other", status="cancelled",
+                 terminal_at=NOW - 60)
+        _workflow(bobi_install, "wf-other-run", status=ledger_status,
+                  completed_at=0, session_name="wf-other", aware=True)
+
+        row = _by_key(_rows(bobi_install))["workflow:wf-other-run"]
+        assert row["status"] == expected
+
+
 class TestMonitorStatus:
     @pytest.mark.parametrize("outcome,expected", [
         (NOTIFIED, "done"), (QUIET, "done"), (MONITOR_FAILED, "failed"),

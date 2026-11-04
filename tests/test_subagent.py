@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bobi import paths
-from bobi.sdk import SessionEntry
+from bobi.sdk import SessionEntry, get_registry
 from bobi.subagent import (
     AgentResult,
     _build_prompt,
@@ -130,6 +130,20 @@ class TestAgentLifecycle:
             assert cancel_agent("AGD-12")
         registry.update.assert_called_once_with(
             "agent-agd-12-implement", status="cancelled", pid=0)
+
+    def test_cancel_agent_stops_tree(self, bobi_install, process_tree):
+        """The #1122 regression: every process of the run is gone on return."""
+        tree = process_tree()
+        root = tree.start()
+        registry = get_registry()
+        registry.register(SessionEntry(name="wf-adhoc-x", run_key="x",
+                                       status="running", pid=root))
+
+        assert cancel_agent("wf-adhoc-x") is True
+
+        tree.assert_stopped()
+        entry = registry.get("wf-adhoc-x")
+        assert (entry.status, entry.pid) == ("cancelled", 0)
 
     def test_cancel_done_agent_returns_false(self):
         entry = SessionEntry(name="agent-agd-12-implement", run_key="AGD-12",

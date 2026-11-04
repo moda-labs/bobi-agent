@@ -1,6 +1,6 @@
 # Make `subagents cancel` stop a run's whole process tree
 
-> **Status:** Draft, awaiting Gate 1 approval from Zach. No implementation until approved.
+> **Status:** Building
 > **Tracking issue:** moda-labs/bobi-agent#1122 · **Related:** #1124, #1115 · **Created:** 2026-11-03 · **Last amended:** - (see Amendments)
 >
 > Every `file:line` here was read at `origin/main` `e8fe14f1` (0.62.0).
@@ -462,16 +462,16 @@ Phase 5 is independent of Phases 2 to 4 and could run in parallel.
 
 ### Phase 1 - Reproduce the survivor on `main`
 
-- [ ] Add `tests/fixtures/cli_shaped_tree.py`: same-group child, own-session shell, own-group command writing its pids and ticks.
-- [ ] Add the stub directive `__stub__:spawn:<absolute path>`.
-- [ ] Write V20, V11 and V22.
-- [ ] Follow `/opt/moda-skills/plugins/moda/skills/investigate/SKILL.md`, and keep the red output for the PR.
+- [x] Add `tests/fixtures/cli_shaped_tree.py`: same-group child, own-session shell, own-group command writing its pids and ticks.
+- [x] Add the stub directive `__stub__:spawn:<absolute path>`.
+- [x] Write V20, V11 and V22.
+- [x] Follow `/opt/moda-skills/plugins/moda/skills/investigate/SKILL.md`, and keep the red output for the PR.
 
 **Validation gate**
 
-- [ ] `pytest tests/integration/test_subagents_cancel.py -k test_cancel_stops_cli_shaped_tree -q` fails on `main` because a tree pid is still alive and the tick file grew, not on an import or a timeout.
-- [ ] `pytest tests/test_subagent.py -k test_cancel_agent_stops_tree --timeout=30 -q` fails the same way.
-- [ ] `pytest tests/test_webapp_runs.py -k test_cancelled_run_is_not_running --timeout=30 -q` fails on `main` with `counts.running == 1`.
+- [x] `pytest tests/integration/test_subagents_cancel.py -k test_cancel_stops_cli_shaped_tree -q` fails on `main` because a tree pid is still alive and the tick file grew, not on an import or a timeout.
+- [x] `pytest tests/test_subagent.py -k test_cancel_agent_stops_tree --timeout=30 -q` fails the same way.
+- [x] `pytest tests/test_webapp_runs.py -k test_cancelled_run_is_not_running --timeout=30 -q` fails on `main` with `counts.running == 1`.
 
 ### Phase 2 - Process table and tree kill
 
@@ -625,6 +625,24 @@ Pass `timeout=30` to the CLI runner, because its 10s default (`tests/integration
 ## Amendments
 
 None yet. This plan is unapproved.
+
+### 2026-11-04: Gate 1, Q1 and Q2
+
+The line above predates approval and stays, because this section only grows.
+
+Zach approved this plan for implementation in Slack on 2026-11-04 ("is approved for implementation").
+D1 to D9 stand as written.
+
+**Q1, the #1124 deadline fix.**
+On 2026-11-03 Zach's scope answer was in ("sure we can fix the deadline check in the same PR").
+He then learned that `cuongbytedev` already has a different fix on `feat/MOD-434-restart-reconciler-deadline`, and the director recommended using it.
+The approval did not answer that, so Phase 7 is on hold pending Zach's answer and this PR builds Phases 1 to 6 only.
+Without Phase 7, a director restart behaves as column (b) of the table under Q1: a verified-live run past its deadline has its whole tree stopped, its entry goes `failed`, and its event is emitted.
+#1124 stays open.
+Phases 1 to 6 keep either design available: Phase 7 needs only `pid_start` from Phase 3, and the deadline test stays in one place in `reconcile_sessions`.
+
+**Q2.** Recommendation (a) stands: a note on #1115 when this lands.
+The note belongs to the landing, not to this PR.
 
 ## Notes
 

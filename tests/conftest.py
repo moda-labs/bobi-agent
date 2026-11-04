@@ -420,6 +420,23 @@ class BobiInstall:
 
 
 @pytest.fixture
+def process_tree(tmp_path):
+    """Make real process trees (``tests/process_tree.py``), reaped after the test."""
+    from tests.process_tree import ProcessTree
+
+    trees = []
+
+    def _make(name: str = "tree") -> ProcessTree:
+        tree = ProcessTree(tmp_path / name)
+        trees.append(tree)
+        return tree
+
+    yield _make
+    for tree in trees:
+        tree.reap()
+
+
+@pytest.fixture
 def bobi_install(tmp_path, monkeypatch):
     """Create a fully isolated Bobi home in a temp directory.
 
