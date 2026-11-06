@@ -127,11 +127,11 @@ run-level deadline would.
 
 That check runs only at manager start, so it stops a run only if a restart lands
 after the deadline plus 300s of grace. Until then a wedged run keeps its
-concurrency slot and its session name. The check then signals the runner, marks
-the run `failed` and emits `agent/session.failed`. The signal reaches the runner
-process only, so a CLI and its tools can outlive it (#1122). Each visit to a
-prompt step arms afresh, so nothing bounds a whole run: a loop ends at its route's
-`max_iterations`.
+concurrency slot and its session name. The check then marks the run `failed`,
+stops its whole process tree the way `subagents cancel` does (#1122), and emits
+`agent/session.failed`. A run that cancel refuses keeps running with no event, and
+the next restart judges it again. Each visit to a prompt step arms afresh, so
+nothing bounds a whole run: a loop ends at its route's `max_iterations`.
 
 Size a step's `timeout` for the longest honest run of that step, retries
 included. Below the run's `--timeout` the run-level floor applies, so a restart

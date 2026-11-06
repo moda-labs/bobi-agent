@@ -90,7 +90,7 @@ def test_crashed_run_is_reconciled_and_failure_delivered(tmp_path, monkeypatch):
 
     emitted = []
     actions = reconcile_sessions(emit=lambda et, d: emitted.append((et, d)) or True,
-                                 cancel=lambda n: None)
+                                 cancel=lambda n, e: None)
 
     # Honest terminal status — never `done`.
     assert reg.get("wf-issue-lifecycle-app-7").status == TERMINAL_CRASHED

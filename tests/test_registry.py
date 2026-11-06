@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import bobi.sdk as sdk
-from bobi import paths
+from bobi import paths, proctree
 from bobi.sdk import SessionEntry, SessionRegistry
 
 
@@ -25,6 +25,50 @@ def tmp_registry(tmp_path, monkeypatch):
     paths.bind_root(tmp_path)
     yield SessionRegistry()
     paths.bind_root(None)
+
+
+class TestPidStart:
+    """V16: the recorded pid carries the identity of the process it names."""
+
+    def test_register_and_update_set_and_clear_it(self, tmp_registry):
+        token = proctree.start_token(os.getpid())
+        assert token
+
+        tmp_registry.register(SessionEntry(name="by-register", pid=os.getpid()))
+        assert tmp_registry.get("by-register").pid_start == token
+
+        tmp_registry.register(SessionEntry(name="by-update"))
+        assert tmp_registry.get("by-update").pid_start == ""
+        tmp_registry.update("by-update", pid=os.getpid())
+        assert tmp_registry.get("by-update").pid_start == token
+
+        tmp_registry.update("by-update", pid=0)
+        assert tmp_registry.get("by-update").pid_start == ""
+
+    def test_a_terminal_write_clears_it(self, tmp_registry):
+        tmp_registry.register(SessionEntry(name="done", pid=os.getpid()))
+        tmp_registry.mark_terminal("done", "failed", error="boom")
+        assert tmp_registry.get("done").pid_start == ""
+
+    def test_an_update_that_does_not_touch_the_pid_keeps_it(self, tmp_registry):
+        tmp_registry.register(SessionEntry(name="busy", pid=os.getpid()))
+        before = tmp_registry.get("busy").pid_start
+        tmp_registry.update("busy", status="running")
+        assert tmp_registry.get("busy").pid_start == before
+
+    def test_an_entry_written_before_the_field_existed(self, tmp_registry):
+        """It reads as no token, and a later pid stamp adds the token."""
+        path = tmp_registry.session_dir("old") / "state.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"name": "old", "status": "running",
+                                    "pid": os.getpid()}))
+        assert tmp_registry.get("old").pid_start == ""
+
+        tmp_registry.update("old", status="idle")
+        assert tmp_registry.get("old").pid_start == ""
+
+        tmp_registry.update("old", pid=os.getpid())
+        assert tmp_registry.get("old").pid_start == proctree.start_token(os.getpid())
 
 
 class TestSessionEntry:

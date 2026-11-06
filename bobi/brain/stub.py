@@ -29,6 +29,11 @@ Directives:
   ``__stub__:hang[:<secs>]`` stall the turn ``<secs>`` seconds (default: long
                              enough to trip wedge detection) before completing,
                              so the manager reads as ``running``/``wedged``.
+  ``__stub__:spawn:<path>``  start ``<path>`` under this interpreter as a child
+                             of this process, then hang. Gives a run the child
+                             processes a real brain's CLI would have, so a test
+                             can prove what stopping the run does to them
+                             (#1122). The path cannot contain whitespace.
   ``__stub__:error``         complete with ``TurnResult(is_error=True)``.
   ``__stub__:auth``          complete with the structured terminal auth error
                              emitted by a logged-out brain.
@@ -61,6 +66,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
+import sys
 from typing import Any, AsyncIterator
 
 from bobi.brain.base import (
@@ -109,6 +116,7 @@ class _StubSession:
         self._session_id = resume or "stub-session"
         self._options = options or {}
         self._pending: str | None = None
+        self._spawned: subprocess.Popen | None = None
 
     async def connect(self) -> None:
         # Setup only, never a turn (#1016) — input arrives via query().
@@ -142,6 +150,11 @@ class _StubSession:
 
         if verb == "hang":
             await asyncio.sleep(_float_arg(arg, _DEFAULT_HANG_SECONDS))
+
+        if verb == "spawn":
+            self._spawned = subprocess.Popen([sys.executable, arg],
+                                             stdin=subprocess.DEVNULL)
+            await asyncio.sleep(_DEFAULT_HANG_SECONDS)
 
         if verb == "options":
             # Echo the scalar session options make_session received - the

@@ -41,7 +41,8 @@ def _state_dir() -> Path:
 
 
 def _pid_path() -> Path:
-    return _state_dir() / "app.pid"
+    _state_dir()
+    return paths.webapp_pid_path()
 
 
 def _port_path() -> Path:

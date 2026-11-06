@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.62.1 - 2026-11-04
+
+Patch release: a manager restart no longer closes healthy long workflow runs,
+`subagents cancel` stops a run's whole process tree, sleep cycles stop reading
+other agents' transcripts, and refused Slack channel reads now fail visibly.
+
+### Fixed
+
+- **Manager restarts closed healthy workflow runs (#1151, #1124, MOD-434).** The
+  restart reconciler closed any live run past `started_at + timeout + 300s`. For
+  a workflow run that timeout is a flat 3600s default the runner never enforces,
+  so each restart failed long runs that were still within their step budgets. The
+  runner now arms a deadline from the current step's timeout before each piece of
+  step work that can block, and the reconciler closes a run only after the later
+  of that deadline and `started_at + timeout`, plus the grace.
+- **`subagents cancel` left a run's processes running (#1148, #1122).** Cancel
+  signalled only the runner, so the claude CLI and its tool commands kept writing
+  after `Cancelled`. It now sends SIGTERM to the recorded process and every live
+  descendant, sends SIGKILL to what remains, and blocks until they are gone. Exit
+  1 means something survived and is named, or that the cancel was refused with
+  nothing signalled. `SessionEntry` gains an additive `pid_start` field in
+  `state.json`, so a recycled pid is never signalled. The reconciler's deadline
+  branch uses the same kill. `subagents list` stops listing the manager, and the
+  runs view stops counting a finished run as running.
+- **Sleep cycles read other agents' transcripts (#1144, #1142).** Agents sharing
+  an OS user share one Claude projects tree, so a sleep cycle could copy another
+  agent's transcripts into long-term memory. The Claude brain now records each
+  session id it runs, and history indexes and returns only those sessions.
+  Existing cursors stay valid, and an agent upgrading with an existing
+  `history.db` claims that database's sessions by exact working directory.
+- **Refused Slack channel reads looked empty (#1149, #1140).** `bobi
+  read-conversation` on a ref with no thread printed `[]` and exited 0 when Slack
+  refused the read. It now fails with HTTP 502 and exit 1. Login bootstrap's
+  ask-id recovery fails the run with its marker intact instead of posting a fresh
+  ask. Channel reads with no thread also follow Slack's cursor past 200 messages
+  and keep the newest `limit`. These changes are in the event server.
+- **Tests overwrote the developer's global instructions (#1145, #1143, #1150,
+  #1147).** Unit and stub-brain integration tests now run under a per-test `HOME`
+  with `CLAUDE_CONFIG_DIR` and `CODEX_HOME` unset. Tests marked `claude`, `live` or
+  `docker`, plus e2e, keep the real home because they need real credentials.
+
 ## 0.62.0 - 2026-11-02
 
 Minor release: Bobi can show where its tokens go and which model ran each turn,
