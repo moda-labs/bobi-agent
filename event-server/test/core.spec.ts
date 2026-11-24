@@ -1632,6 +1632,21 @@ describe("handleSlackWebhook", () => {
 		expect(store.deliveredTo[0].ids).toEqual(["bobbers"]);
 	});
 
+	it("delivers a tagged DM to its conversation-scoped agent only", async () => {
+		const store = createMockStorage();
+		await store.addSubscription("slack:T123:app:A_BAOHUA:D456", "baohua");
+		await store.addSubscription("slack:T123:app:A_BAOHUA:C789", "baohua");
+		await store.addSubscription("slack:T123:app:A_BAOHUA:D999", "other-dm");
+		await store.addSubscription("slack:T123:app:A_OTHER:D456", "other-app");
+		const result = await slackWebhook(store, {
+			type: "event_callback", team_id: "T123", api_app_id: "A_BAOHUA",
+			event: { type: "message", channel_type: "im", channel: "D456",
+				user: "U123", text: "<@UBOT> hi?", ts: "123" },
+		});
+		expect(result.body).toEqual({ delivered_to: 1 });
+		expect(store.deliveredTo[0].ids).toEqual(["baohua"]);
+	});
+
 	it("routes Slack channel events by app and channel when both are present", async () => {
 		const store = createMockStorage();
 		await store.addSubscription("slack:T123:app:A_ENG_TEAM:CENG", "eng-team");
