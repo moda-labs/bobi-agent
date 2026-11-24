@@ -1628,7 +1628,7 @@ describe("handleSlackWebhook", () => {
 
 		expect(result.status).toBe(200);
 		expect((result.body as Record<string, number>).delivered_to).toBe(1);
-		expect(store.delivered[0].topics).toEqual(["slack:T123:app:A_BOBBERS"]);
+		expect(store.delivered[0].topics).toEqual(["slack:T123:app:A_BOBBERS", "slack:T123:app:A_BOBBERS:D456"]);
 		expect(store.deliveredTo[0].ids).toEqual(["bobbers"]);
 	});
 

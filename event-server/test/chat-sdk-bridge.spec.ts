@@ -245,6 +245,7 @@ describe("bridge normalization behavior", () => {
 		// two apps in one workspace.
 		expect(result.event!.topics).toEqual([
 			"slack:T0952RZRZ0X:app:A0952APP",
+			"slack:T0952RZRZ0X:app:A0952APP:D789DM",
 		]);
 		expect(result.event!.fields!.api_app_id).toBe("A0952APP");
 	});
@@ -388,11 +389,21 @@ describe("bridge normalization behavior", () => {
 		expect(result.event!.type).toBe("slack.dm");
 	});
 
-	it("keeps DM topics workspace-level", () => {
+	it("routes tagged DMs to their app-qualified conversation", () => {
+		const payload = JSON.parse(dmPayload({ text: "<@UBOT> hi?" }));
+		payload.api_app_id = "A0952APP";
+		const result = bridgeSlackWebhook(JSON.stringify(payload), undefined, new Set(["UBOT"]));
+		expect(result.event!.topics).toEqual([
+			"slack:T0952RZRZ0X:app:A0952APP",
+			"slack:T0952RZRZ0X:app:A0952APP:D789DM",
+		]);
+	});
+
+	it("keeps legacy DM topics workspace-level when Slack omits the app ID", () => {
 		const result = bridgeSlackWebhook(dmPayload());
 		expect(result.event!.type).toBe("slack.dm");
 		expect(result.event!.delivery).toBe("chat");
-		// a DM is not a real channel - it stays workspace-level only
+		// Legacy events lack the app identity needed for conversation routing.
 		expect(result.event!.topics).toEqual(["slack:T0952RZRZ0X"]);
 	});
 

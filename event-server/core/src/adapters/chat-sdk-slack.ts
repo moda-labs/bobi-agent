@@ -142,7 +142,7 @@ export function bridgeSlackWebhook(
 		} else {
 			topics.push(`slack:${teamId}`);
 		}
-		if (channel && !isDm) {
+		if (channel && (!isDm || appId)) {
 			if (appId) {
 				topics.push(`slack:${teamId}:app:${appId}:${channel}`);
 			} else {
